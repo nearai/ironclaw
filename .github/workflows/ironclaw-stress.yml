@@ -609,7 +609,7 @@ jobs:
             --human-read \
             --bottleneck-report \
             --output-jsonl target/ironclaw-stress/postgres-api-scripted.jsonl \
-            --max-failure-rate 0.05 \
+            --max-failure-rate 0 \
             --max-p95-ms 120000 \
             > target/ironclaw-stress/postgres-api-scripted-summary.json \
             2> target/ironclaw-stress/postgres-api-scripted-report.txt

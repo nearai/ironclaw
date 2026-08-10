@@ -444,6 +444,31 @@ def extract_job_block(text: str, job: str) -> tuple[str | None, str]:
     following = next((m for m in headings if m.start() > start), None)
     return text[start : following.start() if following else len(text)], ""
 
+def extract_continued_commands(text: str, executable: str) -> list[str]:
+    """Return shell commands whose first line is `<executable> \\`.
+
+    A command continues while its current line ends in a backslash. This
+    keeps flag validation scoped to one invocation instead of allowing a
+    same-step `echo` or sibling command to satisfy the contract.
+    """
+
+    lines = text.splitlines()
+    commands: list[str] = []
+    index = 0
+    first_line = f"{executable} \\"
+    while index < len(lines):
+        if lines[index].strip() != first_line:
+            index += 1
+            continue
+        command = [lines[index]]
+        while command[-1].rstrip().endswith("\\") and index + 1 < len(lines):
+            index += 1
+            command.append(lines[index])
+        commands.append("\n".join(command))
+        index += 1
+    return commands
+
+
 
 def extract_upload(body: str) -> tuple[str | None, list[str]]:
     """One upload step's artifact name and path list, or (None, []) when the
@@ -511,52 +536,65 @@ def validate_libsql_scripted_memory_job(text: str) -> list[str]:
             "`for script in memory_roundtrip memory_grow memory_mixed; do` — a "
             "parametrized, reordered, or split loop silently drops a scenario"
         )
-    if LIBSQL_SCRIPTED_OPERATIONS.search(executable) is None:
+    loop = LIBSQL_SCRIPTED_LOOP_BODY.search(executable)
+    runner = ""
+    if loop is not None:
+        commands = extract_continued_commands(
+            loop.group("body"), "target/release/ironclaw_stress"
+        )
+        if len(commands) == 1:
+            runner = commands[0]
+        else:
+            errors.append(
+                f"{label} the fixed script loop must contain exactly one "
+                "target/release/ironclaw_stress command, found "
+                f"{len(commands)}"
+            )
+    if LIBSQL_SCRIPTED_OPERATIONS.search(runner) is None:
         errors.append(
             f"{label} must run each script with --operations 4 — fewer "
             "operations under-sample the scripted verdicts the matrix is paid "
             "to produce"
         )
-    if LIBSQL_SCRIPTED_DOC_SIZES.search(executable) is None:
+    if LIBSQL_SCRIPTED_DOC_SIZES.search(runner) is None:
         errors.append(
             f"{label} must pass exactly the four scripted doc sizes "
             "--api-scripted-doc-sizes 4096,32768,131072,1048576 — the matrix "
             "pins the small-to-large latency curve"
         )
-    if LIBSQL_SCRIPTED_MAX_FAILURE_RATE.search(executable) is None:
+    if LIBSQL_SCRIPTED_MAX_FAILURE_RATE.search(runner) is None:
         errors.append(
             f"{label} must run each script with --max-failure-rate 0 — the "
             "zero-tolerance gate on failed, leaked, or undisclosed scripted "
             "verdicts"
         )
-    if LIBSQL_SCRIPTED_HOT_WRITERS.search(executable) is None:
+    if LIBSQL_SCRIPTED_HOT_WRITERS.search(runner) is None:
         errors.append(
             f"{label} must run each script with --api-hot-writers 2 — the "
             "hot-writer count is part of what the scripted matrix measures"
         )
-    if LIBSQL_SCRIPTED_MOCK_BIND.search(executable) is None:
+    if LIBSQL_SCRIPTED_MOCK_BIND.search(runner) is None:
         errors.append(
             f"{label} must bind the mock LLM sidecar at --mock-llm-bind "
             "127.0.0.1:19090 — that is the address the server's LLM base_url "
             "points at"
         )
-    if LIBSQL_SCRIPTED_POLL_INTERVAL.search(executable) is None:
+    if LIBSQL_SCRIPTED_POLL_INTERVAL.search(runner) is None:
         errors.append(
             f"{label} must poll scripted terminal states every "
             "--api-poll-interval-ms 10000 — the 10s cadence is what the "
             "matrix runs with"
         )
-    if LIBSQL_SCRIPTED_TERMINAL_TIMEOUT.search(executable) is None:
+    if LIBSQL_SCRIPTED_TERMINAL_TIMEOUT.search(runner) is None:
         errors.append(
             f"{label} must cap each scripted terminal wait at "
             "--api-terminal-timeout-ms 120000"
         )
-    if LIBSQL_SCRIPTED_P95.search(executable) is None:
+    if LIBSQL_SCRIPTED_P95.search(runner) is None:
         errors.append(
             f"{label} must run each script with --max-p95-ms 120000 — the "
             "p95 ceiling the matrix enforces"
         )
-    loop = LIBSQL_SCRIPTED_LOOP_BODY.search(executable)
     if loop is None:
         errors.append(
             f"{label} the script loop must be one complete "
@@ -801,6 +839,9 @@ POSTGRES_SCRIPTED_DOC_SIZES = re.compile(
     re.MULTILINE,
 )
 POSTGRES_SCRIPTED_MIN_OPERATIONS = 4
+POSTGRES_SCRIPTED_MAX_FAILURE_RATE = re.compile(
+    r"--max-failure-rate[ \t]+0(?![0-9.])"
+)
 
 
 def validate_postgres_scripted_parity(text: str) -> list[str]:
@@ -822,8 +863,24 @@ def validate_postgres_scripted_parity(text: str) -> list[str]:
     executable = "\n".join(
         line for line in block.splitlines() if not line.lstrip().startswith("#")
     )
+    commands = [
+        command
+        for command in extract_continued_commands(
+            executable, "target/release/ironclaw_stress"
+        )
+        if "--api-scripted-tool memory_roundtrip" in command
+    ]
+    if len(commands) == 1:
+        runner = commands[0]
+    else:
+        errors.append(
+            f"{label} must contain exactly one scripted memory runner command, "
+            f"found {len(commands)}"
+        )
+        runner = ""
 
-    ops = POSTGRES_SCRIPTED_OPERATIONS.search(executable)
+
+    ops = POSTGRES_SCRIPTED_OPERATIONS.search(runner)
     if ops is None:
         errors.append(
             f"{label} the scripted memory leg must pass --operations N "
@@ -840,12 +897,18 @@ def validate_postgres_scripted_parity(text: str) -> list[str]:
             "doc_size_for() cycles sizes by operation index, so the "
             "131072/1048576 buckets are never exercised"
         )
-    if POSTGRES_SCRIPTED_DOC_SIZES.search(executable) is None:
+    if POSTGRES_SCRIPTED_DOC_SIZES.search(runner) is None:
         errors.append(
             f"{label} the scripted memory leg must pass exactly the four "
             "scripted doc sizes --api-scripted-doc-sizes "
             "4096,32768,131072,1048576 — the Postgres parity leg measures "
             "the same small-to-large latency curve as the libsql matrix"
+        )
+    if POSTGRES_SCRIPTED_MAX_FAILURE_RATE.search(runner) is None:
+        errors.append(
+            f"{label} the scripted memory leg must pass --max-failure-rate 0 "
+            "on its runner command — one leak or lost write must fail the "
+            "32-operation parity leg"
         )
     return errors
 

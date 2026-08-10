@@ -1263,6 +1263,56 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         errors = self.errors_for(dropped)
         self.assertTrue(any("--max-failure-rate 0" in error for error in errors), errors)
 
+    def test_runner_flags_cannot_be_satisfied_by_same_job_decoys(self) -> None:
+        """Every matrix pin belongs to the guarded runner command itself.
+        Relocating a flag before the loop must fail even when an exact decoy
+        remains elsewhere in the same job."""
+        text = self.workflows[STRESS_WORKFLOW]
+        block, detail = extract_job_block(text, LIBSQL_SCRIPTED_MEMORY_JOB)
+        self.assertIsNotNone(block, detail)
+        start = text.find(block)
+        self.assertNotEqual(start, -1)
+        for required, replacement in (
+            ("--operations 4", "--operations 3"),
+            (
+                "--api-scripted-doc-sizes 4096,32768,131072,1048576",
+                "--api-scripted-doc-sizes 4096,32768",
+            ),
+            ("--max-failure-rate 0", "--max-failure-rate 0.5"),
+            ("--api-hot-writers 2", "--api-hot-writers 3"),
+            ("--mock-llm-bind 127.0.0.1:19090", "--mock-llm-bind 127.0.0.1:19091"),
+            ("--api-poll-interval-ms 10000", "--api-poll-interval-ms 2000"),
+            ("--api-terminal-timeout-ms 120000", "--api-terminal-timeout-ms 60000"),
+            ("--max-p95-ms 120000", "--max-p95-ms 60000"),
+        ):
+            with self.subTest(required=required):
+                loop = ws12_workflow_contracts.LIBSQL_SCRIPTED_LOOP_BODY.search(block)
+                self.assertIsNotNone(loop)
+                commands = ws12_workflow_contracts.extract_continued_commands(
+                    loop.group("body"), "target/release/ironclaw_stress"
+                )
+                self.assertEqual(len(commands), 1)
+                runner = commands[0]
+                mutated_runner = runner.replace(required, replacement, 1)
+                self.assertNotEqual(mutated_runner, runner)
+                mutated_block = block.replace(runner, mutated_runner, 1)
+                loop_start = mutated_block.find(
+                    "for script in memory_roundtrip memory_grow memory_mixed; do"
+                )
+                self.assertNotEqual(loop_start, -1)
+                mutated_block = (
+                    mutated_block[:loop_start]
+                    + f"          {required} \\\n"
+                    + mutated_block[loop_start:]
+                )
+                mutated = text[:start] + mutated_block + text[start + len(block) :]
+                errors = validate_libsql_scripted_memory_job(mutated)
+                self.assertTrue(
+                    any(required in error for error in errors),
+                    errors,
+                )
+
+
     def test_the_four_doc_sizes_are_exact(self) -> None:
         """Adding a fifth size or changing any value breaks the pinned
         small-to-large latency curve."""
@@ -1793,15 +1843,28 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         )
 
     def test_the_libsql_volume_profile_is_pinned_inside_the_job(self) -> None:
-        mutated = self.sabotage(
-            STRESS_WORKFLOW,
+        text = self.workflows[STRESS_WORKFLOW]
+        block, detail = extract_job_block(text, LIBSQL_SCRIPTED_MEMORY_JOB)
+        self.assertIsNotNone(block, detail)
+        start = text.find(block)
+        self.assertNotEqual(start, -1)
+        mutated_block = block.replace(
             'profile = "hosted-single-tenant-volume"',
             'profile = "hosted-single-tenant-provisioned"',
+            1,
         )
-        errors = self.errors_for(mutated)
+        self.assertNotEqual(mutated_block, block)
+        mutated = (
+            'profile = "hosted-single-tenant-volume"\n'
+            + text[:start]
+            + mutated_block
+            + text[start + len(block) :]
+        )
+        errors = validate_libsql_scripted_memory_job(mutated)
         self.assertTrue(
             any("hosted-single-tenant-volume" in error for error in errors), errors
         )
+
 
     def postgres_errors_for(self, workflows: dict[str, str]) -> list[str]:
         return validate_postgres_scripted_parity(workflows[STRESS_WORKFLOW])
@@ -1822,6 +1885,58 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         first buckets and the largest sizes are never exercised."""
         self.assertEqual(self.postgres_errors_for(self.workflows), [])
         self.assertEqual(self.postgres_errors_for(self.fixed_workflows()), [])
+
+    def test_postgres_scripted_leg_has_zero_failure_tolerance(self) -> None:
+        """One failed operation out of 32 is below five percent, so only an
+        exact zero gate fails closed on leaks and lost durable writes."""
+        for bad in ("0.05", "0.5"):
+            with self.subTest(value=bad):
+                mutated = self.sabotage(
+                    STRESS_WORKFLOW,
+                    "            --max-failure-rate 0 \\\n",
+                    f"            --max-failure-rate {bad} \\\n",
+                )
+                errors = self.postgres_errors_for(mutated)
+                self.assertTrue(
+                    any("--max-failure-rate 0" in error for error in errors),
+                    errors,
+                )
+
+        dropped = self.sabotage(
+            STRESS_WORKFLOW, "            --max-failure-rate 0 \\\n", ""
+        )
+        errors = self.postgres_errors_for(dropped)
+        self.assertTrue(
+            any("--max-failure-rate 0" in error for error in errors), errors
+        )
+
+    def test_postgres_failure_gate_rejects_same_job_decoy(self) -> None:
+        text = self.workflows[STRESS_WORKFLOW]
+        block, detail = extract_job_block(text, "postgres-api-capacity")
+        self.assertIsNotNone(block, detail)
+        start = text.find(block)
+        commands = [
+            command
+            for command in ws12_workflow_contracts.extract_continued_commands(
+                block, "target/release/ironclaw_stress"
+            )
+            if "--api-scripted-tool memory_roundtrip" in command
+        ]
+        self.assertEqual(len(commands), 1)
+        runner = commands[0]
+        mutated_runner = runner.replace(
+            "--max-failure-rate 0", "--max-failure-rate 0.05", 1
+        )
+        self.assertNotEqual(mutated_runner, runner)
+        mutated_block = block.replace(runner, mutated_runner, 1)
+        self.assertNotEqual(mutated_block, block)
+        mutated_block = "          --max-failure-rate 0 \\\n" + mutated_block
+        mutated = text[:start] + mutated_block + text[start + len(block) :]
+        errors = validate_postgres_scripted_parity(mutated)
+        self.assertTrue(
+            any("--max-failure-rate 0" in error for error in errors), errors
+        )
+
 
     def test_postgres_operations_below_size_count_fail_loudly(self) -> None:
         """`--operations 2`/`3` leave configured doc sizes unexercised —

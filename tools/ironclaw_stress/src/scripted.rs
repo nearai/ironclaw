@@ -48,20 +48,20 @@
 //!   trusted even when a later checkpoint finds this operation's token (a
 //!   hard failure). A write/append step is retried only when the
 //!   observation's `recovery.same_call_retry` explicitly permits replaying
-//!   the identical call (`allowed` or `allowed_after_delay`): the same plan
-//!   step is then re-opened with a fresh call id up to
-//!   [`MAX_WRITE_ATTEMPTS`] total attempts, so a transient contention error
-//!   (CAS failure rendered with `same_call_retry=allowed`) that succeeds on
-//!   retry resumes the plan normally. A `forbidden`,
-//!   `requires_changed_input`, or `not_useful` constraint — or an
-//!   observation whose recovery constraint is missing or unparseable — is
-//!   an immediate sticky failure with no re-emission, and checkpoint errors
-//!   stay immediate failures.
+//!   the identical call. `allowed` retries immediately;
+//!   `allowed_after_delay` must include `retry_after_ms`, and the driver
+//!   emits placeholders until that delay expires. The same plan step is
+//!   then re-opened with a fresh call id up to [`MAX_WRITE_ATTEMPTS`] total
+//!   attempts, so a transient contention error (CAS failure rendered with
+//!   `same_call_retry=allowed`) that succeeds on retry resumes the plan.
+//!   A `forbidden`, `requires_changed_input`, or `not_useful` constraint —
+//!   or an observation whose recovery constraint or required delay is
+//!   missing or unparseable — is an immediate sticky failure with no
+//!   re-emission, and checkpoint errors stay immediate failures.
 //!
-//! The module is deliberately pure: no I/O, no globals. Everything the
-//! sidecar and the driver need is a function of the conversation JSON and
-//! the advertised tool names, which keeps the state machine unit-testable
-//! and deterministic.
+//! The module performs no external I/O. Decisions depend on conversation
+//! JSON, advertised tool names, and a monotonic instant supplied by the
+//! driver; tests inject that instant so delayed recovery stays deterministic.
 //!
 //! # Stateful driver
 //!
@@ -87,6 +87,7 @@
 //! when its capacity is exceeded, so the map stays bounded.
 
 use std::collections::{BTreeMap, HashSet};
+use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -147,10 +148,11 @@ pub(crate) const UNDISCLOSED_ATTEMPTS: usize = 2;
 /// observation on a write may be a transient contention failure (the host
 /// renders such calls with `same_call_retry=allowed` under CAS
 /// contention), so the driver re-opens the same step with a fresh call id
-/// instead of failing the operation on the first error — but only when
-/// `recovery.same_call_retry` is `allowed` or `allowed_after_delay`.
-/// After this many failed attempts the step is recorded as failed and the
-/// sticky error evidence yields a hard [`Verdict::Failure`]. The bound
+/// instead of failing the operation on the first error — but only for
+/// `allowed`, or for `allowed_after_delay` with an explicit
+/// `retry_after_ms` after that delay has elapsed. After this many failed
+/// attempts the step is recorded as failed and the sticky error evidence
+/// yields a hard [`Verdict::Failure`]. The bound
 /// keeps repeated identical calls below the production no-progress guard
 /// and the retry state bounded.
 pub(crate) const MAX_WRITE_ATTEMPTS: usize = 3;
@@ -751,20 +753,19 @@ pub(crate) struct ScriptedSession {
     /// Any aligned tool result (write, append, or checkpoint) was a
     /// structured error observation whose write/append step failed — a
     /// non-retryable constraint (`forbidden`, `requires_changed_input`,
-    /// `not_useful`, or missing recovery) or an explicitly allowed replay
-    /// that exhausted its bounded retries. Sticky for the operation: a
-    /// failed write stays a hard [`Verdict::Failure`] even when a later
-    /// checkpoint finds this operation's token. Transient write errors
-    /// that succeed on retry never set this flag.
+    /// `not_useful`, missing recovery, or delayed retry without an explicit
+    /// delay) or an explicitly allowed replay that exhausted its bounded
+    /// retries. Sticky for the operation: a failed write stays a hard
+    /// [`Verdict::Failure`] even when a later checkpoint finds this
+    /// operation's token. Transient errors that succeed on retry do not set
+    /// this flag.
     pub(crate) structured_error: bool,
     /// Structured-error attempts of the current (last emitted) write or
-    /// append step, recorded as they arrive. Only observations whose
-    /// `recovery.same_call_retry` explicitly permits an identical replay
-    /// (`allowed` / `allowed_after_delay`) count and re-emit the same plan
-    /// step with a fresh call id; while below [`MAX_WRITE_ATTEMPTS`] the
-    /// step stays open instead of advancing. The counter resets when the
-    /// step completes (success or the final failed attempt) or a new step
-    /// is emitted, so it is always per-current-step.
+    /// append step, recorded as they arrive. `allowed` retries immediately;
+    /// `allowed_after_delay` requires `retry_after_ms` and waits until that
+    /// deadline. While below [`MAX_WRITE_ATTEMPTS`] the step stays open
+    /// instead of advancing. The counter resets when the step completes
+    /// (success or final failure) or a new step is emitted.
     pub(crate) write_attempts: usize,
     /// Whether the last recorded result of the pending write step was a
     /// structured error that explicitly allowed an identical replay, with
@@ -772,6 +773,9 @@ pub(crate) struct ScriptedSession {
     /// step for another emission (fresh call id) instead of emitting a
     /// placeholder or the next plan step.
     pub(crate) write_retry_pending: bool,
+    /// Earliest instant at which an `allowed_after_delay` retry may be
+    /// emitted. `None` means an explicitly immediate retry.
+    pub(crate) retry_not_before: Option<Instant>,
     /// Interim placeholder responses emitted while the next step's tool is
     /// not yet advertised; reaching [`UNDISCLOSED_ATTEMPTS`] finalizes the
     /// operation as `undisclosed`.
@@ -792,6 +796,7 @@ impl ScriptedSession {
             structured_error: false,
             write_attempts: 0,
             write_retry_pending: false,
+            retry_not_before: None,
             undisclosed_turns: 0,
             created_seq,
         }
@@ -854,6 +859,16 @@ impl ScriptedDriver {
         available_tool_names: &HashSet<String>,
         next_call_id: &str,
     ) -> (ScriptedDecision, Option<ScriptedOp>) {
+        self.decide_at(request, available_tool_names, next_call_id, Instant::now())
+    }
+
+    fn decide_at(
+        &mut self,
+        request: &Value,
+        available_tool_names: &HashSet<String>,
+        next_call_id: &str,
+        now: Instant,
+    ) -> (ScriptedDecision, Option<ScriptedOp>) {
         let Some(messages) = request.get("messages").and_then(Value::as_array) else {
             return (ScriptedDecision::None, None);
         };
@@ -882,9 +897,9 @@ impl ScriptedDriver {
 
         let decision = {
             let session = self.sessions.get_mut(&op).expect("session present");
-            advance_session(session, messages, &conversation);
+            advance_session(session, messages, &conversation, now);
             let previous_call_id = session.last_call_id.clone();
-            let decision = respond_for_session(session, available_tool_names, next_call_id);
+            let decision = respond_for_session(session, available_tool_names, next_call_id, now);
             if matches!(decision, ScriptedDecision::ToolCalls(_)) {
                 // Keep the call-id index in sync: each session contributes
                 // at most its last emitted call id, so the index stays
@@ -1065,8 +1080,19 @@ fn conversation_has_result_anywhere(conversation: &Conversation, op: &ScriptedOp
 /// host-normalized ids may differ from the provider id, so otherwise accept
 /// the newest message only when it is a tool result in this operation's
 /// already-attributed request.
-fn advance_session(session: &mut ScriptedSession, messages: &[Value], conversation: &Conversation) {
+fn advance_session(
+    session: &mut ScriptedSession,
+    messages: &[Value],
+    conversation: &Conversation,
+    now: Instant,
+) {
     if session.completed >= session.emitted {
+        return;
+    }
+    if session.write_retry_pending {
+        // The last result was already consumed. Requests emitted while a
+        // delayed retry is waiting carry that same result and must not count
+        // it as another failed attempt.
         return;
     }
     let Some(last_call_id) = session.last_call_id.as_deref() else {
@@ -1093,7 +1119,7 @@ fn advance_session(session: &mut ScriptedSession, messages: &[Value], conversati
             .flatten()
     });
     if let Some(result_text) = result_text {
-        record_step_result(session, &result_text);
+        record_step_result(session, &result_text, now);
     }
 }
 
@@ -1125,17 +1151,17 @@ fn newest_of(a: Option<usize>, b: Option<usize>, c: Option<usize>) -> Option<usi
 /// Record the tool result of the just-completed step (the last emitted
 /// one) into the session. Checkpoint results are digested into verdict
 /// evidence immediately and stay immediate failures. A structured error on
-/// a write/append step is retried as the same plan step with a fresh call
-/// id only when its observation explicitly permits replaying the identical
-/// call (`recovery.same_call_retry` is `allowed` or `allowed_after_delay`)
-/// and the attempt count is below [`MAX_WRITE_ATTEMPTS`]: the completed
-/// counter does not advance on a retry, and the sticky error evidence is
-/// only set on the final failed attempt, so a transient contention failure
-/// that succeeds on retry resumes normal progression. Any other structured
-/// error — `forbidden`, `requires_changed_input`, `not_useful`, or a
-/// missing/unparseable recovery constraint — is an immediate sticky
-/// failure: the step is never re-opened.
-fn record_step_result(session: &mut ScriptedSession, result_text: &str) {
+/// a write/append step is retried as the same plan step with a fresh call id
+/// only when recovery is `allowed`, or is `allowed_after_delay` with an
+/// explicit `retry_after_ms` after that delay expires, and the attempt count
+/// is below [`MAX_WRITE_ATTEMPTS`]. The completed counter does not advance
+/// on a retry, and sticky error evidence is set only on the final failed
+/// attempt, so a transient contention failure that succeeds on retry resumes
+/// normal progression. Any other structured error — `forbidden`,
+/// `requires_changed_input`, `not_useful`, missing/unparseable recovery, or
+/// delayed recovery without a delay — is an immediate sticky failure: the
+/// step is never re-opened.
+fn record_step_result(session: &mut ScriptedSession, result_text: &str, now: Instant) {
     let step_index = session.emitted - 1;
     let steps = session.op.key.steps(session.op.size_bytes);
     let step = &steps[step_index];
@@ -1151,16 +1177,21 @@ fn record_step_result(session: &mut ScriptedSession, result_text: &str) {
         }
         StepKind::WriteFile | StepKind::MemoryWrite { .. } => {
             if is_structured_error_result(result_text) {
-                if structured_error_allows_same_call_retry(result_text) {
+                if let Some(retry_timing) = structured_error_retry_timing(result_text) {
                     session.write_attempts += 1;
                     if session.write_attempts < MAX_WRITE_ATTEMPTS {
-                        // Transient failure (e.g. CAS contention with
-                        // `same_call_retry=allowed`): re-open the same
-                        // step for another attempt. The completed counter
-                        // must not advance, so the plan re-emits this step
-                        // and never skips or duplicates a step.
-                        session.write_retry_pending = true;
-                        return;
+                        let retry_not_before = match retry_timing {
+                            RetryTiming::Immediate => Some(None),
+                            RetryTiming::After(delay) => now.checked_add(delay).map(Some),
+                        };
+                        if let Some(retry_not_before) = retry_not_before {
+                            // Re-open the same step with a fresh call id.
+                            // Delayed recovery remains pending until the
+                            // provider-specified deadline.
+                            session.write_retry_pending = true;
+                            session.retry_not_before = retry_not_before;
+                            return;
+                        }
                     }
                 }
                 // The step failed: either every explicitly allowed attempt
@@ -1175,6 +1206,7 @@ fn record_step_result(session: &mut ScriptedSession, result_text: &str) {
             // evidence was just recorded): clear the per-step attempt
             // state.
             session.write_attempts = 0;
+            session.retry_not_before = None;
             session.completed += 1;
         }
     }
@@ -1191,9 +1223,16 @@ fn respond_for_session(
     session: &mut ScriptedSession,
     available_tool_names: &HashSet<String>,
     next_call_id: &str,
+    now: Instant,
 ) -> ScriptedDecision {
     let steps = session.op.key.steps(session.op.size_bytes);
     if session.write_retry_pending {
+        if session
+            .retry_not_before
+            .is_some_and(|retry_not_before| now < retry_not_before)
+        {
+            return ScriptedDecision::Placeholder;
+        }
         // The pending write step's last result was a structured error with
         // attempts remaining: re-open the same step for another emission
         // with a fresh call id. The completed counter stays put, so a
@@ -1206,6 +1245,7 @@ fn respond_for_session(
             session.last_call_id = Some(next_call_id.to_string());
             session.undisclosed_turns = 0;
             session.write_retry_pending = false;
+            session.retry_not_before = None;
             return ScriptedDecision::ToolCalls(vec![ToolCallSpec {
                 wire_name,
                 arguments,
@@ -1241,6 +1281,7 @@ fn respond_for_session(
             session.undisclosed_turns = 0;
             session.write_attempts = 0;
             session.write_retry_pending = false;
+            session.retry_not_before = None;
             return ScriptedDecision::ToolCalls(vec![ToolCallSpec {
                 wire_name,
                 arguments,
@@ -1317,49 +1358,39 @@ fn conversation_has_result(
 /// inside an observation's quoted preview cannot flip a success verdict.
 /// Plain-text error prose is deliberately not treated as structured: the
 /// read-back token scan stays the arbiter for unstructured text.
-fn is_structured_error_result(text: &str) -> bool {
-    let mut remainder = text;
-    while let Some(start) = remainder.find("\"status\"") {
-        let after = &remainder[start + "\"status\"".len()..];
-        if let Some(rest) = after.trim_start().strip_prefix(':')
-            && rest.trim_start().starts_with("\"error\"")
-        {
-            return true;
-        }
-        remainder = after;
-    }
-    false
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryTiming {
+    Immediate,
+    After(Duration),
 }
 
-/// Whether a structured error observation explicitly permits replaying the
-/// identical call: its `recovery.same_call_retry` is `allowed` or
-/// `allowed_after_delay`. The host renders every capability failure with a
-/// `recovery` object naming a same-call retry constraint, so a
-/// write/append step is re-opened only when the observation itself says an
-/// identical replay is safe; `forbidden`, `requires_changed_input`,
-/// `not_useful`, or a missing/unparseable constraint are all immediate
-/// failures. The scan matches real (unescaped) JSON keys only, and the
-/// constraint values are bare snake_case tokens, so no JSON unescaping is
-/// needed.
-fn structured_error_allows_same_call_retry(text: &str) -> bool {
-    let mut remainder = text;
-    while let Some(start) = remainder.find("\"same_call_retry\"") {
-        let after = &remainder[start + "\"same_call_retry\"".len()..];
-        let Some(rest) = after.trim_start().strip_prefix(':') else {
-            remainder = after;
-            continue;
-        };
-        let Some(value) = rest.trim_start().strip_prefix('"') else {
-            remainder = after;
-            continue;
-        };
-        let value = value.split('"').next().unwrap_or("");
-        if value == "allowed" || value == "allowed_after_delay" {
-            return true;
-        }
-        remainder = after;
+fn structured_error_observation(text: &str) -> Option<Value> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    let observation = serde_json::from_str::<Value>(&text[start..=end]).ok()?;
+    (observation.get("status").and_then(Value::as_str) == Some("error")).then_some(observation)
+}
+
+fn is_structured_error_result(text: &str) -> bool {
+    structured_error_observation(text).is_some()
+}
+
+/// Parse the recovery contract for an identical write replay. Immediate
+/// retries require `allowed`. Delayed retries require both
+/// `allowed_after_delay` and an explicit `retry_after_ms`; a missing or
+/// malformed delay fails closed rather than being treated as zero.
+fn structured_error_retry_timing(text: &str) -> Option<RetryTiming> {
+    let observation = structured_error_observation(text)?;
+    let recovery = observation.get("recovery")?;
+    match recovery.get("same_call_retry").and_then(Value::as_str)? {
+        "allowed" => Some(RetryTiming::Immediate),
+        "allowed_after_delay" => recovery
+            .get("retry_after_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .map(RetryTiming::After),
+        _ => None,
     }
-    false
 }
 
 /// Derive the read-back verdict from one text per checkpoint step of this
@@ -3670,46 +3701,64 @@ mod tests {
     }
 
     #[test]
-    fn driver_retries_after_delay_failure_once_then_confirms() {
-        // `allowed_after_delay` explicitly permits replaying the identical
-        // call (the host's shape for transient backend/network failures):
-        // the write fails once and succeeds on retry, then the checkpoint
-        // confirms.
+    fn driver_waits_for_retry_after_delay_before_reemitting() {
+        let available = tools(&["ironclaw__memory__write", "ironclaw__memory__read"]);
         let parsed = op(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
-        let own = parsed.readback_token();
+        let marker = marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
+        let mut driver = ScriptedDriver::new(8);
+        let started = std::time::Instant::now();
+
+        let (first, _) = driver.decide_at(
+            &json!({ "messages": [user(&marker)] }),
+            &available,
+            "call-0",
+            started,
+        );
+        let ScriptedDecision::ToolCalls(calls) = first else {
+            panic!("expected initial write");
+        };
         let error_obs = r#"{"schema_version":1,"status":"error","summary":"the tool call failed","detail":{"kind":"generic_failure","failure_kind":"transient"},"artifacts":[],"recovery":{"same_call_retry":"allowed_after_delay","recovery_hint":"wait_then_retry","retry_after_ms":250},"trust":"untrusted_tool_output"}"#;
-        let (driver, decision, rounds) = drive_retrying_plan(
-            ScriptKey::MemoryRoundtrip,
-            "u0",
-            "1",
-            4096,
-            &|step, _, attempt| match step.kind {
-                StepKind::MemoryRead => own.clone(),
-                StepKind::MemoryWrite { .. } if attempt == 1 => error_obs.to_string(),
-                _ => "Tool ironclaw.memory.write returned: ok".to_string(),
-            },
+        let request = json!({
+            "messages": [
+                tool_call_message("call-0", &calls[0]),
+                tool_result_message("call-0", error_obs),
+            ]
+        });
+
+        assert_eq!(
+            driver.decide_at(&request, &available, "call-1", started),
+            (ScriptedDecision::Placeholder, Some(parsed.clone())),
         );
         assert_eq!(
-            decision,
-            ScriptedDecision::FinalText(format!("{RESULT_PREFIX} {} confirmed", parsed.identity()))
+            driver.decide_at(
+                &request,
+                &available,
+                "call-2",
+                started + std::time::Duration::from_millis(249),
+            ),
+            (ScriptedDecision::Placeholder, Some(parsed.clone())),
         );
-        assert_eq!(
-            rounds, 3,
-            "write, retry, read: three responses before the verdict"
+        let (retry, _) = driver.decide_at(
+            &request,
+            &available,
+            "call-3",
+            started + std::time::Duration::from_millis(250),
         );
-        assert!(driver.sessions.is_empty());
-        assert!(driver.call_to_session.is_empty());
+        assert!(
+            matches!(&retry, ScriptedDecision::ToolCalls(calls) if calls.len() == 1),
+            "the identical write may be re-emitted only after the delay"
+        );
     }
 
     #[test]
     fn driver_non_retryable_write_errors_fail_immediately() {
-        // A structured error observation whose `recovery.same_call_retry`
-        // does NOT explicitly permit an identical replay — `forbidden`,
-        // `requires_changed_input`, `not_useful`, or a missing recovery
-        // constraint — is a sticky failure on the first attempt: the write
-        // step is never re-opened (`rounds == 2`: the write then the
-        // read), and the final verdict is a hard Failure even though the
-        // checkpoint returns this operation's own token.
+        // A structured error observation whose recovery does not permit an
+        // immediate identical replay is a sticky failure on the first
+        // attempt. This includes delayed retry without `retry_after_ms`,
+        // because a missing provider delay never means "retry immediately".
+        // The step is never re-opened (`rounds == 2`: write then read), and
+        // the final verdict is a hard Failure even though the checkpoint
+        // returns this operation's own token.
         for (label, recovery) in [
             (
                 "forbidden",
@@ -3724,6 +3773,10 @@ mod tests {
                 r#""recovery":{"same_call_retry":"not_useful","recovery_hint":"respect_failure_constraint"}"#,
             ),
             ("missing recovery", r#""recovery":null"#),
+            (
+                "delayed retry without delay",
+                r#""recovery":{"same_call_retry":"allowed_after_delay","recovery_hint":"wait_then_retry"}"#,
+            ),
         ] {
             let parsed = op(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
             let own = parsed.readback_token();

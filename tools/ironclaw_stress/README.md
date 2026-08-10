@@ -172,6 +172,11 @@ assistant message. Verdicts:
   failure).
 - `undisclosed`: the required tool was never advertised to the model
   (disclosure/agent-surface regression, hard failure).
+- `failure`: a write, append, or checkpoint returned a structured tool error.
+  Writes are replayed at most twice, only when the recovery contract permits
+  the identical call; `allowed_after_delay` also requires and honors
+  `retry_after_ms`. Non-retryable errors, missing delay metadata, exhausted
+  attempts, and checkpoint errors are hard failures.
 
 Scripts:
 
