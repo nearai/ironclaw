@@ -645,6 +645,7 @@ impl OutboundDeliveryTargetProvider for StaticTargetCatalog {
                     progress: false,
                     gate_prompts: true,
                     auth_prompts: true,
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 destination: ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"),

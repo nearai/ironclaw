@@ -218,6 +218,25 @@ pub trait OutboundDeliveryTargetProvider: Send + Sync {
             .into_iter()
             .find(|entry| entry.capabilities.final_replies && entry.destination == *target))
     }
+
+    /// Resolve a target the caller may receive blocked-automation
+    /// notifications on. Gated on `notifications`, NOT `final_replies`, so a
+    /// notification-only target (the web app's browser push) resolves here yet
+    /// never through `resolve_outbound_delivery_target`.
+    async fn resolve_notification_target(
+        &self,
+        scope: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+        Ok(self
+            .list_outbound_delivery_targets(scope)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.notifications
+                    && entry.summary.target_id.as_str() == target_id.as_str()
+            }))
+    }
 }
 
 pub struct OutboundDeliveryTargetRegistry {
@@ -343,6 +362,16 @@ impl OutboundDeliveryTargetProvider for MutableOutboundDeliveryTargetRegistry {
             .resolve_reply_target_binding(scope, target)
             .await
     }
+
+    async fn resolve_notification_target(
+        &self,
+        scope: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+        OutboundDeliveryTargetRegistry::new(self.providers()?)
+            .resolve_notification_target(scope, target_id)
+            .await
+    }
 }
 
 #[async_trait]
@@ -391,6 +420,25 @@ impl OutboundDeliveryTargetProvider for OutboundDeliveryTargetRegistry {
                 .await?
                 .filter(|entry| {
                     entry.owner.matches_scope(scope) && entry.capabilities.final_replies
+                })
+            {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn resolve_notification_target(
+        &self,
+        scope: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+        for provider in &self.providers {
+            if let Some(entry) = provider
+                .resolve_notification_target(scope, target_id)
+                .await?
+                .filter(|entry| {
+                    entry.owner.matches_scope(scope) && entry.capabilities.notifications
                 })
             {
                 return Ok(Some(entry));
@@ -588,6 +636,7 @@ mod tests {
                 progress: !final_replies,
                 gate_prompts: true,
                 auth_prompts: true,
+                notifications: true,
                 modalities: Vec::new(),
             },
             destination: reply_ref(format!("reply:{target_id_value}")),

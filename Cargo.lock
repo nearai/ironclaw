@@ -3481,6 +3481,8 @@ dependencies = [
  "ironclaw_slack_extension",
  "ironclaw_telegram_extension",
  "ironclaw_trace_commons",
+ "ironclaw_web_push",
+ "ironclaw_web_push_extension",
  "ironclaw_webui",
  "libc",
  "rand 0.10.2",
@@ -3594,6 +3596,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
+ "ironclaw_web_push",
  "libsql",
  "secrecy",
  "serde",
@@ -3793,6 +3796,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
+ "ironclaw_web_push",
  "ironclaw_webui",
  "libc",
  "libsql",
@@ -4212,6 +4216,7 @@ name = "ironclaw_host_runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "axum 0.8.9",
  "base64 0.23.0",
  "chrono",
@@ -4360,6 +4365,8 @@ dependencies = [
  "ironclaw_turn_runner",
  "ironclaw_turns",
  "ironclaw_wasm",
+ "ironclaw_web_push",
+ "ironclaw_web_push_extension",
  "ironclaw_webui",
  "libsql",
  "pretty_assertions",
@@ -5141,6 +5148,40 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "wasmtime",
+]
+
+[[package]]
+name = "ironclaw_web_push"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-lc-rs",
+ "base64 0.23.0",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_web_push_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_extension_contracts",
+ "ironclaw_host_api",
+ "ironclaw_outbound",
+ "ironclaw_web_push",
+ "serde_json",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

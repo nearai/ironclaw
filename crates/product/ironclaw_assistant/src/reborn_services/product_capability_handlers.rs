@@ -36,6 +36,8 @@ pub(super) enum ProductCommandHandler {
     AutomationRename,
     AutomationDelete,
     NotificationChannelsSet,
+    WebPushSubscribe,
+    WebPushUnsubscribe,
 }
 
 impl ProductCommandHandler {
@@ -74,6 +76,8 @@ impl ProductCommandHandler {
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
+            WEB_PUSH_SUBSCRIBE_COMMAND_ID => Some(Self::WebPushSubscribe),
+            WEB_PUSH_UNSUBSCRIBE_COMMAND_ID => Some(Self::WebPushUnsubscribe),
             _ => None,
         }
     }
@@ -311,6 +315,19 @@ impl ProductCommandHandler {
             Self::NotificationChannelsSet => {
                 let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
                 command_output(services.set_notification_channels(caller, request).await?)
+            }
+            Self::WebPushSubscribe => {
+                let request: RebornWebPushSubscribeRequest = product_command_input(input)?;
+                command_output(services.web_push_service.subscribe(caller, request).await?)
+            }
+            Self::WebPushUnsubscribe => {
+                let request: RebornWebPushUnsubscribeRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .web_push_service
+                        .unsubscribe(caller, request)
+                        .await?,
+                )
             }
         }
     }

@@ -2085,6 +2085,7 @@ fn notification_channels_response() -> RebornNotificationChannelsResponse {
                         final_replies: true,
                         gate_prompts: true,
                         auth_prompts: true,
+                        notifications: true,
                     },
                 }),
             },
@@ -2106,6 +2107,7 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
                     final_replies: true,
                     gate_prompts: true,
                     auth_prompts: true,
+                    notifications: true,
                 },
             },
             RebornOutboundDeliveryTargetOption {
@@ -2120,6 +2122,7 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
                     final_replies: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    notifications: false,
                 },
             },
         ],
