@@ -3144,9 +3144,19 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let bodies = race_bodies();
-        if anchored_count(&bodies, RACE_REPLY, 618) == 1
-            && anchored_count(&bodies, "is thinking", 618) == 1
-        {
+        // The working indicator is the race-chat message anchored to 618 that is
+        // not the final reply (its copy varies per run, so it can't be matched by
+        // literal — content is pinned in the assistant's prompt unit test).
+        let working_indicator_anchored_to_618 = bodies
+            .iter()
+            .filter(|body| {
+                body["reply_to_message_id"].as_i64() == Some(618)
+                    && !body["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(RACE_REPLY))
+            })
+            .count();
+        if anchored_count(&bodies, RACE_REPLY, 618) == 1 && working_indicator_anchored_to_618 == 1 {
             assert_eq!(
                 anchored_count(&bodies, "still working on a previous message", 619),
                 1,
