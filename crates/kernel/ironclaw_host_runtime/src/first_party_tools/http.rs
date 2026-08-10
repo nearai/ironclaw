@@ -26,7 +26,7 @@ use crate::{
 
 use super::{
     first_party_capability_manifest,
-    http_output::{HttpDispatchOutput, shape_response},
+    http_output::{HttpDispatchOutput, classify_status, shape_response},
     input_error,
 };
 
@@ -131,6 +131,10 @@ fn http_resource_profile() -> ResourceProfile {
 pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
+    // Failure-path usage accounting mirrors the sibling dispatches in
+    // `first_party_tools/mod.rs`: wall time is measured over the whole
+    // dispatch and attached to the capability error.
+    let started = std::time::Instant::now();
     let egress = request
         .services
         .runtime_http_egress
@@ -245,7 +249,17 @@ pub(super) async fn dispatch(
     )
     .await?
     .map_err(|error| http_error(error, save_mode))?;
-    Ok(shape_response(response, response_body_limit))
+    let status = response.status;
+    // Shape at the caller's `response_body_limit` so egress-truncation
+    // accounting stays correct: `shape_response` derives
+    // `body_was_truncated_by_egress` from that limit, and a body the egress
+    // already cut at the caller's cap must not be reported as complete. The
+    // failure diagnostic applies its own display budget separately in
+    // `bounded_failure_diagnostic`; the success-budget trim run here is
+    // discarded for error statuses, which is bounded and sub-millisecond.
+    let shaped = shape_response(response, response_body_limit);
+    let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    classify_status(shaped, status, wall_clock_ms)
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {

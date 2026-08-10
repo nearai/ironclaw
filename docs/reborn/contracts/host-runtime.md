@@ -100,6 +100,43 @@ Path-placeholder credential targets are higher risk than headers or query parame
 
 Built-in host HTTP returns redirect responses without following them. This preserves the #3088 redirect invariant for the current V1 surface by never forwarding credentials to a redirected target. The invariant is pinned by the host-runtime runtime egress contract and the `ironclaw_network` reqwest transport redirect contract. A future redirect-following transport must re-run network policy and credential target policy for every hop before reinjecting credentials.
 
+First-party `builtin.http` and `builtin.http.save` classify HTTP 4xx and 5xx
+responses as model-visible `OperationFailed` capability outcomes, while preserving
+the bounded, sanitized response as diagnostic context. Transport completion alone
+is not capability success. Informational, successful, and redirect responses remain
+inspectable successful results; redirects are still never followed automatically.
+The failure diagnostic is trimmed to the model-visible diagnostic budget
+(`MODEL_DIAGNOSTIC_MAX_BYTES`) before serialization — with headroom reserved
+for the loop-host injection fence — so `status`, `auth_hint`, and the
+truncation envelope survive intact as valid JSON. The original body from a
+network-only failed call is not retained. To retain the response body, use
+`builtin.http.save` on the initial request; saved output is subject to the
+save-mode response limit. Re-issuing the request creates a new response and
+may repeat external side effects. A later save call cannot retrieve the body
+of the prior failed call. In save mode, body content is represented only by
+`saved_body` path metadata (`path`, `bytes_written`); `status`, `auth_hint`,
+and truncation metadata remain in the failure diagnostic — a retry decision
+must inspect `saved_body` first, because treating the verdict as "nothing
+happened" duplicates the write. When the error body trips the loop-host
+injection scan, the seam wraps the diagnostic in the external-content security
+fence before the observation budget is applied; the reserved headroom keeps
+that fenced diagnostic within the observation bound, and the verdict itself
+never depends on the diagnostic JSON surviving either way — the
+`OperationFailed` classification and the `HTTP request returned status N` safe
+summary always reach the model. The host never retries failed HTTP calls
+automatically; for rate-limited or overloaded responses (429/503) the model
+should apply backoff rather than immediately re-invoking. When the host holds
+provider delay metadata it populates `retry_after_ms` on the recovery
+observation; `builtin.http` does not parse `Retry-After`, so `retry_after_ms`
+stays `None` for these responses — and `None` does not permit an immediate
+retry. For 401/403/407 the diagnostic
+retains the extension-install hint; extension install remains approval-gated and
+credential injection remains manifest-scoped to the target audience. This is
+pinned by the `builtin_http_*` status-classification tests (403, 500, save-mode
+403, range boundaries, and diagnostic budget) in
+`first_party_builtin_tools` and the `architecture-runtime` group in
+`scripts/reborn-e2e-rust.sh`.
+
 For WASM host-mediated HTTP imports, `WasmRuntimeHttpAdapter` carries the invoking capability id into `WasmRuntimeCredentialProvider`. Host composition derives the default provider from validated manifest v2 `runtime_credentials` declarations on WASM capability descriptors. The provider matches the request URL against the declared HTTPS audience through the `ironclaw_network` target parser/matcher, then emits `StagedObligation` injection plans for matching capability+audience pairs. When a declaration uses `source = { type = "product_auth_account", provider = "..." }`, authorization emits an account-backed obligation and the host-runtime resolver stages the selected account's access secret under the declared runtime credential slot handle before egress. Explicit `WasmStagedRuntimeCredentials` rules remain available for named legacy/test composition, but production manifest-backed tools should use the manifest-derived provider. The WASM guest still supplies only method/url/headers/body and never chooses credential handles, account providers, or targets.
 
 Script and shell process execution keep Docker containers ambient-network-disabled by default (`docker run --network none`). Tenant sandbox composition can now attach explicit broker affordances for commands. The preferred network shape bind-mounts a host-owned Unix socket and exposes `IRONCLAW_REBORN_NETWORK_MODE=brokered`, `IRONCLAW_REBORN_HTTP_BROKER_SOCKET`, and `IRONCLAW_REBORN_HTTP_BROKER_URL` while preserving Docker `--network none`; Unix-socket broker paths are Unix-host affordances, and Windows hosts must use the HTTP-proxy broker shape. The HTTP-proxy shape is available for compositions that accept Docker network attachment and exposes standard `http_proxy`/`https_proxy` values. Secret broker handoff is metadata-only through `IRONCLAW_REBORN_SECRET_MODE=brokered` plus either `IRONCLAW_REBORN_SECRET_BROKER_SOCKET` or `IRONCLAW_REBORN_SECRET_BROKER_URL`; raw secret material is not injected into command environments. Composition must provision broker sockets or endpoints per `ResourceScope`/`CapabilityId` handoff so tenants cannot share a reusable broker authority by accident. Caller-supplied overrides for reserved broker environment variables fail closed, and containers without a configured network broker still run with Docker networking disabled. If scripts later gain a brokered HTTP SDK, sidecar, helper process, or host API, every request must flow through `ironclaw_sandbox::ScriptRuntimeHttpAdapter<RuntimeHttpEgress>`. The host supplies the `ResourceScope`, `CapabilityId`, `NetworkPolicy`, credential injection plan, response body limit, and timeout; script/runtime input must not invent secret handles, raw credential headers/query parameters, DNS checks, private-IP checks, or direct HTTP clients inside `ironclaw_sandbox`.
