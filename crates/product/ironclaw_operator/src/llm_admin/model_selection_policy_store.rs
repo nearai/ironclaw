@@ -1,4 +1,4 @@
-//! Tenant-scoped persistence for the operator-owned user model policy.
+//! Tenant-scoped filesystem persistence for the operator-owned user model policy.
 
 use std::sync::Arc;
 
@@ -15,12 +15,12 @@ use ironclaw_product_contracts::{
 const POLICY_PATH: &str = "/tenant-shared/llm-user-model-policy.json";
 const POLICY_MAX_BYTES: usize = 64 * 1024;
 
-pub(crate) struct FilesystemModelSelectionPolicyStore<F: RootFilesystem + ?Sized> {
+pub struct FilesystemModelSelectionPolicyStore<F: RootFilesystem + ?Sized> {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
 impl<F: RootFilesystem + ?Sized> FilesystemModelSelectionPolicyStore<F> {
-    pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 

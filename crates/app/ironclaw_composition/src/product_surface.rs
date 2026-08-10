@@ -300,11 +300,9 @@ pub(crate) fn build_llm_config_service(
     let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
         runtime.secret_store(),
     ));
-    let model_policy_store = Arc::new(
-        crate::model_selection_policy_store::FilesystemModelSelectionPolicyStore::new(Arc::clone(
-            &runtime.scoped_filesystem,
-        )),
-    );
+    let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
+        Arc::clone(&runtime.scoped_filesystem),
+    ));
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys)
         .with_model_policy_store(model_policy_store);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {

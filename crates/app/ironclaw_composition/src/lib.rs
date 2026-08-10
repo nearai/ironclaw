@@ -40,7 +40,6 @@ mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
 mod model_gateway_assembly;
-mod model_selection_policy_store;
 mod observability;
 mod operator_secret_store;
 mod operator_tool_catalog;
