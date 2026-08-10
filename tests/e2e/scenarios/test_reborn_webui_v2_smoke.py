@@ -1462,8 +1462,10 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
     reborn_v2_browser,
     mock_llm_server,
 ):
-    """One member's Settings preference reaches the provider without affecting another."""
-    selected_model = "e2e-selected-model"
+    """A bounded long-name preference reaches the provider without affecting another member."""
+    selected_model = (
+        "deepseek-ai/DeepSeek-V4-Flash-e2e-selected-model-with-a-long-name"
+    )
     selected_prompt = f"settings selected model routing {uuid.uuid4()}"
     default_prompt = f"settings default model routing {uuid.uuid4()}"
     suffix = uuid.uuid4().hex[:8]
@@ -1568,6 +1570,17 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
                     "option", name=selected_model, exact=True
                 ).click()
                 await expect(button).to_contain_text(selected_model)
+                selector_box = await selector.bounding_box()
+                assert selector_box is not None
+                viewport_size = selected_page.viewport_size
+                assert viewport_size is not None
+                assert (
+                    selector_box["x"] + selector_box["width"]
+                    <= viewport_size["width"]
+                ), (
+                    "the long selected model overflowed the Settings viewport: "
+                    f"{selector_box}"
+                )
 
                 preference = None
                 async with asyncio.timeout(15):
