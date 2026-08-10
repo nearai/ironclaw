@@ -19,6 +19,7 @@ test-support = []
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
+futures = "0.3"
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }

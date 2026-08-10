@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_agent_loop::{
-    executor::{AgentLoopExecutor, AgentLoopExecutorError, CanonicalAgentLoopExecutor, HostStage},
+    executor::{
+        AgentLoopExecutorError, CanonicalAgentLoopExecutor, CapabilityBatchExecutionMode, HostStage,
+    },
     family::{LoopFamily, LoopFamilyId, LoopFamilyRegistry},
     state::{
         CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointKind, CheckpointPayloadError,
@@ -37,6 +39,7 @@ pub struct PlannedDriver {
     descriptor: AgentLoopDriverDescriptor,
     family: Arc<LoopFamily>,
     executor: Arc<CanonicalAgentLoopExecutor>,
+    batch_execution_mode: CapabilityBatchExecutionMode,
 }
 
 impl PlannedDriver {
@@ -44,6 +47,20 @@ impl PlannedDriver {
         family: Arc<LoopFamily>,
         executor: Arc<CanonicalAgentLoopExecutor>,
         descriptor: AgentLoopDriverDescriptor,
+    ) -> Result<Self, AgentLoopDriverError> {
+        Self::from_family_with_descriptor_and_batch_execution(
+            family,
+            executor,
+            descriptor,
+            CapabilityBatchExecutionMode::Sequential,
+        )
+    }
+
+    pub fn from_family_with_descriptor_and_batch_execution(
+        family: Arc<LoopFamily>,
+        executor: Arc<CanonicalAgentLoopExecutor>,
+        descriptor: AgentLoopDriverDescriptor,
+        batch_execution_mode: CapabilityBatchExecutionMode,
     ) -> Result<Self, AgentLoopDriverError> {
         if descriptor.checkpoint_schema_id.is_none()
             || descriptor.checkpoint_schema_version.is_none()
@@ -56,6 +73,7 @@ impl PlannedDriver {
             descriptor,
             family,
             executor,
+            batch_execution_mode,
         })
     }
 
@@ -70,6 +88,7 @@ impl PlannedDriver {
             descriptor,
             family,
             executor,
+            batch_execution_mode: CapabilityBatchExecutionMode::Sequential,
         })
     }
 
@@ -115,7 +134,12 @@ impl AgentLoopDriver for PlannedDriver {
         validate_run_request(&request, &self.descriptor)?;
         let initial = LoopExecutionState::initial_for_run(host.run_context());
         self.executor
-            .execute_family(self.family.as_ref(), host, initial)
+            .execute_family_with_batch_execution(
+                self.family.as_ref(),
+                host,
+                initial,
+                self.batch_execution_mode,
+            )
             .await
             .map_err(map_executor_error)
     }
@@ -179,7 +203,12 @@ impl AgentLoopDriver for PlannedDriver {
         }
 
         self.executor
-            .execute_family(self.family.as_ref(), host, initial)
+            .execute_family_with_batch_execution(
+                self.family.as_ref(),
+                host,
+                initial,
+                self.batch_execution_mode,
+            )
             .await
             .map_err(map_executor_error)
     }
@@ -461,8 +490,8 @@ mod tests {
     use crate::app_loop_family::build_loop_family_registry;
     use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
     use ironclaw_agent_loop::test_support::{
-        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
-        test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, test_run_context,
     };
     use ironclaw_host_api::failure::categories::{
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
@@ -482,7 +511,7 @@ mod tests {
         VisibleCapabilitySurface,
     };
     use ironclaw_turns::{LoopMessageRef, TurnCheckpointId};
-    use std::sync::Mutex;
+    use std::{collections::VecDeque, sync::Mutex};
 
     #[test]
     fn default_planned_driver_descriptor_uses_default_family_identity() {
@@ -589,6 +618,75 @@ mod tests {
             detail.contains("pre-model checkpoint")
                 && detail.contains("No model or capability ran after the rejection")
                 && detail.contains("Start a new run")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_planned_driver_uses_individual_parallel_capability_calls() {
+        let registry = build_loop_family_registry().expect("registry");
+        let family = registry
+            .get(&LoopFamilyId::DEFAULT)
+            .expect("default family");
+        let descriptor = descriptor_for_driver_id(
+            planned_default_driver_id().expect("driver id"),
+            RunProfileVersion::new(PLANNED_DRIVER_VERSION),
+        )
+        .expect("descriptor");
+        let driver = PlannedDriver::from_family_with_descriptor_and_batch_execution(
+            family,
+            Arc::new(CanonicalAgentLoopExecutor),
+            descriptor,
+            CapabilityBatchExecutionMode::BoundedParallel,
+        )
+        .expect("driver");
+        let context = run_context_for_driver(&driver);
+        let script = ScenarioScript {
+            model_responses: VecDeque::from([
+                ScriptedModelResponse::Calls(vec![
+                    ScriptedCapabilityCall::new("demo.echo"),
+                    ScriptedCapabilityCall::new("demo.echo"),
+                ]),
+                ScriptedModelResponse::Reply {
+                    text: "done".to_string(),
+                },
+            ]),
+            capability_outcomes: VecDeque::new(),
+            single_call_retry_outcomes: VecDeque::from([
+                ScriptedCapabilityOutcome::completed("result:first"),
+                ScriptedCapabilityOutcome::completed("result:second"),
+            ]),
+            pending_inputs: VecDeque::new(),
+        };
+        let (host, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .script(script)
+            .build();
+
+        let exit = driver
+            .run(
+                AgentLoopDriverRunRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await
+            .expect("driver run");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        let calls = host.call_log();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call, MockHostCall::InvokeCapabilityBatch { .. }))
         );
     }
 

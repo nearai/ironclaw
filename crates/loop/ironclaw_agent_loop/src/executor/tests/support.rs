@@ -1,6 +1,9 @@
 // arch-exempt: large_file, prompt-build event instrumentation extends the owning executor mock, plan #5981
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::turn::{
@@ -15,18 +18,18 @@ use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, AssistantReply, CancellationPolicy, CapabilityCallCandidate,
     CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceProfileId,
     CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-    ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
-    LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-    LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest, LoopContextBundle,
-    LoopContextRequest, LoopDriverId, LoopFailureKind, LoopInputAck, LoopInputAckToken,
-    LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-    LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopRequest,
-    LoopRequestBatch, LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
-    PromptMode, ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance,
-    RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-    RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-    StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
+    LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
+    LoopContextBundle, LoopContextRequest, LoopDriverId, LoopFailureKind, LoopInputAck,
+    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
+    LoopModelRequest, LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef,
+    LoopPromptBundleRequest, LoopRequest, LoopRequestBatch, LoopRunContext, ModelProfileId,
+    ModelStreamChunk, ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+    RedactedRunProfileProvenance, RegisterProviderToolCallRequest, ResolvedRunProfile,
+    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+    RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 use crate::{
@@ -57,7 +60,19 @@ pub(super) struct MockHost {
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
     batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::resolution::ResolutionBatch>>>,
-    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::resolution::Resolution>>>,
+    single_outcomes: Arc<
+        Mutex<
+            VecDeque<
+                Result<
+                    ironclaw_host_api::resolution::Resolution,
+                    ironclaw_loop_contracts::AgentLoopHostError,
+                >,
+            >,
+        >,
+    >,
+    single_invoke_delays: Arc<Mutex<VecDeque<std::time::Duration>>>,
+    active_single_invocations: Arc<AtomicUsize>,
+    max_concurrent_single_invocations: Arc<AtomicUsize>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<LoopRequestBatch>>>,
     single_invocations: Arc<Mutex<Vec<LoopRequest>>>,
@@ -89,6 +104,7 @@ pub(super) struct MockHost {
     fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
     prompt_bundle_failure: Option<AgentLoopHostError>,
+    default_concurrency_hint: ConcurrencyHint,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     extra_capability_descriptors: Vec<CapabilityDescriptorView>,
@@ -107,6 +123,9 @@ impl MockHost {
             acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
             batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
             single_outcomes: Arc::new(Mutex::new(VecDeque::new())),
+            single_invoke_delays: Arc::new(Mutex::new(VecDeque::new())),
+            active_single_invocations: Arc::new(AtomicUsize::new(0)),
+            max_concurrent_single_invocations: Arc::new(AtomicUsize::new(0)),
             checkpoints: Arc::new(Mutex::new(Vec::new())),
             batch_invocations: Arc::new(Mutex::new(Vec::new())),
             single_invocations: Arc::new(Mutex::new(Vec::new())),
@@ -134,6 +153,7 @@ impl MockHost {
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
             fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
+            default_concurrency_hint: ConcurrencyHint::SafeForParallel,
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             prompt_bundle_failure: None,
@@ -185,7 +205,25 @@ impl MockHost {
         self,
         outcomes: Vec<ironclaw_host_api::resolution::Resolution>,
     ) -> Self {
+        *self.single_outcomes.lock().expect("lock") = outcomes.into_iter().map(Ok).collect();
+        self
+    }
+
+    pub(super) fn with_single_results(
+        self,
+        outcomes: Vec<
+            Result<
+                ironclaw_host_api::resolution::Resolution,
+                ironclaw_loop_contracts::AgentLoopHostError,
+            >,
+        >,
+    ) -> Self {
         *self.single_outcomes.lock().expect("lock") = outcomes.into();
+        self
+    }
+
+    pub(super) fn with_single_invoke_delays(self, delays: Vec<std::time::Duration>) -> Self {
+        *self.single_invoke_delays.lock().expect("lock") = delays.into();
         self
     }
 
@@ -217,6 +255,14 @@ impl MockHost {
         descriptors: Vec<CapabilityDescriptorView>,
     ) -> Self {
         self.extra_capability_descriptors = descriptors;
+        self
+    }
+
+    pub(super) fn with_default_concurrency_hint(
+        mut self,
+        concurrency_hint: ConcurrencyHint,
+    ) -> Self {
+        self.default_concurrency_hint = concurrency_hint;
         self
     }
 
@@ -279,6 +325,11 @@ impl MockHost {
 
     pub(super) fn single_invocations(&self) -> Vec<LoopRequest> {
         self.single_invocations.lock().expect("lock").clone()
+    }
+
+    pub(super) fn max_concurrent_single_invocations(&self) -> usize {
+        self.max_concurrent_single_invocations
+            .load(Ordering::SeqCst)
     }
 
     pub(super) fn registered_provider_calls(&self) -> Vec<ProviderToolCall> {
@@ -420,7 +471,7 @@ impl MockHost {
             safe_name: "demo".to_string(),
             safe_description: "demo capability".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
+            concurrency_hint: self.default_concurrency_hint,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }];
         descriptors.extend(self.extra_capability_descriptors.clone());
@@ -864,13 +915,30 @@ impl ironclaw_loop_contracts::LoopCapabilityPort for MockHost {
         request: LoopRequest,
     ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
-        self.single_outcomes
+        let outcome = self
+            .single_outcomes
             .lock()
             .expect("lock")
             .pop_front()
             .ok_or_else(|| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "single script exhausted")
-            })
+            })?;
+        let delay = self
+            .single_invoke_delays
+            .lock()
+            .expect("lock")
+            .pop_front()
+            .unwrap_or_default();
+        let active = self
+            .active_single_invocations
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        self.max_concurrent_single_invocations
+            .fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(delay).await;
+        self.active_single_invocations
+            .fetch_sub(1, Ordering::SeqCst);
+        outcome
     }
 
     async fn invoke_capability_batch(
@@ -1090,6 +1158,28 @@ pub(super) fn calls_response() -> LoopModelResponse {
             effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
+        effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
+    }
+}
+
+pub(super) fn calls_response_with_count(count: usize) -> LoopModelResponse {
+    LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(
+            (0..count)
+                .map(|index| CapabilityCallCandidate {
+                    activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new(format!("input:parallel-{index}"))
+                        .expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    provider_replay: None,
+                })
+                .collect(),
+        ),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
         usage: None,
     }

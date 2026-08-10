@@ -10119,6 +10119,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn concurrent_duplicate_gate_invocations_share_one_persisted_resolution() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let gate = ironclaw_host_runtime::RuntimeApprovalGate {
+            approval_request_id: ironclaw_host_api::ids::ApprovalRequestId::new(),
+            capability_id: capability_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        };
+        let store = Arc::new(BlockingGateRecordStore::new());
+        let port = Arc::new(
+            runtime_capability_port_with_gate_store(
+                &capability_id,
+                &provider_id,
+                Arc::new(QueuedHostRuntime::new(
+                    vec![visible_capability(
+                        capability_id.clone(),
+                        provider_id.clone(),
+                    )],
+                    vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(gate))],
+                )),
+                Arc::new(RecordingResultWriter::default()),
+                dummy_milestone_sink(),
+                store.clone(),
+                "thread-concurrent-gate-persist",
+            )
+            .await,
+        );
+        let invocation = visible_runtime_invocation(&port).await;
+
+        let owner_port = Arc::clone(&port);
+        let owner_invocation = invocation.clone();
+        let owner =
+            tokio::spawn(async move { owner_port.invoke_capability(owner_invocation).await });
+        store
+            .entered
+            .acquire()
+            .await
+            .expect("owner save entered")
+            .forget();
+
+        let waiter_port = Arc::clone(&port);
+        let waiter = tokio::spawn(async move { waiter_port.invoke_capability(invocation).await });
+        tokio::task::yield_now().await;
+        store.release.notify_waiters();
+
+        let owner_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), owner)
+            .await
+            .expect("owner must finish")
+            .expect("owner task")
+            .expect("owner resolution");
+        let waiter_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must finish")
+            .expect("waiter task")
+            .expect("waiter resolution");
+
+        assert_eq!(
+            gate_ref_for_resolution(&owner_resolution),
+            gate_ref_for_resolution(&waiter_resolution),
+            "the waiter must receive the owner's persisted gate resolution"
+        );
+        assert_eq!(
+            store.saved().len(),
+            1,
+            "concurrent duplicates must persist one gate record"
+        );
+    }
+
     /// Deterministic in-memory [`ReplayPayloadStorePort`] fake for seam tests: the
     /// port `save`s the raw replay payload at a fresh gate raise and `load`s it on
     /// resume. Keyed by `InvocationId` (globally unique per invocation); the scope

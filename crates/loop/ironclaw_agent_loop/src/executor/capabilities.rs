@@ -2,13 +2,16 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use futures::{StreamExt, stream::FuturesUnordered};
 use ironclaw_host_api::turn::CapabilityActivityId;
 use ironclaw_host_api::turn::{LoopGateRef, LoopResultRef};
 use ironclaw_host_api::{
     decision::DenyReason,
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
     ids::{ApprovalRequestId, CorrelationId},
-    resolution::{Blocked, DependentRunResult, Outcome, Resolution, Suspension, ToolVerdict},
+    resolution::{
+        Blocked, DependentRunResult, Outcome, Resolution, ResolutionBatch, Suspension, ToolVerdict,
+    },
     result_meta::{
         CapabilityRecoveryHint, FailureKind, LoopRef, ModelFailureDiagnostic, ModelInputIssue,
         ResultProgress, ResumeToken, SameCallRetryConstraint,
@@ -19,12 +22,26 @@ use ironclaw_loop_contracts::{
     CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail, CapabilityInputIssue,
     CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
     LoopDriverNoteKind, LoopFailureKind, LoopProcessRef, LoopProgressEvent, LoopRecoveryClass,
-    LoopRecoveryDisposition, LoopRecoveryStage, LoopRequestBatch,
+    LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch,
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation, ObservationTrust,
     ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
     VisibleCapabilitySurface,
 };
 
+use super::{
+    AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
+    CancelCheck, CapabilityBatchExecutionMode, CapabilitySurfaceIndex, CheckpointStage,
+    ExecutorStage, FailedExitDetails, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext,
+    TurnCompletedStep, append_capability_error_ref, append_capability_result_ref,
+    append_capability_safe_summary_ref, attach_failure_explanation, batch_policy_kind,
+    cancelled_exit, capability_batch_counts, capability_call_signature,
+    capability_error_failure_category, capability_host_error,
+    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
+    capability_is_visible, capability_port_error_is_terminal, capability_summary,
+    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
+    honor_capability_retry_alteration, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
+};
 use crate::{
     state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
@@ -33,30 +50,108 @@ use crate::{
     },
 };
 
-use super::{
-    AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
-    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
-    GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
-    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
-    attach_failure_explanation, batch_policy_kind, cancelled_exit, capability_batch_counts,
-    capability_call_signature, capability_error_failure_category, capability_host_error,
-    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_port_error_is_terminal, capability_summary,
-    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    honor_capability_retry_alteration, model_visible_capability_failure_observation,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
-};
-
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct CapabilityStage;
+pub(crate) struct CapabilityStage {
+    batch_execution_mode: CapabilityBatchExecutionMode,
+}
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
 const STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "input could not be encoded";
 
+const MAX_PARALLEL_CAPABILITY_INVOCATIONS: usize = 4;
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) calls: Vec<CapabilityCallCandidate>,
+}
+
+impl CapabilityStage {
+    pub(crate) const fn new(batch_execution_mode: CapabilityBatchExecutionMode) -> Self {
+        Self {
+            batch_execution_mode,
+        }
+    }
+
+    async fn invoke_batch(
+        &self,
+        ctx: StageContext<'_>,
+        policy: BatchPolicy,
+        invocations: Vec<LoopRequest>,
+    ) -> Result<ResolutionBatch, ironclaw_loop_contracts::AgentLoopHostError> {
+        if self.batch_execution_mode != CapabilityBatchExecutionMode::BoundedParallel
+            || policy != BatchPolicy::Parallel
+        {
+            return ctx
+                .host
+                .invoke_capability_batch(LoopRequestBatch {
+                    invocations,
+                    stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential),
+                })
+                .await;
+        }
+
+        let invocation_count = invocations.len();
+        let mut indexed_invocations = invocations.into_iter().enumerate();
+        let invoke = |(index, invocation)| async move {
+            (index, ctx.host.invoke_capability(invocation).await)
+        };
+        let mut pending = FuturesUnordered::new();
+        let mut launched = 0_usize;
+        for _ in 0..MAX_PARALLEL_CAPABILITY_INVOCATIONS {
+            let Some(indexed_invocation) = indexed_invocations.next() else {
+                break;
+            };
+            pending.push(invoke(indexed_invocation));
+            launched += 1;
+        }
+
+        let mut outcomes = (0..invocation_count)
+            .map(|_| None)
+            .collect::<Vec<
+                Option<Result<Resolution, ironclaw_loop_contracts::AgentLoopHostError>>,
+            >>();
+        let mut parked = false;
+        let mut terminal_error_seen = false;
+        while let Some((index, result)) = pending.next().await {
+            match &result {
+                Ok(resolution) => parked |= resolution.parks(),
+                Err(error) => {
+                    terminal_error_seen |= capability_port_error_is_terminal(error.kind);
+                }
+            }
+            outcomes[index] = Some(result);
+
+            if !parked
+                && !terminal_error_seen
+                && let Some(indexed_invocation) = indexed_invocations.next()
+            {
+                pending.push(invoke(indexed_invocation));
+                launched += 1;
+            }
+        }
+
+        let mut resolutions = Vec::with_capacity(launched);
+        let mut terminal_error = None;
+        for outcome in outcomes.into_iter().flatten() {
+            match outcome {
+                Ok(resolution) => resolutions.push(resolution),
+                Err(error) if capability_port_error_is_terminal(error.kind) => {
+                    if terminal_error.is_none() {
+                        terminal_error = Some(error);
+                    }
+                }
+                Err(error) => resolutions.push(recoverable_port_error_resolution(error)),
+            }
+        }
+        if let Some(error) = terminal_error {
+            return Err(error);
+        }
+
+        Ok(ResolutionBatch {
+            resolutions,
+            stopped_on_suspension: parked && launched < invocation_count,
+        })
+    }
 }
 
 #[async_trait]
@@ -236,7 +331,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .map(|call| capability_summary(&surface_index, call))
             .collect::<Vec<_>>();
         let policy = ctx.planner.batch().policy(&state, &summaries);
-        let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
 
@@ -253,37 +347,32 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 
         let mut pending_approval_resume = state.pending_approval_resume.clone();
         let mut pending_auth_resume = state.pending_auth_resume.clone();
-        let batch_result = ctx
-            .host
-            .invoke_capability_batch(LoopRequestBatch {
-                invocations: visible_calls
-                    .iter()
-                    .cloned()
-                    .map(|call| {
-                        // Auth-resume takes precedence: when the run is parked
-                        // at a BlockedAuth checkpoint that also carried prior
-                        // approval identity, re-dispatch through the auth-resume
-                        // path so the original invocation_id is reused.
-                        //
-                        // Consume the slot on first match so that a batch with two
-                        // calls to the same capability_id does not tag both as
-                        // auth-resume (which would reuse one resume_token across
-                        // distinct calls — a correctness and security bug).  Mirror
-                        // the approval path immediately below which uses take_if.
-                        if let Some(auth) = pending_auth_resume
-                            .take_if(|auth| auth.capability_id == call.capability_id)
-                        {
-                            return capability_invocation_from_auth_resume_candidate(call, &auth);
-                        }
-                        let resume = pending_approval_resume
-                            .take_if(|resume| resume.capability_id == call.capability_id)
-                            .map(|resume| resume.to_approval_resume());
-                        capability_invocation_from_candidate(call, resume)
-                    })
-                    .collect(),
-                stop_on_first_suspension,
+        let invocations = visible_calls
+            .iter()
+            .cloned()
+            .map(|call| {
+                // Auth-resume takes precedence: when the run is parked
+                // at a BlockedAuth checkpoint that also carried prior
+                // approval identity, re-dispatch through the auth-resume
+                // path so the original invocation_id is reused.
+                //
+                // Consume the slot on first match so that a batch with two
+                // calls to the same capability_id does not tag both as
+                // auth-resume (which would reuse one resume_token across
+                // distinct calls — a correctness and security bug). Mirror
+                // the approval path immediately below which uses take_if.
+                if let Some(auth) =
+                    pending_auth_resume.take_if(|auth| auth.capability_id == call.capability_id)
+                {
+                    return capability_invocation_from_auth_resume_candidate(call, &auth);
+                }
+                let resume = pending_approval_resume
+                    .take_if(|resume| resume.capability_id == call.capability_id)
+                    .map(|resume| resume.to_approval_resume());
+                capability_invocation_from_candidate(call, resume)
             })
-            .await;
+            .collect();
+        let batch_result = self.invoke_batch(ctx, policy, invocations).await;
 
         let batch = match batch_result {
             Ok(batch) => batch,
@@ -543,18 +632,37 @@ fn capability_port_error_summary(
 /// Model-visible observation for a recoverable capability-stage port `Err`.
 /// Carries the port error's secret-scrubbed `detail` (when present) so the
 /// model can retry or explain instead of guessing from the kind alone.
-fn capability_port_error_observation(
+fn capability_failure_from_port_error(
     error: &ironclaw_loop_contracts::AgentLoopHostError,
-) -> ModelVisibleToolObservation {
+) -> CapabilityFailure {
     let detail = error.detail.clone().unwrap_or_else(|| {
         ironclaw_loop_contracts::sanitize_model_visible_text(error.safe_summary.clone())
     });
-    let failure = CapabilityFailure {
+    CapabilityFailure {
         error_kind: error.kind.failure_kind(),
         safe_summary: error.safe_summary.clone(),
         detail: CapabilityFailureDetail::Diagnostic { text: detail },
-    };
-    model_visible_capability_failure_observation(&failure)
+    }
+}
+
+fn recoverable_port_error_resolution(
+    error: ironclaw_loop_contracts::AgentLoopHostError,
+) -> Resolution {
+    let failure = capability_failure_from_port_error(&error);
+    ironclaw_loop_contracts::resolution::failed(
+        failure.error_kind,
+        failure.safe_summary,
+        failure.detail,
+    )
+}
+
+/// Model-visible observation for a recoverable capability-stage port `Err`.
+/// Carries the port error's secret-scrubbed `detail` (when present) so the
+/// model can retry or explain instead of guessing from the kind alone.
+fn capability_port_error_observation(
+    error: &ironclaw_loop_contracts::AgentLoopHostError,
+) -> ModelVisibleToolObservation {
+    model_visible_capability_failure_observation(&capability_failure_from_port_error(error))
 }
 
 fn capability_failed_summary(

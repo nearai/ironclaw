@@ -14,10 +14,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-    CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
-    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
-    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind, LoopExit,
-    LoopFailureKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+    CapabilityInputRepair, CapabilityResumeToken, ConcurrencyHint, LoopCancelReasonKind,
+    LoopCancellationSignal, LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError,
+    LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
+    LoopExit, LoopFailureKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
     LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
     LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
     LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
@@ -47,11 +47,11 @@ use crate::test_support::{
 
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
-    BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
-    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
-    StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
-    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityBatchExecutionMode,
+    CapabilityInput, CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput,
+    GateStage, HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage,
+    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
+    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -2277,7 +2277,7 @@ async fn capability_stage_returns_after_batch_summary() {
         ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
     };
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -3220,6 +3220,208 @@ async fn gate_stage_aborts_returns_failed_exit() {
     let appended = host.appended_result_refs();
     assert_eq!(appended.len(), 1);
     assert_eq!(appended[0].safe_summary, "auth gate aborted");
+}
+
+#[tokio::test]
+async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
+    let first_ref = LoopResultRef::new("result:parallel-first").expect("valid");
+    let second_ref = LoopResultRef::new("result:parallel-second").expect("valid");
+    let host = MockHost::new(vec![two_calls_response(), reply_response()])
+        .with_single_outcomes(vec![
+            resolution::completed(
+                first_ref.clone(),
+                "first".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            ),
+            resolution::completed(
+                second_ref.clone(),
+                "second".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            ),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(5),
+        ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family_with_batch_execution(
+            &crate::families::default(),
+            &host,
+            state,
+            CapabilityBatchExecutionMode::BoundedParallel,
+        )
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.max_concurrent_single_invocations(), 2);
+    assert!(host.batch_invocations().is_empty());
+    assert_eq!(host.single_invocations().len(), 2);
+    assert_eq!(
+        host.appended_result_refs()
+            .into_iter()
+            .map(|request| request.result_ref)
+            .collect::<Vec<_>>(),
+        vec![first_ref, second_ref]
+    );
+}
+
+#[tokio::test]
+async fn parallel_batch_stops_launching_new_calls_after_a_park() {
+    let mut outcomes = vec![
+        resolution::approval_required(
+            LoopGateRef::new("gate:parallel-window-park").expect("valid"),
+            "approval required".to_string(),
+            None,
+        )
+        .resolution,
+    ];
+    outcomes.extend((1..6).map(|index| {
+        resolution::completed(
+            LoopResultRef::new(format!("result:parallel-window-{index}")).expect("valid"),
+            format!("completed {index}"),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
+    }));
+
+    let host = MockHost::new(vec![calls_response_with_count(6)])
+        .with_single_outcomes(outcomes)
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(5),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family_with_batch_execution(
+            &crate::families::default(),
+            &host,
+            state,
+            CapabilityBatchExecutionMode::BoundedParallel,
+        )
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Blocked(_)));
+    assert_eq!(host.max_concurrent_single_invocations(), 4);
+    assert_eq!(
+        host.single_invocations().len(),
+        4,
+        "the two calls outside the initial window must remain unlaunched"
+    );
+}
+#[tokio::test]
+async fn parallel_batch_preserves_success_when_sibling_returns_recoverable_port_error() {
+    let completed_ref = LoopResultRef::new("result:parallel-mixed-success").expect("valid"); // safety: test-only fixture
+    let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
+        .with_single_results(vec![
+            Ok(resolution::completed(
+                completed_ref.clone(),
+                "first completed".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            )),
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "second invocation was invalid",
+            )
+            .with_detail("second invocation rejected")),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(5),
+        ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family_with_batch_execution(
+            &crate::families::default(),
+            &host,
+            state,
+            CapabilityBatchExecutionMode::BoundedParallel,
+        )
+        .await
+        .expect("recoverable sibling error must not discard completed outcomes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 2);
+    assert_eq!(
+        appended[0].result_ref, completed_ref,
+        "the successful first call must be persisted in input order"
+    );
+    let observation = appended[1]
+        .model_observation
+        .as_ref()
+        .expect("the failed second call must carry a model-visible error");
+    assert_eq!(observation.status, ToolObservationStatus::Error);
+    assert!(
+        matches!(
+            &observation.detail,
+            ToolObservationDetail::GenericFailure {
+                failure_kind: FailureKind::InputEncode,
+                detail: Some(detail),
+            } if detail == "second invocation rejected"
+        ),
+        "the recoverable error must be attributed only to its matching call"
+    );
+}
+
+#[tokio::test]
+async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enabled() {
+    let host = MockHost::new(vec![calls_response_with_count(2)])
+        .with_default_concurrency_hint(ConcurrencyHint::Exclusive)
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![
+                resolution::approval_required(
+                    LoopGateRef::new("gate:exclusive-early-break").expect("valid"),
+                    "approval required".to_string(),
+                    None,
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: true,
+        }]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family_with_batch_execution(
+            &crate::families::default(),
+            &host,
+            state,
+            CapabilityBatchExecutionMode::BoundedParallel,
+        )
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Blocked(_)));
+    assert!(host.single_invocations().is_empty());
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(batch_invocations.len(), 1);
+    assert!(batch_invocations[0].stop_on_first_suspension);
 }
 
 #[tokio::test]
@@ -8150,7 +8352,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
     .await
     .expect("visible surface");
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -8624,7 +8826,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         disposition: Some(GateResumeDisposition::Denied),
     });
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -8757,7 +8959,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     current_surface.descriptors.clear();
     current_surface.callable_capability_ids = Some(Vec::new());
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -8869,7 +9071,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         host: &host,
     };
 
-    let phase1 = CapabilityStage
+    let phase1 = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -8910,7 +9112,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         .expect("pending auth resume")
         .disposition = Some(ironclaw_host_api::turn::GateResumeDisposition::Denied);
 
-    let phase2 = CapabilityStage
+    let phase2 = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -9077,7 +9279,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         },
     ];
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -9289,7 +9491,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
         },
     ];
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -9507,7 +9709,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         },
     ];
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -9739,7 +9941,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         },
     ];
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {
@@ -9930,7 +10132,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         provider_replay: None,
     }];
 
-    let step = CapabilityStage
+    let step = CapabilityStage::default()
         .process(
             ctx,
             CapabilityInput {

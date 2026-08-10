@@ -4,8 +4,9 @@ use ironclaw_loop_contracts::AgentLoopDriverHost;
 use crate::planner::AgentLoopPlannerInternal;
 
 use super::{
-    AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, ExitStage,
-    InputStage, ModelStage, PostCapabilityStage, PromptStage, ReplyAdmissionStage, StopStage,
+    AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityBatchExecutionMode,
+    CapabilityStage, ExitStage, InputStage, ModelStage, PostCapabilityStage, PromptStage,
+    ReplyAdmissionStage, StopStage,
 };
 
 #[derive(Clone, Copy)]
@@ -48,10 +49,21 @@ impl Default for DefaultExecutorPipeline {
             model: ModelStage,
             reply_admission: ReplyAdmissionStage,
             assistant_reply: AssistantReplyStage,
-            capabilities: CapabilityStage,
+            capabilities: CapabilityStage::default(),
             post_capability: PostCapabilityStage::default(),
             stop: StopStage,
             exit: ExitStage,
+        }
+    }
+}
+
+impl DefaultExecutorPipeline {
+    pub(crate) fn with_batch_execution_mode(
+        batch_execution_mode: CapabilityBatchExecutionMode,
+    ) -> Self {
+        Self {
+            capabilities: CapabilityStage::new(batch_execution_mode),
+            ..Self::default()
         }
     }
 }

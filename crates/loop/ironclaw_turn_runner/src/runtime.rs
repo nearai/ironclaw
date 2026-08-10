@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, sync::Arc};
 
+use ironclaw_agent_loop::executor::CapabilityBatchExecutionMode;
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
@@ -42,8 +43,8 @@ use crate::{
     loop_exit_applier::{AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort},
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
-        register_default_planned_driver, register_default_text_only_driver,
-        register_subagent_planned_driver,
+        register_default_planned_driver_with_batch_execution, register_default_text_only_driver,
+        register_subagent_planned_driver_with_batch_execution,
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
@@ -94,6 +95,55 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
+/// Environment variable that enables bounded concurrent capability batches.
+pub const REBORN_PARALLEL_TOOL_BATCH_ENV: &str = "REBORN_PARALLEL_TOOL_BATCH";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ParallelToolBatchMode {
+    #[default]
+    Off,
+    On,
+}
+
+impl ParallelToolBatchMode {
+    pub fn from_env() -> Self {
+        match std::env::var(REBORN_PARALLEL_TOOL_BATCH_ENV) {
+            Ok(value) => Self::from_raw(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::Off,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
+                    "REBORN_PARALLEL_TOOL_BATCH is not valid UTF-8; falling back to Off"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("on" | "1" | "true") => Self::On,
+            None | Some("" | "off" | "0" | "false") => Self::Off,
+            Some(_) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
+                    "unrecognized REBORN_PARALLEL_TOOL_BATCH value; falling back to Off"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    const fn execution_mode(self) -> CapabilityBatchExecutionMode {
+        match self {
+            Self::Off => CapabilityBatchExecutionMode::Sequential,
+            Self::On => CapabilityBatchExecutionMode::BoundedParallel,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -113,6 +163,9 @@ pub struct DefaultPlannedRuntimeConfig {
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
+    /// Rollout switch for bounded concurrent execution of batches whose
+    /// capability descriptors all permit parallel execution.
+    pub parallel_tool_batch: ParallelToolBatchMode,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Override for the default family's model availability-retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
@@ -132,6 +185,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
+            parallel_tool_batch: ParallelToolBatchMode::from_env(),
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
         }
@@ -541,6 +595,7 @@ fn build_default_planned_runtime_inner<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    let batch_execution_mode = parts.config.parallel_tool_batch.execution_mode();
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
     let family_registry = build_loop_family_registry_with_overrides(
@@ -556,8 +611,16 @@ where
             ),
         )
     })?;
-    register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
-    register_subagent_planned_driver(&mut registry, family_registry)?;
+    register_default_planned_driver_with_batch_execution(
+        &mut registry,
+        Arc::clone(&family_registry),
+        batch_execution_mode,
+    )?;
+    register_subagent_planned_driver_with_batch_execution(
+        &mut registry,
+        family_registry,
+        batch_execution_mode,
+    )?;
     let driver_registry = Arc::new(registry);
 
     let resolver = Arc::new(
@@ -938,8 +1001,9 @@ mod tests {
     };
 
     use super::{
-        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+        CapabilityBatchExecutionMode, ParallelToolBatchMode, RuntimeProfiledCapabilityPortFactory,
+        SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
+        scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -965,6 +1029,44 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn parallel_tool_batch_mode_fails_closed_to_off() {
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(None),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(Some("")),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(Some("garbage")),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(Some("off")),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::Off.execution_mode(),
+            CapabilityBatchExecutionMode::Sequential
+        );
+    }
+
+    #[test]
+    fn parallel_tool_batch_mode_accepts_explicit_on_values() {
+        for raw in ["on", "ON", "1", "true", "TRUE"] {
+            assert_eq!(
+                ParallelToolBatchMode::from_raw(Some(raw)),
+                ParallelToolBatchMode::On
+            );
+        }
+        assert_eq!(
+            ParallelToolBatchMode::On.execution_mode(),
+            CapabilityBatchExecutionMode::BoundedParallel
+        );
+    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {

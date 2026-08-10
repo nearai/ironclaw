@@ -54,7 +54,9 @@ use ironclaw_product_contracts::binding::{
 };
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_turn_runner::{
+    loop_driver_host::HookDispatcherBuilderFactory, runtime::ParallelToolBatchMode,
+};
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
     ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,
@@ -165,6 +167,7 @@ pub struct RebornIntegrationHarnessBuilder {
     /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
     tool_disclosure: ToolDisclosureMode,
+    parallel_tool_batch: ParallelToolBatchMode,
     /// Test-only override for the Bridged-mode capability surface policy.
     /// `None` preserves today's forced `CapabilitySurfacePolicy::allow_all()` behavior.
     bridged_policy_override: Option<CapabilitySurfacePolicy>,
@@ -461,6 +464,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Enable bounded parallel execution for batches already classified safe
+    /// for parallelism without mutating the process environment.
+    pub fn with_parallel_tool_batches(mut self) -> Self {
+        self.parallel_tool_batch = ParallelToolBatchMode::On;
+        self
+    }
+
     /// Exercise the production enum default without making the general
     /// integration harness depend on ambient process configuration.
     pub fn with_tool_disclosure_production_default(mut self) -> Self {
@@ -732,6 +742,9 @@ impl RebornIntegrationHarnessBuilder {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
         }
+        if self.parallel_tool_batch == ParallelToolBatchMode::On {
+            group_builder = group_builder.with_parallel_tool_batches();
+        }
         if let Some(policy) = self.bridged_policy_override {
             group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
         }
@@ -875,6 +888,7 @@ impl RebornIntegrationHarness {
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
             tool_disclosure: ToolDisclosureMode::Off,
+            parallel_tool_batch: ParallelToolBatchMode::Off,
             bridged_policy_override: None,
             budget_accounting: false,
             communication_context_provider: None,
@@ -2476,10 +2490,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
-            // No integration test should inherit the ambient tool-disclosure
-            // knob. Builders pin Off and disclosure tests opt into Bridged;
-            // scrubbing is defense in depth for the retained env fallback.
+            // No integration test should inherit ambient rollout knobs.
+            // Builders pin Off and focused tests opt in explicitly; scrubbing
+            // is defense in depth for retained production env fallbacks.
             std::env::remove_var(ironclaw_loop_host::REBORN_TOOL_DISCLOSURE_ENV);
+            std::env::remove_var(ironclaw_turn_runner::runtime::REBORN_PARALLEL_TOOL_BATCH_ENV);
         }
     });
 }

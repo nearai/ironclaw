@@ -26,8 +26,6 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
-const HTTP_TOOL_URL_A: &str = "https://api.example.test/v1/items/a";
-const HTTP_TOOL_URL_B: &str = "https://api.example.test/v1/items/b";
 /// A vision-capable model id per `ironclaw_llm::vision_models::VISION_PATTERNS`
 /// (mirrors `tests/reborn_integration_attach.rs`).
 const VISION_MODEL: &str = "claude-3-5-sonnet-20241022";
@@ -132,28 +130,46 @@ async fn golden_context_surfacing() {
 }
 
 /// (f) Parallel tool_calls: one assistant response carrying TWO `tool_calls[]`
-/// entries, both exact-matched. Distinct from (b): pins that multiple
-/// tool_calls in one message each get a distinct id, and each following `tool`
-/// message's `tool_call_id` lines up with the right one, in order.
+/// entries for a production capability whose descriptor is parallel-safe.
+/// The executor unit test pins actual overlap with deterministic delays; this
+/// integration test pins real descriptor classification, composition wiring,
+/// durable result persistence, and input-order replay to the model.
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
+        .with_parallel_tool_batches()
         .script([
+            RebornScriptedReply::tool_call(
+                "builtin.write_file",
+                json!({
+                    "path": "/workspace/parallel.txt",
+                    "content": "first\nsecond\n"
+                }),
+            ),
             RebornScriptedReply::tool_calls([
-                ("builtin.http", json!({"url": HTTP_TOOL_URL_A})),
-                ("builtin.http", json!({"url": HTTP_TOOL_URL_B})),
+                (
+                    "builtin.read_file",
+                    json!({"path": "/workspace/parallel.txt", "offset": 0, "limit": 5}),
+                ),
+                (
+                    "builtin.read_file",
+                    json!({"path": "/workspace/parallel.txt", "offset": 6, "limit": 6}),
+                ),
             ]),
-            RebornScriptedReply::text("fetched both"),
+            RebornScriptedReply::text("read both"),
         ])
         .build()
         .await
         .expect("harness builds");
-    h.submit_turn("fetch both items")
+    h.submit_turn("write a file, then read both lines")
         .await
         .expect("turn completes");
+    h.assert_tool_invoked("builtin.read_file")
+        .await
+        .expect("parallel-safe read calls reached the production capability host");
     h.assert_golden_payload("parallel_tool_calls");
-    h.assert_reply_eq("fetched both")
+    h.assert_reply_eq("read both")
         .await
         .expect("final reply matches exactly");
 }

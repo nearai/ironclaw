@@ -169,7 +169,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
-| The exact prompt + tool surface sent to the model is snapshot-pinned per iteration | `golden_payload.rs` |
+| The exact prompt + tool surface sent to the model is snapshot-pinned per iteration; parallel batches preserve both persisted tool-result order and dispatch count | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
