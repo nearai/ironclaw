@@ -957,6 +957,27 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["root_partitions"], [], path)
                 self.assertEqual(plan["integration_lanes"], [], path)
 
+    def test_ironloop_configuration_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.ironloop/**` is external IronLoop configuration, not a Reborn surface."""
+        for path in (
+            ".ironloop/config.yaml",
+            ".ironloop/implementer.md",
+            ".ironloop/reviewer.md",
+            ".ironloop/resolver.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+                paired = self.plan(
+                    "pull_request", [path, "crates/alpha/src/lib.rs"]
+                )
+                self.assertEqual(paired["mode"], "selected", path)
+                self.assertNotEqual(paired["crate_buckets"], [], path)
+
     def test_codebase_memory_artifacts_select_no_rust_lane(self) -> None:
         """Shared agent graph data has no Reborn product or test surface."""
         for path in (
