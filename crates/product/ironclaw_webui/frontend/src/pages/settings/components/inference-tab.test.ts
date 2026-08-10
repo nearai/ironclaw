@@ -42,6 +42,7 @@ function renderInferenceModule() {
     Badge: component("Badge"),
     Card: component("Card"),
     ProviderManagement: component("ProviderManagement"),
+    ModelSelectionPolicyEditor: component("ModelSelectionPolicyEditor"),
     UserModelPreferenceSelector: component("UserModelPreferenceSelector"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
@@ -89,6 +90,11 @@ test("Inference tab omits unsupported operator-config fields", () => {
     1,
     "LLM provider management should remain visible"
   );
+  assert.equal(
+    findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
+    1,
+    "admins need a UI to enable the tenant model allowlist"
+  );
 });
 
 test("Inference tab gives non-admin users model preference without provider controls", () => {
@@ -112,5 +118,10 @@ test("Inference tab gives non-admin users model preference without provider cont
     findComponentNodes(rendered, context.ProviderManagement).length,
     0,
     "ordinary users must not receive operator provider controls"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
+    0,
+    "ordinary users must not receive tenant policy controls"
   );
 });

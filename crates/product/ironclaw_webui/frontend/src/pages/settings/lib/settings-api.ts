@@ -169,6 +169,12 @@ export function fetchUserModelCatalog() {
 export function fetchUserModelPreference() {
   return apiFetch("/api/webchat/v2/llm/model-preference");
 }
+export function setUserModelPolicy(payload) {
+  return apiFetch("/api/webchat/v2/llm/model-policy", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
 export function setUserModelPreference(model) {
   return apiFetch("/api/webchat/v2/llm/model-preference", {
     method: "PUT",

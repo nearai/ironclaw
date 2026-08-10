@@ -314,6 +314,12 @@ Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
 release image bundles compiled assets; `frontend/README.md` covers the JS
 toolchain.
 
+The Inference tab keeps provider credentials and provider management
+operator-only. An operator also configures the active provider's tenant model
+allowlist and workspace default there before caller-scoped model selectors are
+enabled. Ordinary users receive only the safe catalog and their own preference
+selector; they never receive provider metadata or policy mutation controls.
+
 ## Why the OAuth login router lives here
 
 The crate already owns `WebuiAuthenticator` impls, `SignedTokenSessionStore`,

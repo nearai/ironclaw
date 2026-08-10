@@ -39,6 +39,13 @@ their own model under **Settings → Inference**. The preference applies to that
 user's future messages in every conversation; it does not change the provider
 or another user's preference.
 
+Administrators configure the allowlist from **Settings → Inference → User
+model access**. Add model IDs manually or fetch the active provider's model
+catalog, select the models users may choose, set the workspace default, and
+save. Provider configuration alone does not publish models to users; this
+explicit step keeps newly available provider models outside the tenant
+allowlist until an administrator approves them.
+
 The same preference is available from chat commands:
 
 ```text

@@ -8,6 +8,7 @@ import { SettingsGroup } from "./settings-field";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { useLlmProviders } from "../hooks/useLlmProviders";
 import { UserModelPreferenceSelector } from "./user-model-preference-selector";
+import { ModelSelectionPolicyEditor } from "./model-selection-policy-editor";
 
 export function InferenceTab({
   isAdmin = false,
@@ -23,11 +24,12 @@ export function InferenceTab({
   // same query the provider list below renders from) rather than the empty
   // settings/gatewayStatus stubs, which left the Model field showing "—".
   // Shares the `["llm-providers"]` react-query cache, so no extra fetch.
-  const { activeProviderId, selectedModel, providers, hasActiveProvider } = useLlmProviders({
+  const providerState = useLlmProviders({
     settings,
     gatewayStatus,
     enabled: isAdmin,
   });
+  const { activeProviderId, selectedModel, providers, hasActiveProvider } = providerState;
   if (isLoading) {
     return (<SettingsSkeleton />);
   }
@@ -68,6 +70,8 @@ export function InferenceTab({
 
   return (
     <div className="space-y-5">
+      {isAdmin && <ModelSelectionPolicyEditor providerState={providerState} />}
+
       <UserModelPreferenceSelector />
 
       {isAdmin && showProviderSummary &&
