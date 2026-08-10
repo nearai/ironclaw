@@ -59,7 +59,14 @@ pub(super) async fn list_extensions(
         LifecycleProductAction::ExtensionList,
     )
     .await?;
-    let installed = lifecycle_installed_extensions(&lifecycle);
+    // The web UI's browser-push channel is host infrastructure, not a
+    // browse-and-install integration, so keep it out of the install UI while it
+    // stays a working notification channel. Classified by id (see
+    // `is_builtin_host_surface`), not by channel direction.
+    let installed = lifecycle_installed_extensions(&lifecycle)
+        .into_iter()
+        .filter(|extension| !is_builtin_host_surface(&extension.summary))
+        .collect::<Vec<_>>();
     let connections = channel_connection_service
         .caller_channel_connections(caller.clone())
         .await?;
@@ -119,6 +126,7 @@ pub(super) async fn list_extension_registry(
     Ok(RebornExtensionRegistryResponse {
         entries: registry_entries
             .iter()
+            .filter(|extension| !is_builtin_host_surface(&extension.summary))
             .cloned()
             .map(|extension| registry_entry(extension.summary, &installed_ids))
             .collect(),
@@ -215,6 +223,17 @@ async fn lifecycle_extension_infos(
             )
         })
         .collect())
+}
+
+/// The host's own built-in surface — always present, not a browse-and-install
+/// integration — is hidden from the install catalog even though it backs a
+/// channel (the web UI's browser-push channel). This is an explicit id
+/// classification rather than one inferred from channel direction, so it stays
+/// correct as the web-app channel later gains inbound/outbound capabilities.
+/// Naming the package dir here is allowed by `NON_VENDOR_PROVIDER_PACKAGE_DIRS`
+/// (reborn_extension_specificity).
+fn is_builtin_host_surface(summary: &LifecycleExtensionSummary) -> bool {
+    matches!(summary.package_ref.id.as_str(), "web-push")
 }
 
 fn registry_entry(

@@ -17,6 +17,9 @@ importers:
       event-source-plus:
         specifier: 0.1.15
         version: 0.1.15
+      gemoji:
+        specifier: 8.0.0
+        version: 8.0.0
       highlight.js:
         specifier: 11.11.1
         version: 11.11.1
@@ -41,6 +44,9 @@ importers:
       react-router:
         specifier: 8.3.0
         version: 8.3.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      remark-gemoji:
+        specifier: 8.0.0
+        version: 8.0.0
       streamdown:
         specifier: 2.5.0
         version: 2.5.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -960,6 +966,9 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
+  gemoji@8.0.0:
+    resolution: {integrity: sha512-MNjL3CO4OIq07S3GV1KZ6Wedz+iNmdPBuqylZtMAimdaw7Zsvp2xbjEuiST53YQXp6SBMFC4aMje6epYm85lMQ==}
+
   get-caller-file@2.0.5:
     resolution: {integrity: sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==}
     engines: {node: 6.* || 8.* || >= 10.*}
@@ -1447,6 +1456,9 @@ packages:
 
   rehype-sanitize@6.0.0:
     resolution: {integrity: sha512-CsnhKNsyI8Tub6L4sm5ZFsme4puGfc6pYylvXo1AeqaGbjOYyzNv3qZPwvs0oMJ39eryyeOdmxwUIo94IpEhqg==}
+
+  remark-gemoji@8.0.0:
+    resolution: {integrity: sha512-/fL9rc72FYwFGtOKcT+QeQdx9Q9t5v4N6KLXSDOTEgaedzK85I9judBqB2eqz+g4b0ERMejlwSOuPK+wket6aA==}
 
   remark-gfm@4.0.1:
     resolution: {integrity: sha512-1quofZ2RQ9EWdeN34S79+KExV1764+wCUGop5CPL1WGdD0ocPpu91lzPGbwWMECpEpd42kJGQwzRfyov9j4yNg==}
@@ -2616,6 +2628,8 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
+  gemoji@8.0.0: {}
+
   get-caller-file@2.0.5: {}
 
   goober@2.1.19(csstype@3.2.3):
@@ -3354,6 +3368,12 @@ snapshots:
     dependencies:
       '@types/hast': 3.0.5
       hast-util-sanitize: 5.0.2
+
+  remark-gemoji@8.0.0:
+    dependencies:
+      '@types/mdast': 4.0.4
+      gemoji: 8.0.0
+      mdast-util-find-and-replace: 3.0.2
 
   remark-gfm@4.0.1:
     dependencies:

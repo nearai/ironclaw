@@ -41,6 +41,12 @@ pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
+/// Posted as the terminal reply for a triggered run that ended in
+/// `Cancelled` (host cancel: auth-auto-deny, policy, supersession, or an
+/// operator action). A scheduled run has no user in the channel to act on a
+/// cancel, so this is informational only — it closes the loop on a fire that
+/// would otherwise vanish (#6896).
+pub(crate) const TRIGGERED_RUN_CANCELED_MESSAGE: &str = "This scheduled run was canceled before it could finish. Open the Ironclaw web app for details.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
@@ -70,9 +76,41 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::ModelDelivery => "model-delivery",
     };
     match discriminator {
-        Some(discriminator) => format!("run-notification:{suffix}:{discriminator}:{run_id}"),
+        Some(discriminator) => {
+            let discriminator = bounded_discriminator(discriminator);
+            format!("run-notification:{suffix}:{discriminator}:{run_id}")
+        }
         None => format!("run-notification:{suffix}:{run_id}"),
     }
+}
+
+/// Longest discriminator embedded verbatim in a projection id. The composed
+/// id must fit `ProjectionUpdateRef`'s 256-byte cap for ANY legal input — a
+/// `TurnGateRef` may itself be up to 256 bytes — or the notice becomes
+/// undeliverable at the ref constructor. Production gate refs are far shorter
+/// (`gate:approval-<uuid>`), so this bound never changes their id shape.
+const DISCRIMINATOR_VERBATIM_MAX: usize = 96;
+
+/// Over-long discriminators keep a readable prefix plus a stable FNV-1a 64
+/// content hash: still one id per distinct gate, never truncation-collided.
+/// FNV-1a is implemented inline because these ids are DURABLE delivery
+/// identities — a std hasher whose output can change across releases would
+/// silently re-key them.
+fn bounded_discriminator(discriminator: &str) -> std::borrow::Cow<'_, str> {
+    if discriminator.len() <= DISCRIMINATOR_VERBATIM_MAX {
+        return std::borrow::Cow::Borrowed(discriminator);
+    }
+    // Room for the ':' + 16 hex digits inside the verbatim budget.
+    let mut end = DISCRIMINATOR_VERBATIM_MAX - 17;
+    while !discriminator.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in discriminator.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    std::borrow::Cow::Owned(format!("{}:{hash:016x}", &discriminator[..end]))
 }
 
 /// Build the approval-gate prompt view. The body carries only the semantic
@@ -295,6 +333,61 @@ mod tests {
         assert_eq!(
             run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
             format!("run-notification:auth:{run_id}")
+        );
+        // FinalReplyReady is the kind production always sends refless: its
+        // suffix keys the in-flight final-reply delivery identities, so a
+        // rename would double-post final replies across a deploy.
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::FinalReplyReady, None),
+            format!("run-notification:final:{run_id}")
+        );
+    }
+
+    #[test]
+    fn discriminated_projection_ids_embed_short_gate_refs_verbatim() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::ApprovalNeeded,
+                Some("gate:approval-1234"),
+            ),
+            format!("run-notification:approval:gate:approval-1234:{run_id}")
+        );
+    }
+
+    /// A legal `TurnGateRef` can be up to 256 bytes while `ProjectionUpdateRef`
+    /// caps at 256: over-long discriminators must compress rather than make
+    /// the gate notice undeliverable, without colliding distinct gates.
+    #[test]
+    fn over_long_discriminators_stay_deliverable_and_distinct() {
+        let run_id = TurnRunId::new();
+        let shared_prefix = "g".repeat(240);
+        let ref_a = format!("{shared_prefix}-a");
+        let ref_b = format!("{shared_prefix}-b");
+        let id_a = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(&ref_a),
+        );
+        let id_b = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(&ref_b),
+        );
+        assert!(
+            id_a.len() <= 256,
+            "composed id must fit the ref cap: {id_a}"
+        );
+        assert_ne!(id_a, id_b, "prefix-sharing gates must not collide");
+        // Deterministic: the same gate re-announced computes the same id.
+        assert_eq!(
+            id_a,
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::ApprovalNeeded,
+                Some(&ref_a),
+            )
         );
     }
 

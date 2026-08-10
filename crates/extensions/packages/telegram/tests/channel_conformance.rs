@@ -167,6 +167,7 @@ fn inbound_identity_is_required_with_constructor_compatibility() {
             config: &config,
             body: private_message_body(),
             headers: &[],
+            can_reply_in_threads: false,
         });
         let Err(error) = result else {
             panic!("missing or invalid bot identity must fail inbound normalization");
@@ -185,6 +186,7 @@ fn inbound_identity_is_required_with_constructor_compatibility() {
             config: &[],
             body: private_message_body(),
             headers: &[],
+            can_reply_in_threads: false,
         })
         .expect("an explicitly configured constructor policy remains valid");
     assert!(matches!(outcome, InboundOutcome::Messages(_)));
@@ -208,6 +210,7 @@ fn username_enforces_vendor_grammar_for_inbound() {
                     config: &config,
                     body: private_message_body(),
                     headers: &[],
+                    can_reply_in_threads: false,
                 })
                 .is_err(),
             "{username:?} must fail Telegram's public bot-username grammar"
@@ -225,6 +228,7 @@ fn username_enforces_vendor_grammar_for_inbound() {
                     config: &config,
                     body: private_message_body(),
                     headers: &[],
+                    can_reply_in_threads: false,
                 }),
                 Ok(InboundOutcome::Messages(_))
             ),
@@ -243,6 +247,7 @@ fn username_enforces_vendor_grammar_for_inbound() {
             config: &[],
             body: private_message_body(),
             headers: &[],
+            can_reply_in_threads: false,
         }),
         Ok(InboundOutcome::Messages(_))
     ));

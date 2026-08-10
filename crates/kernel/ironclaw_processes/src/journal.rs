@@ -766,13 +766,6 @@ pub enum ProcessLifecycleLookupResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProcessGateOwnerMatch {
-    Explicit,
-    ExplicitOrActor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ProcessGateScopeMatch {
     Exact,
     Owner,
@@ -788,8 +781,6 @@ pub struct ProcessGateQuery {
     pub owner_user_id: Option<UserId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_ref: Option<TurnGateRef>,
-    #[serde(default)]
-    pub owner_match: Option<ProcessGateOwnerMatch>,
     #[serde(default)]
     pub include_historical: bool,
 }

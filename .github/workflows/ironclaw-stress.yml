@@ -377,6 +377,36 @@ jobs:
             > target/ironclaw-stress/postgres-api-capacity-summary.json \
             2> target/ironclaw-stress/postgres-api-capacity-report.txt
 
+          # Scripted tool-write leg: the first stress invocation exited,
+          # releasing the mock sidecar port; the server keeps running and
+          # this leg rebinds the sidecar at the same address the server's
+          # LLM base_url points at. Each operation is a scripted memory
+          # write/read-back through the real capability host (issue #7360
+          # Phase 1); the scripted summary reports read-back verdicts and
+          # stage latencies per document size. Runs inside this block so
+          # the server stays alive until both workloads complete.
+          target/release/ironclaw_stress \
+            --backend libsql \
+            --scenario api-user-capacity \
+            --api-base-url http://127.0.0.1:18080 \
+            --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
+            --users 6 \
+            --concurrency 3 \
+            --operations 2 \
+            --api-scripted-tool memory_roundtrip \
+            --api-scripted-doc-sizes 4096,32768,131072,1048576 \
+            --api-hot-writers 2 \
+            --mock-llm-bind 127.0.0.1:19090 \
+            --mock-llm-latency-ms 250 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --output-jsonl target/ironclaw-stress/postgres-api-scripted.jsonl \
+            --max-failure-rate 0.05 \
+            --max-p95-ms 30000 \
+            > target/ironclaw-stress/postgres-api-scripted-summary.json \
+            2> target/ironclaw-stress/postgres-api-scripted-report.txt
+
       - name: Upload Postgres API capacity artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -387,4 +417,7 @@ jobs:
             target/ironclaw-stress/postgres-api-capacity.jsonl
             target/ironclaw-stress/postgres-api-capacity-summary.json
             target/ironclaw-stress/postgres-api-capacity-report.txt
+            target/ironclaw-stress/postgres-api-scripted.jsonl
+            target/ironclaw-stress/postgres-api-scripted-summary.json
+            target/ironclaw-stress/postgres-api-scripted-report.txt
           if-no-files-found: ignore

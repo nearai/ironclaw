@@ -1,11 +1,9 @@
 version: 1
 
 implementer:
-  instructions: .ironloop/implementer.md
   network_access: true
 
 reviewer:
-  instructions: .ironloop/reviewer.md
   network_access: true
   auto_review:
     enabled: true
@@ -14,7 +12,6 @@ reviewer:
     user_update: false
 
 resolver:
-  instructions: .ironloop/resolver.md
   network_access: true
   auto_resolve:
     enabled: true

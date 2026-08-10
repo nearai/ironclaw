@@ -251,6 +251,15 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
+    if let Some(web_push) = runtime.web_push.as_ref() {
+        api = api.with_web_push_product_service(Arc::new(
+            ironclaw_assistant::RebornWebPushProductService::new(
+                Arc::clone(&web_push.subscriptions),
+                web_push.vapid_public_key.clone(),
+                web_push.allowed_push_hosts.clone(),
+            ),
+        ));
+    }
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_service(channel_connection);
     }
@@ -568,6 +577,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusState::Degraded,
             RebornOperatorStatusSeverity::Warning,
             Some("mounted-volume hosted preview is ready for single-tenant validation but is not production storage".to_string()),
+        ),
+        crate::RebornReadinessState::HostedSingleTenantVolumeSandboxedValidated => (
+            RebornOperatorStatusState::Degraded,
+            RebornOperatorStatusSeverity::Warning,
+            Some("sandboxed mounted-volume preview is ready for validation but is not a production multi-replica topology".to_string()),
         ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,

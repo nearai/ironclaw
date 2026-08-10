@@ -15,7 +15,10 @@
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
-pub use run_artifact::{get_run_artifact, get_thread_artifact};
+pub use run_artifact::{
+    admin_get_thread_scrape_artifact, admin_get_thread_scrape_run_artifact,
+    admin_list_thread_scrape_threads, get_run_artifact, get_thread_artifact,
+};
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -111,7 +114,14 @@ use ironclaw_product_contracts::product_wire::{
     RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
     SettingsToolPermissionState,
 };
+use ironclaw_product_contracts::product_wire::{
+    RebornWebPushStatusResponse, RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse,
+    RebornWebPushUnsubscribeRequest, RebornWebPushUnsubscribeResponse,
+};
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
+use ironclaw_product_contracts::web_push::{
+    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND, WEB_PUSH_UNSUBSCRIBE_COMMAND,
+};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
@@ -197,6 +207,12 @@ pub struct WebUiV2Features {
     /// QA-only run and full-thread artifact export surface. Hidden and
     /// unmounted unless the deployment explicitly opts in.
     pub regression_artifact_export: bool,
+    /// Admin cross-user thread scraping surface. Hidden and unmounted unless
+    /// the deployment explicitly opts in via
+    /// `IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE`; independent of
+    /// `regression_artifact_export` so QA self-export never implies
+    /// tenant-wide admin transcript access.
+    pub admin_thread_scrape: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -230,6 +246,7 @@ pub async fn get_session(
             reborn_projects: state.reborn_projects_enabled(),
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
+            admin_thread_scrape: state.admin_thread_scrape_enabled(),
             global_auto_approve,
         },
         attachments: attachment_capabilities(),
@@ -2245,6 +2262,56 @@ pub async fn set_notification_channels(
         body,
     )
     .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/web-push/status`
+///
+/// The deployment's VAPID public key (`applicationServerKey`) plus the
+/// caller's enrolled browsers — redacted to push-service hosts; endpoint
+/// capability URLs never leave the backend.
+pub async fn web_push_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornWebPushStatusResponse>, WebUiV2HttpError> {
+    let response = query_product_view(
+        state.services(),
+        caller,
+        WEB_PUSH_STATUS_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/web-push/subscriptions`
+///
+/// Enroll (or refresh) the caller's current browser for web push. Body:
+/// [`RebornWebPushSubscribeRequest`]; the endpoint is validated against the
+/// supported push-service allowlist before persistence.
+pub async fn web_push_subscribe(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornWebPushSubscribeRequest>,
+) -> Result<Json<RebornWebPushSubscribeResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, WEB_PUSH_SUBSCRIBE_COMMAND, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/web-push/subscriptions/remove`
+///
+/// Remove one of the caller's browser enrollments by endpoint. POST (not
+/// DELETE) because the endpoint is a long capability URL carried in the body.
+pub async fn web_push_unsubscribe(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornWebPushUnsubscribeRequest>,
+) -> Result<Json<RebornWebPushUnsubscribeResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, WEB_PUSH_UNSUBSCRIBE_COMMAND, body)
+            .await?;
     Ok(Json(response))
 }
 

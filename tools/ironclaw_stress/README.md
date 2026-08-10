@@ -137,7 +137,6 @@ Use `--scenario` for a single workload.
 | `api-user-capacity` | End-to-end WebUI API send/read pressure against a running Reborn server. |
 | `cpu-burn` | Process-local CPU pressure control. |
 | `memory-churn` | Process-local allocation/RSS pressure control. |
-
 `api-user-capacity` can use either pre-minted users from `--api-users-jsonl`,
 a shared bearer via `--api-bearer-token`, or real per-user provisioning through
 the WebUI admin surface:
@@ -153,6 +152,62 @@ cargo run -p ironclaw_stress -- \
   --concurrency 100 \
   --operations 1 \
   --api-read-qps-per-user 2 \
+  --mock-llm-bind 127.0.0.1:3911
+```
+
+### Scripted tool writes (issue #7360)
+
+Scripted mode drives each API operation through a real builtin/memory tool
+sequence: the driver embeds a marker in the user message, the mock LLM sidecar
+emits the scripted tool calls, the server executes them through the production
+capability host, and the driver verifies the read-back verdict in the final
+assistant message. Verdicts:
+
+- `confirmed`: the read-back returned exactly this operation's content marker.
+- `contended`: a concurrent same-user write won the document between write and
+  read (expected under `--api-hot-writers`, counted not failed).
+- `leak`: another user's content marker appeared in the read-back (cross-user
+  isolation violation, hard failure).
+- `missing`: the read-back lost the content (durable write failure, hard
+  failure).
+- `undisclosed`: the required tool was never advertised to the model
+  (disclosure/agent-surface regression, hard failure).
+
+Scripts:
+
+| `--api-scripted-tool` | Tool sequence |
+| --- | --- |
+| `write_file_roundtrip` | `builtin.write_file` then `builtin.read_file` of a unique workspace path. |
+| `memory_roundtrip` | `ironclaw.memory.write` (replace) then `ironclaw.memory.read` of `stress/shared.md`. |
+| `memory_grow` | Write a quarter, append three quarters, then read — growing-append slope. |
+| `memory_mixed` | Write half, read, append half, read — mixed read/write. |
+
+All memory scripts target the same relative path for every user, so each run
+also exercises same-relative-path isolation. `--api-scripted-doc-sizes` cycles
+document sizes per operation (default `4096,32768,131072,1048576`, minimum
+4096); results are bucketed per size with submit-to-tool-visible and
+submit-to-finalize stage latencies. `--api-hot-writers N` spawns N extra
+concurrent writers on distinct threads of the first user so they contend on
+the same per-user memory document without per-thread turn serialization.
+
+Scripted mode requires `--mock-llm-bind` (the sidecar serves the tool calls)
+and `--api-wait-for-assistant`. Gated tools (`builtin.write_file`, memory
+writes) are exercised through the per-user Tools auto-approve setting, which
+the driver enables during user setup through the same settings API a real
+user would use.
+
+```bash
+cargo run -p ironclaw_stress -- \
+  --backend libsql \
+  --scenario api-user-capacity \
+  --api-base-url http://127.0.0.1:3900 \
+  --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_BEARER_TOKEN" \
+  --users 6 \
+  --concurrency 3 \
+  --operations 2 \
+  --api-scripted-tool memory_roundtrip \
+  --api-scripted-doc-sizes 4096,32768,131072,1048576 \
+  --api-hot-writers 2 \
   --mock-llm-bind 127.0.0.1:3911
 ```
 

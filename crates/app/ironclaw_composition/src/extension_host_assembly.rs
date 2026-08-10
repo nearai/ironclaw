@@ -616,7 +616,7 @@ pub(crate) async fn build_runtime_channel_host(
                 &binding.extension_id,
                 ironclaw_extension_host::channel_host::ChannelExtras {
                     preference_target_codec: binding.preference_target_codec.clone(),
-                    subject_route_resolver: None,
+                    shared_admission: None,
                     storage_roots: None,
                 },
             )

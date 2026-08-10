@@ -42,6 +42,20 @@ def _webui_frontend_prefix() -> str:
             f"the frontend path prefix used to route Code Style is unknown: {error}"
         ) from error
     return f"{directory}/frontend/"
+
+
+def _sandbox_docker_prefixes() -> tuple[str, ...]:
+    """Sandbox source prefixes whose changes require the Docker lane."""
+    try:
+        directory = crate_directory("ironclaw_sandbox", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_sandbox crate, so "
+            f"the source path prefixes used to route the Docker lane are unknown: {error}"
+        ) from error
+    return (f"{directory}/src/sandbox_process",)
+
+
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -63,6 +77,9 @@ IGNORED_PREFIXES = (
     "docs/",
     "openwiki/",
     ".claude/",
+    # IronLoop reads this repository configuration and optional role guidance;
+    # no Reborn crate or test lane consumes it.
+    ".ironloop/",
     ".github/ISSUE_TEMPLATE/",
     # `ISSUE_TEMPLATE/`'s exact sibling: a GitHub UI template that changes no
     # crate, test, or runtime surface (`classify-test-scope.sh` already pairs
@@ -142,6 +159,35 @@ QA_HARNESS_PREFIXES = (
     "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+SANDBOX_DOCKER_EXACT_PATHS = {
+    "Dockerfile.sandbox-worker",
+    "crates/app/ironclaw_cli/src/runtime/mod.rs",
+    "crates/app/ironclaw_composition/src/sandbox.rs",
+    "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
+    "crates/app/ironclaw_composition/src/deployment.rs",
+    "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+    "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
+    "crates/app/ironclaw_composition/src/input.rs",
+    "crates/app/ironclaw_config/src/profile.rs",
+    "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+    "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
+    "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+    "crates/kernel/ironclaw_host_runtime/src/services.rs",
+    "crates/kernel/ironclaw_host_runtime/src/services/builder.rs",
+    "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
+    "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
+    "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
+    "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+    "tests/integration/reborn_sandbox_shell_turn.rs",
+    "tests/e2e_trace_runtime_policy_serde.rs",
+    "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
+    "tests/integration/support/builder.rs",
+    "tests/integration/support/capability_backend.rs",
+    "tests/integration/support/docker_gate.rs",
+    "tests/integration/support/harness/mod.rs",
+    "tests/integration/support/harness/options.rs",
+    "tests/integration/support/harness/profiles/sandbox_shell.rs",
+}
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
@@ -226,6 +272,37 @@ INTEGRATION_SUPPORT_OWNERS = {
 INTEGRATION_SNAPSHOT_PREFIX_OWNERS = {
     "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
 }
+# Production files whose changes alter the model-visible prompt or tool
+# surface that `golden_payload` snapshot-pins — the surface digest, the
+# instruction bundle, the communication-context renderer, and the shipped
+# prompt assets of the crates the golden harness composes. A change here still
+# classifies as a production-package change below (crate buckets, reverse
+# dependents); this mapping ADDITIONALLY schedules the golden integration lane
+# so a prompt-surface PR cannot land green and then bounce the merge queue on
+# stale goldens (#7361's queue failure, 2026-08-07: `surface.rs` changed the
+# surface digest, the PR lane never ran the golden bucket, the exhaustive
+# queue gate caught it first).
+#
+# Curated, not derived — a new prompt-composition site must be added here by
+# hand, and until it is, the merge queue remains the backstop exactly as it
+# was for every path before this mapping existed. Self-tested by
+# `test_reborn_pr_test_plan.py` (positive per entry + a negative control).
+PROMPT_SURFACE_GOLDEN_OWNER = "tests/integration/golden_payload.rs"
+PROMPT_SURFACE_PATHS = (
+    "crates/kernel/ironclaw_host_runtime/src/surface.rs",
+    "crates/contracts/ironclaw_loop_contracts/src/instruction_bundle.rs",
+    "crates/contracts/ironclaw_loop_contracts/src/runtime_context.rs",
+)
+PROMPT_SURFACE_PREFIXES = (
+    "crates/contracts/ironclaw_loop_contracts/prompts/",
+    "crates/contracts/ironclaw_host_api/prompts/",
+    "crates/loop/ironclaw_agent_loop/prompts/",
+    "crates/loop/ironclaw_loop_host/prompts/",
+    # The host-managed ports assemble the exact request the goldens pin:
+    # `prompt.rs` drives the InstructionBundleBuilder into the message list
+    # and `model.rs` shapes the model request around it.
+    "crates/kernel/ironclaw_turns/src/host_managed_ports/",
+)
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -259,11 +336,18 @@ PR_STATIC_CONTROL_PATHS = {
     #     and additionally has a Code Style self-test
     #     (`scripts/ci/test-build-wasm-extensions.sh`). No Reborn Rust lane
     #     executes it.
+    #   * `e2e-skill-self-creation.sh` drives the skill self-creation e2e
+    #     against a live model, selected by `E2E_PROFILE`. Like
+    #     `run-reborn-webui.sh` it is referenced by no workflow (a search over
+    #     `.github/` finds nothing) and needs credentials no lane has, so no
+    #     lane can be selected for it; it is run by hand per
+    #     `docs/internal/skills/multi_tenant_enablement.md`.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
+    "scripts/e2e-skill-self-creation.sh",
     # `codebase-graph.sh` inspects agent-only graph metadata. It does not
     # execute or select a Reborn product test surface. (Arrived with #7215.)
     "scripts/codebase-graph.sh",
@@ -607,6 +691,7 @@ def _full_plan(
         "integration_lanes": [0, 1, 2, 3, "groups"],
         "run_group_tests": True,
         "run_qa_replay": True,
+        "run_sandbox_docker": True,
         "coverage_mode": "full",
     }
 
@@ -643,10 +728,23 @@ def build_plan(
     # not affected-area coverage. Keep it on for every pull request even when
     # no changed path maps to another Reborn lane.
     run_qa_replay = True
+    run_sandbox_docker = False
     qa_evidence_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
+    sandbox_docker_prefixes = _sandbox_docker_prefixes()
+    sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
+    if sandbox_docker_prefixes:
+        sandbox_crate_directory = sandbox_docker_prefixes[0].removesuffix(
+            "/src/sandbox_process"
+        )
+        sandbox_docker_exact_paths.update(
+            {
+                f"{sandbox_crate_directory}/Cargo.toml",
+                f"{sandbox_crate_directory}/src/lib.rs",
+            }
+        )
 
     for path in sorted(paths):
         if path == "Cargo.lock":
@@ -659,6 +757,20 @@ def build_plan(
                     "workspace lockfile breadth is deferred to the exhaustive merge-queue gate"
                 )
             continue
+        if path == ".config/nextest.toml":
+            # Test-runner config: every `Tests (Reborn)` lane executes cargo
+            # nextest with these profiles, so a change to it cannot be
+            # exercised by any narrow lane. It is deliberately NOT static
+            # control — the membership rule for that set is "no Reborn test
+            # lane reads the file", and these lanes read it. Widening to the
+            # exhaustive plan is the safe resolution (a superset can never
+            # under-select). Unclassified until 2026-08-10, when deleting the
+            # dead `live_tests::zizmor_scan*` overrides failed the whole
+            # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
+            return _full_plan(
+                "nextest runner config changed; this PR runs the exhaustive plan",
+                canonical_packages,
+            )
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
@@ -687,6 +799,17 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
+        if path in sandbox_docker_exact_paths or path.startswith(
+            sandbox_docker_prefixes
+        ):
+            run_sandbox_docker = True
+            reasons.append(f"sandbox Docker surface changed: {path}")
+            if (
+                not path.startswith("crates/")
+                and path not in root_inventory
+                and path not in integration_inventory
+            ):
+                continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
@@ -749,6 +872,15 @@ def build_plan(
             # path.
             reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
+        if path in PROMPT_SURFACE_PATHS or path.startswith(PROMPT_SURFACE_PREFIXES):
+            # Deliberately no `continue`: the path still classifies as a
+            # production-package change below. This arm only ADDS the golden
+            # lane so the prompt-surface snapshots run on the PR instead of
+            # first failing in the merge queue.
+            integration_lanes.add(
+                integration_inventory[PROMPT_SURFACE_GOLDEN_OWNER]
+            )
+            reasons.append(f"model-visible prompt surface changed: {path}")
         if path.startswith(CRATE_OR_ASSET_PREFIXES):
             # Family-level prose that belongs to no package: `crates/AGENTS.md`,
             # `crates/README.md`, `crates/Architecture.md`, and the family
@@ -911,6 +1043,7 @@ def build_plan(
         or root_partitions
         or integration_lanes
         or qa_evidence_changed
+        or run_sandbox_docker
     )
     return {
         "mode": "selected" if active else "none",
@@ -924,6 +1057,7 @@ def build_plan(
         ),
         "run_group_tests": False,
         "run_qa_replay": run_qa_replay,
+        "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",
     }
 

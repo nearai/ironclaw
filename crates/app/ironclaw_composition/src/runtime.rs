@@ -56,6 +56,7 @@ use ironclaw_host_api::{
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
+    process::RuntimeProcessError,
     resource::ResourceScope,
     scope::Principal,
 };
@@ -74,8 +75,8 @@ use ironclaw_loop_host::{
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
-    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
+    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::operator_llm::ActiveModelReader;
@@ -117,7 +118,7 @@ use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
@@ -515,6 +516,8 @@ pub enum RebornRuntimeError {
     SkillExecutionUnavailable,
     #[error("skill execution failed: {0}")]
     SkillExecution(String),
+    #[error("user sandbox shutdown failed: {0}")]
+    UserSandboxShutdown(#[source] RuntimeProcessError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -544,6 +547,7 @@ pub(crate) struct OutboundTestStores {
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
+    user_sandbox_process_port: Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
@@ -619,6 +623,7 @@ pub struct RebornRuntime {
         Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
+    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
@@ -752,7 +757,6 @@ pub(crate) struct InteractionServiceTestParts {
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
     workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
-    skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -1840,6 +1844,10 @@ impl RebornRuntime {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    // A registered channel DM is both a final-reply target and a
+                    // notification channel, mirroring the generic channel
+                    // provider's `full_capabilities`.
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
@@ -2420,6 +2428,12 @@ impl RebornRuntime {
         self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
+        }
+        if let Some(process_port) = self.user_sandbox_process_port {
+            process_port
+                .shutdown()
+                .await
+                .map_err(RebornRuntimeError::UserSandboxShutdown)?;
         }
         Ok(())
     }
@@ -3350,6 +3364,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         durable_milestone_sink,
         live_projection_publisher,
     );
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
     let (
         capability_factory,
         capability_input_resolver,
@@ -3359,12 +3377,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
         builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            tracing::error!(%error, "capability policy is invalid");
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("capability policy is invalid: {error}"),
-            }
-        })?);
+        let builtin_capability_policy = Arc::clone(&services.capability_policy);
+        let tool_diagnostic_sink = Arc::new(
+            ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+                diagnostic_store_impl.clone()
+                    as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+                ironclaw_loop_host::DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY,
+            )
+            .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+        )
+            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3375,6 +3397,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
+            Some(tool_diagnostic_sink),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -3635,10 +3658,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
-    let diagnostic_store_impl =
-        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
-    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
-        diagnostic_store_impl.clone();
     let prompt_diagnostic_sink = Arc::new(
         ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
             diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
@@ -3655,11 +3674,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // filesystem so the model port can build multimodal image parts for
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
-        attachment_read_port: Some(
+        //
+        // Lander and reader share ONE handle so an inbound attachment is read
+        // back from the subtree it landed in. Under a per-caller workspace
+        // policy (`serve` sets it unconditionally) the lander writes to
+        // `/projects/workspace/tenants/{tenant}/users/{user}`, and the shared
+        // read-only `workspace_filesystem` would address the root instead —
+        // the exact regression that dropped every image from the model payload
+        // after #7062 scoped the write lanes. Mirrors the channel-host wiring
+        // in `channel_host_source`.
+        attachment_read_port: crate::runtime_mounts::read_write_workspace_filesystem(
+            &services.extension_filesystem,
+            &services.workspace_mounts,
+        )
+        .map(|filesystem| {
             Arc::new(ironclaw_assistant::ProjectScopedAttachmentReader::new(
-                Arc::clone(&services.workspace_filesystem),
-            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-        ),
+                filesystem,
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
+        }),
         prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
@@ -4109,7 +4141,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             capability_leases: Arc::clone(&local_runtime.capability_leases),
             extension_registry: Arc::clone(&local_runtime.extension_registry),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
-            skill_mounts: local_runtime.skill_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
@@ -4230,6 +4261,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
+        user_sandbox_process_port: services.user_sandbox_process_port.clone(),
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
         skill_management: services.skill_management.clone(),
@@ -4282,6 +4314,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_ingress: services.extension_ingress.clone(),
         #[cfg(any(test, feature = "test-support"))]
         deployment_channels: services.deployment_channels.clone(),
+        web_push: services.web_push.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
         #[cfg(feature = "test-support")]
@@ -4512,22 +4545,32 @@ fn skill_activation_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
     activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
+    process_execution_available: bool,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
-        // `ExplicitAndCriteria` (the upstream default) lets a learned skill
-        // auto-activate when a later request matches its keywords/patterns —
-        // not only when the user types `$name`/`/name`. This is what closes
-        // the learn→reuse loop: a skill distilled from one task is applied
-        // automatically on the next similar task. Explicit mentions still
-        // force-activate; criteria selection is additive and bounded by
-        // `max_active_skills` / `max_context_tokens`. Under the default
-        // `Listing` injection mode a criteria match ranks the skill in the
-        // one-line listing instead of injecting its body.
-        selection_mode: ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria,
+        // `selection_mode` is deliberately NOT set here: it inherits
+        // `SkillActivationSelectorConfig`'s default, which this PR makes
+        // `ExplicitOnly`.
+        //
+        // The model decides which skill applies. It sees every installed skill in
+        // the one-line listing and calls `skill_activate` for the one it wants;
+        // the host does not keyword-match on its behalf. A scoring function
+        // guessing from the user's wording is strictly worse at this than the
+        // model reading the same listing, and a wrong guess spends the skill
+        // budget on the wrong body.
+        //
+        // Pinning `ExplicitAndCriteria` here previously made that default
+        // unreachable on the Reborn path — the value in `activation.rs` was dead
+        // code as far as any real user was concerned, so changing it looked like a
+        // behaviour change and was not one. `reborn_skill_selection_is_model_decided`
+        // fails if it is re-pinned. Criteria selection is still available to
+        // callers that opt in via `set_selection_mode`, and explicit `$name` /
+        // `/name` mentions force-activate under either mode.
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         activation_strategy,
+        process_execution_available,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4635,16 +4678,55 @@ fn filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    // Whether this deployment can execute a process at all. Under `ProcessBackendKind::None` (hosted
+    // multi-tenant + secure default) a skill that says "run scripts/foo.py" is instructing the model to
+    // do something impossible, and it does not degrade gracefully -- see
+    // `SkillActivationSelectorConfig::process_execution_available`.
+    //
+    // MULTI-TENANT ENABLEMENT: this is one of the two places that change when the tenant sandbox
+    // lands. Once `HostedMultiTenant` + `SecureDefault` resolves to `ProcessBackendKind::TenantSandbox`
+    // instead of `None`, this returns true on its own and skills stop being told they cannot run
+    // anything. See docs/skills/multi_tenant_enablement.md.
+    //
+    // `unwrap_or(true)` is not a fail-open: `build_runtime` rejects a services input with no
+    // resolved policy long before this, so only local test harnesses (which do have a shell) can
+    // observe the fallback.
+    let process_execution_available = runtime
+        .runtime_policy
+        .as_ref()
+        .map(|policy| {
+            policy.process_backend != ironclaw_host_api::runtime_policy::ProcessBackendKind::None
+        })
+        .unwrap_or(true);
     let selector_config = skill_activation_selector_config(
         regex_skill_activation_enabled,
         skill_injection_mode_env()?,
         skill_activation_env()?,
+        process_execution_available,
     );
-    let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        selector_config,
-        Arc::clone(workspace_filesystem),
-        Arc::clone(skill_auto_activate_learned),
+    // Staging needs a READ-WRITE workspace handle: `workspace_filesystem` beside it is deliberately
+    // read-only (it backs setup-marker reads) and fails closed on write. Same recipe the inbound
+    // attachment lander uses, and the same reason -- under a per-caller policy it addresses the
+    // caller's own subtree rather than the shared root.
+    let staging_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &runtime.extension_filesystem,
+        &runtime.workspace_mounts,
     );
+    let selectable_skills = match staging_filesystem {
+        Some(staging_filesystem) => extension.selectable_skill_runtime_with_staging(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            staging_filesystem,
+            Arc::clone(skill_auto_activate_learned),
+        ),
+        // No writable workspace (hosted multi-tenant today) -- skills still activate, and a body that
+        // promises execution gets the "cannot execute processes" note instead of a staged path.
+        None => extension.selectable_skill_runtime_with_setup_markers(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            Arc::clone(skill_auto_activate_learned),
+        ),
+    };
     let bundle_source = extension.bundle_source();
     Ok(ComposedSkillContextSource {
         source: selectable_skills.host_skill_context_source(),

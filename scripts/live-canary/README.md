@@ -37,7 +37,6 @@ Run commands from the repository root.
 - `public-smoke`
 - `persona-rotating`
 - `private-oauth`
-- `provider-matrix`
 - `release-public-full`
 - `upgrade-canary`
 
@@ -64,16 +63,6 @@ Run the public live smoke lane:
 
 ```bash
 LANE=public-smoke scripts/live-canary/run.sh
-```
-
-Run the provider matrix lane:
-
-```bash
-LANE=provider-matrix \
-PROVIDER=openai-compatible \
-PROVIDER_TEST_TARGET=e2e_live_mission \
-SCENARIO=mission_daily_news_digest_with_followup \
-scripts/live-canary/run.sh
 ```
 
 Run the auth smoke lane:

@@ -203,6 +203,25 @@ impl SkillSource {
     }
 }
 
+/// Where a skill's bundled files become runnable, once the skill is activated.
+///
+/// Must match `ironclaw_first_party_extension_ports::bundle_staging`, which does the staging and
+/// advertises the same spelling in the injected skill body. Duplicated as a literal rather than
+/// imported because that crate sits above this one; if the two ever disagree, the symptom is an agent
+/// running a command in a directory that does not exist.
+const RUNNABLE_SKILL_DIR_PREFIX: &str = "/workspace/.skills";
+
+/// The path a skill's files can be EXECUTED from, as opposed to where they are stored.
+///
+/// Reported so an agent never has to work this out by probing. It used to: `/skills/<name>` is the
+/// read-only, database-backed store and no process can open it, so an agent that installed a skill
+/// carrying a script and tried to verify it ran `ls`, hand-copied the file to its workspace, compared
+/// the copies, and then asserted -- wrongly -- that "the installed skill's script is directly
+/// executable from the skill root". Ten demo runs spent most of their tool calls on this.
+pub fn runnable_skill_dir(skill_name: &str) -> String {
+    format!("{RUNNABLE_SKILL_DIR_PREFIX}/{skill_name}")
+}
+
 pub fn skill_summary_json(skill: &SkillSummary) -> serde_json::Value {
     serde_json::json!({
         "name": skill.name,
@@ -212,6 +231,9 @@ pub fn skill_summary_json(skill: &SkillSummary) -> serde_json::Value {
         "keywords": skill.keywords,
         "tags": skill.tags,
         "requires_skills": skill.requires_skills,
+        // Storage vs execution, stated rather than discovered.
+        "store_path_read_only": format!("/skills/{}", skill.name),
+        "runnable_path_after_activation": skill.has_scripts.then(|| runnable_skill_dir(&skill.name)),
     })
 }
 
@@ -450,6 +472,65 @@ pub async fn install_skill(
     })
 }
 
+/// Never persist a skill that discovery will skip. Repair the manifest instead of refusing it.
+///
+/// `FilesystemSkillBundleSource::validate_bundle_manifest` rejects a bundle whose `description:` is
+/// empty (`InvalidSkillBundle`) and only `warn!`s. So an install that omitted the description used to
+/// succeed and produce a skill that was listed in Settings → Skills, readable by name, and skipped by
+/// every discovery pass forever. Nothing told the author.
+///
+/// Measured, not hypothesised: on a live local-dev server a model asked to "save this as a reusable
+/// skill" wrote frontmatter carrying `name:` alone. The install reported success, Settings listed the
+/// skill, and the next conversation logged `skipping skill bundle: its manifest could not be
+/// validated` and answered without it (nearai/ironclaw#7168).
+///
+/// Repairing rather than refusing is deliberate. `SkillManagementCapabilityError` carries a kind and
+/// no message, so a refusal reaches the model as `InputEncode` / "the tool input could not be
+/// encoded" — which names neither the field nor the fix, so the model cannot correct it and the
+/// authoring turn is simply lost. A description derived from the skill's own opening prose is a
+/// weaker routing signal than an authored one, and enormously better than a skill that can never be
+/// found. The advisory half of the routing-metadata lint still flags a weak description.
+///
+/// Threading a reason string through to the model is worth doing on its own; it changes the dispatch
+/// error contract, so it is not bundled here.
+fn ensure_manifest_description(
+    content: &str,
+    parsed: &crate::parser::ParsedSkill,
+) -> Option<String> {
+    if !parsed.manifest.description.trim().is_empty() {
+        return None;
+    }
+    // Derived from the BODY, not the raw file: the raw file opens with the frontmatter delimiter, so
+    // deriving from it yields a description of `---`.
+    let description = derive_install_description(&parsed.prompt_content, &parsed.manifest.name);
+    tracing::debug!(
+        skill_name = %parsed.manifest.name,
+        "skill install derived a missing manifest description so discovery will not skip the bundle"
+    );
+    Some(insert_frontmatter_description(content, &description))
+}
+
+/// Insert a `description:` line into an existing frontmatter block.
+///
+/// Placed directly after the opening delimiter so it survives any ordering of the remaining keys, and
+/// the rest of the document is passed through untouched.
+fn insert_frontmatter_description(content: &str, description: &str) -> String {
+    // Leading newlines are preserved, not skipped: the parser tolerates them, so this repair has to
+    // agree with it about where the frontmatter starts. Taking `lines().next()` treated a leading
+    // blank line as the `---` and inserted above it, which the parser then rejected.
+    let leading = content.len() - content.trim_start_matches(['\n', '\r']).len();
+    let (prefix, body) = content.split_at(leading);
+    let mut lines = body.lines();
+    let Some(opening) = lines.next() else {
+        return content.to_string();
+    };
+    let remainder = body
+        .strip_prefix(opening)
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .unwrap_or("");
+    format!("{prefix}{opening}\ndescription: {description}\n{remainder}")
+}
+
 fn prepare_install_content(
     content: &str,
     requested_name: Option<&str>,
@@ -458,6 +539,16 @@ fn prepare_install_content(
     match parse_skill_md(&normalized_content) {
         Ok(parsed) => {
             validate_requested_name_matches_manifest(requested_name, &parsed.manifest.name)?;
+            if let Some(repaired) = ensure_manifest_description(&normalized_content, &parsed) {
+                let parsed = parse_skill_md(&repaired).map_err(|error| {
+                    tracing::debug!(%error, "skill install failed to parse repaired SKILL.md content");
+                    skill_parse_error(error)
+                })?;
+                return Ok(PreparedSkillInstall {
+                    content: repaired,
+                    parsed,
+                });
+            }
             Ok(PreparedSkillInstall {
                 content: normalized_content,
                 parsed,
@@ -518,9 +609,48 @@ fn synthesize_install_frontmatter(
         ));
     };
 
-    let mut rendered = format!("---\nname: {skill_name}\n---\n\n");
+    let description = derive_install_description(normalized_content, &skill_name);
+    let mut rendered = format!("---\nname: {skill_name}\ndescription: {description}\n---\n\n");
     rendered.push_str(normalized_content);
     Ok(rendered)
+}
+
+/// Synthesized frontmatter must carry a description, because discovery skips a bundle without one.
+///
+/// This path used to emit `name:` alone, so every plain-markdown install — a supported, documented
+/// way to add a skill — produced a skill that was listed in Settings, readable by name, and skipped
+/// by every discovery pass. The same defect as an agent writing name-only frontmatter, reached
+/// through a different door (nearai/ironclaw#7168).
+///
+/// The description is taken from the document's own first line of prose, which is where a
+/// human-written skill states what it is for. It is a fallback, not a substitute for an author-
+/// supplied description: a caller that provides real frontmatter keeps theirs untouched.
+fn derive_install_description(normalized_content: &str, skill_name: &str) -> String {
+    const MAX_DERIVED_DESCRIPTION_CHARS: usize = 200;
+
+    let prose = normalized_content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("```"));
+    let heading = normalized_content
+        .lines()
+        .map(|line| line.trim_start_matches('#').trim())
+        .find(|line| !line.is_empty());
+
+    let raw = prose
+        .filter(|line| !line.is_empty())
+        .or(heading)
+        .unwrap_or(skill_name);
+
+    let mut text: String = raw.chars().take(MAX_DERIVED_DESCRIPTION_CHARS).collect();
+    if text.trim().is_empty() {
+        text = skill_name.to_string();
+    }
+
+    // A double-quoted YAML scalar: the derived text is arbitrary markdown, so `:` `#` and quotes are
+    // all reachable and would otherwise produce frontmatter that no longer parses.
+    let escaped = text.trim().replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn skill_parse_error(error: SkillParseError) -> SkillManagementError {
@@ -620,6 +750,15 @@ pub async fn update_skill(
 
     let normalized = normalize_line_endings(request.content);
     let parsed = parse_skill_md(&normalized).map_err(skill_parse_error)?;
+    // Same invariant as install: an update that blanks the description would turn a working skill
+    // into one discovery silently skips.
+    let (normalized, parsed) = match ensure_manifest_description(&normalized, &parsed) {
+        Some(repaired) => {
+            let reparsed = parse_skill_md(&repaired).map_err(skill_parse_error)?;
+            (repaired, reparsed)
+        }
+        None => (normalized, parsed),
+    };
     if parsed.manifest.name != request.name {
         return Err(SkillManagementError::with_reason(
             SkillManagementErrorKind::InvalidInput,

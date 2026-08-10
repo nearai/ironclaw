@@ -7,6 +7,7 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     USER_ID,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -39,27 +40,7 @@ async def test_reborn_chat_history_dom_stays_page_bounded_until_user_loads_more(
     page = await context.new_page()
     timeline_queries: list[dict[str, list[str]]] = []
 
-    await page.add_init_script(
-        """
-        (() => {
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -156,38 +137,7 @@ async def test_reborn_response_projection_survives_full_history_page(
     page = await context.new_page()
     timeline_queries: list[dict[str, list[str]]] = []
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-near-cap") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -315,27 +265,7 @@ async def test_reborn_user_send_survives_full_history_page_without_loading_older
     timeline_queries: list[dict[str, list[str]]] = []
     sent_messages: list[dict] = []
 
-    await page.add_init_script(
-        """
-        (() => {
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              queueMicrotask(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              });
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -446,72 +376,17 @@ async def test_reborn_user_send_survives_full_history_page_without_loading_older
 async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Port legacy reconnect timer cleanup to Reborn's visibility pause path."""
+    """Port legacy reconnect timer cleanup to Reborn's visibility pause path.
+
+    The native-EventSource era scheduled its own 2s reconnect timer; the
+    fetch-based `event-source-plus` transport schedules retries internally.
+    The equivalent contract: a failed stream leaves a pending reconnect, and
+    hiding the tab cancels it (no new stream opens while hidden).
+    """
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          const reconnectTimers = new Map();
-          const timeoutDelays = [];
-          const nativeSetTimeout = window.setTimeout.bind(window);
-          const nativeClearTimeout = window.clearTimeout.bind(window);
-
-          window.setTimeout = (callback, delay = 0, ...args) => {
-            timeoutDelays.push(delay);
-            const id = nativeSetTimeout(() => {
-              reconnectTimers.delete(id);
-              callback(...args);
-            }, delay);
-            if (delay >= 2000 && delay <= 30000) reconnectTimers.set(id, delay);
-            return id;
-          };
-          window.clearTimeout = (id) => {
-            reconnectTimers.delete(id);
-            return nativeClearTimeout(id);
-          };
-          window.__activeSseReconnectTimeoutCount = () =>
-            Array.from(reconnectTimers.values()).filter((delay) => delay === 2000).length;
-          window.__timerDebugState = () => ({
-            activeReconnectTimeouts: reconnectTimers.size,
-            activeReconnectDelays: Array.from(reconnectTimers.values()),
-            activeSseReconnectTimeouts: window.__activeSseReconnectTimeoutCount(),
-            timeoutDelays,
-            failCalls: window.__sseFailCalls || 0,
-          });
-
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              queueMicrotask(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              });
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__v2SseHasErrorHandler = () =>
-            streams.some((stream) => typeof stream.onerror === "function");
-          window.__failLatestV2Sse = () => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            window.__sseFailCalls = (window.__sseFailCalls || 0) + 1;
-            // A closed stream takes useSSE's explicit 2-second fallback path;
-            // an open stream instead uses the native reconnect watchdog.
-            stream.readyState = 2;
-            if (typeof stream.onerror === "function") stream.onerror(new Event("error"));
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body):
         await route.fulfill(
@@ -569,11 +444,13 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
             f"{reborn_v2_server}/chat/{RECONNECT_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
         )
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
-        await page.wait_for_function("() => window.__v2SseHasErrorHandler()")
-        await page.evaluate("() => window.__failLatestV2Sse()")
-        await page.wait_for_timeout(100)
-        timer_state = await page.evaluate("() => window.__timerDebugState()")
-        assert timer_state["activeSseReconnectTimeouts"] == 1, timer_state
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
+
+        # Fail the stream: the transport schedules a retry, which the fake
+        # holds (no response yet). This is the pending-reconnect analog of the
+        # legacy 2s reconnect timer.
+        await page.evaluate("() => window.__failLatestV2Sse(0)")
+        await page.wait_for_function("() => window.__v2SseHasHeldConnection?.() === true")
 
         await page.evaluate(
             """
@@ -587,6 +464,11 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
             """
         )
 
-        await page.wait_for_function("() => window.__activeSseReconnectTimeoutCount() === 0")
+        # Hiding the tab aborts the pending reconnect: the held connection is
+        # released and no new stream opens while hidden (the held retry already
+        # recorded one URL; the count must not grow past it).
+        await page.wait_for_function("() => window.__v2SseHasHeldConnection?.() === false")
+        await page.wait_for_timeout(300)
+        assert await page.evaluate("() => window.__v2SseUrls.length") == 2
     finally:
         await context.close()

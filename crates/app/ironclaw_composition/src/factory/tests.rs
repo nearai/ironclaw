@@ -40,7 +40,10 @@ use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAc
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
 
-use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
+use crate::builtin_capability_policy::{
+    BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, CapabilityMountProfile,
+    CapabilityNetworkProfile,
+};
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
@@ -54,6 +57,70 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
         Err(RebornBuildError::InvalidConfig { reason })
             if reason.contains("libSQL FilesystemResourceGovernor uses process-local tallies")
     ));
+}
+
+#[tokio::test]
+async fn production_backend_projects_user_sandbox_shell_constraints() {
+    let dir = tempfile::tempdir().expect("sandbox production root");
+    let database_path = dir.path().join("reborn.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(database_path.display().to_string())
+            .build()
+            .await
+            .expect("build sandbox production database"),
+    );
+    let runtime =
+        Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
+    let railway_binding = crate::sandbox::build_railway_user_sandbox_binding(
+        "sandbox-policy-project".to_string(),
+        "sandbox-policy-environment".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect("valid Railway fixture config");
+    let services = build_runtime_substrate(
+        crate::test_support::libsql_host_bindings_from_runtime_for_test(
+            RebornCompositionProfile::Production,
+            "sandbox-policy-owner",
+            runtime,
+            database_path.display().to_string(),
+            test_secret_master_key(),
+        )
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::UserSandbox,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
+        })
+        .with_runtime_process_binding(railway_binding),
+    )
+    .await
+    .expect("production-shaped sandbox services build");
+    let shell = services
+        .capability_policy_for_test()
+        .grants
+        .iter()
+        .find(|grant| grant.capability.as_str() == "builtin.shell")
+        .expect("shell grant");
+
+    for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
+        assert!(!shell.effects.contains(&effect));
+    }
+    assert!(shell.effects.contains(&EffectKind::Network));
+    assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
+    assert_eq!(
+        shell.network,
+        CapabilityNetworkProfile::SandboxDirectPreview
+    );
 }
 
 #[tokio::test]
@@ -1222,7 +1289,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
                     capability: &gmail_capability,
                 },
                 crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
-                runtime_surfaces.skill_mounts_for_test(),
+                &crate::factory::test_support::skill_mounts_for_test(&gmail_scope),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             ),
@@ -2221,10 +2288,23 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     .expect("skill install succeeds");
     assert_eq!(install_output["installed"], true);
     assert_eq!(install_output["name"], "runtime-sentinel");
+    // The skill must land in the DB-backed virtual filesystem, which is where discovery, Settings,
+    // and the agent's own later sessions all read. Asserting the host disk is what let writers and
+    // readers disagree about the tree skills live in (nearai/ironclaw#7168).
     assert!(
-        storage_root
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
+        )
+        .await
+        .is_some(),
+        "skill_install must write into the database-backed skill tree"
+    );
+    assert!(
+        !storage_root
             .join("tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md")
-            .exists()
+            .exists(),
+        "nothing may be left on the host disk: a skill written there is invisible to discovery"
     );
 
     let list_output = invoke_json(
@@ -2271,11 +2351,15 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     assert_eq!(auto_activate_output["updated"], true);
     assert_eq!(auto_activate_output["name"], "runtime-sentinel");
     assert_eq!(auto_activate_output["auto_activate"], false);
-    let updated_skill = std::fs::read_to_string(
-        storage_root
-            .join("tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md"),
+    let updated_skill = String::from_utf8(
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
+        )
+        .await
+        .expect("updated skill is readable from the database-backed skill tree"),
     )
-    .expect("updated skill");
+    .expect("skill md is utf-8");
     assert!(updated_skill.contains("auto_activate: false"));
 
     let remove_output = invoke_json(
@@ -2288,9 +2372,13 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     .expect("skill remove succeeds");
     assert_eq!(remove_output["removed"], true);
     assert!(
-        !storage_root
-            .join("tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md")
-            .exists()
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
+        )
+        .await
+        .is_none(),
+        "remove must delete from the database-backed skill tree, the one discovery reads"
     );
 }
 
@@ -2715,7 +2803,8 @@ fn skill_mounts() -> MountView {
         ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("valid resource scope");
-    crate::runtime_mounts::scoped_skill_management_mount_view(&scope).expect("valid skill mounts")
+    crate::runtime_mounts::db_backed_skill_management_mount_view(&scope)
+        .expect("valid skill mounts")
 }
 
 fn workspace_mounts() -> MountView {

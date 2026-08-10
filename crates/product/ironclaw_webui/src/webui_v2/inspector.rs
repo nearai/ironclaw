@@ -11,8 +11,9 @@ use axum::{
 use futures::Stream;
 use ironclaw_product_contracts::{
     inspector::{
-        DiagnosticCursor, DiagnosticRunRequest, DiagnosticToolRequest, INSPECTOR_PROMPT_VIEW,
-        INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
+        DEFAULT_MAX_RETAINED_UPDATES_PER_RUN, DiagnosticCursor, DiagnosticRunRequest,
+        DiagnosticToolRequest, INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW,
+        INSPECTOR_UPDATES_VIEW,
     },
     surface::{
         BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
@@ -48,6 +49,26 @@ pub struct InspectorToolPath {
 #[derive(Default, Deserialize)]
 pub struct InspectorUpdatesQuery {
     after_cursor: Option<String>,
+    connection_id: Option<String>,
+    connection_generation: Option<u64>,
+}
+
+fn stream_connection_id(connection_id: Option<&str>) -> Result<Option<&str>, WebUiV2HttpError> {
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    if !connection_id.is_empty()
+        && connection_id.len() <= 64
+        && connection_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Ok(Some(connection_id));
+    }
+    Err(
+        ProductSurfaceError::validation("connection_id", ProductSurfaceValidationCode::InvalidId)
+            .into(),
+    )
 }
 
 fn require_operator(
@@ -179,10 +200,20 @@ pub async fn stream_inspector_updates(
     if let Some(value) = cursor.as_deref() {
         DiagnosticCursor::parse(value).map_err(|_| invalid_cursor())?;
     }
-    let slot = match state
-        .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id, None)
-    {
+    let connection_id = stream_connection_id(query.connection_id.as_deref())?;
+    if connection_id.is_none() && query.connection_generation.is_some() {
+        return Err(ProductSurfaceError::validation(
+            "connection_generation",
+            ProductSurfaceValidationCode::InvalidValue,
+        )
+        .into());
+    }
+    let slot = match state.sse_capacity().try_acquire_ordered(
+        &caller.tenant_id,
+        &caller.user_id,
+        connection_id,
+        connection_id.and(query.connection_generation),
+    ) {
         SseAcquireResult::Acquired(slot) => slot,
         SseAcquireResult::AtCapacity { .. } => return Ok(capacity_rejected()),
         SseAcquireResult::StaleGeneration => return Ok(StatusCode::NO_CONTENT.into_response()),
@@ -243,6 +274,10 @@ fn build_update_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut cursor = initial_cursor;
+        // Flush response headers immediately even when this retained run has
+        // no updates after its resume cursor. This event deliberately has no
+        // SSE id, so it cannot advance or disturb diagnostic cursor ordering.
+        yield Ok(Event::default().event("diagnostic_connected").data("{}"));
         loop {
             let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
             if remaining.is_zero() {
@@ -292,6 +327,10 @@ fn build_update_stream(
                         return;
                     }
                 };
+                if updates.len() > DEFAULT_MAX_RETAINED_UPDATES_PER_RUN {
+                    yield Ok(error_event(ProductSurfaceError::internal()));
+                    return;
+                }
                 for update in updates {
                     let Some(next_cursor) = cursor_from_value(update) else {
                         yield Ok(error_event(ProductSurfaceError::internal()));

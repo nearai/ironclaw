@@ -347,6 +347,7 @@ registerPack("en", {
   "llm.configureToUse": "Configure this provider before activating it.",
   "llm.confirmDelete": "Delete provider \"{id}\"?",
   "llm.defaultModel": "Default model",
+  "llm.searchModels": "Search models",
   "llm.editProvider": "Edit provider",
   "llm.fetchModels": "Fetch models",
   "llm.fetchingModels": "Fetching...",
@@ -843,7 +844,20 @@ registerPack("en", {
   "automations.notificationChannels.explainer":
     "Choose which connected channels receive approval prompts, auth prompts, and run-failure notices.",
   "automations.notificationChannels.empty": "No connected channels yet.",
-  "automations.notificationChannels.webOnlyHelper": "Notifications stay in the web app",
+  "automations.notificationChannels.noSelectionHelper": "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
+  "automations.notificationChannels.webPush.deviceHeading": "This browser",
+  "automations.notificationChannels.webPush.checking": "Checking this browser's notification support…",
+  "automations.notificationChannels.webPush.unsupported": "Push notifications aren't available in this browser.",
+  "automations.notificationChannels.webPush.permissionDenied": "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.",
+  "automations.notificationChannels.webPush.notEnrolled": "This browser isn't receiving notifications yet.",
+  "automations.notificationChannels.webPush.enrolled": "This browser receives notifications.",
+  "automations.notificationChannels.webPush.enroll": "Enable notifications in this browser",
+  "automations.notificationChannels.webPush.unenroll": "Disable in this browser",
+  "automations.notificationChannels.webPush.deviceCount": "Enrolled browsers: {count}",
+  "automations.notificationChannels.webPush.actionFailed": "Couldn't update this browser's notification enrollment. Please try again.",
+  "automations.notificationChannels.webPush.enrolledOtherAccount": "This browser is enrolled for a different account. You can enable it for this account too.",
+  "automations.notificationChannels.webPush.enableForAccount": "Enable for this account",
+  "automations.notificationChannels.webPush.statusFailed": "Couldn't load this account's enrollment status. Try reloading the page.",
   "automations.notificationChannels.save": "Save",
   "automations.notificationChannels.saved": "Saved",
   "automations.notificationChannels.saveFailed":
@@ -1207,7 +1221,10 @@ registerPack("en", {
   "admin.users.admin": "Admin",
   "admin.users.suspend": "Suspend",
   "admin.users.actionFailed": "Action failed: {message}",
-  "admin.users.lastAdminRequired": "At least one active administrator is required. Add or activate another administrator before changing this user.",
+  // The lazy admin page registers the full copy for these route-only keys.
+  // These stubs preserve locale key/placeholder parity without charging /chat.
+  "admin.users.lastAdminRequired":
+    "At least one active administrator is required. Add or activate another administrator before changing this user.",
   "admin.users.activate": "Activate",
   "admin.users.promote": "Promote",
   "admin.users.demote": "Demote",
@@ -1215,7 +1232,7 @@ registerPack("en", {
   "admin.users.jobsCount": "{count} jobs",
   "admin.users.suspendTitle": "Suspend user",
   "admin.users.suspendDesc":
-    'This will prevent "{name}" from authenticating. Continue?',
+    "This will prevent \"{name}\" from authenticating. Continue?",
   "admin.users.tokenNamePrompt": "Token name for {name}:",
   "admin.users.tokenCreated": "Token created",
   "admin.users.tokenCreatedDesc": "Copy this now — it will not be shown again.",
@@ -1226,7 +1243,7 @@ registerPack("en", {
   "admin.users.delete": "Delete",
   "admin.users.deleteUserTitle": "Delete user",
   "admin.users.deleteUserDesc":
-    'Are you sure you want to delete "{name}"? This action cannot be undone.',
+    "Are you sure you want to delete \"{name}\"? This action cannot be undone.",
 
   // Admin — user detail
   "admin.user.profile": "Profile",
@@ -1245,6 +1262,15 @@ registerPack("en", {
   "admin.user.saveRole": "Save role",
   "admin.user.usage30Days": "Usage (last 30 days)",
   "admin.user.noUsage": "No usage data.",
+  "admin.threadScraping.title": "Thread scraping",
+  "admin.threadScraping.description": "Collect redacted thread and run artifacts for debugging and optimization.",
+  "admin.threadScraping.empty": "No threads available for scraping.",
+  "admin.threadScraping.untitled": "Untitled thread",
+  "admin.threadScraping.selectThread": "Select a thread to load its artifact.",
+  "admin.threadScraping.downloadThread": "Download thread artifact",
+  "admin.threadScraping.downloadRun": "Download run {runId}",
+  "admin.threadScraping.loadFailed": "Thread scraping failed.",
+  "admin.threadScraping.downloadFailed": "Artifact download failed.",
   "admin.user.secrets.title": "Secrets",
   "admin.user.secrets.description": "Provision credentials for this user without exposing stored values.",
   "admin.user.secrets.loading": "Loading secrets…",
@@ -1507,6 +1533,7 @@ registerPack("en", {
   "chat.failure.request": "The request failed before it could be sent.",
   "chat.failure.requestDetail": "The request failed: {detail}.",
   "chat.failure.runCategory": "The run failed: {detail}.",
+  "chat.failure.noProgress": "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
   "chat.failure.recoveryRequired": "The run is awaiting recovery — backend reported `recovery_required`.",
   "chat.failure.run": "The run failed before producing a reply.",
   "chat.failure.streamRetryable": "The chat stream hit a retryable error: {detail}.",

@@ -132,6 +132,26 @@ impl RebornTestIngress {
         self.envelope_from_parsed(user_id, parsed)
     }
 
+    /// [`Self::verified_text_envelope_with_trigger`] carrying host-fetched
+    /// channel conversation history (`UserMessagePayload::channel_context`) —
+    /// the shape channel ingress hydration produces for a shared-channel ping.
+    pub fn verified_text_envelope_with_channel_context(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        text: &str,
+        trigger: ProductTriggerReason,
+        channel_context: &str,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let payload = ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(text.to_string(), Vec::new(), trigger)?
+                .with_channel_context(Some(channel_context.to_string())),
+        );
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
+    }
+
     pub fn verified_subscription_envelope(
         &self,
         event_id: &str,
