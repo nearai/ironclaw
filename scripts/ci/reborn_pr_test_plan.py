@@ -269,6 +269,37 @@ INTEGRATION_SUPPORT_OWNERS = {
 INTEGRATION_SNAPSHOT_PREFIX_OWNERS = {
     "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
 }
+# Production files whose changes alter the model-visible prompt or tool
+# surface that `golden_payload` snapshot-pins — the surface digest, the
+# instruction bundle, the communication-context renderer, and the shipped
+# prompt assets of the crates the golden harness composes. A change here still
+# classifies as a production-package change below (crate buckets, reverse
+# dependents); this mapping ADDITIONALLY schedules the golden integration lane
+# so a prompt-surface PR cannot land green and then bounce the merge queue on
+# stale goldens (#7361's queue failure, 2026-08-07: `surface.rs` changed the
+# surface digest, the PR lane never ran the golden bucket, the exhaustive
+# queue gate caught it first).
+#
+# Curated, not derived — a new prompt-composition site must be added here by
+# hand, and until it is, the merge queue remains the backstop exactly as it
+# was for every path before this mapping existed. Self-tested by
+# `test_reborn_pr_test_plan.py` (positive per entry + a negative control).
+PROMPT_SURFACE_GOLDEN_OWNER = "tests/integration/golden_payload.rs"
+PROMPT_SURFACE_PATHS = (
+    "crates/kernel/ironclaw_host_runtime/src/surface.rs",
+    "crates/contracts/ironclaw_loop_contracts/src/instruction_bundle.rs",
+    "crates/contracts/ironclaw_loop_contracts/src/runtime_context.rs",
+)
+PROMPT_SURFACE_PREFIXES = (
+    "crates/contracts/ironclaw_loop_contracts/prompts/",
+    "crates/contracts/ironclaw_host_api/prompts/",
+    "crates/loop/ironclaw_agent_loop/prompts/",
+    "crates/loop/ironclaw_loop_host/prompts/",
+    # The host-managed ports assemble the exact request the goldens pin:
+    # `prompt.rs` drives the InstructionBundleBuilder into the message list
+    # and `model.rs` shapes the model request around it.
+    "crates/kernel/ironclaw_turns/src/host_managed_ports/",
+)
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -302,11 +333,18 @@ PR_STATIC_CONTROL_PATHS = {
     #     and additionally has a Code Style self-test
     #     (`scripts/ci/test-build-wasm-extensions.sh`). No Reborn Rust lane
     #     executes it.
+    #   * `e2e-skill-self-creation.sh` drives the skill self-creation e2e
+    #     against a live model, selected by `E2E_PROFILE`. Like
+    #     `run-reborn-webui.sh` it is referenced by no workflow (a search over
+    #     `.github/` finds nothing) and needs credentials no lane has, so no
+    #     lane can be selected for it; it is run by hand per
+    #     `docs/internal/skills/multi_tenant_enablement.md`.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
+    "scripts/e2e-skill-self-creation.sh",
     # `codebase-graph.sh` inspects agent-only graph metadata. It does not
     # execute or select a Reborn product test surface. (Arrived with #7215.)
     "scripts/codebase-graph.sh",
@@ -817,6 +855,15 @@ def build_plan(
             # path.
             reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
+        if path in PROMPT_SURFACE_PATHS or path.startswith(PROMPT_SURFACE_PREFIXES):
+            # Deliberately no `continue`: the path still classifies as a
+            # production-package change below. This arm only ADDS the golden
+            # lane so the prompt-surface snapshots run on the PR instead of
+            # first failing in the merge queue.
+            integration_lanes.add(
+                integration_inventory[PROMPT_SURFACE_GOLDEN_OWNER]
+            )
+            reasons.append(f"model-visible prompt surface changed: {path}")
         if path.startswith(CRATE_OR_ASSET_PREFIXES):
             # Family-level prose that belongs to no package: `crates/AGENTS.md`,
             # `crates/README.md`, `crates/Architecture.md`, and the family

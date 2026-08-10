@@ -82,8 +82,10 @@ const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 
 /// The deployment identity every per-extension workflow binds under: the
-/// composed runtime's tenant/agent/project plus the operator user inbound
-/// conversations default their subject to.
+/// composed runtime's tenant/agent/project plus the fallback operator user
+/// host-initiated work is attributed to (notice-thread scopes, the durable
+/// idempotency-ledger scope). Inbound conversations run as their invoking
+/// actor, not this user.
 #[derive(Clone)]
 pub struct ChannelWorkflowIdentity {
     pub tenant_id: TenantId,
@@ -318,14 +320,13 @@ impl ChannelWorkflowFactory for RebornChannelWorkflowFactory {
             identity.tenant_id.clone(),
             identity.agent_id.clone(),
             identity.project_id.clone(),
-        )
-        .with_default_subject_user_id(identity.operator_user_id.clone());
-        // Generic shared-channel admission (§5.3): with a subject-route
-        // resolver installed, unrouted shared conversations fail closed.
-        if let Some(resolver) = request.subject_route_resolver {
-            scope = scope
-                .with_conversation_subject_route_resolver(resolver)
-                .without_default_subject_for_unrouted_shared_conversations();
+        );
+        // Generic shared-conversation admission (§5.3), fail-closed either
+        // way: without a resolver every shared conversation is rejected; with
+        // one, exactly the connected conversations are admitted. A run acts
+        // as the user who invoked it, so there is no subject to default.
+        if let Some(admission) = request.shared_admission {
+            scope = scope.with_shared_conversation_admission(admission);
         }
         let scope = scope.with_actor_user_resolver(
             request.actor_user_resolver,

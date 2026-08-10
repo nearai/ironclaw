@@ -36,6 +36,14 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// runtime construction. The runtime warms the system-skill descriptor cache
     /// during build, so system fixtures must exist before `build_runtime`.
     pub(crate) system_skill_fixtures: Vec<SystemSkillFixture>,
+    /// User-scoped skill fixtures, seeded before runtime construction. Requires
+    /// `skill_activation_tenant` and `skill_activation_user`, which name the (tenant, actor) the
+    /// run resolves under — the only pair whose `/skills` mount the run actually reads.
+    pub(crate) user_skill_fixtures: Vec<UserSkillFixture>,
+    /// Actor the user-scoped skill fixtures are seeded under. Sourced from the group's resolved
+    /// `canonical_binding.actor_user_id`, never a hardcoded literal: the actor id is an opaque
+    /// one-way hash, so it cannot be reconstructed from the profile's plain owner string.
+    pub(crate) skill_activation_user: Option<ironclaw_host_api::ids::UserId>,
     /// Injected outbound-delivery service double + `target_set` approval flag,
     /// when this harness surfaces the synthetic `outbound_delivery_*`
     /// capabilities (C-SYNTH outbound seam). Only `outbound_target_tools()` sets
@@ -146,6 +154,8 @@ impl HostRuntimeHarnessOptions {
             seed_extension_credentials: false,
             skill_activation_tenant: None,
             system_skill_fixtures: Vec::new(),
+            user_skill_fixtures: Vec::new(),
+            skill_activation_user: None,
             outbound_target_service: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
@@ -191,6 +201,47 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
         self.skill_activation_tenant = Some(tenant);
+        self
+    }
+
+    pub(crate) fn with_skill_activation_user(
+        mut self,
+        user: ironclaw_host_api::ids::UserId,
+    ) -> Self {
+        self.skill_activation_user = Some(user);
+        self
+    }
+
+    pub(crate) fn with_user_skill_fixture(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        prompt: impl Into<String>,
+        installed: bool,
+    ) -> Self {
+        self.user_skill_fixtures.push(UserSkillFixture {
+            name: name.into(),
+            description: description.into(),
+            prompt: prompt.into(),
+            installed,
+        });
+        self
+    }
+
+    /// Bulk form used by the skill-activation profile: binds the actor and seeds each
+    /// `(name, description, prompt, installed)` tuple. A no-op when the list is empty, so the
+    /// default profile is unchanged.
+    pub(crate) fn with_user_skill_fixtures(
+        mut self,
+        actor: Option<ironclaw_host_api::ids::UserId>,
+        fixtures: &[(&str, &str, &str, bool)],
+    ) -> Self {
+        if let Some(actor) = actor {
+            self = self.with_skill_activation_user(actor);
+        }
+        for (name, description, prompt, installed) in fixtures {
+            self = self.with_user_skill_fixture(*name, *description, *prompt, *installed);
+        }
         self
     }
 
@@ -315,6 +366,20 @@ impl HostRuntimeHarnessOptions {
 }
 
 #[derive(Clone)]
+/// A USER-scoped skill fixture, written into the local-dev storage root before runtime
+/// construction — the same ordering rule [`SystemSkillFixture`] documents, and for a sharper
+/// reason: skills are read from the database tree, and the host-disk store is migrated into it
+/// once at boot. A user skill written to disk AFTER the runtime is built is never migrated, so
+/// the run cannot see it. Seeding here puts it in the store before that boot import runs.
+pub(crate) struct UserSkillFixture {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) prompt: String,
+    /// Adds the URL-install provenance sidecar, which makes the production filesystem source
+    /// downgrade the bundle's trust to `Installed`.
+    pub(crate) installed: bool,
+}
+
 pub(crate) struct SystemSkillFixture {
     pub(crate) name: String,
     pub(crate) description: String,

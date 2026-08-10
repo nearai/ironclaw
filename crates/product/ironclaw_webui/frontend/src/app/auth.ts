@@ -300,6 +300,9 @@ export function useAuthSession() {
     regressionArtifactExportEnabled: Boolean(
       session?.features?.regression_artifact_export,
     ),
+    adminThreadScrapeEnabled: Boolean(
+      session?.features?.admin_thread_scrape,
+    ),
     globalAutoApproveEnabled: Boolean(session?.features?.global_auto_approve),
     signIn,
     signOut,

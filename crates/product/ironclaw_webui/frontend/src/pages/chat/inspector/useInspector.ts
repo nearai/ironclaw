@@ -1,6 +1,7 @@
 import React from "react";
 import { EventSourcePlus } from "event-source-plus";
 
+import { clientActionId } from "../../../lib/api";
 import { ActivityKind } from "./activity-kind";
 import { fetchInspectorSnapshot, inspectorEventStreamRequest } from "./inspector-api";
 import { subscribeProductInspectorActivity } from "./product-activity";
@@ -17,6 +18,65 @@ const MAX_SNAPSHOT_ATTEMPTS = 3;
 const SNAPSHOT_RETRY_BASE_DELAY_MS = 500;
 const SNAPSHOT_REFRESH_DEBOUNCE_MS = 50;
 const SNAPSHOT_REFRESH_MAX_WAIT_MS = 250;
+const INSPECTOR_CONNECTION_STORAGE_KEY = "ironclaw:inspector-sse-connection";
+
+interface InspectorConnectionState {
+  connectionId: string;
+  generation: number;
+}
+
+function newConnectionState(): InspectorConnectionState {
+  return { connectionId: clientActionId(), generation: 0 };
+}
+
+function isDocumentReload(): boolean {
+  try {
+    const navigation = globalThis.performance?.getEntriesByType?.("navigation")[0];
+    return Boolean(navigation && "type" in navigation && navigation.type === "reload");
+  } catch (_) {
+    return false;
+  }
+}
+
+function loadConnectionState(): InspectorConnectionState {
+  if (!isDocumentReload()) return newConnectionState();
+  try {
+    const raw = globalThis.sessionStorage?.getItem(INSPECTOR_CONNECTION_STORAGE_KEY);
+    if (!raw) return newConnectionState();
+    const candidate = JSON.parse(raw);
+    if (
+      typeof candidate?.connectionId === "string"
+      && /^[A-Za-z0-9_-]{1,64}$/.test(candidate.connectionId)
+      && typeof candidate?.generation === "number"
+      && Number.isSafeInteger(candidate.generation)
+      && candidate.generation >= 0
+    ) {
+      return candidate as InspectorConnectionState;
+    }
+  } catch (_) {
+    // A fresh id remains safe when storage or navigation metadata is unavailable.
+  }
+  return newConnectionState();
+}
+
+const inspectorConnectionState = loadConnectionState();
+
+function nextConnectionState(): InspectorConnectionState {
+  if (inspectorConnectionState.generation >= Number.MAX_SAFE_INTEGER) {
+    inspectorConnectionState.connectionId = clientActionId();
+    inspectorConnectionState.generation = 0;
+  }
+  inspectorConnectionState.generation += 1;
+  try {
+    globalThis.sessionStorage?.setItem(
+      INSPECTOR_CONNECTION_STORAGE_KEY,
+      JSON.stringify(inspectorConnectionState),
+    );
+  } catch (_) {
+    // Best effort. The in-memory generation still orders this document's requests.
+  }
+  return { ...inspectorConnectionState };
+}
 
 export interface DiagnosticUpdate {
   stream_id?: string;
@@ -239,8 +299,14 @@ export function useInspector({
       if (disposed) return;
       setHealth(connectedOnce ? INSPECTOR_HEALTH.RECONNECTING : INSPECTOR_HEALTH.CONNECTING);
       controller = stream.listen({
-        onRequest() {
+        onRequest({ options }) {
           if (!disposed) {
+            const connection = nextConnectionState();
+            options.query = {
+              ...options.query,
+              connection_id: connection.connectionId,
+              connection_generation: connection.generation,
+            };
             setHealth(
               connectedOnce ? INSPECTOR_HEALTH.RECONNECTING : INSPECTOR_HEALTH.CONNECTING,
             );
@@ -277,6 +343,13 @@ export function useInspector({
           if (disposed) return;
           const payload = safeJson(message.data);
           if (!payload) return;
+          if (message.event === "diagnostic_connected") {
+            connectedOnce = true;
+            transportDisconnected = false;
+            setError(null);
+            setHealth(INSPECTOR_HEALTH.CONNECTED);
+            return;
+          }
           if (message.event === "stream_error") {
             noteDisconnected();
             const nextHealth = payload.retryable === false

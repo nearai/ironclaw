@@ -285,25 +285,27 @@ where
     Ok(services)
 }
 
+/// Write-side skill mounts for the production path.
+///
+/// Delegates to [`crate::runtime_mounts::db_backed_skill_management_mount_view`] so this view and
+/// every reader are built from one decision about where skills live. They were three separate
+/// definitions over two trees, which is nearai/ironclaw#7168 — see that function for the table.
 pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/skills")?,
-            VirtualPath::new(format!(
-                "/tenants/{}/users/{}/skills",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str()
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/system/skills")?,
-            VirtualPath::new("/system/skills")?,
-            MountPermissions::read_only(),
-        ),
-    ])
+    crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
+}
+
+/// Read-side skill mounts for the hosted multi-tenant Postgres path.
+///
+/// Delegates to the same source as the writer, so `/skills` cannot resolve to a different tree than
+/// `skill_install` wrote to. Kept as a named function because this is the branch selected when a
+/// build supplies no `workspace_filesystems` of its own, and the name is what makes that branch
+/// searchable from the bug.
+pub(crate) fn production_skill_context_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    crate::runtime_mounts::db_backed_skill_context_mount_view(scope)
 }
 
 pub(crate) fn production_system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError>
@@ -412,7 +414,7 @@ pub(super) async fn build_backend_production(
                 (
                     Arc::new(ScopedFilesystem::new(
                         Arc::clone(&stores.filesystem),
-                        scoped_skill_context_mount_view,
+                        production_skill_context_mount_view,
                     )),
                     Arc::new(ScopedFilesystem::with_fixed_view(
                         Arc::clone(&stores.filesystem),
@@ -422,10 +424,6 @@ pub(super) async fn build_backend_production(
                 )
             }
         };
-    let skill_mounts =
-        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -1317,7 +1315,6 @@ pub(super) async fn build_backend_production(
         channel_disconnect_slot,
         runtime_http_egress,
         ironhub_link_state,
-        skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
         skill_filesystem,
@@ -1447,6 +1444,18 @@ pub(super) async fn build_postgres_production(
         database_filesystem,
         "production-postgres-reborn-state",
     )?;
+    // Seed the built-in skills into the DATABASE-backed `/system/skills`.
+    //
+    // Hosted multi-tenant production shipped with zero built-in skills. The bundled seeder is only
+    // reachable from `bootstrap_standalone_host`, which this path does not run (correctly -- it writes
+    // through a host-disk filesystem, and a tenant here has no host disk). `/system/skills` is mounted
+    // here, to the database, and nothing ever wrote to it, so Settings -> Skills read an empty root and
+    // said "No skills installed" while local-dev listed all 32.
+    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
+        filesystem.as_ref(),
+        &ironclaw_host_api::path::VirtualPath::new("/system/skills")?,
+    )
+    .await?;
     finish_production_backend(
         context,
         filesystem,

@@ -54,7 +54,7 @@ asserted.*
 | `operator_secrets` | The operator control plane's secret-**value** port (`OperatorSecretValueStore`) and its opaque error. Implemented by `ironclaw_composition` — assembly is the only layer that may name both this port and `ironclaw_secrets` (PROPOSAL §8.2's product row). **Deliberately not a re-export of `SecretStorePort`:** no `ResourceScope` argument (the implementor fixes the operator scope), no lease/consume protocol, and an error carrying only a `&'static str` classification. Widening it back toward the substrate's shape undoes what CHECKLIST WS3 bought. |
 | `operator_service` | The deployment-operator control plane's three ports — `OperatorStatusService`, `OperatorLogsService`, `OperatorServiceLifecycleService` — their wire DTOs, and the log-context bound (`normalize_operator_log_context_value`). Implemented by `ironclaw_operator` except readiness status, which is composition's. Product keeps the `Unsupported*`/`Static*` doubles, the frozen view descriptors, and the operator *command-plane* envelope that wraps these DTOs. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
-| `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |
+| `shared_admission` | Shared-conversation admission: `SharedConversationAdmission` + `ProductConversationRouteKey` and its request. Fail-closed connected-channel gating, implemented by `ironclaw_extension_host` over `[channel.config]`. |
 
 ## What must never be here
 
@@ -158,7 +158,7 @@ with it:
 | `ChannelDeliveryResolver` | `ironclaw_extension_host` |
 | `CommandActorRoleResolver` | `ironclaw_extension_host` |
 | `DeliveryReplyContextSource` | `ironclaw_extension_host` |
-| `ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made it declarable) | `ironclaw_extension_host` |
+| `SharedConversationAdmission` (inverted WS2.2 as `ProductConversationSubjectRouteResolver`; reshaped admission-only when shared-route subjects retired) | `ironclaw_extension_host` |
 | `ChannelConfigProductService` | `ironclaw_extension_manager` |
 | `LifecycleProductService` | `ironclaw_extension_manager` |
 | `RebornViewProvider` | `ironclaw_extension_manager` |

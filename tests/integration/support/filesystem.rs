@@ -18,10 +18,8 @@ use ironclaw_host_api::path::{HostPath, VirtualPath};
 /// `scoped_turns_fs` (harness.rs) and `scoped_turns_fs_composite` (builder.rs)
 /// so both tiers derive turn paths from one source of truth.
 pub fn turns_scope_path(root_prefix: &str, binding: &ResolvedBinding) -> String {
-    let owner_user_id = binding
-        .subject_user_id
-        .as_ref()
-        .unwrap_or(&binding.actor_user_id);
+    // A run acts as the user who invoked it: the actor owns the turn scope.
+    let owner_user_id = &binding.actor_user_id;
     match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
         (Some(agent_id), Some(project_id)) => format!(
             "{root_prefix}/tenants/{}/agents/{}/projects/{}/users/{}/turns",

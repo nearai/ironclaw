@@ -129,13 +129,17 @@ struct TriggeredNotification {
     /// collide on one durable identity, so the second is answered
     /// `AlreadyDelivered` and silently never sent while still being recorded
     /// as delivered. `None` keeps the historical id shape for kinds that occur
-    /// at most once per run.
+    /// at most once per run. A run that parks on a SECOND gate of the same
+    /// kind (a re-auth stand-in following an earlier one, say) needs its own
+    /// discriminator too, so the `RunBlocked` stand-ins compose their fixed
+    /// label with the gate ref rather than using the label alone.
     ///
     /// `ApprovalNeeded` and `AuthRequired` additionally require this to carry
     /// the notice's canonical gate ref: [`prompts::run_notification_projection_id`]
     /// fails closed rather than silently falling back to the legacy identity
     /// for those two kinds. Owned rather than `&'static str` so it can carry
-    /// either a fixed vocabulary word or a runtime gate ref.
+    /// either a fixed vocabulary word, a fixed label composed with a runtime
+    /// gate ref, or a bare runtime gate ref.
     notice_discriminator: Option<String>,
 }
 
@@ -943,6 +947,10 @@ async fn notification_plan_for_state(
                 .push_str(&prompts::triggered_gate_footer(trigger_label));
             Ok(Some(TriggeredNotificationPlan {
                 notifications: vec![TriggeredNotification {
+                    // Keyed by the gate ref: a background run that parks on a
+                    // SECOND approval gate must announce it rather than dedupe
+                    // against the first gate's delivered prompt (the exact
+                    // stuck-run collapse the observer lane fixed).
                     notice_discriminator: Some(gate_ref.as_str().to_string()),
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
@@ -997,6 +1005,8 @@ async fn notification_plan_for_state(
                     Ok(Some(TriggeredNotificationPlan {
                         notifications: vec![
                             TriggeredNotification {
+                                // Per-gate identity, as for approval prompts: a
+                                // second auth gate is its own durable delivery.
                                 notice_discriminator: Some(gate_ref.as_str().to_string()),
                                 event_kind: RunNotificationEventKind::AuthRequired,
                                 intent: DeliveryIntent::AuthPrompt,
@@ -1010,7 +1020,14 @@ async fn notification_plan_for_state(
                             TriggeredNotification {
                                 event_kind: RunNotificationEventKind::RunBlocked,
                                 intent: DeliveryIntent::BackgroundRunNotice,
-                                notice_discriminator: Some("reauth".to_string()),
+                                // Per-gate, like its AuthRequired sibling: a
+                                // second auth gate's redacted notice must not
+                                // dedupe against the first gate's. The
+                                // `RunBlocked` bare-label discriminator is
+                                // bounded/hashed if this ever overflows the
+                                // projection ref's length cap (see
+                                // `prompts::bounded_discriminator`).
+                                notice_discriminator: Some(format!("reauth:{}", gate_ref.as_str())),
                                 text: format!(
                                     "{}{}",
                                     prompts::BACKGROUND_RUN_REAUTH_MESSAGE,
@@ -1043,7 +1060,13 @@ async fn notification_plan_for_state(
                         notifications: vec![TriggeredNotification {
                             event_kind: RunNotificationEventKind::RunBlocked,
                             intent: DeliveryIntent::BackgroundRunNotice,
-                            notice_discriminator: Some("auth-unavailable".to_string()),
+                            // Per-gate, for the same reason as the reauth
+                            // stand-in above: a second unserviceable auth
+                            // gate must not dedupe against the first's.
+                            notice_discriminator: Some(format!(
+                                "auth-unavailable:{}",
+                                gate_ref.as_str()
+                            )),
                             text: format!(
                                 "{}{}",
                                 unavailable,
@@ -1062,6 +1085,7 @@ async fn notification_plan_for_state(
             notifications: vec![TriggeredNotification {
                 event_kind: RunNotificationEventKind::RunBlocked,
                 intent: DeliveryIntent::BackgroundRunNotice,
+                // Terminal: one failure notice per run, no gate to key by.
                 notice_discriminator: Some("failed".to_string()),
                 text: format!(
                     "{}{}",

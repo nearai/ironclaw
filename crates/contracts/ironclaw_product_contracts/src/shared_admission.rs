@@ -1,29 +1,30 @@
-//! Shared-route subject resolution.
+//! Shared-conversation admission.
 //!
 //! A shared external conversation (a team channel, a group thread) runs its
-//! turns under a configured *subject* user rather than under whoever spoke.
-//! Which subject that is depends on installation configuration the product
-//! does not own, so product asks a resolver wired beside it.
+//! turns as whoever spoke — a run acts as the user who invoked it — so the
+//! only routing question left to installation configuration is whether the
+//! conversation is CONNECTED to this deployment at all. Which conversations
+//! those are depends on channel configuration the product does not own, so
+//! product asks an admission resolver wired beside it.
 //!
 //! The port is declared here and implemented by the extension host, which
-//! reads the channel configuration (PROPOSAL §6.1.3). It became declarable
-//! here once its error stopped being product's workflow type — see
-//! [`crate::error::ProductOperationFailure`].
+//! reads the channel configuration (PROPOSAL §6.1.3). It replaced the retired
+//! `ProductConversationSubjectRouteResolver`: the subject half (which user a
+//! shared conversation runs as) is gone with shared-route subject binding;
+//! the admission half stays fail-closed.
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
-use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 
 use crate::error::ProductOperationFailure;
 
-/// Stable conversation route key used by hosts to assign shared-route subjects.
+/// Stable conversation route key used by hosts to admit shared conversations.
 ///
 /// The key is `(space, conversation)` and intentionally ignores topic/thread
-/// ids, so every thread inside one configured conversation runs under the same
-/// shared subject while retaining its own conversation context. Which vendor
-/// identifiers those two fields carry is the channel package's business, never
-/// this crate's.
+/// ids, so every thread inside one connected conversation is admitted
+/// together. Which vendor identifiers those two fields carry is the channel
+/// package's business, never this crate's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProductConversationRouteKey {
     space_id: Option<String>,
@@ -66,24 +67,27 @@ impl ProductConversationRouteKey {
     }
 }
 
-/// Request passed to host-owned shared-route subject resolvers.
+/// Request passed to host-owned shared-conversation admission resolvers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProductConversationSubjectRouteResolutionRequest {
+pub struct SharedConversationAdmissionRequest {
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,
     pub route_key: ProductConversationRouteKey,
 }
 
-/// Resolve the subject a shared conversation route runs under.
+/// Decide whether a shared conversation route is connected to this
+/// deployment.
 ///
-/// `Ok(None)` means "no subject is configured for this route" — a routing
-/// decision the caller turns into a rejection, never an error.
+/// `Ok(false)` means "this conversation is not connected" — a routing
+/// decision the caller turns into a rejection, never an error. Admission is
+/// fail-closed: a shared conversation with no resolver, or one the resolver
+/// does not admit, never reaches binding resolution.
 #[async_trait]
-pub trait ProductConversationSubjectRouteResolver: Send + Sync + std::fmt::Debug {
-    async fn resolve_product_conversation_subject_route(
+pub trait SharedConversationAdmission: Send + Sync + std::fmt::Debug {
+    async fn shared_conversation_admitted(
         &self,
-        request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure>;
+        request: SharedConversationAdmissionRequest,
+    ) -> Result<bool, ProductOperationFailure>;
 }
 
 #[cfg(test)]
@@ -92,35 +96,28 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// A double that **derives its answer from the whole request** rather than
-    /// returning a fixed one.
-    ///
-    /// That matters more than it looks: a double that ignored the request and
-    /// always answered the same way would make every test below vacuous — they
-    /// would pass just as happily against a port that dropped its argument on
-    /// the floor, which is exactly the shape this port exists to prevent. So
-    /// the answer is looked up by the full `(adapter, installation, route)`
+    /// returning a fixed one — a double that ignored the request would make
+    /// every test below pass against a port that dropped its argument on the
+    /// floor, which is exactly the shape this port exists to prevent. The
+    /// admitted set is keyed by the full `(adapter, installation, route)`
     /// triple, and every field is echoed back for inspection.
     #[derive(Debug, Default)]
-    struct RouteKeyedResolver {
-        seen: Mutex<Vec<ProductConversationSubjectRouteResolutionRequest>>,
-        subjects: Vec<(ProductConversationSubjectRouteResolutionRequest, UserId)>,
+    struct RouteKeyedAdmission {
+        seen: Mutex<Vec<SharedConversationAdmissionRequest>>,
+        admitted: Vec<SharedConversationAdmissionRequest>,
     }
 
     #[async_trait]
-    impl ProductConversationSubjectRouteResolver for RouteKeyedResolver {
-        async fn resolve_product_conversation_subject_route(
+    impl SharedConversationAdmission for RouteKeyedAdmission {
+        async fn shared_conversation_admitted(
             &self,
-            request: ProductConversationSubjectRouteResolutionRequest,
-        ) -> Result<Option<UserId>, ProductOperationFailure> {
+            request: SharedConversationAdmissionRequest,
+        ) -> Result<bool, ProductOperationFailure> {
             self.seen
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request.clone());
-            Ok(self
-                .subjects
-                .iter()
-                .find(|(configured, _)| configured == &request)
-                .map(|(_, subject)| subject.clone()))
+            Ok(self.admitted.contains(&request))
         }
     }
 
@@ -129,8 +126,8 @@ mod tests {
         installation: &str,
         space: Option<&str>,
         conversation: &str,
-    ) -> ProductConversationSubjectRouteResolutionRequest {
-        ProductConversationSubjectRouteResolutionRequest {
+    ) -> SharedConversationAdmissionRequest {
+        SharedConversationAdmissionRequest {
             adapter_id: ProductAdapterId::new(adapter).expect("valid adapter id"),
             installation_id: AdapterInstallationId::new(installation)
                 .expect("valid installation id"),
@@ -142,57 +139,45 @@ mod tests {
         }
     }
 
-    fn user(id: &str) -> UserId {
-        UserId::new(id).expect("valid user")
-    }
-
-    /// The port is held as `Arc<dyn ProductConversationSubjectRouteResolver>`
-    /// by both product and the extension host, so object safety is a contract,
-    /// not an implementation detail: a non-dispatchable method added here would
-    /// break both callers at once.
+    /// The port is held as `Arc<dyn SharedConversationAdmission>` by both
+    /// product and the extension host, so object safety is a contract, not an
+    /// implementation detail.
     ///
-    /// **Scope.** This pins the port's *shape* — that a resolver is handed every
-    /// field unswapped and that the signature admits a different answer per
-    /// route. It does **not** pin that any production resolver looks the route
-    /// up correctly; `ChannelConfigSubjectRouteResolver`'s own tests in
-    /// `ironclaw_extension_host` own that claim.
+    /// **Scope.** This pins the port's *shape* — that a resolver is handed
+    /// every field unswapped and that the signature admits a different answer
+    /// per route. It does **not** pin that any production resolver reads the
+    /// channel configuration correctly; `ChannelConfigSharedAdmission`'s own
+    /// tests in `ironclaw_extension_host` own that claim.
     #[tokio::test]
     async fn the_port_is_object_safe_and_answers_differ_by_the_route_it_is_handed() {
         let engineering = request_for("slack-like", "install-1", Some("space-1"), "eng");
         let support = request_for("slack-like", "install-1", Some("space-1"), "support");
         let other_install = request_for("slack-like", "install-2", Some("space-1"), "eng");
 
-        let resolver = Arc::new(RouteKeyedResolver {
-            subjects: vec![
-                (engineering.clone(), user("eng-subject")),
-                (support.clone(), user("support-subject")),
-            ],
-            ..RouteKeyedResolver::default()
+        let resolver = Arc::new(RouteKeyedAdmission {
+            admitted: vec![engineering.clone()],
+            ..RouteKeyedAdmission::default()
         });
-        let port: Arc<dyn ProductConversationSubjectRouteResolver> = resolver.clone();
+        let port: Arc<dyn SharedConversationAdmission> = resolver.clone();
 
-        // Both directions: two configured routes resolve to *different*
-        // subjects, so a resolver that ignored the route could not pass.
-        assert_eq!(
-            port.resolve_product_conversation_subject_route(engineering.clone())
+        assert!(
+            port.shared_conversation_admitted(engineering.clone())
                 .await
-                .expect("configured route resolves"),
-            Some(user("eng-subject"))
+                .expect("connected route admits")
         );
-        assert_eq!(
-            port.resolve_product_conversation_subject_route(support)
+        assert!(
+            !port
+                .shared_conversation_admitted(support)
                 .await
-                .expect("configured route resolves"),
-            Some(user("support-subject"))
+                .expect("an unconnected route is not an error")
         );
-
         // The installation is part of the identity, not decoration: the same
         // conversation under a different install is a different route.
-        assert_eq!(
-            port.resolve_product_conversation_subject_route(other_install)
+        assert!(
+            !port
+                .shared_conversation_admitted(other_install)
                 .await
-                .expect("unconfigured route is not an error"),
-            None
+                .expect("an unconnected route is not an error")
         );
 
         // `adapter_id` and `installation_id` are both string-backed newtypes,
@@ -209,28 +194,6 @@ mod tests {
         assert_eq!(seen[2].installation_id.as_str(), "install-2");
     }
 
-    /// "No subject is configured for this route" is a routing decision the
-    /// caller turns into a rejection — never an error. If this ever became
-    /// `Err`, an unconfigured shared channel would report a backend failure
-    /// instead of an unroutable conversation. Paired with the test above, which
-    /// shows the same resolver *can* answer `Some`, so this is absence rather
-    /// than a resolver that never answers at all.
-    #[tokio::test]
-    async fn an_unconfigured_route_is_absence_not_failure() {
-        let port: Arc<dyn ProductConversationSubjectRouteResolver> =
-            Arc::new(RouteKeyedResolver::default());
-        let resolved = port
-            .resolve_product_conversation_subject_route(request_for(
-                "slack-like",
-                "install-1",
-                Some("space-1"),
-                "eng",
-            ))
-            .await
-            .expect("an unconfigured route is not an error");
-        assert_eq!(resolved, None);
-    }
-
     #[test]
     fn route_key_rejects_a_conversation_id_that_is_not_a_valid_external_ref() {
         let error = ProductConversationRouteKey::new(None, String::new())
@@ -242,7 +205,7 @@ mod tests {
     }
 
     /// The key deliberately drops topic/thread identity so every thread in a
-    /// configured channel resolves to the same subject.
+    /// connected conversation is admitted together.
     #[test]
     fn route_key_from_external_ref_keeps_space_and_conversation_only() {
         let conversation_ref =

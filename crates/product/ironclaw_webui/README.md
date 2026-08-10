@@ -77,6 +77,24 @@ alone constructs authenticated-caller evidence.
   standalone deployments and tests); the OpenAI-compat mounts and extension
   administration surface are unconditional.
 
+### Web Debug Inspector
+
+Operators can append `?debug=true` to a chat URL to open the opt-in inspector.
+It shows the bounded host-resolved prompt, an ordered activity timeline with
+session-local turn navigation, aggregate model/tool statistics, and verbose
+tool details fetched on demand. The panel is a desktop sidebar, a tablet
+overlay, and hidden on mobile; closing it and selecting a tab persist only for
+the current browser session.
+
+The four inspector routes live below
+`/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}`. They
+require both operator caller authority and the operator configuration
+capability. Reads are tenant/user/thread/run scoped, SSE updates are resumable,
+and normal chat events never carry prompt bodies, tool arguments, or tool
+results. See
+[`docs/reborn/contracts/web-debug-inspector.md`](../../../docs/reborn/contracts/web-debug-inspector.md)
+for the bounds, security contract, and failure behavior.
+
 ## Tests
 
 ```bash

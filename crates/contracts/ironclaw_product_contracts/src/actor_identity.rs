@@ -5,7 +5,7 @@
 //! product does not read. So product asks a resolver wired beside it.
 //!
 //! The port is declared here and implemented by the extension host (PROPOSAL
-//! §6.1.3) — the same shape as [`crate::subject_route`]. It became declarable
+//! §6.1.3) — the same shape as [`crate::shared_admission`]. It became declarable
 //! here once two things stopped blocking it: the error is no longer product's
 //! workflow type (see [`crate::error::ProductOperationFailure`], WS2.2), and
 //! the binding epoch its response carries is no longer

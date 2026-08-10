@@ -65,7 +65,9 @@ pub(crate) enum RunNotificationProjectionIdError {
 /// `discriminator` separates notices that share an event kind within one run
 /// -- e.g. the several `RunBlocked` notices one run can legitimately produce
 /// (a re-auth stand-in, an unserviceable-auth cancellation, a run failure).
-/// For those kinds it is formatted directly into the id; `None` preserves the
+/// For those kinds it is embedded into the id verbatim when short, or folded
+/// into a stable content hash via [`bounded_discriminator`] when it would
+/// overflow `ProjectionUpdateRef`'s length cap; `None` preserves the
 /// historical id shape for kinds that occur at most once per run.
 ///
 /// `ApprovalNeeded` and `AuthRequired` additionally require `discriminator`
@@ -109,7 +111,10 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::ApprovalNeeded | RunNotificationEventKind::AuthRequired
     ) {
         return Ok(match discriminator {
-            Some(discriminator) => format!("run-notification:{suffix}:{discriminator}:{run_id}"),
+            Some(discriminator) => {
+                let discriminator = bounded_discriminator(discriminator);
+                format!("run-notification:{suffix}:{discriminator}:{run_id}")
+            }
             None => format!("run-notification:{suffix}:{run_id}"),
         });
     }
@@ -147,6 +152,35 @@ fn lower_hex(bytes: &[u8]) -> String {
         output.push(char::from(HEX[(byte & 0x0f) as usize]));
     }
     output
+}
+
+/// Longest discriminator embedded verbatim in a projection id. The composed
+/// id must fit `ProjectionUpdateRef`'s 256-byte cap for ANY legal input — a
+/// `TurnGateRef` may itself be up to 256 bytes — or the notice becomes
+/// undeliverable at the ref constructor. Production gate refs are far shorter
+/// (`gate:approval-<uuid>`), so this bound never changes their id shape.
+const DISCRIMINATOR_VERBATIM_MAX: usize = 96;
+
+/// Over-long discriminators keep a readable prefix plus a stable FNV-1a 64
+/// content hash: still one id per distinct gate, never truncation-collided.
+/// FNV-1a is implemented inline because these ids are DURABLE delivery
+/// identities — a std hasher whose output can change across releases would
+/// silently re-key them.
+fn bounded_discriminator(discriminator: &str) -> std::borrow::Cow<'_, str> {
+    if discriminator.len() <= DISCRIMINATOR_VERBATIM_MAX {
+        return std::borrow::Cow::Borrowed(discriminator);
+    }
+    // Room for the ':' + 16 hex digits inside the verbatim budget.
+    let mut end = DISCRIMINATOR_VERBATIM_MAX - 17;
+    while !discriminator.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in discriminator.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    std::borrow::Cow::Owned(format!("{}:{hash:016x}", &discriminator[..end]))
 }
 
 /// Build the approval-gate prompt view. The body carries only the semantic
@@ -403,6 +437,62 @@ mod tests {
                 "gate identity hardening must not rewrite legacy non-gate delivery identities"
             );
         }
+    }
+
+    #[test]
+    fn non_gate_discriminated_projection_ids_embed_short_discriminators_verbatim() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::RunBlocked,
+                Some("reauth:gate:approval-1234"),
+            )
+            .expect("a RunBlocked discriminator is not a gate identity"),
+            format!("run-notification:blocked:reauth:gate:approval-1234:{run_id}")
+        );
+    }
+
+    /// A `RunBlocked` discriminator can embed a full gate ref (the
+    /// `reauth:`/`auth-unavailable:` stand-ins do exactly this, so a run
+    /// parked on a SECOND auth gate announces distinctly), and a legal
+    /// `TurnGateRef` can itself be up to 256 bytes -- so the composed
+    /// discriminator must compress rather than make the notice undeliverable
+    /// at `ProjectionUpdateRef`'s length cap, without colliding distinct
+    /// discriminators.
+    #[test]
+    fn over_long_non_gate_discriminators_stay_deliverable_and_distinct() {
+        let run_id = TurnRunId::new();
+        let shared_prefix = "g".repeat(240);
+        let discriminator_a = format!("{shared_prefix}-a");
+        let discriminator_b = format!("{shared_prefix}-b");
+        let id_a = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::RunBlocked,
+            Some(&discriminator_a),
+        )
+        .expect("a RunBlocked discriminator is not a gate identity");
+        let id_b = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::RunBlocked,
+            Some(&discriminator_b),
+        )
+        .expect("a RunBlocked discriminator is not a gate identity");
+        assert!(
+            id_a.len() <= 256,
+            "composed id must fit the ref cap: {id_a}"
+        );
+        assert_ne!(id_a, id_b, "prefix-sharing discriminators must not collide");
+        // Deterministic: the same discriminator recomputes the same id.
+        assert_eq!(
+            id_a,
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::RunBlocked,
+                Some(&discriminator_a),
+            )
+            .expect("a RunBlocked discriminator is not a gate identity")
+        );
     }
 
     #[test]
