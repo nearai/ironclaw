@@ -64,7 +64,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 
 Totals: **51** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**868** test functions).
+**102** Python scenario files (**869** test functions).
 
 ---
 
@@ -407,6 +407,7 @@ entries.
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
+| Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |
 | Use plan mode (`/plan`, checklist, approve, status) | `test_plan_mode.py` (5) |
 | As an admin: create users, hand out one-time tokens, page the user list, set roles, suspend/activate, manage write-only secrets, delete users | `test_admin_api.py` (18) |
 | Bootstrap as the single-tenant owner with stable identity | `test_ownership_model.py` (8), `test_multi_tenant_greeting.py` |
@@ -429,7 +430,7 @@ entries.
 | Kill the process (`kill -9`) and still find their history | `test_reborn_blackbox_smoke.py` (5) |
 | Restart gracefully and keep thread history and "always approve" | `test_reborn_blackbox_smoke.py`, `test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_always_approve_survives_reborn_restart` |
 | Not be XSS'd by assistant or user content | `test_reborn_webui_v2_legacy_rendering.py` (3), `test_csp.py` (4) |
-| Upload attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (7) |
+| Upload and reselect attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (8) |
 | Have the model retried on HTTP errors and broken SSE streams, and cancel a slow inference | `test_reborn_webui_v2_streaming_run_control_api.py` |
 
 ### 6.10 Provider contracts & fixtures (Emulate-backed)

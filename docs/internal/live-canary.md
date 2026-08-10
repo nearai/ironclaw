@@ -36,10 +36,9 @@ account guide rather than introducing another bespoke runner layout.
 | Lane | Scope | Runner | Trigger | Blocking |
 | --- | --- | --- | --- | --- |
 | `deterministic-replay` | Retired under Tier B — its `tests/e2e_live*.rs` fixtures and the `test.yml` workflow were deleted with the v1 monolith. Reborn recorded-fixture replay is the `Reborn QA recorded fixtures` gate in `reborn-tests.yml`. (Live-canary lane rewire tracked in #6369.) | — | — | — |
-| `public-smoke` | Real LLM plus public tools such as `zizmor_scan` and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
+| `public-smoke` | Real LLM plus public tools and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `persona-rotating` | Real LLM multi-turn persona workflow, one persona per day | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |
-| `provider-matrix` | Same live behavior against multiple provider adapters | GitHub-hosted | Weekly and manual | Opens issue on scheduled failure |
 | `release-public-full` | Full public live suite for release candidates | GitHub-hosted | Manual | Release checklist gate |
 | `upgrade-canary` | Previous release DB opened by current checkout | GitHub-hosted | Manual | Release checklist gate |
 | `auth-smoke` | Fresh-machine mock-backed auth smoke: hosted OAuth, MCP OAuth, and multi-user MCP isolation | GitHub-hosted | Hourly and manual | No |

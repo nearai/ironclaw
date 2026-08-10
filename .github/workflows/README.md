@@ -237,9 +237,8 @@ The same deep reuse raises all existing property-test generators from 256 to
 hermetic journey/provider-fault inventory. `ironclaw-stress.yml` adds a
 15-minute libSQL user-session soak alongside its libSQL ramps and
 shipping-profile Postgres API capacity lane. `live-canary.yml` keeps the
-three-hour Reborn WebUI cadence and runs the broader credentialed provider
-matrix weekly. Workflow-contract sabotage tests fail if any of these schedules,
-guards, merge/main triggers, or release gates disappear.
+three-hour Reborn WebUI cadence. Workflow-contract sabotage tests fail if any
+of these schedules, guards, merge/main triggers, or release gates disappear.
 
 The Reborn E2E job also publishes `product-surface-coverage-<sha>`. Its JSON and
 Markdown files join the shipped capability denominator with typed contract,

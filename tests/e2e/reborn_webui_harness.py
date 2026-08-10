@@ -997,6 +997,184 @@ def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def install_fake_v2_event_stream(
+    page,
+    *,
+    expected_authorization: str | None = None,
+    record_request_headers: bool = True,
+) -> None:
+    """Install the fetch-based fake WebChat v2 SSE transport on ``page``.
+
+    The Reborn SPA streams through ``event-source-plus``, which is a
+    fetch/ReadableStream client — it never constructs ``window.EventSource``,
+    so the legacy ``FakeEventSource`` init scripts (which faked the native
+    EventSource API) no longer intercept anything. This fake hooks
+    ``window.fetch`` for ``*/events`` URLs and serves a scripted SSE body,
+    matching the packaged transport exactly.
+
+    Exposed test hooks (all under ``window``):
+
+    - ``__emitV2Sse(type, frame, id)`` — enqueue one SSE frame on the current
+      stream; ``id`` becomes the frame's ``id:`` line so the next reconnect
+      carries it as ``Last-Event-ID`` (the cursor contract).
+    - ``__failLatestV2Sse(readyState)`` — force a failure on the current
+      stream; ``0`` holds the next connection open (no response yet),
+      anything else closes the current stream with a TypeError (retryable)
+      or rejects a held connection with 401 (terminal).
+    - ``__v2SseHasOpenStream()`` / ``__v2SseHasHeldConnection()`` — readiness
+      probes so tests never race forced failures against the fake lifecycle.
+    - ``__v2SseUrls`` — every ``*/events`` URL the app opened, in order.
+    - ``__v2SseRequests`` — ``{url, headers}`` per opened stream (only when
+      ``record_request_headers`` is true), for reconnect assertions on the
+      ``Authorization`` and ``Last-Event-ID`` headers.
+
+    The fake enforces the current wire contract: a ``token`` query parameter
+    on the stream URL is rejected with 400 (the bearer travels in the
+    ``Authorization`` header), and a missing/mismatched ``Authorization``
+    header is rejected with 401.
+    """
+    if expected_authorization is None:
+        expected_authorization = f"Bearer {REBORN_V2_AUTH_TOKEN}"
+    script = f"""
+        (() => {{
+          const nativeFetch = window.fetch.bind(window);
+          const encoder = new TextEncoder();
+          const expectedAuthorization = {json.dumps(expected_authorization)};
+          const recordHeaders = {json.dumps(record_request_headers)};
+          let activeStream = null;
+          let holdNextConnection = false;
+
+          window.__v2SseUrls = [];
+          window.__v2SseRequests = [];
+
+          const currentStream = () => {{
+            if (!activeStream || activeStream.closed) {{
+              throw new Error("no event stream is open");
+            }}
+            return activeStream;
+          }};
+
+          window.__v2SseHasOpenStream = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.controller);
+          window.__v2SseHasHeldConnection = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.resolve);
+
+          const closeStream = (stream, error = null) => {{
+            if (!stream || stream.closed) return;
+            stream.closed = true;
+            if (stream.controller) {{
+              if (error) {{
+                stream.controller.error(error);
+              }} else {{
+                stream.controller.close();
+              }}
+            }}
+            if (activeStream === stream) activeStream = null;
+          }};
+
+          const openStreamResponse = (request, signal) => {{
+            const stream = {{ closed: false, controller: null }};
+            const body = new ReadableStream({{
+              start(controller) {{
+                stream.controller = controller;
+              }},
+              cancel() {{
+                stream.closed = true;
+                if (activeStream === stream) activeStream = null;
+              }},
+            }});
+            if (activeStream && !activeStream.closed) {{
+              closeStream(activeStream);
+            }}
+            activeStream = stream;
+            window.__v2SseUrls.push(request.url);
+            if (recordHeaders) {{
+              const headers = {{}};
+              request.headers.forEach((value, key) => {{ headers[key] = value; }});
+              window.__v2SseRequests.push({{ url: request.url, headers }});
+            }}
+            signal?.addEventListener(
+              "abort",
+              () => closeStream(stream),
+              {{ once: true }},
+            );
+            return new Response(body, {{
+              status: 200,
+              headers: {{ "content-type": "text/event-stream" }},
+            }});
+          }};
+
+          window.fetch = async (input, init = {{}}) => {{
+            const request = new Request(input, init);
+            const url = new URL(request.url, window.location.href);
+            if (!url.pathname.endsWith("/events")) {{
+              return nativeFetch(input, init);
+            }}
+            if (url.searchParams.has("token")) {{
+              return new Response("", {{ status: 400 }});
+            }}
+            if (request.headers.get("Authorization") !== expectedAuthorization) {{
+              return new Response("", {{ status: 401 }});
+            }}
+            if (!holdNextConnection) {{
+              return openStreamResponse(request, request.signal);
+            }}
+            return new Promise((resolve, reject) => {{
+              const stream = {{
+                closed: false,
+                controller: null,
+                resolve,
+                reject,
+              }};
+              activeStream = stream;
+              window.__v2SseUrls.push(request.url);
+              if (recordHeaders) {{
+                const headers = {{}};
+                request.headers.forEach((value, key) => {{ headers[key] = value; }});
+                window.__v2SseRequests.push({{ url: request.url, headers }});
+              }}
+              request.signal?.addEventListener(
+                "abort",
+                () => {{
+                  if (stream.closed) return;
+                  stream.closed = true;
+                  if (activeStream === stream) activeStream = null;
+                  reject(new DOMException("Aborted", "AbortError"));
+                }},
+                {{ once: true }},
+              );
+            }});
+          }};
+
+          window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {{
+            const stream = currentStream();
+            if (!stream.controller) throw new Error("event stream is reconnecting");
+            stream.controller.enqueue(encoder.encode(
+              `id: ${{id}}\\nevent: ${{type}}\\ndata: ${{JSON.stringify({{ type, ...frame }})}}\\n\\n`
+            ));
+          }};
+
+          window.__failLatestV2Sse = (readyState = 2) => {{
+            const stream = currentStream();
+            if (readyState === 0) {{
+              holdNextConnection = true;
+              closeStream(stream, new TypeError("event stream interrupted"));
+              return;
+            }}
+            holdNextConnection = false;
+            if (stream.resolve) {{
+              stream.closed = true;
+              if (activeStream === stream) activeStream = null;
+              stream.resolve(new Response("", {{ status: 401 }}));
+              return;
+            }}
+            closeStream(stream, new TypeError("event stream interrupted"));
+          }};
+        }})();
+        """
+    await page.add_init_script(script)
+
+
 async def fetch_extension_oauth_requirement(
     client: httpx.AsyncClient,
     base_url: str,

@@ -3669,11 +3669,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // filesystem so the model port can build multimodal image parts for
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
-        attachment_read_port: Some(
+        //
+        // Lander and reader share ONE handle so an inbound attachment is read
+        // back from the subtree it landed in. Under a per-caller workspace
+        // policy (`serve` sets it unconditionally) the lander writes to
+        // `/projects/workspace/tenants/{tenant}/users/{user}`, and the shared
+        // read-only `workspace_filesystem` would address the root instead —
+        // the exact regression that dropped every image from the model payload
+        // after #7062 scoped the write lanes. Mirrors the channel-host wiring
+        // in `channel_host_source`.
+        attachment_read_port: crate::runtime_mounts::read_write_workspace_filesystem(
+            &services.extension_filesystem,
+            &services.workspace_mounts,
+        )
+        .map(|filesystem| {
             Arc::new(ironclaw_assistant::ProjectScopedAttachmentReader::new(
-                Arc::clone(&services.workspace_filesystem),
-            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-        ),
+                filesystem,
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
+        }),
         prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
