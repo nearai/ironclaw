@@ -6,8 +6,11 @@ use std::{
 };
 
 use ironclaw_host_api::{capability::CapabilityDescriptionTrust, ids::CapabilityId};
-use ironclaw_loop_contracts::ProviderToolDefinition;
+use ironclaw_loop_contracts::{
+    ProviderToolDefinition, ToolRetrievalIndex, ToolRetrievalProvider, ToolSearchOutcome,
+};
 use serde_json::Value;
+use std::sync::Arc;
 
 pub(crate) const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_QUERY_TERMS: usize = 32;
@@ -43,27 +46,35 @@ struct IndexedDocument {
     length: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchQueryClass {
-    ExactIdentifier,
-    Lexical,
-    NoMatch,
-}
+/// The query classes and outcome shape now live in `ironclaw_loop_contracts`
+/// so a bound provider outside this crate can produce them. Aliased here so the
+/// module (and its tests) keep reading in the local vocabulary.
+pub(crate) use ironclaw_loop_contracts::ToolSearchOutcome as SearchOutcome;
+pub(crate) use ironclaw_loop_contracts::ToolSearchQueryClass as SearchQueryClass;
 
-impl SearchQueryClass {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactIdentifier => "exact_identifier",
-            Self::Lexical => "lexical",
-            Self::NoMatch => "no_match",
-        }
+/// The host-bundled ranker: bounded BM25F over name, provider, parameters and
+/// description, with an exact-identifier short circuit.
+///
+/// This is the default binding for [`ToolRetrievalProvider`] and the only
+/// ranker this crate names. A deployment that binds a different provider gets
+/// its ranking instead, with no change here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NativeBm25fToolRetrieval;
+
+impl ToolRetrievalProvider for NativeBm25fToolRetrieval {
+    fn ranker_version(&self) -> &str {
+        RANKER_VERSION
+    }
+
+    fn fit(&self, definitions: &[ProviderToolDefinition]) -> Arc<dyn ToolRetrievalIndex> {
+        Arc::new(AuthorizedToolSearchIndex::new(definitions.iter()))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SearchOutcome {
-    pub(crate) names: Vec<String>,
-    pub(crate) query_class: SearchQueryClass,
+impl ToolRetrievalIndex for AuthorizedToolSearchIndex {
+    fn search(&self, query: &str, limit: usize) -> ToolSearchOutcome {
+        AuthorizedToolSearchIndex::search(self, query, limit)
+    }
 }
 
 impl AuthorizedToolSearchIndex {
@@ -99,10 +110,7 @@ impl AuthorizedToolSearchIndex {
 
     pub(crate) fn search(&self, query: &str, limit: usize) -> SearchOutcome {
         if limit == 0 {
-            return SearchOutcome {
-                names: Vec::new(),
-                query_class: SearchQueryClass::NoMatch,
-            };
+            return SearchOutcome::no_match();
         }
         let normalized_query = query.trim().to_lowercase();
         let query_terms: Vec<String> = tokenize(&normalized_query)
@@ -110,10 +118,7 @@ impl AuthorizedToolSearchIndex {
             .take(MAX_QUERY_TERMS)
             .collect();
         if query_terms.is_empty() {
-            return SearchOutcome {
-                names: Vec::new(),
-                query_class: SearchQueryClass::NoMatch,
-            };
+            return SearchOutcome::no_match();
         }
 
         let exact = self
@@ -358,11 +363,18 @@ fn tokenize(value: &str) -> Vec<String> {
 
 /// Stable for a fixed ranker version and effective authorized metadata. Object
 /// keys are sorted recursively so semantically identical schemas share a key.
-pub(crate) fn definitions_fingerprint(definitions: &[ProviderToolDefinition]) -> u64 {
+///
+/// `ranker_version` comes from the *bound* provider rather than a constant, so
+/// rebinding retrieval invalidates a cached index instead of silently serving
+/// the previous ranker's fitted corpus.
+pub(crate) fn definitions_fingerprint(
+    ranker_version: &str,
+    definitions: &[ProviderToolDefinition],
+) -> u64 {
     let mut definitions: Vec<_> = definitions.iter().collect();
     definitions.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    RANKER_VERSION.hash(&mut hasher);
+    ranker_version.hash(&mut hasher);
     definitions.len().hash(&mut hasher);
     for definition in definitions {
         definition.capability_id.hash(&mut hasher);
@@ -742,13 +754,37 @@ mod tests {
         );
 
         assert_eq!(
-            definitions_fingerprint(std::slice::from_ref(&first)),
-            definitions_fingerprint(&[reordered])
+            definitions_fingerprint(RANKER_VERSION, std::slice::from_ref(&first)),
+            definitions_fingerprint(RANKER_VERSION, &[reordered])
         );
         assert_ne!(
-            definitions_fingerprint(&[first]),
-            definitions_fingerprint(&[changed])
+            definitions_fingerprint(RANKER_VERSION, &[first]),
+            definitions_fingerprint(RANKER_VERSION, &[changed])
         );
+    }
+
+    #[test]
+    fn fingerprint_separates_rankers_over_an_identical_corpus() {
+        // Rebinding retrieval must invalidate a cached fitted index. If the
+        // fingerprint ignored the ranker, a swapped provider would keep serving
+        // the previous ranker's index until the surface happened to change.
+        let corpus = [definition(
+            "fixture.lookup",
+            "fixture__lookup",
+            "Lookup.",
+            json!({"type":"object","properties":{"city":{"type":"string"}}}),
+            CapabilityDescriptionTrust::Untrusted,
+        )];
+
+        assert_ne!(
+            definitions_fingerprint(RANKER_VERSION, &corpus),
+            definitions_fingerprint("some-other-ranker-v1", &corpus)
+        );
+    }
+
+    #[test]
+    fn native_provider_reports_the_ranker_version_it_fingerprints_with() {
+        assert_eq!(NativeBm25fToolRetrieval.ranker_version(), RANKER_VERSION);
     }
 
     #[test]
@@ -769,8 +805,8 @@ mod tests {
         );
 
         assert_eq!(
-            definitions_fingerprint(&[first.clone(), second.clone()]),
-            definitions_fingerprint(&[second, first])
+            definitions_fingerprint(RANKER_VERSION, &[first.clone(), second.clone()]),
+            definitions_fingerprint(RANKER_VERSION, &[second, first])
         );
     }
 

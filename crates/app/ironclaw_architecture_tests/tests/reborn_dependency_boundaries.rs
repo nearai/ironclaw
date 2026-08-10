@@ -671,7 +671,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // hand-synced now lives once on the contract type (its callers in
         // composition and loop_host DELETED their copies). Reason recorded
         // in the PR body; count read from this test's failure message.
-        ("ironclaw_loop_contracts", 13_107),
+        // 13_107 -> 13_246 (2026-08-09, swappable deferred-tool retrieval):
+        // +139 lines for the `ToolRetrievalProvider`/`ToolRetrievalIndex` port
+        // behind `tool_search`, plus its `ToolSearchOutcome`/
+        // `ToolSearchQueryClass` DTOs. Declarations and the contracts an
+        // implementation must hold (authorization, determinism,
+        // confidentiality) — zero ranking logic: the bounded BM25F ranker stays
+        // whole in `ironclaw_loop_host::tool_search`, which is also the only
+        // crate that names it. Most of the added lines are those contract doc
+        // comments, which is the growth this tier is *for*. Count read from
+        // this test's own failure message.
+        ("ironclaw_loop_contracts", 13_246),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

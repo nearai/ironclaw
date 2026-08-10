@@ -183,6 +183,7 @@ pub use tool_diagnostics::{HostManagedToolDiagnosticEmitter, PreparedToolDiagnos
 pub use tool_disclosure::bridge_capability_ids;
 pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
 pub use tool_disclosure_port::ToolDisclosureCapabilityDecorator;
+pub use tool_search::NativeBm25fToolRetrieval;
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");

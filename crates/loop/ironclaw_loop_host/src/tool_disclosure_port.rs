@@ -15,7 +15,8 @@ use ironclaw_loop_contracts::{
     CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
     LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    ToolRetrievalIndex, ToolRetrievalProvider, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    resolution,
 };
 use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
@@ -27,7 +28,7 @@ use crate::tool_disclosure::{
     is_bridge_capability_id, is_bridge_name, select_active_set,
 };
 use crate::tool_search::{
-    AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
+    MAX_SEARCH_QUERY_BYTES, NativeBm25fToolRetrieval, definitions_fingerprint,
 };
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
@@ -53,6 +54,7 @@ pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    retrieval: Arc<dyn ToolRetrievalProvider>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
@@ -61,7 +63,18 @@ impl ToolDisclosureCapabilityDecorator {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
+            retrieval: Arc::new(NativeBm25fToolRetrieval),
         }
+    }
+
+    /// Bind a different deferred-tool ranker.
+    ///
+    /// The default is the host-bundled BM25F provider, so omitting this leaves
+    /// ranking behavior exactly as it was. Composition is the layer expected to
+    /// call this; nothing below it names a concrete provider.
+    pub fn with_retrieval_provider(mut self, retrieval: Arc<dyn ToolRetrievalProvider>) -> Self {
+        self.retrieval = retrieval;
+        self
     }
 
     /// Wrap one run's capability port with disclosure using the exact
@@ -79,6 +92,7 @@ impl ToolDisclosureCapabilityDecorator {
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
             policy,
+            retrieval: Arc::clone(&self.retrieval),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -97,6 +111,10 @@ struct ToolDisclosureCapabilityPort {
     /// tool_search/tool_describe metadata *and* the tool_search bridge's own
     /// advertised description (the always-on catalog index).
     policy: Arc<CapabilitySurfacePolicy>,
+    /// The bound deferred-tool ranker. Defaults to the host-bundled BM25F
+    /// provider; a deployment may bind another through
+    /// [`ToolDisclosureCapabilityDecorator::with_retrieval_provider`].
+    retrieval: Arc<dyn ToolRetrievalProvider>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -113,7 +131,9 @@ struct ToolDisclosureTurnState {
     definitions_fingerprint: u64,
     surface_version: Option<CapabilitySurfaceVersion>,
     catalog: CapabilityCatalog,
-    search_index: AuthorizedToolSearchIndex,
+    /// Fitted by the bound [`ToolRetrievalProvider`]; the host holds only the
+    /// port type, never a concrete ranker.
+    search_index: Arc<dyn ToolRetrievalIndex>,
     active: ActiveSet,
     disclosed_names: BTreeSet<String>,
     search_ranks: BTreeMap<String, usize>,
@@ -609,7 +629,8 @@ impl ToolDisclosureCapabilityPort {
             .into_iter()
             .filter(|definition| authorized_capability_ids.contains(&definition.capability_id))
             .collect();
-        let fingerprint = definitions_fingerprint(&authorized_definitions);
+        let fingerprint =
+            definitions_fingerprint(self.retrieval.ranker_version(), &authorized_definitions);
         let mut guard = self.lock_turn_state()?;
         // Fit and cache retrieval only over the effective authorized corpus.
         // Denied schemas therefore cannot affect IDF, ordering, counts, cache
@@ -629,9 +650,10 @@ impl ToolDisclosureCapabilityPort {
         if rebuild {
             let index_started_at = std::time::Instant::now();
             let catalog = CapabilityCatalog::new(&authorized_definitions, &[]);
-            let search_index = AuthorizedToolSearchIndex::new(authorized_definitions.iter());
+            let search_index = self.retrieval.fit(&authorized_definitions);
             debug!(
                 target: "ironclaw::reborn::tool_search",
+                ranker_version = self.retrieval.ranker_version(),
                 authorized_document_count = authorized_definitions.len(),
                 index_build_micros = index_started_at.elapsed().as_micros(),
                 metadata_fingerprint = fingerprint,
@@ -1472,7 +1494,7 @@ mod tests {
     };
     use ironclaw_loop_contracts::{
         CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
-        RunProfileResolutionRequest, RunProfileResolver,
+        RunProfileResolutionRequest, RunProfileResolver, ToolSearchOutcome,
     };
     use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
 
@@ -3488,6 +3510,113 @@ mod tests {
         );
     }
 
+    /// Drive one `tool_search` call through the port and return the emitted
+    /// result names in rank order.
+    async fn search_names(
+        port: &ToolDisclosureCapabilityPort,
+        outputs: &Mutex<Vec<Value>>,
+    ) -> Vec<String> {
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_SEARCH_NAME,
+                json!({"query": "read a file"}),
+            )))
+            .await
+            .expect("tool_search registers");
+        port.invoke_capability(LoopRequest {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("tool_search invokes");
+
+        let captured = outputs.lock().expect("capture is not poisoned");
+        let output = captured.last().expect("tool_search wrote a result");
+        output
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("tool_search output carries results")
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn three_tool_spy() -> Arc<SpyPort> {
+        Arc::new(SpyPort {
+            definitions: vec![
+                provider_definition("fixture.read_file", "read_file", "Read a file"),
+                provider_definition("fixture.write_file", "write_file", "Write a file"),
+                provider_definition("fixture.send_email", "send_email", "Send an email"),
+            ],
+            surface_version: CapabilitySurfaceVersion::new("surface:retrieval-swap")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn tool_search_ranks_with_the_bound_retrieval_provider_not_the_native_one() {
+        // Control: the host-bundled BM25F ranker puts the lexically-closest
+        // tool first for this query.
+        let native_outputs = Arc::new(Mutex::new(Vec::new()));
+        let native_port = disclosure_port_with(
+            three_tool_spy() as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(CapturingWriter {
+                outputs: Arc::clone(&native_outputs),
+            }),
+            Arc::new(NativeBm25fToolRetrieval),
+        );
+        let native_names = search_names(&native_port, &native_outputs).await;
+        assert_eq!(
+            native_names.first().map(String::as_str),
+            Some("read_file"),
+            "native BM25F should rank the matching tool first"
+        );
+
+        // Swapped: the same corpus and query, ranked by the bound provider.
+        let fitted_corpus_sizes = Arc::new(Mutex::new(Vec::new()));
+        let swapped_outputs = Arc::new(Mutex::new(Vec::new()));
+        let swapped_port = disclosure_port_with(
+            three_tool_spy() as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(CapturingWriter {
+                outputs: Arc::clone(&swapped_outputs),
+            }),
+            Arc::new(FixedRankingRetrieval {
+                order: vec!["send_email".to_string(), "write_file".to_string()],
+                fitted_corpus_sizes: Arc::clone(&fitted_corpus_sizes),
+            }),
+        );
+        let swapped_names = search_names(&swapped_port, &swapped_outputs).await;
+
+        assert_eq!(
+            swapped_names,
+            vec!["send_email".to_string(), "write_file".to_string()],
+            "the bound provider's ranking must be what tool_search returns"
+        );
+        assert_ne!(
+            native_names, swapped_names,
+            "the swap must actually change ranking, or this test proves nothing"
+        );
+        assert_eq!(
+            *fitted_corpus_sizes
+                .lock()
+                .expect("fit recorder is not poisoned"),
+            vec![3],
+            "the provider is fitted once over the whole authorized corpus"
+        );
+    }
+
     #[tokio::test]
     async fn tool_search_rejects_missing_non_string_or_blank_query() {
         let inner = Arc::new(SpyPort {
@@ -3548,6 +3677,94 @@ mod tests {
         }
     }
 
+    /// Records every `fit` it is handed and ranks by a caller-supplied order,
+    /// so a test can tell the bound provider's ranking apart from BM25F's.
+    #[derive(Debug)]
+    struct FixedRankingRetrieval {
+        order: Vec<String>,
+        fitted_corpus_sizes: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[derive(Debug)]
+    struct FixedRankingIndex {
+        order: Vec<String>,
+    }
+
+    impl ToolRetrievalIndex for FixedRankingIndex {
+        fn search(&self, _query: &str, limit: usize) -> ToolSearchOutcome {
+            ToolSearchOutcome {
+                names: self.order.iter().take(limit).cloned().collect(),
+                query_class: ironclaw_loop_contracts::ToolSearchQueryClass::Lexical,
+            }
+        }
+    }
+
+    impl ToolRetrievalProvider for FixedRankingRetrieval {
+        fn ranker_version(&self) -> &str {
+            "fixed-ranking-test-v1"
+        }
+
+        fn fit(&self, definitions: &[ProviderToolDefinition]) -> Arc<dyn ToolRetrievalIndex> {
+            self.fitted_corpus_sizes
+                .lock()
+                .expect("fit recorder is not poisoned")
+                .push(definitions.len());
+            Arc::new(FixedRankingIndex {
+                order: self.order.clone(),
+            })
+        }
+    }
+
+    /// Captures the bridge output so a test can read what `tool_search` emitted.
+    struct CapturingWriter {
+        outputs: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for CapturingWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.outputs
+                .lock()
+                .expect("output capture is not poisoned")
+                .push(write.output.clone());
+            let result_digest = ironclaw_host_api::approval::sha256_digest_token(
+                write.input_ref.as_str().as_bytes(),
+            )
+            .replace(':', ".");
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new(format!("result:{result_digest}")).expect("valid result ref"),
+                write.output.to_string().len() as u64,
+            ))
+        }
+    }
+
+    fn disclosure_port_with(
+        inner: Arc<dyn LoopCapabilityPort>,
+        run_context: LoopRunContext,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        retrieval: Arc<dyn ToolRetrievalProvider>,
+    ) -> ToolDisclosureCapabilityPort {
+        ToolDisclosureCapabilityPort {
+            inner,
+            run_context,
+            result_writer,
+            promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
+            caps: DisclosureCaps {
+                max_tokens: u32::MAX,
+                max_tools: 5,
+                ctx_limit: None,
+            },
+            policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
+            retrieval,
+            turn_state: Mutex::new(None),
+            bridge_inputs: Mutex::new(BTreeMap::new()),
+            tool_call_target_inputs: Mutex::new(BTreeMap::new()),
+        }
+    }
+
     fn disclosure_port(
         inner: Arc<dyn LoopCapabilityPort>,
         run_context: LoopRunContext,
@@ -3566,6 +3783,7 @@ mod tests {
             // Unnarrowed — unit tests here exercise disclosure mechanics, not
             // profile narrowing (that's the integration tier).
             policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
+            retrieval: Arc::new(NativeBm25fToolRetrieval),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

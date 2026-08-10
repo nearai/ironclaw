@@ -31,6 +31,11 @@ and the loop tier's system-prompt content assets.
 - Progressive tool disclosure (`tool_disclosure*.rs`): catalog/selector, the
   deferring `LoopCapabilityPort` decorator, the `REBORN_TOOL_DISCLOSURE`
   switch.
+- Deferred-tool retrieval (`tool_search.rs`): `NativeBm25fToolRetrieval`, the
+  host-bundled bounded BM25F ranker and the default binding for the
+  `ToolRetrievalProvider` port in `ironclaw_loop_contracts`. It is the only
+  ranker this crate names; a deployment binds another through
+  `ToolDisclosureCapabilityDecorator::with_retrieval_provider`.
 - Prompt-context builders (`identity_context.rs`, `skill_context.rs`) and
   `skill_activation/` (the dissolved `ironclaw_first_party_extension_ports`
   crate, WS8).

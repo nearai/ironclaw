@@ -32,6 +32,12 @@ Almost purely trait + DTO, re-exported flat from `src/lib.rs`:
 - `RedactedCheckpointPayload` + `MAX_CHECKPOINT_STATE_PAYLOAD_BYTES`;
   loop-side error and safe-summary vocabulary (`AgentLoopHostError*`,
   `LoopSafeSummary`).
+- `ToolRetrievalProvider` / `ToolRetrievalIndex` (+ `ToolSearchOutcome`,
+  `ToolSearchQueryClass`) — the deferred-tool ranking port behind
+  `tool_search`, so a deployment can bind a retriever other than the
+  host-bundled BM25F one without any crate below `app` naming it. The module
+  docs carry the authorization, determinism, and confidentiality contracts an
+  implementation must hold.
 
 ## Depends on / consumed by
 
