@@ -137,9 +137,9 @@ pub use skill_activation::{
     SkillActivationObservedEvent, SkillActivationObserver, SkillActivationPlan,
     SkillActivationRequest, SkillActivationSelection, SkillActivationSelectionError,
     SkillActivationSelectionMode, SkillActivationSelectorConfig, SkillBundleAsset,
-    SkillBundleAssetReadError, SkillBundleAssetReader, SkillExecutionAdapter,
-    SkillExecutionAdapterError, SkillExecutionPlan, SkillInjectionMode,
-    skill_activation_capability,
+    SkillBundleAssetReadError, SkillBundleAssetReader, SkillBundleStager, SkillExecutionAdapter,
+    SkillExecutionAdapterError, SkillExecutionPlan, SkillInjectionMode, StagedBundleFile,
+    WorkspaceSkillBundleStager, skill_activation_capability,
 };
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{

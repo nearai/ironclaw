@@ -110,6 +110,41 @@ fn write_system_skill_fixture(
     Ok(())
 }
 
+/// Write a USER-scoped skill into the local-dev store, at the path the boot import migrates from.
+///
+/// Same layout `seed_user_skill_for_test` writes, extracted so it can run BEFORE the runtime is
+/// built. That ordering is the point: skills are read from the database tree, and the host-disk
+/// store is migrated into it at boot, so a user skill written afterwards is never seen by the run.
+fn write_user_skill_fixture(
+    storage_root: &std::path::Path,
+    tenant: &TenantId,
+    user: &ironclaw_host_api::ids::UserId,
+    name: &str,
+    description: &str,
+    prompt: &str,
+    installed: bool,
+) -> HarnessResult<()> {
+    let dir = storage_root
+        .join("tenants")
+        .join(tenant.as_str())
+        .join("users")
+        .join(user.as_str())
+        .join("skills")
+        .join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    if installed {
+        std::fs::write(
+            dir.join(".ironclaw-install.json"),
+            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -689,6 +724,8 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_credentials,
             skill_activation_tenant,
             system_skill_fixtures,
+            user_skill_fixtures,
+            skill_activation_user,
             outbound_target_service,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
@@ -720,6 +757,25 @@ impl HostRuntimeCapabilityHarness {
                 &fixture.description,
                 &fixture.prompt,
             )?;
+        }
+        if !user_skill_fixtures.is_empty() {
+            let tenant = skill_activation_tenant
+                .as_ref()
+                .ok_or("user skill fixtures require with_skill_activation_tenant")?;
+            let user = skill_activation_user
+                .as_ref()
+                .ok_or("user skill fixtures require with_skill_activation_user")?;
+            for fixture in &user_skill_fixtures {
+                write_user_skill_fixture(
+                    &storage_root,
+                    tenant,
+                    user,
+                    &fixture.name,
+                    &fixture.description,
+                    &fixture.prompt,
+                    fixture.installed,
+                )?;
+            }
         }
         let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {

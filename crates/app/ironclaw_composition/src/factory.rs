@@ -37,10 +37,7 @@ use crate::input::{
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
-use crate::runtime_mounts::{
-    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
-    workspace_mount_view,
-};
+use crate::runtime_mounts::{memory_mount_view, workspace_mount_view};
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
 #[cfg(test)]
@@ -209,7 +206,7 @@ pub(crate) use trigger_creation_assembly::LateBoundAgentTurnRuntime;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
-mod production_backend_assembly;
+pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
@@ -326,7 +323,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
-    pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,

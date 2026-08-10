@@ -1519,6 +1519,7 @@ registerPack("en", {
   "chat.failure.request": "The request failed before it could be sent.",
   "chat.failure.requestDetail": "The request failed: {detail}.",
   "chat.failure.runCategory": "The run failed: {detail}.",
+  "chat.failure.noProgress": "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
   "chat.failure.recoveryRequired": "The run is awaiting recovery — backend reported `recovery_required`.",
   "chat.failure.run": "The run failed before producing a reply.",
   "chat.failure.streamRetryable": "The chat stream hit a retryable error: {detail}.",

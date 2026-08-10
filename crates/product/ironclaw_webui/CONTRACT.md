@@ -275,8 +275,11 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   assistant item instead of replacing an earlier utterance from the same run.
   The SPA marks the prior phase as no longer streaming, retains it as
   intermediate text, and upgrades only the latest phase when the durable final
-  reply arrives. These phase items remain live-projection/session state rather
-  than durable transcript records.
+  reply arrives. If the run fails before a final reply, the SPA removes the
+  still-streaming unfinished phase and shows the typed, actionable run failure
+  instead, while preserving earlier completed phases; a late projection frame
+  cannot restore the unfinished draft. These phase items remain
+  live-projection/session state rather than durable transcript records.
 - Active assistant phases render accumulated Markdown through Streamdown's
   incomplete-Markdown-aware streaming mode. The product projection boundary
   publishes cumulative text at most once per 16 ms browser-paint interval,

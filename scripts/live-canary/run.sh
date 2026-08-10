@@ -251,7 +251,7 @@ main() {
       ;;
     public-smoke)
       export IRONCLAW_LIVE_TEST=1
-      run_cargo_test e2e_live "${SCENARIO:-zizmor_scan}"
+      run_cargo_test e2e_live "${SCENARIO:-}"
       run_cargo_test e2e_live_mission "mission_daily_news_digest_with_followup"
       ;;
     persona-rotating)
@@ -273,14 +273,8 @@ main() {
       # run_cargo_test e2e_live "drive_auth_gate_roundtrip"
       run_cargo_test e2e_live "drive_transparent_oauth_refresh"
       ;;
-    provider-matrix)
-      export IRONCLAW_LIVE_TEST=1
-      run_cargo_test "${PROVIDER_TEST_TARGET:-e2e_live}" "${SCENARIO:-zizmor_scan}"
-      ;;
     release-public-full)
       export IRONCLAW_LIVE_TEST=1
-      run_cargo_test e2e_live "zizmor_scan"
-      run_cargo_test e2e_live "zizmor_scan_v2"
       run_cargo_test e2e_live_mission ""
       run_cargo_test e2e_live_personas ""
       ;;
@@ -336,7 +330,7 @@ main() {
       ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, reborn-webui-v2-live-qa" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, reborn-webui-v2-live-qa" >&2
       return 2
       ;;
   esac

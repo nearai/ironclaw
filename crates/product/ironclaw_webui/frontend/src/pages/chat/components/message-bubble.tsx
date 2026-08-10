@@ -310,10 +310,18 @@ function MessageBubbleImpl({
     (role === CHAT_MESSAGE_ROLES.ASSISTANT &&
       !isOptimistic &&
       !isIntermediateAssistantPhase);
+  const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
+  const isError = role === CHAT_MESSAGE_ROLES.ERROR;
+  // A failed run's terminal error bubble carries its own `turnRunId` (see
+  // `appendRunFailureMessage` in useChatEvents.ts) so the same run-artifact
+  // export used for a completed assistant reply is also reachable from the
+  // error message itself — otherwise a failed run has no trace-capture path
+  // at all (#7369).
   const showArtifactAction = Boolean(
-    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
-    message.isFinalReply === true &&
-    !isOptimistic &&
+    (isError ||
+      (role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+        message.isFinalReply === true &&
+        !isOptimistic)) &&
     threadId &&
     turnRunId &&
     regressionArtifactExportEnabled,
@@ -325,8 +333,6 @@ function MessageBubbleImpl({
     threadId &&
     regressionArtifactExportEnabled,
   );
-  const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
-  const isError = role === CHAT_MESSAGE_ROLES.ERROR;
   const bubbleWidthClass = isUser
     ? "v2-chat-readable-width"
     : isNotice
@@ -430,7 +436,10 @@ function MessageBubbleImpl({
           ].join(" ")}
         >
           {timeLabel && (<time dateTime={timestamp} className="shrink-0 font-mono text-[11px] text-[var(--v2-text-muted)]">{timeLabel}</time>)}
-          {(showActions || showRetryAction) && (
+          {(showActions ||
+            showRetryAction ||
+            showArtifactAction ||
+            showThreadArtifactAction) && (
             <div className="flex shrink-0 items-center gap-1">
             {showActions && (
               <button

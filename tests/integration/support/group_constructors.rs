@@ -223,6 +223,19 @@ impl RebornIntegrationGroup {
         Self::builder().skill_activation_tools().await
     }
 
+    /// [`Self::skill_activation_tools`] with USER-scoped skills already in the store.
+    ///
+    /// Seeding after the group is built does not work: skills are read from the database tree and
+    /// the host-disk store is migrated into it at boot, so a later write is invisible to the run.
+    /// Each entry is `(name, description, prompt, installed)`.
+    pub async fn skill_activation_tools_with_user_skills(
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<Self> {
+        Self::builder()
+            .skill_activation_tools_with_user_skills(user_skills)
+            .await
+    }
+
     /// C-MULTIUSER: core built-in tools (memory/http/shell/…) with **per-actor
     /// capability scoping** (`with_run_owner_scoped_capability_dispatch`). Each
     /// thread dispatches its capabilities under its OWN run owner's
@@ -696,15 +709,28 @@ impl RebornIntegrationGroupBuilder {
     /// pre-seeds the system fixtures before runtime construction so the warmed
     /// system-skill descriptor cache sees them.
     pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        self.skill_activation_tools_with_user_skills(&[]).await
+    }
+
+    /// See [`RebornIntegrationGroup::skill_activation_tools_with_user_skills`].
+    pub async fn skill_activation_tools_with_user_skills(
+        self,
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
         // above) rather than a separately hardcoded literal, so the E-SKILL
         // skill context source is built for the same tenant the turn runs
         // under — see `HostRuntimeCapabilityHarness::skill_activation_tools`.
-        let host_runtime = super::super::harness::profiles::skill::skill_activation_tools(
-            &base.canonical_binding.tenant_id,
-        )
-        .await?;
+        // Both ids come from the group's ALREADY-resolved binding, so the fixtures land under the
+        // same (tenant, actor) the turn runs as -- the only pair whose `/skills` mount it reads.
+        let host_runtime =
+            super::super::harness::profiles::skill::skill_activation_tools_with_user_skills(
+                &base.canonical_binding.tenant_id,
+                base.canonical_binding.actor_user_id.clone(),
+                user_skills,
+            )
+            .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
