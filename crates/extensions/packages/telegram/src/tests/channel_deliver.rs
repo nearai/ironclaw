@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome, ReactionAction,
+    RunReaction,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
@@ -114,6 +115,90 @@ async fn deliver_retract_part_deletes_the_referenced_message() {
         serde_json::from_slice(requests[0].body.as_deref().unwrap_or_default()).unwrap();
     assert_eq!(body["chat_id"], "8675309");
     assert_eq!(body["message_id"], 42);
+}
+
+#[tokio::test]
+async fn deliver_react_add_sets_the_mapped_reaction_emoji() {
+    let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true,"result":true}"#)]);
+    let report = TelegramChannelAdapter::default()
+        .deliver(
+            envelope(
+                vec![OutboundPart::React {
+                    vendor_message_ref: "42".to_string(),
+                    reaction: RunReaction::Working,
+                    action: ReactionAction::Add,
+                }],
+                None,
+            ),
+            &egress,
+        )
+        .await
+        .expect("deliver drives");
+
+    assert!(matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }));
+    let requests = egress.requests.lock().unwrap();
+    assert_eq!(
+        requests[0].url,
+        "https://api.telegram.org/bot{telegram_bot_token}/setMessageReaction"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(requests[0].body.as_deref().unwrap_or_default()).unwrap();
+    assert_eq!(body["chat_id"], "8675309");
+    assert_eq!(body["message_id"], 42);
+    assert_eq!(
+        body["reaction"],
+        serde_json::json!([{ "type": "emoji", "emoji": "👀" }])
+    );
+}
+
+#[tokio::test]
+async fn deliver_react_remove_clears_the_reaction() {
+    let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true,"result":true}"#)]);
+    let report = TelegramChannelAdapter::default()
+        .deliver(
+            envelope(
+                vec![OutboundPart::React {
+                    vendor_message_ref: "42".to_string(),
+                    reaction: RunReaction::Working,
+                    action: ReactionAction::Remove,
+                }],
+                None,
+            ),
+            &egress,
+        )
+        .await
+        .expect("deliver drives");
+
+    assert!(matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }));
+    let requests = egress.requests.lock().unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(requests[0].body.as_deref().unwrap_or_default()).unwrap();
+    assert_eq!(body["reaction"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn deliver_react_with_non_numeric_ref_is_permanent_without_egress() {
+    let egress = ScriptedEgress::new(Vec::new());
+    let report = TelegramChannelAdapter::default()
+        .deliver(
+            envelope(
+                vec![OutboundPart::React {
+                    vendor_message_ref: "not-a-message-id".to_string(),
+                    reaction: RunReaction::Done,
+                    action: ReactionAction::Add,
+                }],
+                None,
+            ),
+            &egress,
+        )
+        .await
+        .expect("deliver drives");
+
+    assert!(matches!(
+        &report.parts[0],
+        PartDeliveryOutcome::Permanent { .. }
+    ));
+    assert!(egress.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

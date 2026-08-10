@@ -110,6 +110,9 @@ impl ChannelAdapter for WebPushChannelAdapter {
                 OutboundPart::Retract { .. } => {
                     part_supported.push(Err("retraction is not supported by browser push"));
                 }
+                OutboundPart::React { .. } => {
+                    part_supported.push(Err("reactions are not supported by browser push"));
+                }
             }
         }
 

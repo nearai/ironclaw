@@ -24,7 +24,7 @@ use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, ProductTriggerReason, VerifiedInbound,
+    PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -299,6 +299,24 @@ impl RecordingChannelAdapter {
                     OutboundPart::Retract { vendor_message_ref } => {
                         Some(vendor_message_ref.clone())
                     }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// The ordered run-lifecycle reactions the adapter was asked to apply, as
+    /// `(target_ref, reaction, action)`.
+    fn reactions(&self) -> Vec<(String, RunReaction, ReactionAction)> {
+        self.envelopes()
+            .iter()
+            .flat_map(|envelope| {
+                envelope.parts.iter().filter_map(|part| match part {
+                    OutboundPart::React {
+                        vendor_message_ref,
+                        reaction,
+                        action,
+                    } => Some((vendor_message_ref.clone(), *reaction, *action)),
                     _ => None,
                 })
             })
@@ -869,6 +887,8 @@ fn build_harness_with_commands(
             max_wait,
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         commands,
         prefix,
@@ -1371,13 +1391,13 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         .await;
 
     let texts = harness.adapter.texts();
-    assert_eq!(
-        texts,
-        vec![
-            "Ironclaw is thinking...".to_string(),
-            "done thinking".to_string()
-        ]
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert!(
+        !texts[0].is_empty() && texts[0] != "done thinking",
+        "a distinct working indicator precedes the final reply, got {:?}",
+        texts[0]
     );
+    assert_eq!(texts[1], "done thinking");
     // The working indicator's vendor ref came back through the coordinator
     // outcome and was retracted after the final reply (Cleanup intent).
     let retracted = harness.adapter.retracted_refs();
@@ -1396,9 +1416,260 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
     );
 }
 
+/// A run whose triggering message has a vendor ref is marked 👀 while working
+/// and swapped to ✅ when it completes, so a busy channel shows at a glance
+/// which ping is being handled.
+#[tokio::test]
+async fn observer_reacts_eyes_while_working_then_check_when_done() {
+    let harness = build_harness(
+        vec![
+            // guard, then Running (posts indicator + 👀), then Completed (✅).
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "done thinking").await;
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-react",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.reactions(),
+        vec![
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Add
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Remove
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Done,
+                ReactionAction::Add
+            ),
+        ],
+        "the triggering message is 👀 while working and ✅ when done"
+    );
+}
+
+/// A run that reaches a terminal *failed* state no longer goes silent: the
+/// working indicator is retracted and replaced with a failure notice, and the
+/// triggering message is marked ❌.
+#[tokio::test]
+async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction() {
+    let harness = build_harness(
+        vec![
+            // guard, then Running (indicator + 👀), then a hard failure.
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Failed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    // A failed run has no finalized assistant message.
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-fail",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    // Working indicator, then a distinct, non-empty failure notice — not silence.
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then failure notice");
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[0],
+        "the failure notice is distinct from the working indicator, got {:?}",
+        texts[1]
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        1,
+        "the stuck working indicator is retracted"
+    );
+    // 👀 → ❌ on the triggering message.
+    assert_eq!(
+        harness.adapter.reactions(),
+        vec![
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Add
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Remove
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Failed,
+                ReactionAction::Add
+            ),
+        ],
+        "a failed run swaps 👀 for ❌"
+    );
+}
+
+/// The full lifecycle: 👀 working → ⚠️ when parked on an approval → 👀 again on
+/// resume → ✅ when it finishes.
+#[tokio::test]
+async fn observer_marks_needs_input_while_blocked_then_swaps_back_and_completes() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None), // guard
+            scripted_state(TurnStatus::Running, None), // working + 👀
+            scripted_state(TurnStatus::BlockedApproval, Some("gate-1")), // ⚠️ + prompt
+            scripted_state(TurnStatus::Running, None), // resume → 👀
+            scripted_state(TurnStatus::Completed, None), // ✅
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "approved and done").await;
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-needs-input",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let w = RunReaction::Working;
+    let ni = RunReaction::NeedsInput;
+    let add = ReactionAction::Add;
+    let rm = ReactionAction::Remove;
+    assert_eq!(
+        harness.adapter.reactions(),
+        vec![
+            ("ts-source".to_string(), w, add), // 👀 working
+            ("ts-source".to_string(), w, rm),  // → ⚠️
+            ("ts-source".to_string(), ni, add),
+            ("ts-source".to_string(), ni, rm), // resume → 👀
+            ("ts-source".to_string(), w, add),
+            ("ts-source".to_string(), w, rm), // → ✅
+            ("ts-source".to_string(), RunReaction::Done, add),
+        ],
+        "reaction tracks working → needs-input → working → done"
+    );
+}
+
+/// A long-running run refreshes its working indicator in place with escalating
+/// "still working" nudges (retract + repost) rather than a single stale line.
+#[tokio::test(start_paused = true)]
+async fn observer_refreshes_working_indicator_with_escalating_nudges_on_a_long_run() {
+    let settings = RunDeliverySettings {
+        poll_interval: Duration::from_millis(1),
+        first_nudge_after: Duration::from_millis(1),
+        renudge_interval: Duration::from_millis(1),
+        max_wait: Duration::from_secs(60),
+        ..RunDeliverySettings::default()
+    };
+    // guard + several Running polls (nudge on each) + Completed.
+    let mut states = vec![scripted_state(TurnStatus::Running, None)];
+    states.extend(std::iter::repeat_with(|| scripted_state(TurnStatus::Running, None)).take(5));
+    states.push(scripted_state(TurnStatus::Completed, None));
+    let harness = build_harness_with_settings(states, false, None, settings, &["status"], None);
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "slow done").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-nudge"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert!(
+        texts.len() >= 3,
+        "initial working notice + at least one nudge + final reply, got {texts:?}"
+    );
+    assert_eq!(
+        texts.last().map(String::as_str),
+        Some("slow done"),
+        "the final reply is delivered last"
+    );
+    let (notices, reply) = texts.split_at(texts.len() - 1);
+    assert!(
+        notices.iter().all(|t| !t.is_empty()),
+        "every working/nudge notice is non-empty, got {notices:?}"
+    );
+    assert_eq!(reply, ["slow done".to_string()]);
+    // Each nudge refreshes in place (retracts the prior indicator); the final
+    // reply retracts the last one.
+    assert!(
+        harness.adapter.retracted_refs().len() >= 2,
+        "nudges refresh the indicator in place, got {:?}",
+        harness.adapter.retracted_refs()
+    );
+    // The escalated nudges are worded differently from the initial "on it" line.
+    let distinct: std::collections::HashSet<&str> = notices.iter().map(String::as_str).collect();
+    assert!(
+        distinct.len() >= 2,
+        "the nudge copy escalates from the initial line, got {distinct:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cutoff() {
-    let settings = RunDeliverySettings::default();
+    // Disable the "still working" nudges so this longevity test asserts exactly
+    // the working indicator + final reply, not the nudge cadence.
+    let settings = RunDeliverySettings {
+        first_nudge_after: Duration::from_secs(3600),
+        renudge_interval: Duration::from_secs(3600),
+        ..RunDeliverySettings::default()
+    };
     assert!(
         settings.max_wait > Duration::from_secs(2 * 60),
         "the live channel watcher must outlive a healthy run that exceeds the old two-minute cutoff"
@@ -1428,13 +1699,14 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
         tokio::time::Instant::now().duration_since(started) > Duration::from_secs(2 * 60),
         "the scripted run must cross the previous delivery deadline"
     );
-    assert_eq!(
-        harness.adapter.texts(),
-        vec![
-            "Ironclaw is thinking...".to_string(),
-            "slow run finished".to_string()
-        ]
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert!(
+        !texts[0].is_empty() && texts[0] != "slow run finished",
+        "a distinct working indicator precedes the final reply, got {:?}",
+        texts[0]
     );
+    assert_eq!(texts[1], "slow run finished");
     assert_eq!(harness.adapter.retracted_refs().len(), 1);
 }
 
@@ -1467,7 +1739,11 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
     let texts = harness.adapter.texts();
     assert_eq!(texts.len(), 3, "auth prompt + working + final reply");
     assert!(texts[0].contains("Authentication required"));
-    assert_eq!(texts[1], "Ironclaw is thinking...");
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[0] && texts[1] != texts[2],
+        "a distinct working indicator sits between the auth prompt and the reply, got {:?}",
+        texts[1]
+    );
     assert_eq!(texts[2], "authenticated and finished");
     assert_eq!(
         harness.adapter.retracted_refs(),
@@ -2430,6 +2706,8 @@ fn build_triggered_harness_with_turns_catalog(
             max_wait: Duration::from_millis(60),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         Arc::clone(&codecs)
