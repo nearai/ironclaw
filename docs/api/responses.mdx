@@ -159,7 +159,7 @@ print(resp.output_text)
 | Field | Required | Description |
 |-------|----------|-------------|
 | `input` | yes | A string, or an array of `message` / `function_call_output` items. See [External tools](#external-tools) for the array form. |
-| `model` | yes | Any well-formed model name: non-empty, no surrounding whitespace, no control characters, at most 256 bytes. Carried through as a server-side routing hint and echoed back in the response; provider and model selection is configured via settings. `"default"` is the conventional placeholder. |
+| `model` | yes | Any well-formed model name: non-empty, no surrounding whitespace, no control characters, at most 256 bytes. Carried through as a server-side routing hint and echoed back in the create response; retrieval and cancel responses report the server placeholder `"reborn"` instead of the submitted name. Provider and model selection is configured via settings. `"default"` is the conventional placeholder. |
 | `instructions` | no | System/developer instructions. Injected ahead of `input` as an `<instructions>` block and stored as part of the persisted user message. See [Per-request instructions](#per-request-instructions) for the IronClaw-specific replay caveat. |
 | `previous_response_id` | no | The `id` from a prior response. Resumes the same thread; see [Session continuity](#session-continuity). |
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
@@ -329,19 +329,11 @@ The resume request must satisfy the bridge:
 - A `function_call_output` item without a live external-tool gate on this thread returns `400`.
 - A `function_call_output` item whose `call_id` does not match the pending gate returns `400`.
 - A `function_call_output` item with an empty `call_id` or missing `output` returns `400`.
+- A resume request that omits `previous_response_id` returns `400`.
+- A resume `input` array must contain **only** `function_call_output` items — mixing in a `message` item returns `400`.
 - If the thread is paused on an unrelated gate (OAuth, approval, pairing), resolve that first.
 
-You can interleave a fresh user message with the tool output by adding a `message` item. Both will be visible to the agent:
-
-```json
-{
-  "model": "default",
-  "input": [
-    { "type": "function_call_output", "call_id": "...", "output": "..." },
-    { "type": "message", "role": "user", "content": "Also, what about tomorrow?" }
-  ]
-}
-```
+To ask a follow-up question alongside a tool result, complete the resume first, then send the new `message` as its own request with `previous_response_id` pointing at the resumed response.
 
 ### Multi-call batching
 
@@ -552,7 +544,7 @@ if (call) {
 - **Tool batching**: one external-tool call per round trip. The engine resumes the next call on the next turn.
 - **Approvals and auth gates**: not surfaced over the Responses API. Resolve them via the web UI before retrying.
 - **`tool_choice`**: accepted and ignored — there is no per-request tool-choice surface. `max_output_tokens` and other unlisted OpenAI fields are likewise accepted and ignored.
-- **`model`**: required, any well-formed name (≤ 256 bytes). It is a routing hint echoed back in the response; provider and model selection is server-side via settings.
+- **`model`**: required, any well-formed name (≤ 256 bytes). It is a routing hint echoed back in the create response; `GET` and cancel responses report the server placeholder `"reborn"`. Provider and model selection is server-side via settings.
 - **Token usage on retrieval**: `GET /api/v1/responses/{id}` reads `usage` best-effort from persisted run state (token totals plus USD cost); it can be zero when the run reported no usage.
 
 ---

@@ -147,7 +147,7 @@ CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md"
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
 # The docs tree — published Mintlify pages and the zh/ locale mirror — plus
-# the living contract corpus under docs/reborn/contracts/. The scan is
+# the living corpora re-included from the fenced trees below. The scan is
 # against the git tree, not the publication set, so `.mintignore` plays no
 # part here. The fenced historical archives are excluded as *classes*, not
 # per-file: dated plans, ADRs, research notes, superpowers specs, and
@@ -155,10 +155,24 @@ SKILLS_PREFIX = ".claude/skills/"
 # (measured 2026-08-07: 705 of 709 dangling docs references sat in
 # docs/internal/ and the non-contract parts of docs/reborn/) — forcing them
 # to track today's tree would either rewrite history or drown KNOWN_MISSING,
-# and both destroy the signal this gate exists for.
+# and both destroy the signal this gate exists for. Re-included prefixes are
+# the *living* exceptions inside those classes — pages the tree still cites
+# as currently authoritative: the contract corpus, the extension-runtime
+# spec pages (overview.md is named canonical by contracts/extensions.md;
+# standard-operations.md is the live vocabulary the extension-surfaces skill
+# routes to — their design-era siblings checklist.md and implementation.md
+# stay archival), and the guidance-conventions page that canonically
+# describes this gate. Each prefix must match at least one tracked page or
+# discovery refuses: a silent zero-match (the corpus moved) is the gate
+# going dark on its best-signal files.
 DOCS_PREFIX = "docs/"
 DOCS_EXCLUDED_PREFIXES = ("docs/internal/", "docs/reborn/")
-DOCS_REINCLUDED_PREFIXES = ("docs/reborn/contracts/",)
+DOCS_REINCLUDED_PREFIXES = (
+    "docs/reborn/contracts/",
+    "docs/reborn/extension-runtime/overview.md",
+    "docs/reborn/extension-runtime/standard-operations.md",
+    "docs/reborn/guidance-conventions.md",
+)
 
 CORRECTION_GLYPH = "✎"
 SUPPRESS_MARKER = "check-guidance: path-ok"
@@ -209,7 +223,7 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # globs or the extractor broke — not that the repository stopped documenting
 # itself. Refuse rather than report an empty scan as clean. (Measured
 # 2026-08-07 on the shipped tree, after the docs/ surface joined the scan:
-# 364 guidance files, ~2276 path references, 38 rule globs, 65
+# 364 guidance files, ~2276 path references, 57 rule globs, 65
 # AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json` and re-date this
 # comment when the numbers move materially.) Each floor sits roughly half of
 # its measured value: low enough that legitimate consolidation never trips
@@ -446,6 +460,15 @@ def discover_guidance(tree: Tree) -> list[str]:
             )
         ):
             docs.append(path)
+    for prefix in DOCS_REINCLUDED_PREFIXES:
+        if not any(path.startswith(prefix) for path in docs):
+            raise GuidanceError(
+                f"re-included docs prefix {prefix!r} matched no tracked "
+                "pages — the corpus moved or was renamed, and leaving the "
+                "prefix stale would silently drop it from the scan. Update "
+                "DOCS_REINCLUDED_PREFIXES (and DOCS_EXCLUDED_PREFIXES) to "
+                "the new location."
+            )
     return docs
 
 
@@ -527,6 +550,13 @@ def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...
             f"{doc}: unterminated ``` fence — the extractor cannot tell prose "
             "from code, so it refuses rather than scanning the wrong half."
         )
+    if pending_close is not None:
+        opener = next(o for o, c in _COMMENT_SYNTAXES if c == pending_close)
+        raise GuidanceError(
+            f"{doc}: unterminated {opener} comment — every line after it "
+            "would be silently un-scanned, the same fail-open shape the "
+            "fence refusal above exists to prevent."
+        )
     return lines
 
 
@@ -593,8 +623,14 @@ def extract_references(
     # Under docs/, markdown link targets are Mintlify site routes
     # (extensionless page paths, `/using/cli` site-absolute forms) — a
     # different namespace than the tracked tree, so the link extractor is off
-    # there by design. Backticked repo paths remain checked.
-    include_links = not doc.startswith(DOCS_PREFIX)
+    # there by design. Backticked repo paths remain checked. The re-included
+    # contract corpus is the exception: it is fenced out of publication
+    # (never a site route), and its relative links (`](kernel-boundary.md)`)
+    # are genuine repo-path claims — renaming one contract file would leave
+    # every cross-reference dangling with the gate green.
+    include_links = not doc.startswith(DOCS_PREFIX) or doc.startswith(
+        DOCS_REINCLUDED_PREFIXES
+    )
     previous_spans: list[str] = []
     for number, line, markers in _reference_lines(text, doc):
         inline_matches = list(_INLINE_CODE.finditer(line))
