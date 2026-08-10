@@ -66,20 +66,16 @@ pub struct ToolDisclosureCapabilityDecorator {
 }
 
 impl ToolDisclosureCapabilityDecorator {
-    pub fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
+    pub fn new(
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        mode: crate::ToolDisclosureMode,
+    ) -> Self {
         Self {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
-            mode: crate::ToolDisclosureMode::Bridged,
+            mode,
         }
-    }
-
-    /// Select one of the benchmarkable disclosure arms. Production uses the
-    /// default `Namespaces` arm; the other variants are explicit controls.
-    pub fn with_mode(mut self, mode: crate::ToolDisclosureMode) -> Self {
-        self.mode = mode;
-        self
     }
 
     /// Wrap one run's capability port with disclosure using the exact
@@ -182,6 +178,42 @@ enum BridgeKind {
     Call,
 }
 
+struct BoundedCountingWriter {
+    bytes_written: usize,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedCountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(next) = self.bytes_written.checked_add(buffer.len()) else {
+            return Err(std::io::Error::other(
+                "serialized schema exceeds byte limit",
+            ));
+        };
+        if next > self.limit {
+            return Err(std::io::Error::other(
+                "serialized schema exceeds byte limit",
+            ));
+        }
+        self.bytes_written = next;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_len_within(value: &Value, limit: usize) -> Option<usize> {
+    let mut writer = BoundedCountingWriter {
+        bytes_written: 0,
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value)
+        .ok()
+        .map(|()| writer.bytes_written)
+}
+
 fn bounded_search_results(
     results: Vec<CatalogSearchResult>,
     total_signature_bytes: usize,
@@ -191,11 +223,10 @@ fn bounded_search_results(
     results
         .into_iter()
         .map(|result| {
-            let schema_bytes = serde_json::to_vec(&result.parameters).ok().map(|v| v.len());
-            let schema_complete = schema_bytes.is_some_and(|schema_bytes| {
-                schema_bytes <= per_signature_bytes && schema_bytes <= remaining_signature_bytes
-            });
-            if let Some(schema_bytes) = schema_bytes.filter(|_| schema_complete) {
+            let limit = per_signature_bytes.min(remaining_signature_bytes);
+            let schema_bytes = serialized_len_within(&result.parameters, limit);
+            let schema_complete = schema_bytes.is_some();
+            if let Some(schema_bytes) = schema_bytes {
                 remaining_signature_bytes = remaining_signature_bytes.saturating_sub(schema_bytes);
             }
             let mut output = json!({
@@ -3784,6 +3815,17 @@ mod tests {
             bounded_search_results(vec![result], schema_bytes.saturating_sub(1), schema_bytes);
         assert_eq!(overflow[0]["schema_complete"], false);
         assert!(overflow[0].get("parameters").is_none());
+    }
+
+    #[test]
+    fn bounded_schema_measurement_stops_at_the_limit() {
+        let schema = json!({"value": "x".repeat(1_000_000)});
+
+        assert_eq!(
+            serialized_len_within(&json!({"type": "object"}), 64),
+            Some(17)
+        );
+        assert_eq!(serialized_len_within(&schema, 8 * 1024), None);
     }
 
     #[test]

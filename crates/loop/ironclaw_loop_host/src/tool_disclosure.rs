@@ -16,6 +16,9 @@ use serde_json::{Map, Value, json};
 
 use crate::ToolDisclosureMode;
 
+const EMPTY_CATALOG_DESCRIPTION: &str = include_str!("../prompts/tool_search_empty_catalog.md");
+const NAMESPACE_CATALOG_HEADER: &str = include_str!("../prompts/tool_search_namespace_header.md");
+
 /// Canonical core tool names from the progressive-disclosure policy.
 ///
 /// Builtin provider names may be encoded from capability ids by the host
@@ -232,9 +235,10 @@ impl CapabilityCatalog {
             .collect()
     }
 
-    /// Authorized discoverable tools grouped by their typed extension namespace.
-    /// Core and pinned tools are omitted because their full definitions are
-    /// already directly visible. Both namespace and tool order are stable.
+    /// Authorized discoverable tools grouped by model-facing semantic namespace.
+    /// Extension tools use their extension id; first-party tools use intent groups.
+    /// Core and pinned tools are omitted because their full definitions are already
+    /// directly visible. Both namespace and tool order are stable.
     pub(crate) fn discoverable_namespaces(
         &self,
         policy: &CapabilitySurfacePolicy,
@@ -630,8 +634,7 @@ fn catalog_index_tool_search_description_for_mode(
     }
     let namespaces = catalog.discoverable_namespaces(policy);
     if namespaces.is_empty() {
-        return "Search additional tools that are loaded on demand. Results include complete parameter schemas when they fit the host budget; use tool_describe only when schema_complete is false or a result needs inspection. Tools already listed are available and do not need to be searched."
-            .to_string();
+        return EMPTY_CATALOG_DESCRIPTION.trim_end().to_string();
     }
     // Stay well under MODEL_SAFE_SUMMARY_MAX_BYTES (4096); the reserve leaves room
     // for the "…and N more" note plus headroom so we never trip the cap.
@@ -641,10 +644,10 @@ fn catalog_index_tool_search_description_for_mode(
         .iter()
         .map(|summary| summary.tool_names.len())
         .sum::<usize>();
-    let mut description = format!(
-        "These {total} tools are available on demand across {} authorized namespaces. Search results include complete schemas when schema_complete=true; otherwise use tool_describe. Never report a capability unavailable before searching. Namespaces:",
-        namespaces.len()
-    );
+    let mut description = NAMESPACE_CATALOG_HEADER
+        .trim_end()
+        .replace("{{total_tools}}", &total.to_string())
+        .replace("{{namespace_count}}", &namespaces.len().to_string());
     for summary in &namespaces {
         let item = format!("\n- {} ({})", summary.namespace, summary.tool_names.len());
         if description.len() + item.len() + TAIL_NOTE_RESERVE > BUDGET_BYTES {
@@ -2028,8 +2031,8 @@ mod tests {
     fn tool_search_description_summarizes_namespace_and_representative_tool() {
         // Structural-awareness regression: a model handed a coding-heavy core on a
         // non-coding task never reaches for integrations it cannot see. The
-        // tool_search description must enumerate every discoverable tool by exact
-        // name so the model knows they exist and can tool_call them, rather than
+        // tool_search description must expose semantic namespace counts plus fair
+        // representative names so the model can discover integrations without
         // defaulting to the advertised builtins and giving up. Names only — the
         // index is a capability safe-description and arbitrary tool descriptions
         // both blow its byte budget and can carry denylisted content.
@@ -2131,6 +2134,27 @@ mod tests {
             description.contains("more — use tool_search"),
             "an overflowing catalog must point the model at query for the tail: {description}"
         );
+    }
+
+    #[test]
+    fn namespace_preview_reports_namespace_cardinality_overflow_within_safe_cap() {
+        let definitions = (0..180)
+            .map(|index| {
+                let namespace = format!("namespace-{index:03}-{}", "x".repeat(40));
+                fixture_tool_with_capability_id(
+                    format!("{namespace}.action"),
+                    format!("{namespace}__action"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+
+        let description =
+            catalog_index_tool_search_description(&catalog, &CapabilitySurfacePolicy::allow_all());
+
+        assert!(description.len() <= 4096);
+        assert!(description.contains("additional authorized namespaces exist"));
+        assert!(!description.contains("Representative tools"));
     }
 
     #[test]

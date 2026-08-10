@@ -1,0 +1,1 @@
+Search additional tools that are loaded on demand. Results include complete parameter schemas when they fit the host budget; use tool_describe only when schema_complete is false or a result needs inspection. Tools already listed are available and do not need to be searched.

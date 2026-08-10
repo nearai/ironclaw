@@ -3,7 +3,7 @@
 //! Proves `.with_tool_disclosure_bridged()` reaches production's
 //! `ToolDisclosureCapabilityDecorator` wiring
 //! (`ironclaw_turn_runner::runtime::build_default_planned_runtime_inner`, gated on
-//! `DefaultPlannedRuntimeConfig::tool_disclosure.is_bridged()`) — the same
+//! `DefaultPlannedRuntimeConfig::tool_disclosure.is_enabled()`) — the same
 //! lower-level factory this harness's group assembly already calls.
 //!
 //! Two load-bearing mechanics, both empirically verified (NOT what the
@@ -313,6 +313,28 @@ async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
         .assert_model_tools_excludes("github__search_code")
         .await
         .expect("namespace-summary production default does not expose opt-in profile pins");
+}
+
+#[tokio::test]
+async fn bridged_mode_exposes_authorized_profile_pin_for_matching_profile() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("bridged profile-pin harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    harness
+        .assert_model_tools_contains("github__search_code")
+        .await
+        .expect("matching interactive profile exposes its authorized pin");
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("an unrelated deferred GitHub tool remains deferred");
 }
 
 #[tokio::test]

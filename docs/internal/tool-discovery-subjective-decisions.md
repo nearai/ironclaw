@@ -315,3 +315,54 @@ failure was invalid.
 **Alternative considered:** Create `report.csv` in the temporary workspace.
 Rejected because inline content keeps the task self-contained across server
 homes and avoids adding filesystem setup as another benchmark dependency.
+
+## D17 — Score end-to-end execution, not tool-name presence
+
+**Decision:** A benchmark observation completes only when the expected tools are
+called in order with the task's required arguments. No-match and denied-tool
+cases inspect every model-attempted call in the trace, including wrapped
+`tool_call` targets. Latency starts at the task request and stops at the first
+correct tool call, not the first arbitrary call.
+
+**Why:** Tool-name presence can award success to an invocation that uploads the
+wrong content, reads instead of creates, or performs a workflow backwards. A
+hard-coded zero leakage counter cannot validate the authorization claim. These
+are task-completion and safety properties, not retrieval-only metrics.
+
+**Alternative considered:** Keep name-only scoring and manually inspect failed
+traces. Rejected because it produces precise-looking aggregate completion and
+leakage numbers that the harness did not actually measure.
+
+## D18 — Benchmark namespaces must carry the semantics under test
+
+**Decision:** The synthetic catalog uses 20 stable semantic MCP integration IDs
+(`github`, `gmail`, `google-calendar`, and so on). Fixed relevance-corpus tools
+stay with their semantic owner; generated distractors fill the smallest bucket
+deterministically. Completed observations are appended and synced individually
+and resume by stable observation ID.
+
+**Why:** Randomly round-robining real tools through anonymous packages measures
+fair allocation across arbitrary buckets, not whether namespace summaries help
+the model route to a relevant integration. Per-group buffering also discarded
+valid observations when a later repetition was interrupted.
+
+**Alternative considered:** Keep anonymous packages because they are perfectly
+balanced. Rejected because balance cannot compensate for invalid namespace
+meaning. The fixed corpus may create a small size imbalance at low tool counts;
+generated tools still distribute fairly without moving relevant tools away from
+their owner.
+
+## D19 — Keep profile pins typed and explicit at construction
+
+**Decision:** Parse profile-pin configuration into validated
+`CapabilitySurfaceProfileId` keys, preserve parse-error causes in diagnostics,
+and require every disclosure decorator constructor to receive its mode.
+
+**Why:** Raw string keys postpone identity validation, while a constructor that
+silently selects `bridged` can activate pins when a caller forgets a follow-up
+builder call. The explicit mode makes the context-cost decision visible at every
+construction site.
+
+**Alternative considered:** Retain the fluent `.with_mode(...)` override and
+document the default. Rejected because the unsafe intermediate value remains a
+valid production object and documentation cannot enforce the call sequence.

@@ -962,7 +962,7 @@ impl RebornIntegrationGroupBuilder {
         let restart_builder = self.clone();
         // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
         // if the override is set without Bridged mode also selected.
-        if self.narrowed_bridged_policy.is_some() && !self.tool_disclosure.is_bridged() {
+        if self.narrowed_bridged_policy.is_some() && !self.tool_disclosure.is_enabled() {
             return Err(
                 "with_narrowed_capability_surface_policy_for_bridged_test() was set but \
                  tool_disclosure is Off — the override only applies to \
@@ -1017,7 +1017,7 @@ impl RebornIntegrationGroupBuilder {
         // disclosure's synthetic bridge surface, so this is production parity,
         // not a bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure.is_bridged() {
+            if self.tool_disclosure.is_enabled() {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     policy: self
                         .narrowed_bridged_policy
@@ -1236,8 +1236,9 @@ impl RebornIntegrationGroupBuilder {
                 // Enabler (b): test groups are hermetically pinned and never
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
-                tool_disclosure_profile_pins: std::collections::BTreeMap::from([(
-                    "interactive_tools".to_string(),
+                tool_disclosure_profile_pins: std::collections::HashMap::from([(
+                    ironclaw_loop_contracts::CapabilitySurfaceProfileId::new("interactive_tools")
+                        .expect("valid integration capability profile id"),
                     vec![
                         ironclaw_host_api::ids::CapabilityId::new("github.search_code")
                             .expect("valid integration profile pin"),

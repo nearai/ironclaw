@@ -1,13 +1,14 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
-    AgentLoopDriverError, AgentLoopHostError, CommunicationContextProvider,
-    InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant,
-    LoopModelPolicyGuard, LoopRunContext, MemoryPromptContextService, RunProfileResolver,
+    AgentLoopDriverError, AgentLoopHostError, CapabilitySurfaceProfileId,
+    CommunicationContextProvider, InstructionSafetyContext, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+    MemoryPromptContextService, RunProfileResolver,
 };
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
@@ -115,7 +116,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub tool_disclosure: ToolDisclosureMode,
     /// Profile-owned visibility preferences, keyed by capability-surface
     /// profile id. Values are canonical capability ids and never grant access.
-    pub tool_disclosure_profile_pins: BTreeMap<String, Vec<CapabilityId>>,
+    pub tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Override for the default family's model availability-retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
@@ -144,33 +145,67 @@ impl Default for DefaultPlannedRuntimeConfig {
 
 pub const REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV: &str = "REBORN_TOOL_DISCLOSURE_PROFILE_PINS";
 
-fn tool_disclosure_profile_pins_from_env() -> BTreeMap<String, Vec<CapabilityId>> {
+fn tool_disclosure_profile_pins_from_env() -> HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>
+{
     let Ok(raw) = std::env::var(REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV) else {
-        return BTreeMap::new();
+        return HashMap::new();
     };
-    let Ok(resolved) = parse_tool_disclosure_profile_pins(&raw) else {
-        tracing::debug!(
-            target: "ironclaw::reborn::runtime",
-            env = REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
-            "tool-disclosure profile pins are invalid; ignoring all pins"
-        );
-        return BTreeMap::new();
-    };
-    resolved
+    match parse_tool_disclosure_profile_pins(&raw) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::runtime",
+                env = REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
+                reason = %error,
+                "tool-disclosure profile pins are invalid; ignoring all pins"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ToolDisclosureProfilePinsParseError {
+    #[error("profile-pin JSON is invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("profile id {profile:?} is invalid: {reason}")]
+    Profile { profile: String, reason: String },
+    #[error("capability id {capability:?} for profile {profile:?} is invalid: {reason}")]
+    Capability {
+        profile: String,
+        capability: String,
+        reason: String,
+    },
 }
 
 fn parse_tool_disclosure_profile_pins(
     raw: &str,
-) -> Result<BTreeMap<String, Vec<CapabilityId>>, ()> {
-    let parsed = serde_json::from_str::<BTreeMap<String, Vec<String>>>(raw).map_err(|_error| ())?;
-    let mut resolved = BTreeMap::new();
+) -> Result<
+    HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
+    ToolDisclosureProfilePinsParseError,
+> {
+    let parsed = serde_json::from_str::<HashMap<String, Vec<String>>>(raw)?;
+    let mut resolved = HashMap::new();
     for (profile, pins) in parsed {
+        let profile_id = CapabilitySurfaceProfileId::new(profile.clone()).map_err(|reason| {
+            ToolDisclosureProfilePinsParseError::Profile {
+                profile: profile.clone(),
+                reason,
+            }
+        })?;
         let pins = pins
             .into_iter()
-            .map(CapabilityId::new)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_error| ())?;
-        resolved.insert(profile, pins);
+            .map(|capability| {
+                CapabilityId::new(capability.clone()).map_err(|error| {
+                    ToolDisclosureProfilePinsParseError::Capability {
+                        profile: profile.clone(),
+                        capability,
+                        reason: error.to_string(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        resolved.insert(profile_id, pins);
     }
     Ok(resolved)
 }
@@ -698,15 +733,16 @@ where
             parts.capability_surface_resolver,
             Arc::clone(&subagent_prompt_source),
         ));
-    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_bridged() {
+    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_enabled() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            "reborn tool disclosure decorator wired (bridged)"
+            mode = ?parts.config.tool_disclosure,
+            "reborn tool disclosure decorator wired"
         );
-        Some(Arc::new(
-            ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer))
-                .with_mode(parts.config.tool_disclosure),
-        ))
+        Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+            Arc::clone(&parts.capability_result_writer),
+            parts.config.tool_disclosure,
+        )))
     } else {
         None
     };
@@ -881,7 +917,7 @@ struct RuntimeProfiledCapabilityPortFactory {
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
     global_denied: Vec<CapabilityId>,
     scheduled_trigger_denied: Vec<CapabilityId>,
-    tool_disclosure_profile_pins: BTreeMap<String, Vec<CapabilityId>>,
+    tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
 }
 
 #[async_trait::async_trait]
@@ -916,10 +952,9 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             let pins = self
                 .tool_disclosure_profile_pins
                 .get(
-                    run_context
+                    &run_context
                         .resolved_run_profile
-                        .capability_surface_profile_id
-                        .as_str(),
+                        .capability_surface_profile_id,
                 )
                 .cloned()
                 .unwrap_or_default();
@@ -986,7 +1021,7 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -994,7 +1029,7 @@ mod tests {
 
     use super::{
         RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        ToolDisclosureCapabilityDecorator, parse_tool_disclosure_profile_pins,
+        ToolDisclosureCapabilityDecorator, ToolDisclosureMode, parse_tool_disclosure_profile_pins,
         scheduler_permit_count,
     };
     use async_trait::async_trait;
@@ -1010,9 +1045,10 @@ mod tests {
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryRunProfileResolver, LoopCapabilityPort,
-        LoopRequest, LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
-        RunProfileResolver, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, ConcurrencyHint,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+        LoopRunContext, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
@@ -1060,7 +1096,8 @@ mod tests {
         .expect("valid profile-pin configuration");
 
         assert_eq!(
-            parsed["interactive_tools"]
+            parsed[&CapabilitySurfaceProfileId::new("interactive_tools")
+                .expect("valid test profile id")]
                 .iter()
                 .map(CapabilityId::as_str)
                 .collect::<Vec<_>>(),
@@ -1077,6 +1114,11 @@ mod tests {
             .is_err()
         );
         assert!(parse_tool_disclosure_profile_pins("[]").is_err());
+        assert!(
+            parse_tool_disclosure_profile_pins(r#"{"INVALID PROFILE":["github.search_code"]}"#,)
+                .is_err(),
+            "profile identities must be validated at the environment boundary"
+        );
     }
 
     async fn test_run_context() -> LoopRunContext {
@@ -1391,10 +1433,11 @@ mod tests {
             }),
             tool_disclosure_decorator: Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
                 Arc::new(UnusedResultWriter),
+                ToolDisclosureMode::Bridged,
             ))),
             global_denied: vec![denied_id.clone()],
             scheduled_trigger_denied: Vec::new(),
-            tool_disclosure_profile_pins: BTreeMap::new(),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         factory
@@ -1536,7 +1579,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied,
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
-            tool_disclosure_profile_pins: BTreeMap::new(),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         let scheduled_ids =
@@ -1594,7 +1637,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
-            tool_disclosure_profile_pins: BTreeMap::new(),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         let scheduled_ids =

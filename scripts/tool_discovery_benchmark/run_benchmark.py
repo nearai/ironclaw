@@ -31,19 +31,17 @@ CORPUS_PATH = (
     / "crates/loop/ironclaw_loop_host/tests/fixtures/tool_search_relevance.json"
 )
 LIVE_QA_PATH = ROOT / "scripts/reborn_webui_v2_live_qa/run_live_qa.py"
-GENERATOR_VERSION = "tool-search-scale-v1"
+GENERATOR_VERSION = "tool-search-scale-v2"
 SEED = 7405
-NAMESPACE_COUNT = 20
 AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 
 NAMESPACES = (
-    "asset_hub", "audit_log", "billing_ops", "compliance_archive",
-    "content_registry", "customer_directory", "data_exchange", "device_fleet",
-    "document_vault", "incident_queue", "inventory_ledger", "media_pipeline",
-    "network_inventory", "quality_control", "research_catalog",
-    "service_directory", "support_queue", "telemetry_store", "training_library",
-    "workflow_admin",
+    "browser", "database", "documents", "extensions", "github", "gmail",
+    "google-calendar", "google-drive", "google-sheets", "hubspot", "incident",
+    "jira", "linear", "media", "memory", "notion", "slack", "stripe",
+    "system", "workflow-admin",
 )
+NAMESPACE_COUNT = len(NAMESPACES)
 ACTIONS = (
     "archive_record", "compare_snapshot", "export_summary", "get_status",
     "inspect_artifact", "list_categories", "normalize_dataset",
@@ -112,6 +110,7 @@ TASKS = (
             "an unrelated tool."
         ),
         "expected": (),
+        "forbidden": ("spawn_subagent",),
     },
 )
 
@@ -130,27 +129,45 @@ def _load_live_qa() -> Any:
     return module
 
 
-def generate_catalog(tool_count: int) -> list[list[dict[str, Any]]]:
+def _corpus_namespace(capability_id: str) -> str:
+    owner = capability_id.split(".", 1)[0]
+    return {
+        "archive": "documents",
+        "builtin": "system",
+        "csv": "documents",
+        "docs": "documents",
+        "extension": "extensions",
+        "filesystem": "system",
+        "image": "media",
+        "pdf": "documents",
+    }.get(owner, owner)
+
+
+def generate_catalog(tool_count: int) -> list[dict[str, Any]]:
     corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
-    tools = [
-        {
+    corpus_tools = corpus["tools"]
+    if tool_count < len(corpus_tools):
+        raise ValueError(f"tool_count must be at least {len(corpus_tools)}")
+    buckets: dict[str, list[dict[str, Any]]] = {namespace: [] for namespace in NAMESPACES}
+    for tool in corpus_tools:
+        namespace = _corpus_namespace(tool["capability_id"])
+        if namespace not in buckets:
+            raise ValueError(f"corpus namespace is not mapped: {namespace}")
+        buckets[namespace].append({
             "name": tool["name"],
             "description": tool["description"],
             "inputSchema": tool["parameters"],
             "annotations": {"readOnlyHint": True},
-        }
-        for tool in corpus["tools"]
-    ]
-    if tool_count < len(tools):
-        raise ValueError(f"tool_count must be at least {len(tools)}")
+        })
     namespace_offset = SEED % len(NAMESPACES)
     action_offset = SEED % len(ACTIONS)
     noun_offset = SEED % len(NOUNS)
-    for ordinal in range(tool_count - len(tools)):
-        namespace = NAMESPACES[(ordinal + namespace_offset) % len(NAMESPACES)]
+    namespace_order = NAMESPACES[namespace_offset:] + NAMESPACES[:namespace_offset]
+    for ordinal in range(tool_count - len(corpus_tools)):
+        namespace = min(namespace_order, key=lambda item: len(buckets[item]))
         action = ACTIONS[(ordinal + action_offset) % len(ACTIONS)]
         noun = NOUNS[(ordinal + noun_offset) % len(NOUNS)]
-        tools.append(
+        buckets[namespace].append(
             {
                 "name": f"{action}_{ordinal:04}",
                 "description": (
@@ -168,21 +185,18 @@ def generate_catalog(tool_count: int) -> list[list[dict[str, Any]]]:
                 "annotations": {"readOnlyHint": True},
             }
         )
-    buckets: list[list[dict[str, Any]]] = [[] for _ in range(NAMESPACE_COUNT)]
-    for index, tool in enumerate(tools):
-        buckets[index % NAMESPACE_COUNT].append(tool)
-    return buckets
+    return [{"namespace": namespace, "tools": buckets[namespace]} for namespace in NAMESPACES]
 
 
-def canonical_capability_id(catalogs: list[list[dict[str, Any]]], tool_name: str) -> str:
-    for index, tools in enumerate(catalogs):
-        if any(tool["name"] == tool_name for tool in tools):
-            return f"mcp-benchmark-{index:02}.{tool_name}"
+def canonical_capability_id(catalogs: list[dict[str, Any]], tool_name: str) -> str:
+    for catalog in catalogs:
+        if any(tool["name"] == tool_name for tool in catalog["tools"]):
+            return f"mcp-benchmark-{catalog['namespace']}.{tool_name}"
     raise ValueError(f"tool is absent from benchmark catalog: {tool_name}")
 
 
 class McpFixture:
-    def __init__(self, catalogs: list[list[dict[str, Any]]]) -> None:
+    def __init__(self, catalogs: list[dict[str, Any]]) -> None:
         self.catalogs = catalogs
         self.calls: list[dict[str, Any]] = []
         self._lock = threading.Lock()
@@ -230,15 +244,16 @@ class McpFixture:
         request_id = body.get("id")
         method = body.get("method")
         if method == "initialize":
+            namespace = self.catalogs[namespace_index]["namespace"]
             value = {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": f"benchmark-{namespace_index:02}", "version": "1"},
+                "serverInfo": {"name": f"benchmark-{namespace}", "version": "1"},
                 "capabilities": {"tools": {}},
             }
         elif method == "notifications/initialized":
             value = {}
         elif method == "tools/list":
-            value = {"tools": self.catalogs[namespace_index]}
+            value = {"tools": self.catalogs[namespace_index]["tools"]}
         elif method == "tools/call":
             params = body.get("params") if isinstance(body.get("params"), dict) else {}
             call = {
@@ -300,16 +315,17 @@ async def wait_for_ready(url: str, timeout: float) -> None:
     raise TimeoutError(f"server did not become ready at {url}")
 
 
-def install_catalog(base_url: str) -> list[str]:
+def install_catalog(base_url: str, catalogs: list[dict[str, Any]]) -> list[str]:
     package_ids = []
-    for index in range(NAMESPACE_COUNT):
-        desired_id = f"benchmark-{index:02}"
+    for index, catalog in enumerate(catalogs):
+        namespace = catalog["namespace"]
+        desired_id = f"benchmark-{namespace}"
         registration = _request_json(
             base_url,
             "/api/webchat/v2/extensions/register-hosted-mcp",
             {
                 "desired_id": desired_id,
-                "desired_name": f"Benchmark namespace {index:02}",
+                "desired_name": f"Benchmark {namespace}",
                 "endpoint": f"https://example.com/benchmark/{index}",
                 "auth_selection": {"kind": "no_auth"},
             },
@@ -355,22 +371,126 @@ def install_catalog(base_url: str) -> list[str]:
     return package_ids
 
 
-def score_task(task: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+def _ordered_expected_calls(
+    expected: list[str], calls: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    selected = []
+    cursor = 0
+    for expected_name in expected:
+        while cursor < len(calls) and calls[cursor]["name"] != expected_name:
+            cursor += 1
+        if cursor == len(calls):
+            return None
+        selected.append(calls[cursor])
+        cursor += 1
+    return selected
+
+
+def _contains_casefold(value: object, expected: str) -> bool:
+    return isinstance(value, str) and expected.casefold() in value.casefold()
+
+
+def _task_arguments_are_valid(task_id: str, calls: list[dict[str, Any]]) -> bool:
+    if not calls:
+        return task_id in {"no-match", "denied-capability"}
+    arguments = [call.get("arguments", {}) for call in calls]
+    if task_id == "exact-canonical-id":
+        first = arguments[0]
+        return (
+            first.get("owner") == "nearai"
+            and first.get("repo") == "ironclaw"
+            and str(first.get("pull_number")) == "7273"
+        )
+    if task_id == "natural-language-alias":
+        return True
+    if task_id == "ambiguous-relevant-set":
+        first = arguments[0]
+        return first.get("email") == "ada@example.com" or _contains_casefold(
+            first.get("query"), "ada@example.com"
+        )
+    if task_id == "nested-argument-vocabulary":
+        first = arguments[0]
+        return (
+            first.get("name") == "report.csv"
+            and first.get("content") == "benchmark-report"
+            and first.get("mime_type") == "text/csv"
+        )
+    if task_id == "cross-namespace-workflow":
+        search, create = arguments
+        schedule = create.get("schedule")
+        return (
+            _contains_casefold(search.get("query"), "project aurora")
+            and isinstance(schedule, dict)
+            and _contains_casefold(schedule.get("start_at"), "2026-08-12")
+            and _contains_casefold(schedule.get("start_at"), "10:00")
+            and _contains_casefold(schedule.get("end_at"), "2026-08-12")
+            and _contains_casefold(schedule.get("end_at"), "10:30")
+        )
+    return True
+
+
+def _attempted_target(call: dict[str, Any]) -> str:
+    name = str(call.get("name") or "")
+    if name != "tool_call":
+        return name
+    arguments = call.get("arguments")
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("name"), str):
+        return name
+    return arguments["name"]
+
+
+def _matches_forbidden(target: str, forbidden: tuple[str, ...]) -> bool:
+    normalized = target.replace('.', '__')
+    return any(
+        normalized == item or normalized.endswith(f"__{item}")
+        for item in forbidden
+    )
+
+
+def score_task(
+    task: dict[str, Any],
+    calls: list[dict[str, Any]],
+    attempted_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
     called = [call["name"] for call in calls]
     expected = list(task["expected"])
+    forbidden = tuple(task.get("forbidden", ()))
+    unauthorized = sum(
+        _matches_forbidden(_attempted_target(call), forbidden)
+        for call in attempted_calls
+    )
     if expected:
         correct = all(name in called for name in expected)
-        completed = correct
+        ordered = _ordered_expected_calls(expected, calls)
+        completed = (
+            ordered is not None
+            and _task_arguments_are_valid(task["id"], ordered)
+            and unauthorized == 0
+        )
     else:
         correct = not called
-        completed = correct
+        discovery_names = {"tool_search", "tool_describe", "capability_info"}
+        non_discovery_attempts = [
+            call for call in attempted_calls if str(call.get("name")) not in discovery_names
+        ]
+        completed = correct and not non_discovery_attempts and unauthorized == 0
     return {
         "completed": completed,
         "correct_tool_recalled": correct,
         "expected_tools": expected,
         "called_tools": called,
-        "unauthorized_tool_leaks": 0,
+        "unauthorized_tool_leaks": unauthorized,
     }
+
+
+def first_correct_tool_call_latency_ms(
+    expected: tuple[str, ...], calls: list[dict[str, Any]], started: float,
+) -> int | None:
+    expected_names = set(expected)
+    first = next((call for call in calls if call["name"] in expected_names), None)
+    if first is None:
+        return None
+    return int((first["monotonic_ns"] / 1_000_000) - (started * 1000))
 
 
 def aggregate_observations(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -396,7 +516,9 @@ def aggregate_observations(observations: list[dict[str, Any]]) -> list[dict[str,
     return aggregates
 
 
-def _trace_metrics(live_qa: Any, trace_path: Path) -> tuple[dict[str, object], list[str]]:
+def _trace_metrics(
+    live_qa: Any, trace_path: Path,
+) -> tuple[dict[str, object], list[dict[str, Any]]]:
     if not trace_path.exists():
         return {
             "model_call_count": 0, "tool_call_count": 0, "input_tokens": 0,
@@ -405,15 +527,19 @@ def _trace_metrics(live_qa: Any, trace_path: Path) -> tuple[dict[str, object], l
         }, []
     metrics = live_qa.parse_case_llm_trace_metrics(trace_path)
     payload = json.loads(trace_path.read_text(encoding="utf-8"))
-    names = []
+    calls = []
     for step in payload.get("steps", []):
         response = step.get("response") if isinstance(step, dict) else None
         if not isinstance(response, dict):
             continue
         for call in response.get("tool_calls", []):
             if isinstance(call, dict) and isinstance(call.get("name"), str):
-                names.append(call["name"])
-    return metrics, names
+                calls.append({
+                    "name": call["name"],
+                    "arguments": call.get("arguments")
+                    if isinstance(call.get("arguments"), dict) else {},
+                })
+    return metrics, calls
 
 
 def _metric_delta(after: dict[str, object], before: dict[str, object], key: str) -> int | None:
@@ -431,7 +557,8 @@ async def run_task_group(
     arm: str,
     tool_count: int,
     task: dict[str, Any],
-    repetitions: int,
+    repetitions: list[int],
+    observations_path: Path,
 ) -> list[dict[str, Any]]:
     group_name = f"{arm}-{tool_count}-{task['id']}"
     case_dir = output_dir / "cases" / group_name
@@ -457,14 +584,14 @@ async def run_task_group(
     try:
         live_qa.wait_for_ready = wait_for_ready
         proc, base_url = await live_qa.start_reborn_server(binary, home, case_dir, extra_env)
-        packages = await asyncio.to_thread(install_catalog, base_url)
+        packages = await asyncio.to_thread(install_catalog, base_url, catalogs)
         ctx = live_qa.LiveQaContext(
             base_url=base_url, output_dir=output_dir, reborn_home=home, env=extra_env
         )
         trace_path = output_dir / "llm-traces" / f"{group_name}.json"
-        prior_metrics, prior_tool_names = _trace_metrics(live_qa, trace_path)
+        prior_metrics, prior_trace_calls = _trace_metrics(live_qa, trace_path)
         observations = []
-        for repetition in range(repetitions):
+        for repetition in repetitions:
             case_name = f"{group_name}-{repetition}"
             print(
                 f"[tool-benchmark] arm={arm} tools={tool_count} "
@@ -488,60 +615,76 @@ async def run_task_group(
             )
             latency_ms = int((time.monotonic() - started) * 1000)
             calls = fixture.calls[calls_before:]
-            metrics, all_tool_names = _trace_metrics(live_qa, trace_path)
-            tool_names = all_tool_names[len(prior_tool_names):]
-            scored = score_task(task, calls)
-            observations.append({
-            "schema_version": 1,
-            "catalog": {
-                "generator_version": GENERATOR_VERSION,
-                "seed": SEED,
-                "tool_count": tool_count,
-                "namespace_count": NAMESPACE_COUNT,
-            },
-            "arm": arm,
-            "model": {
-                "provider": os.environ.get("REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID", "nearai"),
-                "model": os.environ.get(
-                    "REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL",
-                    os.environ.get("LIVE_OPENAI_COMPATIBLE_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
-                ),
-                "temperature": 0.0,
-            },
-            "run": {
-                "thermal_class": "cold" if repetition == 0 else "warm",
-                "repetition": repetition,
-            },
-            "task": {"id": task["id"], **scored},
-            "counts": {
-                "model_turns": _metric_delta(metrics, prior_metrics, "model_call_count"),
-                "tool_calls": _metric_delta(metrics, prior_metrics, "tool_call_count"),
-                "synthetic_tool_calls": len(calls),
-                "tool_search_calls": tool_names.count("tool_search"),
-                "tool_describe_calls": tool_names.count("tool_describe"),
-            },
-            "tokens": {
-                "input": _metric_delta(metrics, prior_metrics, "input_tokens"),
-                "cached_input": _metric_delta(metrics, prior_metrics, "cache_read_tokens"),
-                "uncached_input": _metric_delta(metrics, prior_metrics, "uncached_input_tokens"),
-                "output": _metric_delta(metrics, prior_metrics, "output_tokens"),
-                "cost_usd": None,
-            },
-            "latency_ms": {
-                "time_to_first_correct_tool_call": (
-                    int((calls[0]["monotonic_ns"] / 1_000_000) - (started * 1000))
-                    if calls else None
-                ),
-                "end_to_end": latency_ms,
-            },
-            "ui_probe_success": result.success,
-            "installed_namespaces": len(packages),
-            "failure": None if result.success and scored["completed"] else (
-                "task_incomplete" if result.success else "agent_run_failure"
-            ),
-            })
+            metrics, all_trace_calls = _trace_metrics(live_qa, trace_path)
+            trace_calls = all_trace_calls[len(prior_trace_calls):]
+            tool_names = [call["name"] for call in trace_calls]
+            scored = score_task(task, calls, trace_calls)
+            observation = {
+                "schema_version": 2,
+                "observation_id": f"{arm}:{tool_count}:{task['id']}:{repetition}",
+                "catalog": {
+                    "generator_version": GENERATOR_VERSION,
+                    "seed": SEED,
+                    "tool_count": tool_count,
+                    "namespace_count": NAMESPACE_COUNT,
+                },
+                "arm": arm,
+                "model": {
+                    "provider": os.environ.get(
+                        "REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID", "nearai"
+                    ),
+                    "model": os.environ.get(
+                        "REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL",
+                        os.environ.get(
+                            "LIVE_OPENAI_COMPATIBLE_MODEL",
+                            "deepseek-ai/DeepSeek-V4-Flash",
+                        ),
+                    ),
+                    "temperature": 0.0,
+                },
+                "run": {
+                    "thermal_class": "cold" if repetition == 0 else "warm",
+                    "repetition": repetition,
+                },
+                "task": {"id": task["id"], **scored},
+                "counts": {
+                    "model_turns": _metric_delta(
+                        metrics, prior_metrics, "model_call_count"
+                    ),
+                    "tool_calls": _metric_delta(
+                        metrics, prior_metrics, "tool_call_count"
+                    ),
+                    "synthetic_tool_calls": len(calls),
+                    "tool_search_calls": tool_names.count("tool_search"),
+                    "tool_describe_calls": tool_names.count("tool_describe"),
+                },
+                "tokens": {
+                    "input": _metric_delta(metrics, prior_metrics, "input_tokens"),
+                    "cached_input": _metric_delta(
+                        metrics, prior_metrics, "cache_read_tokens"
+                    ),
+                    "uncached_input": _metric_delta(
+                        metrics, prior_metrics, "uncached_input_tokens"
+                    ),
+                    "output": _metric_delta(metrics, prior_metrics, "output_tokens"),
+                    "cost_usd": None,
+                },
+                "latency_ms": {
+                    "time_to_first_correct_tool_call": first_correct_tool_call_latency_ms(
+                        tuple(task["expected"]), calls, started
+                    ),
+                    "end_to_end": latency_ms,
+                },
+                "ui_probe_success": result.success,
+                "installed_namespaces": len(packages),
+                "failure": None
+                if result.success and scored["completed"]
+                else ("task_incomplete" if result.success else "agent_run_failure"),
+            }
+            append_observation(observations_path, observation)
+            observations.append(observation)
             prior_metrics = metrics
-            prior_tool_names = all_tool_names
+            prior_trace_calls = all_trace_calls
             print(
                 f"[tool-benchmark] completed={scored['completed']} "
                 f"latency_ms={latency_ms}", flush=True,
@@ -564,6 +707,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_observations(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    by_id: dict[str, dict[str, Any]] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        observation = json.loads(line)
+        observation_id = observation.get("observation_id")
+        if not isinstance(observation_id, str) or not observation_id:
+            raise ValueError(
+                f"{path}:{line_number} is missing a non-empty observation_id"
+            )
+        by_id.setdefault(observation_id, observation)
+    return list(by_id.values())
+
+
+def append_observation(path: Path, observation: dict[str, Any]) -> None:
+    observation_id = observation.get("observation_id")
+    if not isinstance(observation_id, str) or not observation_id:
+        raise ValueError("observation requires a non-empty observation_id")
+    if any(
+        existing["observation_id"] == observation_id
+        for existing in load_observations(path)
+    ):
+        return
+    encoded = json.dumps(observation, sort_keys=True) + "\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 async def async_main(args: argparse.Namespace) -> int:
     if not os.environ.get("NEARAI_API_KEY") and not os.environ.get("LIVE_OPENAI_COMPATIBLE_API_KEY"):
         raise RuntimeError("a live model API key is required")
@@ -575,20 +751,27 @@ async def async_main(args: argparse.Namespace) -> int:
     arms = args.arm or list(ARMS)
     tool_counts = args.tool_count or [100, 500, 1000]
     tasks = [task for task in TASKS if not args.task or task["id"] in args.task]
-    observations = []
+    observations = load_observations(observations_path)
+    completed_ids = {item["observation_id"] for item in observations}
     for tool_count in tool_counts:
         for arm in arms:
             for task in tasks:
+                missing_repetitions = [
+                    repetition
+                    for repetition in range(args.repetitions)
+                    if f"{arm}:{tool_count}:{task['id']}:{repetition}" not in completed_ids
+                ]
+                if not missing_repetitions:
+                    continue
                 group = await run_task_group(
                     live_qa, args.binary, args.output_dir, arm, tool_count,
-                    task, args.repetitions,
+                    task, missing_repetitions, observations_path,
                 )
                 for observation in group:
                     observations.append(observation)
-                    with observations_path.open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps(observation, sort_keys=True) + "\n")
+                    completed_ids.add(observation["observation_id"])
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "head": os.popen("git rev-parse HEAD").read().strip(),
         "observation_count": len(observations),
         "observations_path": str(observations_path),

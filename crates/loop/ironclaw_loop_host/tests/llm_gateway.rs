@@ -803,6 +803,86 @@ async fn gateway_allows_exact_named_deferred_capability_for_policy_resolution() 
 }
 
 #[tokio::test]
+async fn gateway_allows_describe_and_wrapped_exact_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_describe".to_string(),
+            name: "tool_describe".to_string(),
+            arguments: serde_json::json!({"name": "demo__hidden"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        },
+        ToolCall {
+            id: "call_wrapped".to_string(),
+            name: "tool_call".to_string(),
+            arguments: serde_json::json!({
+                "name": "demo__hidden",
+                "arguments": r#"{"message":"authorized at the capability port"}"#,
+            }),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use the demo.hidden capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected policy-checked bridge calls");
+    };
+    assert_eq!(calls.len(), 2);
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn gateway_suppresses_wrapped_unrelated_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_wrapped".to_string(),
+        name: "tool_call".to_string(),
+        arguments: serde_json::json!({
+            "name": "demo__other",
+            "arguments": "{}",
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use the demo.hidden capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(_)
+    ));
+}
+
+#[tokio::test]
 async fn gateway_suppresses_tool_calls_when_user_names_unavailable_hidden_namespace_capability() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_shell".to_string(),
@@ -4885,17 +4965,17 @@ impl GatewayCapabilityPort {
     }
 
     fn with_discovery_bridge_surface() -> Self {
-        let definitions = vec![ProviderToolDefinition {
-            capability_id: CapabilityId::new("ironclaw.tool_search").unwrap(),
-            name: provider_name("tool_search"),
-            description: "Search authorized deferred tools".to_string(),
-            description_trust: Default::default(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"]
-            }),
-        }];
+        let definitions = ["tool_search", "tool_describe", "tool_call"]
+            .into_iter()
+            .map(|name| ProviderToolDefinition {
+                capability_id: CapabilityId::new(format!("ironclaw.{name}"))
+                    .expect("valid bridge capability id"),
+                name: provider_name(name),
+                description: format!("Deferred-tool bridge {name}"),
+                description_trust: Default::default(),
+                parameters: serde_json::json!({"type": "object"}),
+            })
+            .collect::<Vec<_>>();
         Self {
             resolvable_definitions: definitions.clone(),
             definitions,
