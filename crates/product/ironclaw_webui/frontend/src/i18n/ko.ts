@@ -1466,6 +1466,7 @@ registerPack("ko", {
   "chat.failure.request": "요청을 보내기 전에 실패했습니다.",
   "chat.failure.requestDetail": "요청에 실패했습니다: {detail}.",
   "chat.failure.runCategory": "실행에 실패했습니다: {detail}.",
+  "chat.failure.noProgress": "진전 없이 작업이 반복되어 실행이 중지되었습니다. 더 명확한 지시나 좁은 범위로 다시 시도하세요.",
   "chat.failure.recoveryRequired": "실행이 복구를 기다리고 있습니다. 백엔드에서 `recovery_required`를 보고했습니다.",
   "chat.failure.run": "응답을 생성하기 전에 실행이 실패했습니다.",
   "chat.failure.streamRetryable": "채팅 스트림에 재시도 가능한 오류가 발생했습니다: {detail}.",

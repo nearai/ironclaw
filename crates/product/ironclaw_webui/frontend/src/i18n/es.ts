@@ -1467,6 +1467,7 @@ registerPack("es", {
   "chat.failure.request": "La solicitud falló antes de poder enviarse.",
   "chat.failure.requestDetail": "La solicitud falló: {detail}.",
   "chat.failure.runCategory": "La ejecución falló: {detail}.",
+  "chat.failure.noProgress": "La ejecución se detuvo porque repitió trabajo sin avanzar. Inténtalo de nuevo con una instrucción más clara o un alcance más limitado.",
   "chat.failure.recoveryRequired": "La ejecución está esperando recuperación; el backend informó `recovery_required`.",
   "chat.failure.run": "La ejecución falló antes de generar una respuesta.",
   "chat.failure.streamRetryable": "El flujo del chat encontró un error reintentable: {detail}.",

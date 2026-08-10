@@ -1466,6 +1466,7 @@ registerPack("pt-BR", {
   "chat.failure.request": "A solicitação falhou antes de ser enviada.",
   "chat.failure.requestDetail": "A solicitação falhou: {detail}.",
   "chat.failure.runCategory": "A execução falhou: {detail}.",
+  "chat.failure.noProgress": "A execução parou porque repetiu trabalho sem avançar. Tente novamente com uma instrução mais clara ou um escopo mais restrito.",
   "chat.failure.recoveryRequired": "A execução está aguardando recuperação; o backend informou `recovery_required`.",
   "chat.failure.run": "A execução falhou antes de produzir uma resposta.",
   "chat.failure.streamRetryable": "O fluxo do chat encontrou um erro que permite nova tentativa: {detail}.",

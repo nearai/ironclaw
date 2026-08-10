@@ -1466,6 +1466,7 @@ registerPack("ar", {
   "chat.failure.request": "فشل الطلب قبل أن يتم إرساله.",
   "chat.failure.requestDetail": "فشل الطلب: {detail}.",
   "chat.failure.runCategory": "فشل التشغيل: {detail}.",
+  "chat.failure.noProgress": "توقف التشغيل لأنه كرر العمل دون إحراز تقدم. حاول مرة أخرى بتعليمات أوضح أو نطاق أضيق.",
   "chat.failure.recoveryRequired": "ينتظر التشغيل الاسترداد؛ أبلغت الواجهة الخلفية عن `recovery_required`.",
   "chat.failure.run": "فشل التشغيل قبل إنتاج رد.",
   "chat.failure.streamRetryable": "واجه تدفق المحادثة خطأً قابلاً لإعادة المحاولة: {detail}.",

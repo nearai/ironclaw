@@ -1466,6 +1466,7 @@ registerPack("hi", {
   "chat.failure.request": "अनुरोध भेजे जाने से पहले विफल हो गया।",
   "chat.failure.requestDetail": "अनुरोध विफल हुआ: {detail}।",
   "chat.failure.runCategory": "रन विफल हुआ: {detail}।",
+  "chat.failure.noProgress": "रन रुक गया क्योंकि काम बिना प्रगति के दोहराया जा रहा था। अधिक स्पष्ट निर्देश या सीमित दायरे के साथ फिर प्रयास करें।",
   "chat.failure.recoveryRequired": "रन रिकवरी की प्रतीक्षा कर रहा है; बैकएंड ने `recovery_required` रिपोर्ट किया।",
   "chat.failure.run": "उत्तर बनने से पहले रन विफल हो गया।",
   "chat.failure.streamRetryable": "चैट स्ट्रीम में फिर से प्रयास योग्य त्रुटि आई: {detail}।",

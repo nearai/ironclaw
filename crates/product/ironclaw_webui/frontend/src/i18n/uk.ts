@@ -1466,6 +1466,7 @@ registerPack("uk", {
   "chat.failure.request": "Не вдалося надіслати запит.",
   "chat.failure.requestDetail": "Запит завершився помилкою: {detail}.",
   "chat.failure.runCategory": "Виконання завершилося помилкою: {detail}.",
+  "chat.failure.noProgress": "Виконання зупинено, оскільки робота повторювалася без прогресу. Повторіть спробу з чіткішою вказівкою або вужчим обсягом.",
   "chat.failure.recoveryRequired": "Виконання очікує відновлення; сервер повідомив `recovery_required`.",
   "chat.failure.run": "Виконання завершилося помилкою до створення відповіді.",
   "chat.failure.streamRetryable": "У потоці чату сталася помилка, яку можна повторити: {detail}.",

@@ -1464,6 +1464,7 @@ registerPack("zh-CN", {
   "chat.failure.request": "请求在发送前失败。",
   "chat.failure.requestDetail": "请求失败：{detail}。",
   "chat.failure.runCategory": "运行失败：{detail}。",
+  "chat.failure.noProgress": "运行因重复执行却没有进展而停止。请使用更清晰的指令或缩小任务范围后重试。",
   "chat.failure.recoveryRequired": "运行正在等待恢复——后端报告了 `recovery_required`。",
   "chat.failure.run": "运行在生成回复前失败。",
   "chat.failure.streamRetryable": "聊天流遇到可重试错误：{detail}。",

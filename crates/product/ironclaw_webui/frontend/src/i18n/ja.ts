@@ -1466,6 +1466,7 @@ registerPack("ja", {
   "chat.failure.request": "リクエストは送信前に失敗しました。",
   "chat.failure.requestDetail": "リクエストに失敗しました: {detail}。",
   "chat.failure.runCategory": "実行に失敗しました: {detail}。",
+  "chat.failure.noProgress": "進展のない作業が繰り返されたため、実行を停止しました。より明確な指示または狭い範囲で再試行してください。",
   "chat.failure.recoveryRequired": "実行は復旧待ちです。バックエンドから `recovery_required` が報告されました。",
   "chat.failure.run": "返信を生成する前に実行が失敗しました。",
   "chat.failure.streamRetryable": "チャットストリームで再試行可能なエラーが発生しました: {detail}。",

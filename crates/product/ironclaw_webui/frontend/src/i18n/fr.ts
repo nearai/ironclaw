@@ -1466,6 +1466,7 @@ registerPack("fr", {
   "chat.failure.request": "La requête a échoué avant de pouvoir être envoyée.",
   "chat.failure.requestDetail": "La requête a échoué : {detail}.",
   "chat.failure.runCategory": "L'exécution a échoué : {detail}.",
+  "chat.failure.noProgress": "L'exécution s'est arrêtée car elle répétait des actions sans progresser. Réessayez avec une instruction plus claire ou un périmètre plus restreint.",
   "chat.failure.recoveryRequired": "L'exécution attend une récupération ; le backend a signalé `recovery_required`.",
   "chat.failure.run": "L'exécution a échoué avant de produire une réponse.",
   "chat.failure.streamRetryable": "Le flux du chat a rencontré une erreur réessayable : {detail}.",

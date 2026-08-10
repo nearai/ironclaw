@@ -1466,6 +1466,7 @@ registerPack("de", {
   "chat.failure.request": "Die Anfrage ist fehlgeschlagen, bevor sie gesendet werden konnte.",
   "chat.failure.requestDetail": "Die Anfrage ist fehlgeschlagen: {detail}.",
   "chat.failure.runCategory": "Die Ausführung ist fehlgeschlagen: {detail}.",
+  "chat.failure.noProgress": "Die Ausführung wurde beendet, weil Arbeit ohne Fortschritt wiederholt wurde. Versuche es mit einer klareren Anweisung oder einem engeren Umfang erneut.",
   "chat.failure.recoveryRequired": "Die Ausführung wartet auf Wiederherstellung; das Backend meldete `recovery_required`.",
   "chat.failure.run": "Die Ausführung ist fehlgeschlagen, bevor eine Antwort erzeugt wurde.",
   "chat.failure.streamRetryable": "Im Chat-Stream ist ein wiederholbarer Fehler aufgetreten: {detail}.",
