@@ -40,7 +40,7 @@ export function UserModelPreferenceSelector() {
             {t("llm.modelPreferenceDesc")}
           </p>
         </div>
-        <div className="w-full shrink-0 sm:w-72">
+        <div className="w-full min-w-0 sm:w-72 sm:max-w-full">
           <SelectMenu
             data-testid="settings-model-selector"
             value={model || ""}
@@ -49,7 +49,9 @@ export function UserModelPreferenceSelector() {
             disabled={isLoading || isSaving || !catalog.selection_enabled}
             ariaLabel={t("llm.modelPreference")}
             align="right"
-            buttonClassName="w-full"
+            className="block w-full min-w-0 max-w-full"
+            buttonClassName="w-full min-w-0 overflow-hidden"
+            menuClassName="w-full max-w-[calc(100vw-2rem)]"
           />
           <div
             data-testid="settings-model-selector-status"
