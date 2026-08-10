@@ -291,16 +291,19 @@ fn build_channel_envelope(
     )?;
     let payload = match request.classification {
         Some(classification) => ProductInboundPayload::from(classification),
-        None => ProductInboundPayload::UserMessage(UserMessagePayload::new(
-            request.message.text.clone(),
-            request
-                .message
-                .attachments
-                .iter()
-                .map(|attachment| attachment.descriptor.clone())
-                .collect(),
-            request.message.trigger,
-        )?),
+        None => ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                request.message.text.clone(),
+                request
+                    .message
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.descriptor.clone())
+                    .collect(),
+                request.message.trigger,
+            )?
+            .with_channel_context(request.channel_context.clone()),
+        ),
     };
     let parsed = ParsedProductInbound::new(
         request.message.event_id,
@@ -1661,8 +1664,8 @@ fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {
 }
 
 fn turn_scope_for_thread(binding: &ResolvedBinding, thread_id: ThreadId) -> TurnScope {
-    // A run acts as the user who invoked it: the turn's explicit owner is the
-    // binding's actor on every route kind.
+    // The turn is scoped to the user who invoked it (the pinger): one identity
+    // per run, no separate thread owner.
     TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),

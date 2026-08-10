@@ -21,9 +21,9 @@ use ironclaw_processes::{
     OpenProcessDependencyRequest, ProcessCheckpointId, ProcessCheckpointPayload,
     ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
     ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
-    ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
+    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
@@ -3065,7 +3065,6 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             scope_match: None,
             owner_user_id: Some(owner),
             gate_ref: Some(gate_ref.clone()),
-            owner_match: Some(ProcessGateOwnerMatch::Explicit),
             include_historical: false,
         })
         .await
@@ -3092,13 +3091,39 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             scope_match: Some(ProcessGateScopeMatch::Owner),
             owner_user_id: gates[0].owner_user_id.clone(),
             gate_ref: None,
-            owner_match: Some(ProcessGateOwnerMatch::Explicit),
             include_historical: false,
         })
         .await
         .expect("query gates across the explicit owner's projects");
     assert_eq!(owner_gates.len(), 1);
     assert_eq!(owner_gates[0].process_id, process_id);
+
+    // Owner-isolation guard (sabotage test for the retired `ProcessGateOwnerMatch`
+    // and its `ProcessGateScopeMatch::Owner` successor): the same-tenant owner
+    // broadening MUST still confine to the requesting user. A query rooted at an
+    // UNRELATED owner returns nothing even with the `owner_user_id` filter left
+    // open — so a future edit that drops the `scope.user_id` equality check on the
+    // `Owner` branch fails HERE instead of leaking another user's authorization
+    // gates.
+    let mut unrelated_owner_scope = scope.clone();
+    unrelated_owner_scope.user_id = UserId::new("user-unrelated-owner").expect("user");
+    unrelated_owner_scope.project_id = None;
+    unrelated_owner_scope.thread_id = None;
+    let unrelated_gates = store
+        .query_process_gates(ProcessGateQuery {
+            scope: unrelated_owner_scope,
+            gate_kind: ProcessSuspensionKind::Authorization,
+            scope_match: Some(ProcessGateScopeMatch::Owner),
+            owner_user_id: None,
+            gate_ref: None,
+            include_historical: false,
+        })
+        .await
+        .expect("query gates for an unrelated owner");
+    assert!(
+        unrelated_gates.is_empty(),
+        "owner-scope gate queries must not leak across owners: {unrelated_gates:?}"
+    );
 
     let snapshot = store
         .get_process_snapshot(GetProcessSnapshotRequest {

@@ -97,10 +97,9 @@ pub struct AuthInteractionScope {
 
 impl AuthInteractionScope {
     pub fn from_turn(scope: &TurnScope, actor: &TurnActor) -> Self {
-        let user_id = scope
-            .explicit_owner_user_id()
-            .cloned()
-            .unwrap_or_else(|| actor.user_id.clone());
+        // The auth-flow scope is the run's single user (the actor), matching
+        // the create/cancel sides.
+        let user_id = actor.user_id.clone();
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id,
@@ -378,10 +377,14 @@ mod tests {
 
     use super::*;
 
+    /// A run's auth flow is created, resolved, and cancelled under the same
+    /// user (the run's actor), so it owns the OAuth flow backing its own
+    /// blocked run and `from_turn` keys the interaction scope by that user.
+    /// Owner == actor since the ephemeral-per-ping remodel.
     #[test]
-    fn auth_interaction_scope_from_turn_uses_scope_owner_over_actor() {
+    fn auth_interaction_scope_from_turn_keys_by_the_run_user() {
         let actor = TurnActor::new(UserId::new("user:actor").unwrap());
-        let owner_user_id = UserId::new("user:subject").unwrap();
+        let owner_user_id = actor.user_id.clone();
         let thread_id = ThreadId::new("thread:shared").unwrap();
         let scope = TurnScope::new_with_owner(
             TenantId::new("tenant:shared").unwrap(),
@@ -393,7 +396,10 @@ mod tests {
 
         let interaction_scope = AuthInteractionScope::from_turn(&scope, &actor);
 
-        assert_eq!(interaction_scope.user_id, owner_user_id);
+        assert_eq!(
+            interaction_scope.user_id, actor.user_id,
+            "a run's auth flow is keyed by its user"
+        );
         assert_eq!(interaction_scope.thread_id, thread_id);
         assert_eq!(
             interaction_scope.agent_id.as_ref().map(AgentId::as_str),

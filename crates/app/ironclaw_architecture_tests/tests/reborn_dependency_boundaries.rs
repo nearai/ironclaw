@@ -628,7 +628,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ChannelDescriptor.notifications` field + its doc — a manifest capability
         // declaration only; notification delivery gating lives in
         // ironclaw_outbound (DeliveryTargetCapabilities) and product resolution.
-        ("ironclaw_extension_contracts", 7_758),
+        // 7_758 -> 7_851 (2026-08-10, presence-shared-conversations rebased onto
+        // main): the `ChannelConversationContext` DTO + the
+        // `fetch_conversation_context` channel-adapter method (channel-history
+        // hydration) and the `presentation.can_reply_in_threads` reply-placement
+        // flag. Contract vocabulary only — the fetch impl lives in the slack
+        // package, the flag is consumed by the channel workflow. Count read from
+        // this test's failure on the rebased base.
+        ("ironclaw_extension_contracts", 7_851),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -652,7 +659,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // a redacting `Debug`, a `validate_shape` fallible shape check, and a
         // dependency-free base64url decode helper — all declaration/validation
         // on the type's own shape, no execution.
-        ("ironclaw_host_api", 18_922),
+        // 18_922 -> 18_974 (2026-08-10, presence-shared-conversations rebased onto
+        // main): the serde-defaulted `ProductTurnContext.channel_context` field +
+        // its `with_channel_context` builder carry hydrated channel context on the
+        // durable turn record. A DTO field only; the fetch and prompt framing live
+        // in the slack package and loop_host. Count read from failure.
+        ("ironclaw_host_api", 18_974),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -687,7 +699,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // hand-synced now lives once on the contract type (its callers in
         // composition and loop_host DELETED their copies). Reason recorded
         // in the PR body; count read from this test's failure message.
-        ("ironclaw_loop_contracts", 13_107),
+        // 13_107 -> 13_112 (2026-08-09, ephemeral-per-ping remodel): +5 lines
+        // reframing the `acting_user_id`/`acting_resource_scope` docs to the
+        // single "the run's user" model (owner-vs-actor divergence retired).
+        // Vocabulary/comment change only — the actor-first ladder itself is
+        // preserved (WebChat=actor, trigger=creator, system=fallback). Count
+        // read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_112),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -707,7 +725,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 15_879 -> 15_885 (review): the `endpoint_digest` field + its doc on
         // `RebornWebPushSubscriptionInfo` for account-scoped enrollment
         // correlation.
-        ("ironclaw_product_contracts", 15_885),
+        // 15_885 -> 15_904 (2026-08-10, presence-shared-conversations rebased onto
+        // main): per-event source/reply-target binding refs on `ResolvedBinding`
+        // (a shared route resolves each inbound event onto its OWN ephemeral
+        // thread, carried through the wire contract), net of the ephemeral-per-ping
+        // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
+        // retired). Declaration only. Count read from failure.
+        ("ironclaw_product_contracts", 15_909),
         ("ironclaw_prompt_envelope", 832),
     ];
 

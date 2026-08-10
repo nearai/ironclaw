@@ -17,8 +17,12 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAdapter, MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES, NormalizedInboundMessage,
+    ProductTriggerReason,
+};
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
@@ -498,6 +502,18 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
         let evidence = self.config.evidence.mint(&installation_id);
+        // Advisory channel conversation context for shared-channel triggers:
+        // fetched host-side through the same pinned adapter + manifest-
+        // restricted egress that parsed the request, BEFORE admission and
+        // independent of the attachment-vs-plain branching below. Any miss
+        // (no capability, missing scopes, vendor/egress failure) degrades to
+        // no context — it never fails the sink.
+        let channel_context = fetch_channel_conversation_context(
+            channel_adapter.as_ref(),
+            channel_egress.as_deref(),
+            &message,
+        )
+        .await;
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
@@ -514,6 +530,7 @@ impl InboundSink for GenericChannelInboundSink {
             received_at: Utc::now(),
             classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
+            channel_context,
         };
         let response = if request.message.attachments.is_empty() {
             Box::pin(self.config.surface.admit_channel_inbound(request)).await
@@ -610,6 +627,108 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
     }
+}
+
+/// Whether an inbound trigger addresses the bot inside a shared conversation
+/// (channel/group), where recent vendor-side history is useful advisory
+/// context. Direct chats already carry their own thread; linked-thread
+/// actions are follow-ups on conversations the run already knows.
+fn is_shared_channel_trigger(trigger: ProductTriggerReason) -> bool {
+    // Only the conversational triggers hydrate: a `BotCommand` (slash command)
+    // is classified into a product command whose envelope never carries
+    // channel context, so fetching it would burn a vendor GET for nothing.
+    matches!(
+        trigger,
+        ProductTriggerReason::BotMention | ProductTriggerReason::ReplyToBot
+    )
+}
+
+/// Best-effort advisory context fetch for one shared-channel inbound message.
+/// Every miss — non-shared trigger, no deployment egress, adapter without the
+/// capability, vendor/egress failure, or unusable text — returns `None`; this
+/// helper must never fail the sink.
+async fn fetch_channel_conversation_context(
+    channel_adapter: &dyn ChannelAdapter,
+    channel_egress: Option<&dyn RestrictedEgress>,
+    message: &NormalizedInboundMessage,
+) -> Option<String> {
+    if !is_shared_channel_trigger(message.trigger) {
+        return None;
+    }
+    let egress = channel_egress?;
+    match channel_adapter
+        .fetch_conversation_context(&message.conversation, egress)
+        .await
+    {
+        Ok(Some(context)) => sanitize_channel_conversation_context(&context.text),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "channel conversation context fetch failed; admitting without context"
+            );
+            None
+        }
+    }
+}
+
+/// Host-side defense over adapter-supplied context text (the adapter is
+/// untrusted for content): normalize newlines, keep only `\n`/`\t` control
+/// characters, and clamp to the contract byte bound by dropping OLDEST lines
+/// (adapters emit oldest-first). Returns `None` when nothing usable remains.
+fn sanitize_channel_conversation_context(raw: &str) -> Option<String> {
+    let mut text = String::with_capacity(raw.len().min(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES));
+    let mut characters = raw.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                text.push('\n');
+            }
+            '\n' | '\t' => text.push(character),
+            // `is_control()` is the Unicode `Cc` category only. Bidi and
+            // zero-width `Cf` format characters pass it, and they let an
+            // untrusted channel message reorder or hide text as the model and
+            // the operator see it — the exact injection this sanitizer exists
+            // to stop. Drop them at the same point.
+            character
+                if character.is_control()
+                    // `U+200C` (ZWNJ) and `U+200D` (ZWJ) are deliberately NOT
+                    // stripped — they are required orthography in Persian,
+                    // Hindi, and other scripts, and carry meaning inside emoji
+                    // sequences. Only the zero-width SPACE and the bidi
+                    // controls/isolates/BOM are injection vectors here.
+                    || matches!(
+                        character,
+                        '\u{200B}'
+                            | '\u{200E}'
+                            | '\u{200F}'
+                            | '\u{202A}'..='\u{202E}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{FEFF}'
+                    ) => {}
+            character => text.push(character),
+        }
+    }
+    let mut remainder = text.trim();
+    while remainder.len() > MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES {
+        match remainder.find('\n') {
+            // Drop the oldest line and retry.
+            Some(newline) => remainder = remainder[newline + 1..].trim_start(),
+            // One oversized line: keep its newest tail on a char boundary.
+            None => {
+                let mut start = remainder.len() - MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES;
+                while start < remainder.len() && !remainder.is_char_boundary(start) {
+                    start += 1;
+                }
+                remainder = &remainder[start..];
+            }
+        }
+    }
+    let remainder = remainder.trim();
+    (!remainder.is_empty()).then(|| remainder.to_string())
 }
 
 /// A static secrets port: fixed candidates for one extension (operator
@@ -906,6 +1025,7 @@ mod tests {
         submissions: AtomicUsize,
         transfer_submissions: AtomicUsize,
         classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
+        channel_contexts: std::sync::Mutex<Vec<Option<String>>>,
     }
 
     impl CountingSurface {
@@ -914,6 +1034,7 @@ mod tests {
                 submissions: AtomicUsize::new(0),
                 transfer_submissions: AtomicUsize::new(0),
                 classifications: std::sync::Mutex::new(Vec::new()),
+                channel_contexts: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -931,6 +1052,13 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
         }
+
+        fn channel_contexts(&self) -> Vec<Option<String>> {
+            self.channel_contexts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
     }
 
     #[async_trait]
@@ -943,6 +1071,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request.classification.clone());
+            self.channel_contexts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.channel_context.clone());
             self.submissions.fetch_add(1, Ordering::SeqCst);
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
@@ -1326,5 +1458,187 @@ mod tests {
             sink.admit(admission_for(text)).await.expect("admitted");
             assert_eq!(surface.classifications(), vec![expected]);
         }
+    }
+
+    /// Scripted conversation-context adapter: records fetch calls and returns
+    /// a fixed outcome (context, none, or a channel error).
+    struct ScriptedContextAdapter {
+        fetch_calls: AtomicUsize,
+        outcome: Result<Option<String>, ChannelError>,
+    }
+
+    impl ScriptedContextAdapter {
+        fn new(outcome: Result<Option<String>, ChannelError>) -> Self {
+            Self {
+                fetch_calls: AtomicUsize::new(0),
+                outcome,
+            }
+        }
+    }
+
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelConversationContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
+        VerifiedInbound,
+    };
+
+    #[async_trait]
+    impl ChannelAdapter for ScriptedContextAdapter {
+        fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+            Ok(InboundOutcome::Ignore)
+        }
+
+        async fn deliver(
+            &self,
+            _envelope: OutboundEnvelope,
+            _egress: &dyn RestrictedEgress,
+        ) -> Result<DeliveryReport, ChannelError> {
+            Ok(DeliveryReport { parts: Vec::new() })
+        }
+
+        async fn fetch_conversation_context(
+            &self,
+            _conversation: &ExternalConversationRef,
+            _egress: &dyn RestrictedEgress,
+        ) -> Result<Option<ChannelConversationContext>, ChannelError> {
+            self.fetch_calls.fetch_add(1, Ordering::SeqCst);
+            match &self.outcome {
+                Ok(Some(text)) => Ok(Some(
+                    ChannelConversationContext::new(text.clone()).expect("scripted context"),
+                )),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error.clone()),
+            }
+        }
+    }
+
+    fn shared_admission_with_adapter(adapter: Arc<ScriptedContextAdapter>) -> InboundAdmission {
+        let mut admission = admission_for("<@bot> summarize this thread");
+        admission.message.trigger = ProductTriggerReason::BotMention;
+        admission.channel_adapter = adapter;
+        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
+        admission
+    }
+
+    #[tokio::test]
+    async fn shared_trigger_attaches_fetched_conversation_context_to_the_admitted_request() {
+        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+        let adapter = Arc::new(ScriptedContextAdapter::new(Ok(Some(
+            "<@U1>: earlier message\n<@U2>: reply".to_string(),
+        ))));
+
+        let ack = sink
+            .admit(shared_admission_with_adapter(Arc::clone(&adapter)))
+            .await
+            .expect("admitted");
+
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            surface.channel_contexts(),
+            vec![Some("<@U1>: earlier message\n<@U2>: reply".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_chat_never_fetches_conversation_context() {
+        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+        let adapter = Arc::new(ScriptedContextAdapter::new(Ok(Some(
+            "must never be fetched".to_string(),
+        ))));
+        let mut admission = admission_for("hello");
+        admission.channel_adapter = Arc::clone(&adapter) as Arc<dyn ChannelAdapter>;
+        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
+
+        sink.admit(admission).await.expect("admitted");
+
+        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(surface.channel_contexts(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn conversation_context_fetch_failure_still_admits_without_context() {
+        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+        let adapter = Arc::new(ScriptedContextAdapter::new(Err(
+            ChannelError::VendorWiring {
+                reason: "scripted vendor failure".to_string(),
+            },
+        )));
+
+        let ack = sink
+            .admit(shared_admission_with_adapter(Arc::clone(&adapter)))
+            .await
+            .expect("a context fetch failure must not fail admission");
+
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(surface.channel_contexts(), vec![None]);
+        assert_eq!(surface.submit_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_trigger_without_egress_skips_the_fetch_and_still_admits() {
+        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+        let adapter = Arc::new(ScriptedContextAdapter::new(Ok(Some(
+            "requires egress".to_string(),
+        ))));
+        let mut admission = shared_admission_with_adapter(Arc::clone(&adapter));
+        admission.channel_egress = None;
+
+        sink.admit(admission).await.expect("admitted");
+
+        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(surface.channel_contexts(), vec![None]);
+    }
+
+    #[test]
+    fn conversation_context_sanitizer_normalizes_and_clamps() {
+        // Newline normalization + control stripping.
+        assert_eq!(
+            sanitize_channel_conversation_context("a\r\nb\rc\u{0007}d\te").as_deref(),
+            Some("a\nb\ncd\te")
+        );
+        // Bidi + zero-width `Cf` format characters are stripped alongside `Cc`
+        // controls, so untrusted channel text cannot reorder or hide itself in
+        // the rendered prompt.
+        assert_eq!(
+            sanitize_channel_conversation_context("a\u{200B}b\u{202E}c\u{2066}d\u{FEFF}e\u{200F}f")
+                .as_deref(),
+            Some("abcdef")
+        );
+        // Regression: `U+200C` (ZWNJ) and `U+200D` (ZWJ) are legitimate
+        // orthography (Persian/Hindi word-joining) and emoji-sequence glue, NOT
+        // injection vectors — they must SURVIVE sanitization even though they
+        // sit between the stripped `U+200B` and the bidi controls.
+        assert_eq!(
+            sanitize_channel_conversation_context("با\u{200C}هم").as_deref(),
+            Some("با\u{200C}هم"),
+            "ZWNJ (U+200C) must be preserved as required orthography"
+        );
+        assert_eq!(
+            sanitize_channel_conversation_context("a\u{200D}b").as_deref(),
+            Some("a\u{200D}b"),
+            "ZWJ (U+200D) must be preserved (emoji sequences and script joining)"
+        );
+        // Unusable content degrades to None.
+        assert!(sanitize_channel_conversation_context("").is_none());
+        assert!(sanitize_channel_conversation_context(" \u{0000}\u{001b} ").is_none());
+        // A message that is nothing but format characters degrades to None.
+        assert!(sanitize_channel_conversation_context("\u{200B}\u{202E}\u{2066}").is_none());
+        // Oversized multi-line content drops the OLDEST lines.
+        let oldest = "oldest line".to_string();
+        let newest = "n".repeat(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES - 100);
+        let clamped = sanitize_channel_conversation_context(&format!(
+            "{oldest}\n{}\n{newest}",
+            "middle ".repeat(20_000)
+        ))
+        .expect("clamped context");
+        assert!(clamped.len() <= MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES);
+        assert!(clamped.ends_with(&newest));
+        assert!(!clamped.contains(&oldest));
+        // One oversized line keeps its newest tail on a char boundary.
+        let single = "日".repeat(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES);
+        let clamped = sanitize_channel_conversation_context(&single).expect("clamped line");
+        assert!(clamped.len() <= MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES);
+        assert!(!clamped.is_empty());
     }
 }

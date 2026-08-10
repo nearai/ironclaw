@@ -1071,6 +1071,12 @@ pub struct ProductTurnContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_channel: Option<RunOriginAdapter>,
     pub owner: TurnOwner,
+    /// Recent vendor-side conversation history fetched host-side at channel
+    /// ingress for shared-channel triggers (UNTRUSTED third-party text,
+    /// advisory only). Persisted with the run so a resume re-renders the same
+    /// prompt context; `None` for every non-channel origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_context: Option<String>,
 }
 
 impl ProductTurnContext {
@@ -1097,7 +1103,15 @@ impl ProductTurnContext {
             adapter,
             source_channel,
             owner,
+            channel_context: None,
         }
+    }
+
+    /// Attach host-fetched channel conversation context. See
+    /// [`ProductTurnContext::channel_context`].
+    pub fn with_channel_context(mut self, channel_context: Option<String>) -> Self {
+        self.channel_context = channel_context.filter(|context| !context.is_empty());
+        self
     }
 }
 
@@ -1436,6 +1450,44 @@ mod tests {
             back.source_channel.as_ref().map(RunOriginAdapter::as_str),
             Some("telegram")
         );
+    }
+
+    #[test]
+    fn product_turn_context_channel_context_round_trips_and_old_json_still_loads() {
+        let ctx = ProductTurnContext::new(
+            TurnOriginKind::Inbound,
+            Some(TurnSurfaceType::Channel),
+            Some(RunOriginAdapter::new("slack").unwrap()),
+            TurnOwner::Personal {
+                user: crate::ids::UserId::new("u1").unwrap(),
+            },
+        )
+        .with_channel_context(Some("<@U1>: hello\n<@U2>: hi bot".to_string()));
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: ProductTurnContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx, back);
+        assert_eq!(
+            back.channel_context.as_deref(),
+            Some("<@U1>: hello\n<@U2>: hi bot")
+        );
+
+        // Persisted run records predating the field must still deserialize
+        // (default None), and None must not serialize a key at all.
+        let old_json = r#"{
+                "origin": "inbound",
+                "owner": {"kind": "personal", "user": "u1"}
+            }"#;
+        let old: ProductTurnContext = serde_json::from_str(old_json).expect("old JSON loads");
+        assert!(old.channel_context.is_none());
+        let none_json = serde_json::to_string(&old).unwrap();
+        assert!(
+            !none_json.contains("channel_context"),
+            "absent context must stay absent on the wire: {none_json}"
+        );
+
+        // The builder normalizes empty context to absent.
+        let cleared = old.clone().with_channel_context(Some(String::new()));
+        assert!(cleared.channel_context.is_none());
     }
 
     #[test]

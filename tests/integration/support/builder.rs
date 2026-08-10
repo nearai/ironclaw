@@ -2508,7 +2508,9 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        // A run acts as the user who invoked it: the actor owns the scope.
+        // The run's thread scope is the acting user (the pinger). Ephemeral
+        // per-ping threads are pinger-owned, so owner == actor; mirrors
+        // production `run_delivery::thread_scope_from_binding`.
         owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })

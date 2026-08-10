@@ -22,13 +22,14 @@ fields = [
   { handle = "slack_bot_user_id", label = "Bot user ID", secret = false, required = true },
   { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
   { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true },
-  { handle = "slack_allowed_channels", label = "Allowed channels (JSON array of Slack channel IDs)", secret = false, required = false },
 ]
-# Retired handles (run-acts-as-invoker): `slack_shared_subject_user_id` and
-# `slack_subject_routes` are gone — a shared channel runs as whoever invoked
-# the bot, so there is no subject to configure. Saved values are inert and new
-# saves fail closed as unknown fields. Channels formerly admitted only through
-# subject routes are re-admitted by listing them in `slack_allowed_channels`.
+# Retired handles (run-acts-as-invoker): `slack_shared_subject_user_id`,
+# `slack_subject_routes`, and the interim `slack_allowed_channels` allowlist
+# are gone — a shared channel runs as whoever invoked the bot, and adding the
+# bot to a channel is what admits it (presence-based; the message arriving
+# through this channel's verified ingress is the membership evidence). Saved
+# values for retired handles are inert; new saves fail closed as unknown
+# fields.
 
 # Least-privilege scopes: the read-only tools request only read scopes; only
 # send_message requests chat:write. The slack OAuth grant is the union of
@@ -235,6 +236,10 @@ paths = [
 request_body_limit_bytes = 262144
 response_body_limit_bytes = 262144
 
+# conversations.history / conversations.replies hydrate shared-channel pings
+# with recent conversation context at ingress. The bot needs the
+# channels:history-family scopes granted operator-side; when absent, Slack
+# returns missing_scope and the ping proceeds with no context.
 [[channel.egress]]
 scheme = "https"
 host = "slack.com"
@@ -243,6 +248,8 @@ credential_handle = "slack_bot_token"
 paths = [
   "/api/files.info",
   "/api/files.getUploadURLExternal",
+  "/api/conversations.history",
+  "/api/conversations.replies",
 ]
 request_body_limit_bytes = 0
 response_body_limit_bytes = 262144
@@ -272,6 +279,7 @@ response_body_limit_bytes = 262144
 [channel.presentation]
 supports_markdown = true
 supports_threads = true
+can_reply_in_threads = true
 max_message_chars = 40000
 command_prefix = "/ironclaw "
 

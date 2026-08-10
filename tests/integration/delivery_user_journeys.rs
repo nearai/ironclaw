@@ -562,6 +562,10 @@ fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
             config: &[],
             body: body.as_bytes(),
             headers: &[],
+            // Slack's manifest `presentation.can_reply_in_threads` (#7377
+            // made the flag load-bearing); a DM body is unaffected either
+            // way, but the value must mirror the shipped manifest.
+            can_reply_in_threads: true,
         })
         .expect("the slack DM body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {

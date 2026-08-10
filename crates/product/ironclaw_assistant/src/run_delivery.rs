@@ -294,16 +294,12 @@ pub(crate) async fn cancel_auth_blocked_run(
     gate_ref: Option<&str>,
 ) -> Result<(), RunDeliveryError> {
     // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`.
-    // Owner resolution: an explicit turn owner (shared/team subject) wins,
-    // else the acting user. Without a gate ref there is no flow to resolve.
+    // The flow was created under the run's user, so cancel must target the same
+    // user — matching the auth-flow create/resolve sides. Owner == actor since
+    // the ephemeral-per-ping remodel. Without a gate ref there is no flow to
+    // resolve.
     let flow_cancel_target = match (auth_flow_cancel, gate_ref) {
-        (Some(canceller), Some(gate_ref)) => {
-            let owner_user_id = scope
-                .explicit_owner_user_id()
-                .unwrap_or(&actor.user_id)
-                .clone();
-            Some((canceller, owner_user_id, gate_ref))
-        }
+        (Some(canceller), Some(gate_ref)) => Some((canceller, actor.user_id.clone(), gate_ref)),
         _ => None,
     };
 
@@ -355,8 +351,9 @@ pub(crate) fn thread_scope_from_binding(
         tenant_id: binding.tenant_id.clone(),
         agent_id,
         project_id: binding.project_id.clone(),
-        // A run acts as the user who invoked it: the thread owner is the
-        // binding's actor on every route kind.
+        // The thread belongs to the user who invoked it (the pinger). A channel
+        // ping resolves onto its own ephemeral pinger-owned thread and a DM is
+        // the user's own thread, so there is one identity per run: the actor.
         owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })
@@ -371,6 +368,8 @@ pub(crate) fn turn_scope_from_thread_scope(
             reason: "resolved binding missing agent_id required for turn scope".to_string(),
         });
     };
+    // The run's turn scope shares the thread scope's single user (the pinger):
+    // there is no separate thread owner to diverge from the actor.
     Ok(TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         Some(agent_id),

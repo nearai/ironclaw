@@ -996,16 +996,21 @@ impl RunDeliveryObserver {
         true
     }
 
-    /// A first-contact DM from a user with no identity binding is rejected
-    /// with `BindingRequired`. Instead of silently dropping it, greet them
-    /// with a connect nudge — but ONLY in a 1:1 direct chat: the nudge is
-    /// addressed to one person and must never land in a shared conversation.
-    /// The gate is the adapter's own trigger classification
-    /// (`ProductTriggerReason::DirectChat` — the same signal the OAuth-link
-    /// privacy rule trusts). Deliberately performs NO binding lookup (the
-    /// sender is unbound by definition) and posts only fixed, host-authored
-    /// text. Transport retries arrive as `Duplicate`, so this fires at most
-    /// once per inbound event.
+    /// A message from a user with no identity binding is rejected with
+    /// `BindingRequired`. Instead of silently dropping it, greet them with a
+    /// connect nudge. In a 1:1 direct chat that lands in the DM as before;
+    /// in a shared conversation it lands as a reply anchored on the sender's
+    /// own message (the envelope's message-scoped conversation ref carries
+    /// the anchor — a threading surface roots a thread on the ping, a flat
+    /// surface quotes it), so the nudge addresses the one unpaired sender
+    /// rather than the room. The
+    /// text is fixed, host-authored, and link-free (OAuth links and pairing
+    /// codes stay out of shared surfaces by the private-setup rules).
+    /// Deliberately performs NO binding lookup (the sender is unbound by
+    /// definition). Transport retries arrive as `Duplicate`, so this fires
+    /// at most once per inbound event, and the per-conversation reservation
+    /// throttles repeats — per rooted thread (each top-level ping roots its
+    /// own conversation) and per flat chat or topic.
     async fn post_connect_nudge_if_unbound_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -1017,7 +1022,11 @@ impl RunDeliveryObserver {
         if !matches!(rejection.kind, ProductRejectionKind::BindingRequired) {
             return false;
         }
-        if !envelope_is_direct_chat(envelope) {
+        // Only nudge when the message actually addressed the bot. A shared
+        // channel forwards ordinary chatter and unbound thread replies that
+        // also reject `BindingRequired`; nudging those would butt a "connect"
+        // notice into conversations nobody pointed at the bot.
+        if !envelope_addresses_the_bot(envelope) {
             return false;
         }
         let conversation_key = envelope
@@ -1515,6 +1524,29 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
         envelope.payload(),
         ProductInboundPayload::UserMessage(payload)
             if payload.trigger == ProductTriggerReason::DirectChat
+    )
+}
+
+/// Does this message ADDRESS the bot — a DM, a mention, or a slash command —
+/// as opposed to ordinary channel chatter the adapter merely forwarded?
+///
+/// The connect nudge fires only for addressed messages: a shared channel
+/// delivers every `message` event the bot is subscribed to, and an unbound
+/// human-to-human thread reply (`ReplyToBot` with no existing binding) also
+/// rejects `BindingRequired` — nudging THAT would post a "connect" notice
+/// into a conversation nobody pointed at the bot. Requiring a bot-addressed
+/// trigger keeps the nudge to the "someone tried to use the bot and isn't
+/// paired" case on every surface.
+fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload)
+            if matches!(
+                payload.trigger,
+                ProductTriggerReason::DirectChat
+                    | ProductTriggerReason::BotMention
+                    | ProductTriggerReason::BotCommand
+            )
     )
 }
 
