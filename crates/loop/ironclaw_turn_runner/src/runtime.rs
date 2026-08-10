@@ -2,7 +2,6 @@
 
 use std::{error::Error, fmt, sync::Arc};
 
-use ironclaw_agent_loop::executor::CapabilityBatchExecutionMode;
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
@@ -43,8 +42,8 @@ use crate::{
     loop_exit_applier::{AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort},
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
-        register_default_planned_driver_with_batch_execution, register_default_text_only_driver,
-        register_subagent_planned_driver_with_batch_execution,
+        register_default_planned_driver, register_default_text_only_driver,
+        register_subagent_planned_driver,
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
@@ -111,7 +110,7 @@ impl ParallelToolBatchMode {
             Ok(value) => Self::from_raw(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::Off,
             Err(std::env::VarError::NotUnicode(_)) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_PARALLEL_TOOL_BATCH_ENV,
                     "REBORN_PARALLEL_TOOL_BATCH is not valid UTF-8; falling back to Off"
@@ -126,7 +125,7 @@ impl ParallelToolBatchMode {
             Some("on" | "1" | "true") => Self::On,
             None | Some("" | "off" | "0" | "false") => Self::Off,
             Some(_) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_PARALLEL_TOOL_BATCH_ENV,
                     "unrecognized REBORN_PARALLEL_TOOL_BATCH value; falling back to Off"
@@ -136,11 +135,8 @@ impl ParallelToolBatchMode {
         }
     }
 
-    const fn execution_mode(self) -> CapabilityBatchExecutionMode {
-        match self {
-            Self::Off => CapabilityBatchExecutionMode::Sequential,
-            Self::On => CapabilityBatchExecutionMode::BoundedParallel,
-        }
+    const fn is_enabled(self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
@@ -595,12 +591,13 @@ fn build_default_planned_runtime_inner<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    let batch_execution_mode = parts.config.parallel_tool_batch.execution_mode();
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
+    let parallel_tool_batch = parts.config.parallel_tool_batch.is_enabled();
     let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
         parts.config.planned_model_availability_retry_attempts,
+        parallel_tool_batch,
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
@@ -611,16 +608,8 @@ where
             ),
         )
     })?;
-    register_default_planned_driver_with_batch_execution(
-        &mut registry,
-        Arc::clone(&family_registry),
-        batch_execution_mode,
-    )?;
-    register_subagent_planned_driver_with_batch_execution(
-        &mut registry,
-        family_registry,
-        batch_execution_mode,
-    )?;
+    register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    register_subagent_planned_driver(&mut registry, family_registry)?;
     let driver_registry = Arc::new(registry);
 
     let resolver = Arc::new(
@@ -1001,7 +990,7 @@ mod tests {
     };
 
     use super::{
-        CapabilityBatchExecutionMode, ParallelToolBatchMode, RuntimeProfiledCapabilityPortFactory,
+        ParallelToolBatchMode, RuntimeProfiledCapabilityPortFactory,
         SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
         scheduler_permit_count,
     };
@@ -1048,10 +1037,7 @@ mod tests {
             ParallelToolBatchMode::from_raw(Some("off")),
             ParallelToolBatchMode::Off
         );
-        assert_eq!(
-            ParallelToolBatchMode::Off.execution_mode(),
-            CapabilityBatchExecutionMode::Sequential
-        );
+        assert!(!ParallelToolBatchMode::Off.is_enabled());
     }
 
     #[test]
@@ -1062,10 +1048,7 @@ mod tests {
                 ParallelToolBatchMode::On
             );
         }
-        assert_eq!(
-            ParallelToolBatchMode::On.execution_mode(),
-            CapabilityBatchExecutionMode::BoundedParallel
-        );
+        assert!(ParallelToolBatchMode::On.is_enabled());
     }
 
     #[test]

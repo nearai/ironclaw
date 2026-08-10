@@ -131,9 +131,10 @@ async fn golden_context_surfacing() {
 
 /// (f) Parallel tool_calls: one assistant response carrying TWO `tool_calls[]`
 /// entries for a production capability whose descriptor is parallel-safe.
-/// The executor unit test pins actual overlap with deterministic delays; this
-/// integration test pins real descriptor classification, composition wiring,
-/// durable result persistence, and input-order replay to the model.
+/// The executor unit test pins actual overlap with deterministic scheduling.
+/// This integration test first creates its own file fixture through the real
+/// write capability, then pins descriptor classification, composition wiring,
+/// durable result persistence, exact dispatch count, and input-order replay.
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
@@ -165,9 +166,9 @@ async fn golden_parallel_tool_calls() {
     h.submit_turn("write a file, then read both lines")
         .await
         .expect("turn completes");
-    h.assert_tool_invoked("builtin.read_file")
+    h.assert_tool_invocation_count("builtin.read_file", 2)
         .await
-        .expect("parallel-safe read calls reached the production capability host");
+        .expect("both parallel-safe read calls reached the production capability host once");
     h.assert_golden_payload("parallel_tool_calls");
     h.assert_reply_eq("read both")
         .await

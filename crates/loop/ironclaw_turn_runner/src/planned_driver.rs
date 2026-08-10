@@ -10,9 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_agent_loop::{
-    executor::{
-        AgentLoopExecutorError, CanonicalAgentLoopExecutor, CapabilityBatchExecutionMode, HostStage,
-    },
+    executor::{AgentLoopExecutor, AgentLoopExecutorError, CanonicalAgentLoopExecutor, HostStage},
     family::{LoopFamily, LoopFamilyId, LoopFamilyRegistry},
     state::{
         CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointKind, CheckpointPayloadError,
@@ -39,7 +37,6 @@ pub struct PlannedDriver {
     descriptor: AgentLoopDriverDescriptor,
     family: Arc<LoopFamily>,
     executor: Arc<CanonicalAgentLoopExecutor>,
-    batch_execution_mode: CapabilityBatchExecutionMode,
 }
 
 impl PlannedDriver {
@@ -47,20 +44,6 @@ impl PlannedDriver {
         family: Arc<LoopFamily>,
         executor: Arc<CanonicalAgentLoopExecutor>,
         descriptor: AgentLoopDriverDescriptor,
-    ) -> Result<Self, AgentLoopDriverError> {
-        Self::from_family_with_descriptor_and_batch_execution(
-            family,
-            executor,
-            descriptor,
-            CapabilityBatchExecutionMode::Sequential,
-        )
-    }
-
-    pub fn from_family_with_descriptor_and_batch_execution(
-        family: Arc<LoopFamily>,
-        executor: Arc<CanonicalAgentLoopExecutor>,
-        descriptor: AgentLoopDriverDescriptor,
-        batch_execution_mode: CapabilityBatchExecutionMode,
     ) -> Result<Self, AgentLoopDriverError> {
         if descriptor.checkpoint_schema_id.is_none()
             || descriptor.checkpoint_schema_version.is_none()
@@ -73,7 +56,6 @@ impl PlannedDriver {
             descriptor,
             family,
             executor,
-            batch_execution_mode,
         })
     }
 
@@ -88,7 +70,6 @@ impl PlannedDriver {
             descriptor,
             family,
             executor,
-            batch_execution_mode: CapabilityBatchExecutionMode::Sequential,
         })
     }
 
@@ -134,12 +115,7 @@ impl AgentLoopDriver for PlannedDriver {
         validate_run_request(&request, &self.descriptor)?;
         let initial = LoopExecutionState::initial_for_run(host.run_context());
         self.executor
-            .execute_family_with_batch_execution(
-                self.family.as_ref(),
-                host,
-                initial,
-                self.batch_execution_mode,
-            )
+            .execute_family(self.family.as_ref(), host, initial)
             .await
             .map_err(map_executor_error)
     }
@@ -203,12 +179,7 @@ impl AgentLoopDriver for PlannedDriver {
         }
 
         self.executor
-            .execute_family_with_batch_execution(
-                self.family.as_ref(),
-                host,
-                initial,
-                self.batch_execution_mode,
-            )
+            .execute_family(self.family.as_ref(), host, initial)
             .await
             .map_err(map_executor_error)
     }
@@ -487,7 +458,9 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_loop_family::build_loop_family_registry;
+    use crate::app_loop_family::{
+        build_loop_family_registry, build_loop_family_registry_with_overrides,
+    };
     use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
@@ -623,7 +596,8 @@ mod tests {
 
     #[tokio::test]
     async fn configured_planned_driver_uses_individual_parallel_capability_calls() {
-        let registry = build_loop_family_registry().expect("registry");
+        let registry =
+            build_loop_family_registry_with_overrides(None, None, true).expect("registry");
         let family = registry
             .get(&LoopFamilyId::DEFAULT)
             .expect("default family");
@@ -632,11 +606,10 @@ mod tests {
             RunProfileVersion::new(PLANNED_DRIVER_VERSION),
         )
         .expect("descriptor");
-        let driver = PlannedDriver::from_family_with_descriptor_and_batch_execution(
+        let driver = PlannedDriver::from_family_with_descriptor(
             family,
             Arc::new(CanonicalAgentLoopExecutor),
             descriptor,
-            CapabilityBatchExecutionMode::BoundedParallel,
         )
         .expect("driver");
         let context = run_context_for_driver(&driver);

@@ -155,40 +155,15 @@ fn debug_host_unavailable(stage: HostStage, error: &AgentLoopHostError) {
         Err(validation_error) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            validation_error = %validation_error,
+            invalid_summary_error = %validation_error,
             "agent loop host call unavailable with invalid safe summary"
         ),
     }
 }
 
-/// Selects how batches already judged safe for parallel execution are invoked.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum CapabilityBatchExecutionMode {
-    /// Preserve the pre-rollout path through the host's batch method.
-    #[default]
-    Sequential,
-    /// Invoke individual capability calls concurrently with a fixed bound.
-    BoundedParallel,
-}
-
 /// Reference executor for the Reborn skeleton loop.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CanonicalAgentLoopExecutor;
-
-impl CanonicalAgentLoopExecutor {
-    /// Execute one family with an explicit capability-batch rollout mode.
-    pub async fn execute_family_with_batch_execution(
-        &self,
-        family: &LoopFamily,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
-        initial_state: LoopExecutionState,
-        batch_execution_mode: CapabilityBatchExecutionMode,
-    ) -> Result<LoopExit, AgentLoopExecutorError> {
-        DefaultExecutorPipeline::with_batch_execution_mode(batch_execution_mode)
-            .execute(family, host, initial_state)
-            .await
-    }
-}
 
 #[async_trait]
 impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
@@ -198,13 +173,9 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         initial_state: LoopExecutionState,
     ) -> Result<LoopExit, AgentLoopExecutorError> {
-        self.execute_family_with_batch_execution(
-            family,
-            host,
-            initial_state,
-            CapabilityBatchExecutionMode::Sequential,
-        )
-        .await
+        DefaultExecutorPipeline::default()
+            .execute(family, host, initial_state)
+            .await
     }
 }
 

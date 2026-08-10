@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_agent_loop::{
-    executor::{CanonicalAgentLoopExecutor, CapabilityBatchExecutionMode},
+    executor::CanonicalAgentLoopExecutor,
     family::{LoopFamilyId, LoopFamilyRegistry},
     state::{CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION},
 };
@@ -135,16 +135,6 @@ pub fn subagent_planned_driver_descriptor() -> Result<AgentLoopDriverDescriptor,
 pub fn default_planned_driver(
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
-    default_planned_driver_with_batch_execution(
-        family_registry,
-        CapabilityBatchExecutionMode::Sequential,
-    )
-}
-
-pub(crate) fn default_planned_driver_with_batch_execution(
-    family_registry: Arc<LoopFamilyRegistry>,
-    batch_execution_mode: CapabilityBatchExecutionMode,
-) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
     let family = family_registry.get(&LoopFamilyId::DEFAULT).ok_or_else(|| {
         AgentLoopDriverError::InvalidRequest {
             reason: "default loop family is not registered".to_string(),
@@ -153,12 +143,7 @@ pub(crate) fn default_planned_driver_with_batch_execution(
     let descriptor = planned_driver_descriptor()
         .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
     let executor = Arc::new(CanonicalAgentLoopExecutor);
-    let driver = PlannedDriver::from_family_with_descriptor_and_batch_execution(
-        family,
-        executor,
-        descriptor.clone(),
-        batch_execution_mode,
-    )?;
+    let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
     Ok(DefaultPlannedDriverBuild {
         driver: Arc::new(driver),
         descriptor,
@@ -168,16 +153,6 @@ pub(crate) fn default_planned_driver_with_batch_execution(
 pub fn subagent_planned_driver(
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
-    subagent_planned_driver_with_batch_execution(
-        family_registry,
-        CapabilityBatchExecutionMode::Sequential,
-    )
-}
-
-pub(crate) fn subagent_planned_driver_with_batch_execution(
-    family_registry: Arc<LoopFamilyRegistry>,
-    batch_execution_mode: CapabilityBatchExecutionMode,
-) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
     let family = family_registry
         .get(&LoopFamilyId::SUBAGENT)
         .ok_or_else(|| AgentLoopDriverError::InvalidRequest {
@@ -186,12 +161,7 @@ pub(crate) fn subagent_planned_driver_with_batch_execution(
     let descriptor = subagent_planned_driver_descriptor()
         .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
     let executor = Arc::new(CanonicalAgentLoopExecutor);
-    let driver = PlannedDriver::from_family_with_descriptor_and_batch_execution(
-        family,
-        executor,
-        descriptor.clone(),
-        batch_execution_mode,
-    )?;
+    let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
     Ok(DefaultPlannedDriverBuild {
         driver: Arc::new(driver),
         descriptor,
@@ -214,19 +184,7 @@ pub fn register_default_planned_driver(
     registry: &mut DriverRegistry,
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
-    register_default_planned_driver_with_batch_execution(
-        registry,
-        family_registry,
-        CapabilityBatchExecutionMode::Sequential,
-    )
-}
-
-pub(crate) fn register_default_planned_driver_with_batch_execution(
-    registry: &mut DriverRegistry,
-    family_registry: Arc<LoopFamilyRegistry>,
-    batch_execution_mode: CapabilityBatchExecutionMode,
-) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
-    let build = default_planned_driver_with_batch_execution(family_registry, batch_execution_mode)?;
+    let build = default_planned_driver(family_registry)?;
     registry
         .register_driver(
             build.driver,
@@ -240,20 +198,7 @@ pub fn register_subagent_planned_driver(
     registry: &mut DriverRegistry,
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
-    register_subagent_planned_driver_with_batch_execution(
-        registry,
-        family_registry,
-        CapabilityBatchExecutionMode::Sequential,
-    )
-}
-
-pub(crate) fn register_subagent_planned_driver_with_batch_execution(
-    registry: &mut DriverRegistry,
-    family_registry: Arc<LoopFamilyRegistry>,
-    batch_execution_mode: CapabilityBatchExecutionMode,
-) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
-    let build =
-        subagent_planned_driver_with_batch_execution(family_registry, batch_execution_mode)?;
+    let build = subagent_planned_driver(family_registry)?;
     registry
         .register_driver(
             build.driver,

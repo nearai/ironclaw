@@ -10119,7 +10119,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_duplicate_gate_invocations_share_one_persisted_resolution() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -10162,8 +10162,29 @@ mod tests {
 
         let waiter_port = Arc::clone(&port);
         let waiter = tokio::spawn(async move { waiter_port.invoke_capability(invocation).await });
-        tokio::task::yield_now().await;
-        store.release.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiter_holds_reservation = port
+                    .persisted_gate_resolutions
+                    .lock()
+                    .expect("gate resolution reservations lock")
+                    .values()
+                    .any(|state| {
+                        matches!(
+                            state,
+                            GateResolutionState::InFlight(notify)
+                                if Arc::strong_count(notify) >= 3
+                        )
+                    });
+                if waiter_holds_reservation {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter must park on the in-flight reservation");
+        store.release.notify_one();
 
         let owner_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), owner)
             .await

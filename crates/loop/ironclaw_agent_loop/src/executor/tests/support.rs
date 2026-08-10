@@ -37,11 +37,11 @@ use crate::{
     family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
-        CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy, ContextStrategy,
-        DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome,
-        GateSummary, InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
-        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
-        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
+        BoundedParallelBatchPolicyStrategy, CapabilityErrorSummary, CapabilityFilter,
+        CapabilityStrategy, ContextStrategy, DefaultBudgetStrategy, DefaultCompactionStrategy,
+        GateHandlingStrategy, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary,
+        RecoveryOutcome, RecoveryStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
+        RetryAlteration, RetryScope, StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
 
@@ -70,7 +70,8 @@ pub(super) struct MockHost {
             >,
         >,
     >,
-    single_invoke_delays: Arc<Mutex<VecDeque<std::time::Duration>>>,
+    single_invoke_delays: Arc<[std::time::Duration]>,
+    next_single_invoke_delay: Arc<AtomicUsize>,
     active_single_invocations: Arc<AtomicUsize>,
     max_concurrent_single_invocations: Arc<AtomicUsize>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
@@ -123,7 +124,8 @@ impl MockHost {
             acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
             batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
             single_outcomes: Arc::new(Mutex::new(VecDeque::new())),
-            single_invoke_delays: Arc::new(Mutex::new(VecDeque::new())),
+            single_invoke_delays: Arc::from([]),
+            next_single_invoke_delay: Arc::new(AtomicUsize::new(0)),
             active_single_invocations: Arc::new(AtomicUsize::new(0)),
             max_concurrent_single_invocations: Arc::new(AtomicUsize::new(0)),
             checkpoints: Arc::new(Mutex::new(Vec::new())),
@@ -222,8 +224,8 @@ impl MockHost {
         self
     }
 
-    pub(super) fn with_single_invoke_delays(self, delays: Vec<std::time::Duration>) -> Self {
-        *self.single_invoke_delays.lock().expect("lock") = delays.into();
+    pub(super) fn with_single_invoke_delays(mut self, delays: Vec<std::time::Duration>) -> Self {
+        self.single_invoke_delays = delays.into();
         self
     }
 
@@ -923,11 +925,11 @@ impl ironclaw_loop_contracts::LoopCapabilityPort for MockHost {
             .ok_or_else(|| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "single script exhausted")
             })?;
+        let delay_index = self.next_single_invoke_delay.fetch_add(1, Ordering::SeqCst);
         let delay = self
             .single_invoke_delays
-            .lock()
-            .expect("lock")
-            .pop_front()
+            .get(delay_index)
+            .copied()
             .unwrap_or_default();
         let active = self
             .active_single_invocations
@@ -1370,6 +1372,15 @@ pub(super) fn input_ack(
 
 pub(super) fn message_ref(value: &str) -> LoopMessageRef {
     LoopMessageRef::new(value).expect("valid message ref")
+}
+
+pub(super) fn family_with_parallel_batch_execution() -> LoopFamily {
+    let planner =
+        DefaultPlanner::compose_default().with_batch(Arc::new(BoundedParallelBatchPolicyStrategy));
+    let id = LoopFamilyId::new("executor-parallel-batch-test").expect("valid test family id");
+    let version =
+        ComponentIdentity::from_static("executor-parallel-batch-test", ComponentDigest([11; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
 }
 
 pub(super) fn family_with_capability_filter(filter: CapabilityFilter) -> LoopFamily {

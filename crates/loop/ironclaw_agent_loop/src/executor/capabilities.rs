@@ -30,12 +30,11 @@ use ironclaw_loop_contracts::{
 
 use super::{
     AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
-    CancelCheck, CapabilityBatchExecutionMode, CapabilitySurfaceIndex, CheckpointStage,
-    ExecutorStage, FailedExitDetails, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext,
-    TurnCompletedStep, append_capability_error_ref, append_capability_result_ref,
-    append_capability_safe_summary_ref, attach_failure_explanation, batch_policy_kind,
-    cancelled_exit, capability_batch_counts, capability_call_signature,
-    capability_error_failure_category, capability_host_error,
+    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
+    GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
+    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
+    attach_failure_explanation, batch_policy_kind, cancelled_exit, capability_batch_counts,
+    capability_call_signature, capability_error_failure_category, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_port_error_is_terminal, capability_summary,
     clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
@@ -45,15 +44,14 @@ use super::{
 use crate::{
     state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
-        BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
-        RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
+        BatchPolicy, CapabilityBatchExecutionMode, CapabilityBatchTurnSummary,
+        CapabilityErrorSummary, GateKind, RecoveryOutcome, RetryAlteration,
+        SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
     },
 };
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct CapabilityStage {
-    batch_execution_mode: CapabilityBatchExecutionMode,
-}
+pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
 const STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "input could not be encoded";
@@ -66,19 +64,13 @@ pub(super) struct CapabilityInput {
 }
 
 impl CapabilityStage {
-    pub(crate) const fn new(batch_execution_mode: CapabilityBatchExecutionMode) -> Self {
-        Self {
-            batch_execution_mode,
-        }
-    }
-
     async fn invoke_batch(
         &self,
         ctx: StageContext<'_>,
         policy: BatchPolicy,
         invocations: Vec<LoopRequest>,
     ) -> Result<ResolutionBatch, ironclaw_loop_contracts::AgentLoopHostError> {
-        if self.batch_execution_mode != CapabilityBatchExecutionMode::BoundedParallel
+        if ctx.planner.batch().execution_mode() != CapabilityBatchExecutionMode::BoundedParallel
             || policy != BatchPolicy::Parallel
         {
             return ctx
@@ -488,10 +480,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         } else {
             None
         };
-        if !batch.stopped_on_suspension {
-            // Non-suspended batches record completed (and coalesced-await)
-            // outcomes before handling any remaining gates so partial parallel
-            // progress is durable in any later suspension checkpoint.
+        {
+            // Record completed outcomes before handling any gate, including
+            // bounded fan-out batches that stopped launching after a suspension.
+            // Calls already in flight are awaited, so their completed results
+            // must be durable in the suspension checkpoint.
             let mut pending_outcomes = Vec::new();
             for (call, resolution) in visible_calls.into_iter().zip(resolutions) {
                 match resolution {
@@ -589,19 +582,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         return self
                             .completed_turn(ctx, *next, result_refs_start, capability_batch)
                             .await;
-                    }
-                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
-                }
-            }
-        } else {
-            for (call, resolution) in visible_calls.into_iter().zip(resolutions) {
-                push_call_signature_once(&mut state, &mut signatures, &call)?;
-                match self
-                    .handle_capability_outcome(ctx, state, call, resolution, &mut capability_batch)
-                    .await?
-                {
-                    BatchStep::Continue(next) => {
-                        state = *next;
                     }
                     BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }

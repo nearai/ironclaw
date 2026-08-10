@@ -47,11 +47,11 @@ use crate::test_support::{
 
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
-    BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityBatchExecutionMode,
-    CapabilityInput, CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput,
-    GateStage, HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage,
-    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
+    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
+    StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -2277,7 +2277,7 @@ async fn capability_stage_returns_after_batch_summary() {
         ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
     };
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -3255,11 +3255,10 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = executor
-        .execute_family_with_batch_execution(
-            &crate::families::default(),
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
             &host,
             state,
-            CapabilityBatchExecutionMode::BoundedParallel,
         )
         .await
         .expect("execute");
@@ -3312,11 +3311,10 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
-        .execute_family_with_batch_execution(
-            &crate::families::default(),
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
             &host,
             state,
-            CapabilityBatchExecutionMode::BoundedParallel,
         )
         .await
         .expect("execute");
@@ -3328,7 +3326,68 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
         4,
         "the two calls outside the initial window must remain unlaunched"
     );
+    let persisted_refs = host
+        .appended_result_refs()
+        .into_iter()
+        .map(|request| request.result_ref)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_refs,
+        (1..4)
+            .map(|index| {
+                LoopResultRef::new(format!("result:parallel-window-{index}")).expect("valid")
+            })
+            .collect::<Vec<_>>(),
+        "completed siblings already in flight must be durable before the gate exit"
+    );
+    assert_eq!(
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock).result_refs,
+        persisted_refs,
+        "the suspension checkpoint must retain all completed siblings"
+    );
 }
+#[tokio::test]
+async fn parallel_batch_reports_first_input_order_terminal_error() {
+    let host = MockHost::new(vec![two_calls_response()])
+        .with_single_results(vec![
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "first input call failed",
+            )
+            .with_detail("first input detail")),
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "second input call failed",
+            )
+            .with_detail("second input detail")),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(5),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("terminal capability failures must end the run");
+
+    assert!(
+        matches!(
+            &error,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                safe_summary,
+                ..
+            } if safe_summary.as_str() == "first input call failed"
+        ),
+        "terminal error selection must follow input order, not completion order: {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn parallel_batch_preserves_success_when_sibling_returns_recoverable_port_error() {
     let completed_ref = LoopResultRef::new("result:parallel-mixed-success").expect("valid"); // safety: test-only fixture
@@ -3357,11 +3416,10 @@ async fn parallel_batch_preserves_success_when_sibling_returns_recoverable_port_
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = executor
-        .execute_family_with_batch_execution(
-            &crate::families::default(),
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
             &host,
             state,
-            CapabilityBatchExecutionMode::BoundedParallel,
         )
         .await
         .expect("recoverable sibling error must not discard completed outcomes");
@@ -3408,11 +3466,10 @@ async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enab
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
-        .execute_family_with_batch_execution(
-            &crate::families::default(),
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
             &host,
             state,
-            CapabilityBatchExecutionMode::BoundedParallel,
         )
         .await
         .expect("execute");
@@ -8352,7 +8409,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
     .await
     .expect("visible surface");
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -8826,7 +8883,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         disposition: Some(GateResumeDisposition::Denied),
     });
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -8959,7 +9016,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     current_surface.descriptors.clear();
     current_surface.callable_capability_ids = Some(Vec::new());
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -9071,7 +9128,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         host: &host,
     };
 
-    let phase1 = CapabilityStage::default()
+    let phase1 = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -9112,7 +9169,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         .expect("pending auth resume")
         .disposition = Some(ironclaw_host_api::turn::GateResumeDisposition::Denied);
 
-    let phase2 = CapabilityStage::default()
+    let phase2 = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -9279,7 +9336,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         },
     ];
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -9491,7 +9548,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
         },
     ];
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -9709,7 +9766,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         },
     ];
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -9941,7 +9998,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         },
     ];
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
@@ -10132,7 +10189,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         provider_replay: None,
     }];
 
-    let step = CapabilityStage::default()
+    let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {

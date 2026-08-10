@@ -11,22 +11,26 @@ use ironclaw_agent_loop::{
 /// Builtin family means adding its factory here; the framework crate exports
 /// family factories but does not decide which ones are bound in production.
 pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
-    build_loop_family_registry_with_overrides(None, None)
+    build_loop_family_registry_with_overrides(None, None, false)
 }
 
 pub fn build_loop_family_registry_with_overrides(
     default_iteration_limit: Option<NonZeroU32>,
     model_availability_attempts: Option<NonZeroU32>,
+    parallel_tool_batch: bool,
 ) -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
     // `default_with_overrides` returns the pure-default composition (static
     // replay digest included) when no override is set.
     let default_family = families::default_with_overrides(families::FamilyOverrides {
         iteration_limit: default_iteration_limit.map(NonZeroU32::get),
         model_availability_attempts: model_availability_attempts.map(NonZeroU32::get),
+        parallel_tool_batch,
     });
     LoopFamilyRegistry::with_families(vec![
         Arc::new(default_family),
-        Arc::new(families::subagent()),
+        Arc::new(families::subagent_with_parallel_tool_batch(
+            parallel_tool_batch,
+        )),
     ])
 }
 
