@@ -1848,22 +1848,22 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         self.assertIsNotNone(block, detail)
         start = text.find(block)
         self.assertNotEqual(start, -1)
-        mutated_block = block.replace(
-            'profile = "hosted-single-tenant-volume"',
-            'profile = "hosted-single-tenant-provisioned"',
-            1,
-        )
-        self.assertNotEqual(mutated_block, block)
-        mutated = (
-            'profile = "hosted-single-tenant-volume"\n'
+        expected = 'profile = "hosted-single-tenant-volume"'
+        replacement = 'profile = "hosted-single-tenant-provisioned"'
+
+        inside = copy.deepcopy(self.workflows)
+        inside[STRESS_WORKFLOW] = (
+            f"{expected}\n"
             + text[:start]
-            + mutated_block
+            + block.replace(expected, replacement, 1)
             + text[start + len(block) :]
         )
-        errors = validate_libsql_scripted_memory_job(mutated)
-        self.assertTrue(
-            any("hosted-single-tenant-volume" in error for error in errors), errors
-        )
+        errors = self.errors_for(inside)
+        self.assertTrue(any(expected in error for error in errors), errors)
+
+        outside = copy.deepcopy(self.workflows)
+        outside[STRESS_WORKFLOW] = f'{replacement}\n{text}'
+        self.assertEqual(self.errors_for(outside), [])
 
 
     def postgres_errors_for(self, workflows: dict[str, str]) -> list[str]:
@@ -1928,9 +1928,12 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
             "--max-failure-rate 0", "--max-failure-rate 0.05", 1
         )
         self.assertNotEqual(mutated_runner, runner)
-        mutated_block = block.replace(runner, mutated_runner, 1)
+        mutated_block = block.replace(
+            runner,
+            '          echo "--max-failure-rate 0"\n' + mutated_runner,
+            1,
+        )
         self.assertNotEqual(mutated_block, block)
-        mutated_block = "          --max-failure-rate 0 \\\n" + mutated_block
         mutated = text[:start] + mutated_block + text[start + len(block) :]
         errors = validate_postgres_scripted_parity(mutated)
         self.assertTrue(

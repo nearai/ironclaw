@@ -2811,7 +2811,17 @@ fn mock_completion_response(model: &str, request_index: u64, content: String) ->
 
 /// Deterministic tool-call id for the single scripted call of a response.
 fn mock_tool_call_id(request_index: u64) -> String {
-    format!("call-stress-{request_index}")
+    mock_tool_call_id_at(request_index, 0)
+}
+
+/// Deterministic, response-local tool-call id. Preserve the established bare
+/// request id for the first call; suffix later calls with their array index.
+fn mock_tool_call_id_at(request_index: u64, call_index: usize) -> String {
+    if call_index == 0 {
+        format!("call-stress-{request_index}")
+    } else {
+        format!("call-stress-{request_index}-{call_index}")
+    }
 }
 
 /// Non-streaming chat completion carrying the scripted tool call(s). The
@@ -2826,17 +2836,14 @@ fn mock_tool_call_response(
 ) -> Value {
     let tool_calls = calls
         .iter()
-        .map(|call| {
-            let arguments = match serde_json::to_string(&call.arguments) {
-                Ok(arguments) => arguments,
-                Err(_) => "{}".to_string(),
-            };
+        .enumerate()
+        .map(|(index, call)| {
             json!({
-                "id": mock_tool_call_id(request_index),
+                "id": mock_tool_call_id_at(request_index, index),
                 "type": "function",
                 "function": {
                     "name": call.wire_name,
-                    "arguments": arguments
+                    "arguments": call.arguments.to_string()
                 }
             })
         })
@@ -2890,7 +2897,7 @@ fn mock_streaming_tool_call_chunks(
         .map(|(index, call)| {
             json!({
                 "index": index,
-                "id": mock_tool_call_id(request_index),
+                "id": mock_tool_call_id_at(request_index, index),
                 "type": "function",
                 "function": {"name": call.wire_name, "arguments": ""}
             })
@@ -2912,10 +2919,7 @@ fn mock_streaming_tool_call_chunks(
         .iter()
         .enumerate()
         .map(|(index, call)| {
-            let arguments = match serde_json::to_string(&call.arguments) {
-                Ok(arguments) => arguments,
-                Err(_) => "{}".to_string(),
-            };
+            let arguments = call.arguments.to_string();
             json!({
                 "index": index,
                 "function": {"arguments": arguments}
@@ -3165,13 +3169,21 @@ mod tests {
                 "append": false,
             }),
         };
-        let response = mock_tool_call_response("stress-mock", 7, &[call]);
+        let second_call = scripted::ToolCallSpec {
+            wire_name: "ironclaw__memory__read".to_string(),
+            arguments: json!({"path": "stress/shared.md"}),
+        };
+        let response = mock_tool_call_response("stress-mock", 7, &[call, second_call]);
 
         assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(response["choices"][0]["message"]["content"], Value::Null);
         assert_eq!(
             response["choices"][0]["message"]["tool_calls"][0]["id"],
             "call-stress-7"
+        );
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][1]["id"],
+            "call-stress-7-1"
         );
         let parsed: rig::providers::openai::completion::CompletionResponse =
             serde_json::from_value(response)
@@ -3181,8 +3193,9 @@ mod tests {
             rig::providers::openai::Message::Assistant { tool_calls, .. } => tool_calls,
             other => panic!("expected assistant message, got {other:?}"),
         };
-        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0].id, "call-stress-7");
+        assert_eq!(tool_calls[1].id, "call-stress-7-1");
         assert_eq!(tool_calls[0].function.name, "ironclaw__memory__write");
         assert_eq!(
             tool_calls[0].function.arguments,
@@ -3200,12 +3213,20 @@ mod tests {
             wire_name: "builtin__write_file".to_string(),
             arguments: json!({"path": "stress/u0__1.txt", "content": "payload"}),
         };
-        let (header, body, done) = mock_streaming_tool_call_chunks("stress-mock", 7, &[call]);
+        let second_call = scripted::ToolCallSpec {
+            wire_name: "builtin__read_file".to_string(),
+            arguments: json!({"path": "stress/u0__1.txt"}),
+        };
+        let (header, body, done) =
+            mock_streaming_tool_call_chunks("stress-mock", 7, &[call, second_call]);
 
         let header_call = &header["choices"][0]["delta"]["tool_calls"][0];
         assert_eq!(header_call["index"], 0);
         assert_eq!(header_call["id"], "call-stress-7");
         assert_eq!(header_call["function"]["name"], "builtin__write_file");
+        let second_header_call = &header["choices"][0]["delta"]["tool_calls"][1];
+        assert_eq!(second_header_call["index"], 1);
+        assert_eq!(second_header_call["id"], "call-stress-7-1");
         assert_eq!(header["choices"][0]["delta"]["role"], "assistant");
 
         let body_call = &body["choices"][0]["delta"]["tool_calls"][0];
@@ -3303,19 +3324,18 @@ mod tests {
             );
 
         let mut response = Vec::new();
-        let early =
-            tokio::time::timeout(Duration::from_millis(5), client.read_to_end(&mut response)).await;
-        assert!(
-            early.is_err(),
-            "a delayed retry must not emit a terminal placeholder response"
-        );
-        tokio::time::timeout(
-            Duration::from_millis(500),
-            client.read_to_end(&mut response),
-        )
-        .await
-        .expect("delayed retry response timeout")
-        .expect("read delayed retry response");
+        let mut read_response = Box::pin(client.read_to_end(&mut response));
+        tokio::select! {
+            result = &mut read_response => {
+                panic!("a delayed retry responded before 5ms: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+        tokio::time::timeout(Duration::from_millis(500), &mut read_response)
+            .await
+            .expect("delayed retry response timeout")
+            .expect("read delayed retry response");
+        drop(read_response);
         handler
             .await
             .expect("mock handler task")
