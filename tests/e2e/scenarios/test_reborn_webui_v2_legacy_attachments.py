@@ -116,6 +116,23 @@ async def test_reborn_legacy_attachment_flow_renders_and_reaches_model(
     await expect(reloaded_user_message).to_contain_text("tiny.png", timeout=15000)
 
 
+async def test_reborn_file_picker_reselects_the_same_attachment(reborn_v2_page):
+    """Reset the native picker so choosing the same file twice fires twice."""
+    page = reborn_v2_page
+    file = {
+        "name": "same-file.txt",
+        "mimeType": "text/plain",
+        "buffer": b"same file picker payload",
+    }
+
+    await page.set_input_files(SEL_V2["attachment_file_input"], files=file)
+    remove_buttons = page.get_by_label("Remove attachment")
+    await expect(remove_buttons).to_have_count(1, timeout=15000)
+
+    await page.set_input_files(SEL_V2["attachment_file_input"], files=file)
+    await expect(remove_buttons).to_have_count(2, timeout=15000)
+
+
 async def test_reborn_legacy_attachment_document_extraction_reaches_model(
     reborn_v2_vision_page,
     mock_llm_server,

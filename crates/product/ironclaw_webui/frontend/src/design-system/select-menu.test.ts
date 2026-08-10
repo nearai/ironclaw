@@ -264,6 +264,28 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
   assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
 });
 
+test("SelectMenu supports a compact reusable size", () => {
+  const harness = createHarness();
+  let rendered = harness.render({ size: "sm" });
+  let classes = collectScalars(rendered).filter((value) => typeof value === "string");
+  const classTokens = new Set(
+    classes.flatMap((value) => value.split(/\s+/).filter(Boolean))
+  );
+
+  assert.ok(classTokens.has("min-w-[7.5rem]"));
+  assert.ok(classTokens.has("text-xs"));
+  assert.ok(classTokens.has("h-8"));
+  assert.ok(classTokens.has("px-2"));
+  assert.ok(!classTokens.has("px-2.5"));
+  assert.ok(!classTokens.has("min-w-[9.5rem]"));
+  assert.ok(!classTokens.has("text-ui"));
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render({ size: "sm" });
+  classes = collectScalars(rendered).filter((value) => typeof value === "string");
+  assert.ok(classes.some((value) => value.includes("px-2 py-1.5 text-xs")));
+});
+
 test("SelectMenu opens, selects an option, and closes after selection", () => {
   const changes = [];
   const harness = createHarness();
