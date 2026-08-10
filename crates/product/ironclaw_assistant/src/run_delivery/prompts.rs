@@ -12,7 +12,26 @@ use ironclaw_product_contracts::outbound::{ApprovalPromptContextView, GatePrompt
 
 use crate::is_approval_gate_ref;
 
-pub(crate) const WORKING_MESSAGE: &str = "Ironclaw is thinking...";
+/// A small rotation of warm "on it" notices posted while a run works, so a
+/// shared channel with several runs in flight does not fill with identical
+/// lines. Picked deterministically from a per-run seed (see [`working_message`])
+/// so a single run keeps one voice while concurrent runs vary.
+pub(crate) const WORKING_MESSAGES: &[&str] = &[
+    "On it!",
+    "Let me look into that…",
+    "Working on it…",
+    "Give me a sec…",
+    "Digging in…",
+    "Let me take care of that…",
+    "Looking into it…",
+    "Got it — on this now…",
+];
+
+/// Pick a working notice deterministically from `seed` (the run id), so the
+/// same run always shows the same line and two concurrent runs usually differ.
+pub(crate) fn working_message(seed: u64) -> &'static str {
+    WORKING_MESSAGES[(seed % WORKING_MESSAGES.len() as u64) as usize]
+}
 pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run has no channel-serviceable auth challenge. This stays
 /// deliberately generic because missing/unknown challenge metadata cannot
@@ -281,6 +300,24 @@ mod tests {
     use super::*;
     use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
     use ironclaw_host_api::turn::TurnRunId;
+
+    #[test]
+    fn working_message_is_always_a_member_and_varies_by_seed() {
+        // Every seed maps to one of the rotation lines.
+        for seed in 0u64..32 {
+            assert!(WORKING_MESSAGES.contains(&working_message(seed)));
+        }
+        // Deterministic for a given seed (one run keeps one voice).
+        assert_eq!(working_message(3), working_message(3));
+        // The rotation actually varies across runs (not one hardcoded line).
+        let distinct: std::collections::HashSet<&str> = (0u64..WORKING_MESSAGES.len() as u64)
+            .map(working_message)
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "the working notice should vary across runs, got {distinct:?}"
+        );
+    }
 
     /// The delivery id is derived from this ref, so two notices that share a
     /// string share a durable delivery identity — the second comes back

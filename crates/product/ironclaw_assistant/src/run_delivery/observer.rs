@@ -598,6 +598,10 @@ impl RunDeliveryObserver {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
             if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
+                // Vary the notice per run so a channel with several runs in
+                // flight does not show a wall of identical lines; seeded by the
+                // run id so one run keeps one voice.
+                let notice_seed = run_id.to_string().bytes().map(u64::from).sum::<u64>();
                 *working_message = self
                     .services
                     .post_notice(
@@ -605,7 +609,7 @@ impl RunDeliveryObserver {
                         scope.clone(),
                         Some(run_id),
                         envelope.external_conversation_ref(),
-                        prompts::WORKING_MESSAGE,
+                        prompts::working_message(notice_seed),
                         format!("working:{run_id}"),
                     )
                     .await;
