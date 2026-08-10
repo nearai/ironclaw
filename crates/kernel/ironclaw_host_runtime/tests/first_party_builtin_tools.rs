@@ -4677,6 +4677,42 @@ async fn builtin_http_error_diagnostic_respects_model_diagnostic_budget() {
 }
 
 #[tokio::test]
+async fn builtin_http_error_diagnostic_preserves_egress_truncation_flag() {
+    // The egress returns a partial body when it hits the caller's
+    // response_body_limit; the failure diagnostic must keep reporting that
+    // truncation instead of presenting the partial body as complete.
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        b"partial body that exceeds the one-byte cap".to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/private",
+            "response_body_limit": 1
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("diagnostic must stay valid JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["body_truncated"],
+        json!(true),
+        "egress truncation at the caller cap must stay visible"
+    );
+    assert_eq!(response["truncation"]["body"], json!(true));
+}
+
+#[tokio::test]
 async fn builtin_http_requires_tool_call_http_egress_for_inline_output() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
     let runtime = runtime_with_strict_http_egress_only(Arc::clone(&egress));

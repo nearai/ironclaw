@@ -12,7 +12,6 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, SandboxQuota},
-    result_meta::MODEL_DIAGNOSTIC_MAX_BYTES,
     runtime::RuntimeKind,
 };
 use serde_json::Value;
@@ -27,7 +26,7 @@ use crate::{
 
 use super::{
     first_party_capability_manifest,
-    http_output::{HttpDispatchOutput, classify_status, is_error_status, shape_response},
+    http_output::{HttpDispatchOutput, classify_status, shape_response},
     input_error,
 };
 
@@ -251,15 +250,14 @@ pub(super) async fn dispatch(
     .await?
     .map_err(|error| http_error(error, save_mode))?;
     let status = response.status;
-    // Error responses are consumed by the failure diagnostic (a few KiB of
-    // budget), so shape them at the diagnostic budget instead of the success
-    // inline limit: the success-budget trim would be discarded wholesale.
-    let shape_limit = if is_error_status(status) {
-        u64::try_from(MODEL_DIAGNOSTIC_MAX_BYTES).unwrap_or(response_body_limit)
-    } else {
-        response_body_limit
-    };
-    let shaped = shape_response(response, shape_limit);
+    // Shape at the caller's `response_body_limit` so egress-truncation
+    // accounting stays correct: `shape_response` derives
+    // `body_was_truncated_by_egress` from that limit, and a body the egress
+    // already cut at the caller's cap must not be reported as complete. The
+    // failure diagnostic applies its own display budget separately in
+    // `bounded_failure_diagnostic`; the success-budget trim run here is
+    // discarded for error statuses, which is bounded and sub-millisecond.
+    let shaped = shape_response(response, response_body_limit);
     let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     classify_status(shaped, status, wall_clock_ms)
 }

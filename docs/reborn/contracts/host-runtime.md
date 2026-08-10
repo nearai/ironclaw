@@ -106,25 +106,30 @@ the bounded, sanitized response as diagnostic context. Transport completion alon
 is not capability success. Informational, successful, and redirect responses remain
 inspectable successful results; redirects are still never followed automatically.
 The failure diagnostic is trimmed to the model-visible diagnostic budget
-(`MODEL_DIAGNOSTIC_MAX_BYTES`) before serialization, so `status`, `auth_hint`, and
-the truncation envelope survive intact as valid JSON; the full sanitized body
-remains inspectable by re-issuing the original request through `builtin.http.save`
-with `save_to` — that new request writes the sanitized body to the scoped mount as
-`saved_body`, which `builtin.read_file` can then read. A later save call cannot
-retrieve the body of the prior failed call, and re-issuing a mutating request may
-repeat its external side effect. In save mode the sanitized body is written to the scoped
-mount before the failure verdict is produced, and the diagnostic carries only
-`saved_body` path metadata (`path`, `bytes_written`) — a retry decision must
-inspect `saved_body` first, because treating the verdict as "nothing happened"
-duplicates the write. When the error body trips the loop-host injection scan, the
-seam wraps the diagnostic in the external-content security fence before the
-observation budget is applied; the verdict itself never depends on the diagnostic
-JSON surviving that wrap — the `OperationFailed` classification and the
-`HTTP request returned status N` safe summary always reach the model, and the
-fenced diagnostic may be truncated at the observation boundary without affecting
-verdict semantics. The host never retries failed HTTP calls automatically;
-for rate-limited or overloaded responses (429/503) the model should apply
-backoff rather than immediately re-invoking. For 401/403/407 the diagnostic
+(`MODEL_DIAGNOSTIC_MAX_BYTES`) before serialization — with headroom reserved
+for the loop-host injection fence — so `status`, `auth_hint`, and the
+truncation envelope survive intact as valid JSON. The original body from a
+network-only failed call is not retained. To retain the response body, use
+`builtin.http.save` on the initial request; saved output is subject to the
+save-mode response limit. Re-issuing the request creates a new response and
+may repeat external side effects. A later save call cannot retrieve the body
+of the prior failed call. In save mode, body content is represented only by
+`saved_body` path metadata (`path`, `bytes_written`); `status`, `auth_hint`,
+and truncation metadata remain in the failure diagnostic — a retry decision
+must inspect `saved_body` first, because treating the verdict as "nothing
+happened" duplicates the write. When the error body trips the loop-host
+injection scan, the seam wraps the diagnostic in the external-content security
+fence before the observation budget is applied; the reserved headroom keeps
+that fenced diagnostic within the observation bound, and the verdict itself
+never depends on the diagnostic JSON surviving either way — the
+`OperationFailed` classification and the `HTTP request returned status N` safe
+summary always reach the model. The host never retries failed HTTP calls
+automatically; for rate-limited or overloaded responses (429/503) the model
+should apply backoff rather than immediately re-invoking. When the host holds
+provider delay metadata it populates `retry_after_ms` on the recovery
+observation; `builtin.http` does not parse `Retry-After`, so `retry_after_ms`
+stays `None` for these responses — and `None` does not permit an immediate
+retry. For 401/403/407 the diagnostic
 retains the extension-install hint; extension install remains approval-gated and
 credential injection remains manifest-scoped to the target audience. This is
 pinned by the `builtin_http_*` status-classification tests (403, 500, save-mode

@@ -15,6 +15,11 @@ use super::model_visible_output::{
 const MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES: usize = 2 * 1024;
 const MODEL_VISIBLE_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES: usize = 1024;
+/// Fixed overhead of `ironclaw_safety::wrap_external_content` (the SECURITY
+/// NOTICE fence) plus margin for the source name and escape expansion.
+/// Reserving it keeps the fenced failure diagnostic within
+/// `MODEL_DIAGNOSTIC_MAX_BYTES` at the observation boundary.
+const MODEL_DIAGNOSTIC_FENCE_HEADROOM_BYTES: usize = 768;
 const MAX_MODEL_VISIBLE_BINARY_INLINE_BYTES: usize = 512;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADERS: usize = 32;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADER_NAME_BYTES: usize = 128;
@@ -125,21 +130,30 @@ pub(super) fn classify_status(
 /// `status` and the truncation envelope (the last-sorted keys) out of the
 /// model-visible text. Trimming here keeps the verdict fields intact and the
 /// diagnostic valid JSON.
+///
+/// The budget also reserves headroom for the loop-host external-content fence:
+/// when an error body trips the injection scan, the seam wraps the whole
+/// diagnostic in `ironclaw_safety::wrap_external_content` before the
+/// observation boundary re-applies `MODEL_DIAGNOSTIC_MAX_BYTES`. Without the
+/// reservation the fenced diagnostic would exceed the boundary and the tail
+/// (status, truncation envelope) would be cut.
 fn bounded_failure_diagnostic(output: Value, status: u16) -> String {
     let Value::Object(mut output) = output else {
-        return fallback_diagnostic(status);
+        return fallback_diagnostic(status, None);
     };
     if serialized_output_len(&output) <= MODEL_DIAGNOSTIC_MAX_BYTES {
         return scrub_model_diagnostic_controls(serialize_diagnostic(&output, status));
     }
-    // The truncation envelope grows the serialized size too, so pre-account it
-    // exactly like `enforce_final_model_visible_output_budget` does; the fixed
-    // verdict fields alone are always far below the budget.
-    let final_budget =
-        MODEL_DIAGNOSTIC_MAX_BYTES.saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES);
+    // Pre-account the truncation envelope and the injection-fence headroom,
+    // exactly like `enforce_final_model_visible_output_budget` pre-accounts
+    // the envelope; the fixed verdict fields alone are always far below the
+    // budget.
+    let final_budget = MODEL_DIAGNOSTIC_MAX_BYTES
+        .saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES)
+        .saturating_sub(MODEL_DIAGNOSTIC_FENCE_HEADROOM_BYTES);
     let trim = fit_output_to_budget(&mut output, final_budget);
     if serialized_output_len(&output) > final_budget {
-        return fallback_diagnostic(status);
+        return fallback_diagnostic(status, saved_body_evidence(&output));
     }
     // The envelope must reflect truncation state from BOTH stages: the shape
     // stage may have already marked headers/body as truncated (e.g. more than
@@ -186,13 +200,38 @@ fn serialize_diagnostic(output: &Map<String, Value>, status: u16) -> String {
         Ok(diagnostic) => diagnostic,
         Err(error) => {
             tracing::debug!(%error, "failed to serialize HTTP failure diagnostic");
-            fallback_diagnostic(status)
+            fallback_diagnostic(status, saved_body_evidence(output))
         }
     }
 }
 
-fn fallback_diagnostic(status: u16) -> String {
-    format!("{{\"status\":{status},\"error\":\"diagnostic unavailable\"}}")
+/// Compact `saved_body` evidence extracted from a shaped output, used to keep
+/// the save destination visible even when the diagnostic falls back.
+fn saved_body_evidence(output: &Map<String, Value>) -> Option<(&str, u64)> {
+    let saved_body = output.get("saved_body")?.as_object()?;
+    let path = saved_body.get("path")?.as_str()?;
+    let bytes_written = saved_body.get("bytes_written")?.as_u64()?;
+    Some((path, bytes_written))
+}
+
+/// Long save paths are accepted by the tool input limit; keep only a bounded
+/// prefix in the fallback so the evidence payload stays far below the
+/// diagnostic budget.
+const FALLBACK_SAVED_BODY_PATH_BUDGET: usize = 1024;
+
+fn fallback_diagnostic(status: u16, saved_body: Option<(&str, u64)>) -> String {
+    let mut output = Map::new();
+    output.insert("status".to_string(), json!(status));
+    if let Some((path, bytes_written)) = saved_body {
+        let (path, _) = truncate_str_for_json_content_budget(path, FALLBACK_SAVED_BODY_PATH_BUDGET);
+        output.insert(
+            "saved_body".to_string(),
+            json!({ "path": path, "bytes_written": bytes_written }),
+        );
+    }
+    output.insert("error".to_string(), json!("diagnostic unavailable"));
+    serde_json::to_string(&output)
+        .unwrap_or_else(|_| format!("{{\"status\":{status},\"error\":\"diagnostic unavailable\"}}"))
 }
 
 /// When an outbound `builtin.http` request is rejected for missing or invalid
@@ -690,12 +729,12 @@ mod tests {
             "diagnostic must never exceed the budget, got {} bytes",
             diagnostic.len()
         );
-        assert_eq!(diagnostic, fallback_diagnostic(403));
+        assert_eq!(diagnostic, fallback_diagnostic(403, None));
     }
 
     #[test]
-    fn failure_diagnostic_falls_back_on_unserializable_output() {
-        // Non-object output funnels to the fixed verdict payload; the
+    fn failure_diagnostic_non_object_output_falls_back_to_verdict() {
+        // A non-object output funnels to the fixed verdict payload; the
         // fallback shape is part of the contract. (serialize_diagnostic's
         // serde-failure arm is a pure defensive guard: serde_json serializes
         // every Value string without revalidating UTF-8, probed empirically,
@@ -703,7 +742,76 @@ mod tests {
         let diagnostic = bounded_failure_diagnostic(Value::Null, 403);
         assert_eq!(
             diagnostic,
-            "{\"status\":403,\"error\":\"diagnostic unavailable\"}"
+            "{\"error\":\"diagnostic unavailable\",\"status\":403}"
+        );
+    }
+
+    #[test]
+    fn failure_diagnostic_fallback_retains_saved_body_evidence() {
+        // A save path longer than the diagnostic budget must not erase the
+        // saved-body evidence: the fallback keeps a bounded path prefix and
+        // bytes_written so the model can still inspect the saved response.
+        let mut output = Map::new();
+        output.insert("status".to_string(), json!(403));
+        output.insert(
+            "saved_body".to_string(),
+            json!({"path": format!("/workspace/{}", "x".repeat(8 * 1024)), "bytes_written": 42}),
+        );
+        output.insert(
+            "huge_untrimmed".to_string(),
+            Value::String("x".repeat(64 * 1024)),
+        );
+        let diagnostic = bounded_failure_diagnostic(Value::Object(output), 403);
+        assert!(
+            diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "diagnostic must never exceed the budget, got {} bytes",
+            diagnostic.len()
+        );
+        let parsed: Value =
+            serde_json::from_str(&diagnostic).expect("fallback must stay valid JSON");
+        assert_eq!(parsed["status"], json!(403));
+        let saved = parsed["saved_body"]
+            .as_object()
+            .expect("saved_body evidence retained");
+        assert_eq!(saved["bytes_written"], json!(42));
+        let path = saved["path"].as_str().expect("path retained");
+        assert!(
+            path.len() <= FALLBACK_SAVED_BODY_PATH_BUDGET,
+            "fallback path must stay bounded"
+        );
+        assert!(path.starts_with("/workspace/"));
+    }
+
+    #[test]
+    fn failure_diagnostic_stays_within_budget_when_fenced() {
+        // The loop-host seam wraps injection-shaped diagnostics in the
+        // external-content fence before the observation boundary; the reserved
+        // headroom must keep the fenced diagnostic within the budget.
+        let shaped = shape_response(
+            RuntimeHttpEgressResponse {
+                status: 403,
+                headers: (0..32)
+                    .map(|i| (format!("x-header-{i}"), "h".repeat(1024)))
+                    .collect(),
+                body: vec![b'a'; 32 * 1024],
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 32 * 1024,
+                redaction_applied: false,
+            },
+            48 * 1024,
+        );
+        let diagnostic = bounded_failure_diagnostic(shaped.output, 403);
+        assert!(
+            diagnostic.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "unfenced diagnostic must fit, got {} bytes",
+            diagnostic.len()
+        );
+        let fenced = ironclaw_safety::wrap_external_content("http", &diagnostic);
+        assert!(
+            fenced.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+            "fenced diagnostic must stay within the observation budget, got {} bytes",
+            fenced.len()
         );
     }
 
