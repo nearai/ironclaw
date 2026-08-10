@@ -1135,6 +1135,16 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         if !binding_scope_owns_account(scope, account) {
             return Err(AuthProductError::CrossScopeDenied);
         }
+        // Same ownership pin the durable store enforces (PROPOSAL §4.5). A fake
+        // that let a reusable account become a linked device would let a
+        // production consumer depend on exactly the unsafe shortcut the pin
+        // exists to close.
+        if !account.linked_device_ownership_is_pinned() {
+            return Err(AuthProductError::invalid_request(
+                "a linked-device account must be extension-owned by exactly one \
+                 extension and carry no grants",
+            ));
+        }
         account.link_revision = account.link_revision.saturating_add(1);
         account.updated_at = now;
         Ok(account.clone())

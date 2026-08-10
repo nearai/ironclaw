@@ -135,6 +135,45 @@ fn sanitizer_truncates_on_a_character_boundary() {
     assert!(long.starts_with(&clamped));
 }
 
+/// The per-message cap is a *byte* cap on text that is routinely non-ASCII, so
+/// the two facts worth pinning are that it holds for multi-byte input and that
+/// it does not fire on ordinary messages. A cap that clipped normal traffic
+/// would be reported as a bug and widened until it stopped bounding anything.
+#[test]
+fn the_per_message_cap_binds_only_oversized_text() {
+    let ordinary = "the quick brown fox. 🦊 با هم";
+    assert_eq!(sanitize_untrusted_text(ordinary), ordinary);
+
+    let oversized = "🦊".repeat(MAX_MESSAGE_TEXT_BYTES);
+    let clamped = sanitize_untrusted_text(&oversized);
+    assert!(clamped.len() <= MAX_MESSAGE_TEXT_BYTES);
+    assert!(
+        clamped.len() > MAX_MESSAGE_TEXT_BYTES - 4,
+        "{}",
+        clamped.len()
+    );
+    // Truncation on a char boundary, not a byte index: a split 4-byte emoji
+    // would make the whole result invalid UTF-8 downstream.
+    assert!(clamped.chars().all(|character| character == '🦊'));
+}
+
+/// `@username` is the one identity field the tool prompts tell the model to
+/// trust over a display name. It is only worth trusting if it cannot be
+/// dressed up — so it takes the same sanitizer, and a handle that is nothing
+/// but injection characters becomes `None` rather than a bare `@`.
+#[test]
+fn a_handle_is_sanitized_because_it_is_the_identity_the_model_is_told_to_trust() {
+    assert_eq!(handle("alice_dev").as_deref(), Some("@alice_dev"));
+    assert_eq!(
+        handle("ali\u{202E}ce\u{200B}").as_deref(),
+        Some("@alice"),
+        "a bidi override inside a handle renders as a different handle"
+    );
+    assert_eq!(handle("\u{202E}\u{200B}"), None);
+    assert_eq!(handle(""), None);
+    assert_eq!(handle("   "), None);
+}
+
 #[test]
 fn result_bounding_drops_oldest_rows_until_the_budget_holds() {
     let row = json!({ "text": "x".repeat(1024) });
@@ -142,6 +181,42 @@ fn result_bounding_drops_oldest_rows_until_the_budget_holds() {
     assert!(bound_result_bytes(&mut items));
     assert!(!items.is_empty());
     assert!(serde_json::to_vec(&items).expect("serializes").len() <= MAX_RESULT_BYTES);
+}
+
+/// Which rows survive the clamp is the whole point. Every list-shaped read
+/// here is newest-first, so dropping from the tail keeps the newest context —
+/// dropping from the head would silently answer "the most recent messages"
+/// with the oldest ones it could fit.
+#[test]
+fn result_bounding_keeps_the_newest_rows_and_leaves_a_fitting_page_alone() {
+    let mut items: Vec<Value> = (0..512)
+        .map(|index| json!({ "index": index, "text": "x".repeat(1024) }))
+        .collect();
+    let newest = items[0].clone();
+    assert!(bound_result_bytes(&mut items));
+    assert_eq!(items.first(), Some(&newest));
+    assert_eq!(items.last().and_then(|row| row["index"].as_u64()), {
+        let last = items.len() as u64 - 1;
+        Some(last)
+    });
+
+    let mut small = vec![json!({ "text": "hi" }); 3];
+    let untouched = small.clone();
+    assert!(!bound_result_bytes(&mut small));
+    assert_eq!(small, untouched);
+}
+
+/// An empty page must not loop forever, and a single row that cannot fit must
+/// still terminate: the clamp pops until the list is empty rather than
+/// spinning on a row it can never accommodate.
+#[test]
+fn result_bounding_terminates_on_a_single_unfittable_row() {
+    let mut items = vec![json!({ "text": "x".repeat(MAX_RESULT_BYTES * 2) })];
+    assert!(bound_result_bytes(&mut items));
+    assert!(items.is_empty());
+
+    let mut empty: Vec<Value> = Vec::new();
+    assert!(!bound_result_bytes(&mut empty));
 }
 
 /// The single most consequential rule in this module: Telegram took the

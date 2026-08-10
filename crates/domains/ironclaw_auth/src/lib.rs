@@ -35,7 +35,8 @@ pub mod test_support;
 pub use account_state::{AuthAccountLastError, AuthAccountState, project_auth_account_state};
 pub use channel_connection::{ChannelAuthAccountState, ChannelConnectionService};
 pub use cleanup::{
-    CanceledCleanupFlow, SecretCleanupAction, SecretCleanupQuarantine,
+    CanceledCleanupFlow, LinkedDeviceCleanupService, LinkedDeviceRevokeError,
+    LinkedDeviceRevokeRequest, LinkedDeviceRevoker, SecretCleanupAction, SecretCleanupQuarantine,
     SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 // NOTE: `SessionBytes`, `LinkedSessionVersion` and `MAX_LINKED_SESSION_BYTES`

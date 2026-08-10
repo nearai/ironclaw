@@ -18,6 +18,7 @@ use ironclaw_host_api::{messaging::StandardMessagingErrorCode, resource::Resourc
 use serde_json::Value;
 
 use super::{
+    MAX_ITEMS_PER_PAGE,
     mapping::{self, ConversationRef, Cursor, OpFamily},
     pool::{PooledSession, SessionPoolError},
     transport::VendorOpKind,
@@ -202,14 +203,20 @@ pub(crate) fn message_ref_arg(input: &Value) -> Result<(ConversationRef, i32), T
         .ok_or_else(|| mapping::failed(StandardMessagingErrorCode::UnknownMessage))
 }
 
-/// Reads the optional `limit`, clamped to this adapter's per-page ceiling.
+/// Reads the optional `limit`, clamped to this adapter's per-page ceiling
+/// ([`MAX_ITEMS_PER_PAGE`], PROPOSAL §6.4/§7.2).
+///
+/// The clamp is a ceiling on *untrusted content volume*, not a convenience: the
+/// canonical input schemas bound `limit` loosely or not at all, so an
+/// unclamped page is however many attacker-authored messages the model happened
+/// to ask for.
 pub(crate) fn limit_arg(input: &Value) -> usize {
     input
         .get("limit")
         .and_then(Value::as_u64)
         .map(|limit| limit as usize)
-        .unwrap_or(mapping::MAX_ITEMS_PER_PAGE)
-        .clamp(1, mapping::MAX_ITEMS_PER_PAGE)
+        .unwrap_or(MAX_ITEMS_PER_PAGE)
+        .clamp(1, MAX_ITEMS_PER_PAGE)
 }
 
 /// Reads the optional `cursor`.

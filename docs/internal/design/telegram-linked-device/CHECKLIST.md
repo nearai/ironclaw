@@ -230,6 +230,23 @@ names the file — that is honest, not a loophole.
 
 ## Cross-cutting: security
 
+- [x] **Supply-chain controls shipped with the dependency** (PROPOSAL §11.1,
+      ADR "The larger trade this sits inside"), not deferred to hardening:
+      every `grammers-*` edge is `=0.10.0` with `default-features = false` and
+      an explicit allowlist; versions, `.crate` checksums, registry source, and
+      **resolved** feature sets (all eight members, including the five
+      transitive ones no manifest can pin) are frozen by
+      `crates/app/ironclaw_architecture_tests/tests/reborn_linked_device_supply_chain_pin.rs`
+      under both the default and `--all-features` resolution; the socks5
+      `proxy` feature is off and asserted off three independent ways; and
+      `.github/dependabot.yml` ignores `grammers-*` so a bump can only arrive as
+      a deliberate human edit. Every gate was sabotage-tested (proxy on, caret
+      range, tampered checksum, dropped pin row, removed ignore) and observed to
+      fail. **Residual, deliberately not claimed as closed:** the repository has
+      no `CODEOWNERS`, so §11.1's *named* human reviewer cannot be routed — the
+      pin is a forcing function proving a human touched the bump, not evidence
+      anyone diffed upstream. Stated in the gate's module docs and asserted, so
+      the day a `CODEOWNERS` appears the gate demands the residual be rewritten.
 - [ ] Dependency review **deliberately deferred** per PROPOSAL §11.1; the
       revisit trigger — **N = 2 linked accounts**, not GA — is tracked somewhere
       that will actually be seen: an issue, not just this document.

@@ -1564,6 +1564,181 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
     );
 }
 
+// ─── PROPOSAL §4.5: the linked-device ownership pin, on the durable store ─────
+
+/// The bump is the operation that makes an account a linked device, so it is
+/// where the ownership pin is enforced. Without it, a `UserReusable` account —
+/// which `is_authorized_for_requester` answers `true` for on *any* requester,
+/// and which ownership-aware cleanup deliberately does not delete — would pick
+/// up a live vendor device authorization.
+#[tokio::test]
+async fn filesystem_bump_link_revision_refuses_an_account_whose_ownership_is_not_pinned() {
+    use ironclaw_host_api::ids::ExtensionId;
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let owner = ExtensionId::new("test-ext").unwrap();
+    let other = ExtensionId::new("other-ext").unwrap();
+    let session = SecretHandle::new("linked-session").unwrap();
+
+    let reusable = service
+        .create_account(crate::NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(session.clone()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+    let error = service
+        .bump_link_revision(&scope, reusable.id)
+        .await
+        .expect_err("a reusable account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a reusable account: {error:?}"
+    );
+    let stored = service
+        .get_account(crate::CredentialAccountLookupRequest::new(
+            scope.clone(),
+            reusable.id,
+        ))
+        .await
+        .unwrap()
+        .expect("the account still exists");
+    assert_eq!(
+        stored.link_revision, 0,
+        "a refused bump must not have written a revision"
+    );
+
+    let shared = service
+        .create_account(crate::NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: crate::CredentialAccountLabel::new("shared-linked").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(owner.clone()),
+            granted_extensions: vec![other],
+            access_secret: Some(session.clone()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+    let error = service
+        .bump_link_revision(&scope, shared.id)
+        .await
+        .expect_err("a granted account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a granted account: {error:?}"
+    );
+
+    let pinned = service
+        .create_account(crate::NewCredentialAccount::for_linked_device(
+            scope.clone(),
+            google_provider(),
+            crate::CredentialAccountLabel::new("pinned-linked").unwrap(),
+            owner,
+            session,
+        ))
+        .await
+        .unwrap();
+    let linked = service
+        .bump_link_revision(&scope, pinned.id)
+        .await
+        .expect("the sanctioned mint shape links");
+    assert_eq!(linked.link_revision, 1);
+    assert!(linked.is_linked_device());
+}
+
+/// Deactivating an extension must delete a linked device's session blob, not
+/// merely mark the account inactive: an inactive extension cannot make a vendor
+/// call, so a retained blob is a live device authorization nothing can end.
+#[tokio::test]
+async fn filesystem_cleanup_deletes_a_linked_device_session_blob_on_deactivate() {
+    use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+    use ironclaw_host_api::ids::ExtensionId;
+    use secrecy::SecretString;
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let ext_id = ExtensionId::new("test-ext").unwrap();
+    let session = SecretHandle::new("linked-session").unwrap();
+
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            session.clone(),
+            SecretString::from("session-blob"),
+            None,
+        )
+        .await
+        .unwrap();
+    let account = service
+        .create_account(crate::NewCredentialAccount::for_linked_device(
+            scope.clone(),
+            google_provider(),
+            account_label(),
+            ext_id.clone(),
+            session.clone(),
+        ))
+        .await
+        .unwrap();
+    service
+        .bump_link_revision(&scope, account.id)
+        .await
+        .unwrap();
+
+    let report = service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: scope.clone(),
+            extension_id: ext_id.clone(),
+            provider: None,
+            lifecycle_package: None,
+            action: SecretCleanupAction::Deactivate,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.revoked_accounts,
+        vec![account.id],
+        "a deactivated linked device is revoked, not retained"
+    );
+    assert!(report.retained_accounts.is_empty());
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &session)
+            .await
+            .unwrap()
+            .is_none(),
+        "deactivate must delete the linked-device session blob"
+    );
+    let stored = service
+        .get_account(
+            crate::CredentialAccountLookupRequest::new(scope.clone(), account.id)
+                .for_extension(ext_id),
+        )
+        .await
+        .unwrap()
+        .expect("the account record survives as a tombstone");
+    assert_eq!(stored.status, CredentialAccountStatus::Revoked);
+    assert!(stored.access_secret.is_none());
+}
+
 // ─── fix: cleanup matches owner granularity + provider-selected OAuth accounts ─
 
 /// The production shape the Slack disconnect issues: the OAuth flow stored the

@@ -37,30 +37,14 @@ use ironclaw_host_api::{
 };
 use serde_json::{Value, json};
 
+use super::{MAX_MESSAGE_TEXT_BYTES, MAX_RESULT_BYTES};
+
 /// The extension id and the credential handle the linked tools gate on. Both
 /// are manifest facts (`manifest.toml`), restated here because
 /// [`auth_required`] has to name them to park a run on the connect gate.
 pub(crate) const TELEGRAM_EXTENSION_ID: &str = "telegram";
 pub(crate) const TELEGRAM_VENDOR_ID: &str = "telegram";
 pub(crate) const TELEGRAM_LINKED_SESSION_HANDLE: &str = "telegram_linked_session";
-
-/// Ceiling on one tool result's serialized bytes. Untrusted text read from a
-/// personal Telegram account lands verbatim in the durable turn transcript,
-/// the event log, and the model provider (§6.4), so the volume of it is
-/// bounded here rather than left to whatever the vendor returns.
-pub(crate) const MAX_RESULT_BYTES: usize = 96 * 1024;
-
-/// Per-message text ceiling, applied before the whole-result ceiling so one
-/// enormous message cannot evict an entire page of context.
-pub(crate) const MAX_MESSAGE_TEXT_BYTES: usize = 4096;
-
-/// Per-page item ceiling for every list-shaped read.
-pub(crate) const MAX_ITEMS_PER_PAGE: usize = 100;
-
-/// How many vendor pages one call may pull while filling a page. Bounds the
-/// worst case where nearly every fetched row is filtered (a chat of service
-/// messages) and the loop would otherwise walk the whole history.
-pub(crate) const MAX_PAGES_PER_CALL: usize = 10;
 
 /// Prefix of the non-addressable author ref used for messages with no personal
 /// author — broadcast-channel posts and anonymous-admin posts. Both are real
@@ -441,6 +425,23 @@ pub(crate) fn conversation_value(peer: &Peer, peer_ref: PeerRef) -> Value {
     value
 }
 
+/// A Telegram `@username`, sanitized, or `None` when nothing usable survives.
+///
+/// The handle is the *stable* identity the approval card, `resolve_user`'s
+/// disambiguation, and every "identify people by @username, not by display
+/// name" instruction lean on. That is exactly why it goes through the same
+/// sanitizer as free-form text rather than being trusted for being
+/// handle-shaped: a handle carrying a bidi override or a zero-width space
+/// renders as a *different* handle, which turns the one field the model was
+/// told to trust into the spoof (§6.3). Telegram's own charset would forbid
+/// those characters — but this adapter enforces the property rather than
+/// assuming the vendor did.
+fn handle(username: &str) -> Option<String> {
+    let sanitized = sanitize_untrusted_text(username);
+    let sanitized = sanitized.trim();
+    (!sanitized.is_empty()).then(|| format!("@{sanitized}"))
+}
+
 /// A peer's rendered name, **sanitized**.
 ///
 /// A group title is settable by any admin and a display name by the user
@@ -453,10 +454,9 @@ fn display_name(peer: &Peer) -> Option<String> {
             let full = user.full_name();
             let full = full.trim().to_string();
             if full.is_empty() {
-                user.username().map(|name| format!("@{name}"))?
-            } else {
-                full
+                return user.username().and_then(handle);
             }
+            full
         }
         other => other.name().map(str::to_string)?,
     };
@@ -474,18 +474,26 @@ pub(crate) fn user_value(user: &User, peer_ref: PeerRef) -> Value {
     let mut value = json!({ "user_ref": UserRef::from_peer_ref(peer_ref).encode() });
     let full = user.full_name();
     let full = full.trim();
+    let handle = user.username().and_then(handle);
     if !full.is_empty() {
         value["display_name"] = json!(sanitize_untrusted_text(full));
         value["real_name"] = json!(sanitize_untrusted_text(full));
-    } else if let Some(username) = user.username() {
-        value["display_name"] = json!(format!("@{username}"));
+    } else if let Some(handle) = &handle {
+        value["display_name"] = json!(handle);
     }
     if user.is_bot() {
         value["is_bot"] = json!(true);
     }
     let mut vendor = json!({});
-    if let Some(username) = user.username() {
-        vendor["username"] = json!(username);
+    // The `@` prefix belongs to the rendered form, not to the identity, so the
+    // vendor block carries the bare handle — sanitized all the same. Exactly
+    // one prefix is stripped: `handle` adds exactly one, and stripping greedily
+    // would silently rewrite a name rather than un-render it.
+    if let Some(handle) = handle
+        .as_deref()
+        .and_then(|handle| handle.strip_prefix('@'))
+    {
+        vendor["username"] = json!(handle);
     }
     if user.mutual_contact() {
         vendor["mutual_contact"] = json!(true);
@@ -730,6 +738,47 @@ pub(crate) fn send_result(
         value["reply_to"] = reply_to.clone();
     }
     value
+}
+
+/// Builds the output for a write whose only evidence is the ref the caller
+/// already held — `edit_message` and `remove_reaction`.
+///
+/// Telegram's edit and reaction-clear return no new identity, so re-stating the
+/// caller's ref is the honest maximum: it says *which* message the call acted
+/// on without claiming a fact the vendor did not supply.
+pub(crate) fn ref_only_result(conversation: &ConversationRef, message_id: i32) -> Value {
+    json!({ "message_ref": message_ref(conversation, message_id) })
+}
+
+/// Builds the `delete_message` output. `deleted` is `const: true` in the
+/// canonical schema — a delete that did not happen is an error at the call
+/// site, never `deleted: false`.
+pub(crate) fn delete_result(conversation: &ConversationRef, message_id: i32) -> Value {
+    json!({
+        "deleted": true,
+        "message_ref": message_ref(conversation, message_id),
+    })
+}
+
+/// Builds the `add_reaction` output. The echoed `emoji` is the model's own
+/// input, not vendor text, and `add_reaction` is the only reaction op that may
+/// echo one: `remove_reaction` clears every reaction this account left, so
+/// naming one would report a precision the call does not have (§6.3).
+pub(crate) fn add_reaction_result(
+    conversation: &ConversationRef,
+    message_id: i32,
+    emoji: &str,
+) -> Value {
+    json!({
+        "message_ref": message_ref(conversation, message_id),
+        "emoji": emoji,
+    })
+}
+
+/// Builds the `open_dm` output: a peer-ref re-encode, with no vendor call and
+/// therefore no evidence beyond the ref itself.
+pub(crate) fn open_dm_result(peer_ref: PeerRef) -> Value {
+    json!({ "conversation": ConversationRef::from_peer_ref(peer_ref).encode() })
 }
 
 #[cfg(test)]

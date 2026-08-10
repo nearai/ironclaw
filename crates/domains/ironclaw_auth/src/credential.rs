@@ -127,6 +127,36 @@ impl CredentialAccount {
             CredentialOwnership::System => false,
         }
     }
+
+    /// Whether this account carries a linked-device session.
+    ///
+    /// `link_revision` is `0` for every account that has never been linked, and
+    /// [`CredentialAccountService::bump_link_revision`] is the only writer, so a
+    /// non-zero revision is the durable record of "a live vendor device
+    /// authorization hangs off this credential".
+    pub fn is_linked_device(&self) -> bool {
+        self.link_revision > 0
+    }
+
+    /// Whether this account carries the ownership a linked device requires:
+    /// [`CredentialOwnership::ExtensionOwned`], a named owner extension, and no
+    /// grants.
+    ///
+    /// **Not a style preference — the reusable default is a reachability bug
+    /// here.** [`Self::is_authorized_for_requester`] answers `true` for *any*
+    /// requester on [`CredentialOwnership::UserReusable`], so a linked device
+    /// left at that default would hand every installed extension a working
+    /// handle onto the user's personal vendor session; and ownership-aware
+    /// cleanup deliberately does not delete reusable credentials, so the same
+    /// account (and the live device behind it) would survive uninstall. Both
+    /// consequences follow from the ownership fields alone, which is why the
+    /// pin is checked at the record rather than trusted at each mint site
+    /// (PROPOSAL §4.5).
+    pub fn linked_device_ownership_is_pinned(&self) -> bool {
+        self.ownership == CredentialOwnership::ExtensionOwned
+            && self.owner_extension.is_some()
+            && self.granted_extensions.is_empty()
+    }
 }
 
 /// Adapter-safe account projection. It does not include raw secret material or
@@ -488,6 +518,46 @@ pub struct NewCredentialAccount {
     pub scopes: Vec<ProviderScope>,
 }
 
+impl NewCredentialAccount {
+    /// The one sanctioned shape for the credential account a device link mints.
+    ///
+    /// **Every ownership field is pinned here rather than chosen at the call
+    /// site**, because the fields a mint site would otherwise fill in by hand
+    /// are exactly the ones whose defaults are dangerous: reusable ownership
+    /// makes the account reachable by every installed extension and survives
+    /// uninstall along with the live vendor device
+    /// ([`CredentialAccount::linked_device_ownership_is_pinned`] states the
+    /// mechanism). So `ownership` is [`CredentialOwnership::ExtensionOwned`],
+    /// `owner_extension` is the extension that ran the link, and
+    /// `granted_extensions` is empty — sharing a linked device is not a thing
+    /// this constructor can express.
+    ///
+    /// `scopes` is empty and `refresh_secret` is `None` by construction too: a
+    /// linked device holds the account's own authority, so there is no scope to
+    /// intersect and no refresh token to exchange. The session blob rotates
+    /// through custody compare-and-swap, not through a refresh.
+    pub fn for_linked_device(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        label: CredentialAccountLabel,
+        owner_extension: ExtensionId,
+        access_secret: SecretHandle,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            label,
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(owner_extension),
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountUpdate {
     pub account_id: CredentialAccountId,
@@ -641,6 +711,16 @@ pub trait CredentialAccountService: Send + Sync {
     /// invalidates every handle and cached client bound to the previous
     /// revision, so it must be a single durable write, never a read-then-set
     /// from a caller-supplied value.
+    ///
+    /// **This is where the ownership pin is enforced.** The bump is the
+    /// operation that makes an account a linked device, so an implementation
+    /// must refuse it on an account that is not
+    /// [`CredentialAccount::linked_device_ownership_is_pinned`] — otherwise a
+    /// reusable account picks up a live vendor device authorization that every
+    /// installed extension may use and that uninstall will not delete
+    /// (PROPOSAL §4.5). Checking here rather than only at the mint site is
+    /// deliberate: the mint site is one caller, and this is the invariant's
+    /// only durable writer.
     async fn bump_link_revision(
         &self,
         _scope: &AuthProductScope,
@@ -1284,6 +1364,114 @@ mod tests {
     /// Build a base ResourceScope for a known owner with a given invocation_id.
     fn owner_resource(invocation_id: InvocationId) -> ResourceScope {
         ResourceScope::local_default(UserId::new("alice").unwrap(), invocation_id).unwrap()
+    }
+
+    fn device_link_mint() -> NewCredentialAccount {
+        NewCredentialAccount::for_linked_device(
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web),
+            AuthProviderId::new("vendor-a").unwrap(),
+            CredentialAccountLabel::new("vendor-a-linked").unwrap(),
+            ExtensionId::new("ext-a").unwrap(),
+            ironclaw_host_api::ids::SecretHandle::new("vendor_a_session").unwrap(),
+        )
+    }
+
+    /// PROPOSAL §4.5: the mint pins ownership rather than inheriting the
+    /// reusable default.
+    #[test]
+    fn a_device_link_mint_is_extension_owned_with_no_grants() {
+        let mint = device_link_mint();
+
+        assert_eq!(mint.ownership, CredentialOwnership::ExtensionOwned);
+        assert_eq!(
+            mint.owner_extension,
+            Some(ExtensionId::new("ext-a").unwrap()),
+            "the linking extension owns the account"
+        );
+        assert!(
+            mint.granted_extensions.is_empty(),
+            "a linked device is never shared with another extension"
+        );
+        // A linked device holds the account's own authority: nothing to refresh
+        // and no scope to intersect.
+        assert!(mint.refresh_secret.is_none());
+        assert!(mint.scopes.is_empty());
+        assert_eq!(mint.status, CredentialAccountStatus::Configured);
+    }
+
+    /// The hazard the pin closes: `UserReusable` answers `true` for ANY
+    /// requester, so an unpinned linked device would be reachable by every
+    /// installed extension.
+    #[test]
+    fn a_different_extension_is_not_authorized_for_a_device_link_account() {
+        let mint = device_link_mint();
+        let account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: mint.scope.clone(),
+            provider: mint.provider.clone(),
+            label: mint.label.clone(),
+            status: mint.status,
+            ownership: mint.ownership,
+            owner_extension: mint.owner_extension.clone(),
+            granted_extensions: mint.granted_extensions.clone(),
+            access_secret: mint.access_secret.clone(),
+            refresh_secret: None,
+            scopes: Vec::new(),
+            provider_identity: None,
+            link_revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(account.is_authorized_for_requester(Some(&ExtensionId::new("ext-a").unwrap())));
+        assert!(
+            !account.is_authorized_for_requester(Some(&ExtensionId::new("ext-b").unwrap())),
+            "another installed extension must not reach the linked account"
+        );
+        assert!(
+            !account.is_authorized_for_requester(None),
+            "an unattributed requester must not reach the linked account either"
+        );
+        assert!(account.is_linked_device());
+        assert!(account.linked_device_ownership_is_pinned());
+    }
+
+    /// The three shapes the pin refuses, each for its own reason.
+    #[test]
+    fn the_linked_device_ownership_pin_refuses_reusable_ownerless_and_granted_accounts() {
+        let mut reusable = make_account(AuthProductScope::new(
+            owner_resource(InvocationId::new()),
+            AuthSurface::Web,
+        ));
+        reusable.ownership = CredentialOwnership::UserReusable;
+        assert!(!reusable.linked_device_ownership_is_pinned());
+
+        let mut ownerless = reusable.clone();
+        ownerless.ownership = CredentialOwnership::ExtensionOwned;
+        ownerless.owner_extension = None;
+        assert!(!ownerless.linked_device_ownership_is_pinned());
+
+        let mut granted = ownerless.clone();
+        granted.owner_extension = Some(ExtensionId::new("ext-a").unwrap());
+        granted.granted_extensions = vec![ExtensionId::new("ext-b").unwrap()];
+        assert!(!granted.linked_device_ownership_is_pinned());
+
+        granted.granted_extensions.clear();
+        assert!(granted.linked_device_ownership_is_pinned());
+    }
+
+    /// `link_revision == 0` is "never linked"; only a bump makes an account a
+    /// linked device.
+    #[test]
+    fn only_a_bumped_link_revision_marks_an_account_as_a_linked_device() {
+        let mut account = make_account(AuthProductScope::new(
+            owner_resource(InvocationId::new()),
+            AuthSurface::Web,
+        ));
+
+        assert!(!account.is_linked_device());
+        account.link_revision = 1;
+        assert!(account.is_linked_device());
     }
 
     // Case 1: all axes match, including surface and session. invocation_id differs

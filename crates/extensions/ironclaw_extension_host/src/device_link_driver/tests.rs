@@ -755,3 +755,142 @@ mod auth_port {
         assert!(!error.restartable());
     }
 }
+
+// -------------------------------------------------------------------------
+// The `ironclaw_auth::LinkedDeviceRevoker` port
+// -------------------------------------------------------------------------
+
+/// Unlink teardown, as `ironclaw_auth`'s cleanup drives it. The ordering
+/// (logout before unbind) is the auth side's; what these cases pin is that the
+/// call reaches the right adapter, scoped to the right account and revision,
+/// and that nothing else is talked into logging a device out.
+mod linked_device_revoker {
+    use ironclaw_auth::{
+        AuthProductScope, AuthSurface, CredentialAccountId, LinkedDeviceRevokeError,
+        LinkedDeviceRevokeRequest, LinkedDeviceRevoker,
+    };
+    use ironclaw_host_api::ids::InvocationId;
+    use ironclaw_host_api::resource::ResourceScope;
+
+    use super::*;
+
+    fn revoke_request(
+        extension: &str,
+        account_id: CredentialAccountId,
+        link_revision: u64,
+    ) -> LinkedDeviceRevokeRequest {
+        LinkedDeviceRevokeRequest {
+            scope: AuthProductScope::new(
+                ResourceScope::local_default(
+                    UserId::new(USER).expect("user id"),
+                    InvocationId::new(),
+                )
+                .expect("resource scope"),
+                AuthSurface::Api,
+            ),
+            extension_id: ExtensionId::new(extension).expect("extension id"),
+            account_id,
+            link_revision,
+        }
+    }
+
+    /// The teardown reaches the bound adapter with a grant naming the real
+    /// account at its current revision — never the pre-mint provisional ref a
+    /// link in progress uses.
+    #[tokio::test]
+    async fn revoking_a_linked_device_calls_the_adapter_scoped_to_that_account() {
+        let h = harness(DeviceLinkLimits::default()).await;
+        let account_id = CredentialAccountId::new();
+
+        h.driver
+            .revoke_linked_device(revoke_request(EXTENSION, account_id, 3))
+            .await
+            .expect("revoke through the port");
+
+        let calls = h.adapter.recorded();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].kind, FakeDeviceLinkCallKind::Revoke);
+        assert_eq!(calls[0].user_id.as_str(), USER);
+        let grant = calls[0]
+            .account
+            .as_ref()
+            .expect("a revoke always names an established account");
+        assert_eq!(grant.account().as_str(), account_id.to_string());
+        assert_eq!(grant.link_revision(), 3);
+
+        let keys = h.material.keys();
+        assert_eq!(keys.len(), 1, "one handle, one key");
+        assert_eq!(keys[0].extension().as_str(), EXTENSION);
+        assert_eq!(
+            keys[0].account().as_str(),
+            account_id.to_string(),
+            "the custody handle addresses the minted account, not a pending link"
+        );
+        assert!(
+            !keys[0]
+                .account()
+                .as_str()
+                .starts_with(PENDING_ACCOUNT_PREFIX),
+            "a teardown must never open the provisional pre-mint handle"
+        );
+    }
+
+    /// Revision 0 is the provisional grant a link in progress holds. There is
+    /// no device behind it, so the vendor is never asked to log one out.
+    #[tokio::test]
+    async fn a_provisional_revision_is_refused_without_reaching_the_adapter() {
+        let h = harness(DeviceLinkLimits::default()).await;
+
+        let error = h
+            .driver
+            .revoke_linked_device(revoke_request(EXTENSION, CredentialAccountId::new(), 0))
+            .await
+            .expect_err("revision 0 names no established device");
+
+        assert_eq!(error, LinkedDeviceRevokeError::Unavailable);
+        assert_eq!(h.adapter.call_count(), 0);
+    }
+
+    /// "Nothing is bound" stays distinguishable from "the vendor refused" —
+    /// both quarantine, and an operator reading the two apart is the point.
+    #[tokio::test]
+    async fn an_extension_that_binds_no_adapter_answers_no_binding() {
+        let h = harness_with(
+            DeviceLinkLimits::default(),
+            FakeDeviceLinkAdapter::default(),
+            false,
+        )
+        .await;
+
+        let error = h
+            .driver
+            .revoke_linked_device(revoke_request("acme-chat", CredentialAccountId::new(), 1))
+            .await
+            .expect_err("nothing is bound");
+
+        assert_eq!(error, LinkedDeviceRevokeError::NoBinding);
+        assert_eq!(h.adapter.call_count(), 0);
+    }
+
+    /// A vendor that refuses the logout is reported as a vendor failure, which
+    /// is what the auth side quarantines on — never a silent success.
+    #[tokio::test]
+    async fn a_vendor_failure_is_reported_rather_than_swallowed() {
+        let adapter = FakeDeviceLinkAdapter::default();
+        *adapter.fail_with.lock().expect("fake device-link failure") =
+            Some(DeviceLinkError::Vendor {
+                code: DeviceLinkErrorCode::VendorUnavailable,
+                restartable: true,
+            });
+        let h = harness_with(DeviceLinkLimits::default(), adapter, true).await;
+
+        let error = h
+            .driver
+            .revoke_linked_device(revoke_request(EXTENSION, CredentialAccountId::new(), 1))
+            .await
+            .expect_err("the vendor refused the logout");
+
+        assert_eq!(error, LinkedDeviceRevokeError::Vendor);
+        assert_eq!(h.adapter.call_count(), 1);
+    }
+}

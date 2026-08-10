@@ -28,6 +28,8 @@
 
 use std::time::Duration;
 
+#[cfg(test)]
+mod conformance;
 pub(crate) mod login;
 pub(crate) mod mapping;
 pub(crate) mod ops;
@@ -99,12 +101,70 @@ pub const MAX_PEER_CACHE_ENTRIES: usize = 1_000;
 /// RPC.
 pub const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+// --- Content bounds (PROPOSAL §6.4, listed in §7.2) ------------------------
+//
+// The bounds above protect the process. These three protect the *transcript*.
+// A personal Telegram account can be messaged by any Telegram user on earth,
+// unsolicited and for free, so every byte a read returns is attacker-controlled
+// text that lands verbatim in the durable turn transcript, the event log, and
+// the model provider. Nothing upstream bounds that volume: the schema puts no
+// `maxLength` on `text`, and the vendor decides how much it hands back.
+//
+// They are declared here, beside the other §7.2 bounds, because §7.2 is the
+// one list that carries an each-tested rule — see the tests at the foot of this
+// file. The enforcement sites are `mapping::sanitize_untrusted_text` (per
+// message) and `mapping::bound_result_bytes` (per result); the per-page cap is
+// applied by `ops::limit_arg`.
+
+/// Ceiling on the serialized bytes of one read result's item list.
+///
+/// Applied by dropping trailing items — every list-shaped read here is
+/// newest-first, so the oldest rows are the ones to lose. This is the
+/// in-repo shape of #7397's channel-context clamp, which drops oldest lines
+/// against its own declared byte ceiling.
+pub const MAX_RESULT_BYTES: usize = 96 * 1024;
+
+/// Ceiling on one message's (or one display name's) text, applied *before*
+/// [`MAX_RESULT_BYTES`] so a single enormous message cannot evict a whole page
+/// of context on its own.
+pub const MAX_MESSAGE_TEXT_BYTES: usize = 4096;
+
+/// Ceiling on the items one page of any list-shaped read may return, and the
+/// clamp applied to a model-supplied `limit`.
+pub const MAX_ITEMS_PER_PAGE: usize = 100;
+
+/// How many vendor rows one call may walk while filling a page.
+///
+/// Bounds the pathological case where nearly every fetched row is filtered — a
+/// chat of nothing but join/leave notices — and the loop would otherwise walk
+/// the entire history looking for something to return.
+pub const MAX_PAGES_PER_CALL: usize = 10;
+
 // A zero bound is not a bound — it is a pool that never pools, a registry that
 // never registers, and a peer cache that evicts the self-user. Checked at
 // compile time rather than in a test, so it holds in every build.
 const _: () = assert!(MAX_POOLED_SESSIONS > 0);
 const _: () = assert!(MAX_PENDING_LINKS > 0);
 const _: () = assert!(MAX_PEER_CACHE_ENTRIES > 0);
+const _: () = assert!(MAX_RESULT_BYTES > 0);
+const _: () = assert!(MAX_MESSAGE_TEXT_BYTES > 0);
+const _: () = assert!(MAX_ITEMS_PER_PAGE > 0);
+const _: () = assert!(MAX_PAGES_PER_CALL > 0);
+
+// The three content bounds are a set, not three independent numbers, and the
+// ordering below is what makes each of them do work. Without it one of them is
+// silently dead.
+//
+// One message must not be able to spend the whole result budget…
+const _: () = assert!(MAX_MESSAGE_TEXT_BYTES < MAX_RESULT_BYTES);
+// …and a full page of maximum-length messages must exceed the byte ceiling,
+// because otherwise the item cap already implies it and `bound_result_bytes`
+// never runs — an unreachable clamp is one nobody notices breaking.
+const _: () = assert!(MAX_ITEMS_PER_PAGE * MAX_MESSAGE_TEXT_BYTES > MAX_RESULT_BYTES);
+// The walk ceiling is a multiplier over the page size, so at 1 a page of
+// filtered rows (a chat of nothing but join notices) returns empty rather than
+// looking past them.
+const _: () = assert!(MAX_PAGES_PER_CALL > 1);
 
 #[cfg(test)]
 mod tests {
@@ -133,4 +193,12 @@ mod tests {
             "a sweeper coarser than the timeout it enforces cannot enforce it"
         );
     }
+
+    // The content bounds' *relationships* are the `const _: () = assert!(…)`
+    // block above rather than tests down here: comparing two constants is not
+    // a runtime fact, and a compile-time check holds in every build instead of
+    // only where the test binary runs. What IS runtime about them — a caller
+    // trying to raise the page cap, the per-message clamp on multi-byte text,
+    // which rows the byte clamp keeps — is tested where the enforcement lives
+    // (`ops::tests`, `mapping::tests`).
 }

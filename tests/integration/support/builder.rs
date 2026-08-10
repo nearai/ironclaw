@@ -2022,6 +2022,37 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Provider-generic twin of [`Self::resolve_auth_gate`]: resolve a blocked
+    /// AUTH gate by minting a real credential account for `provider` under THIS
+    /// run's dispatch scope (through the production manual-token flow), then
+    /// resuming with no deny disposition so the parked capability
+    /// re-dispatches.
+    ///
+    /// `resolve_auth_gate` is hardwired to GitHub's seeder; this is the form a
+    /// linked-account (device-link) journey needs, where "the user answered the
+    /// gate" means "the user linked their account" and the provider is the
+    /// package's own credential-authority namespace.
+    pub async fn resolve_auth_gate_for_provider(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+        provider: &str,
+        label: &str,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        self.seed_capability_credential_account(provider, label, &[])
+            .await?;
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
     /// Seed a Configured credential account WITH real secret material for
     /// `provider` through the production manual-token flow, scoped so this
     /// thread's CAPABILITY dispatch finds it: account selection matches all of

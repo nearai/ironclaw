@@ -11,11 +11,11 @@ use grammers_client::{
     session::types::PeerKind,
 };
 use ironclaw_host_api::messaging::StandardMessagingErrorCode;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{
-    ConversationRef, OpFamily, PooledSession, ToolError, conversation_arg, input_str, mapping,
-    message_ref_arg, optional_str, vendor_call,
+    OpFamily, PooledSession, ToolError, conversation_arg, input_str, mapping, message_ref_arg,
+    optional_str, vendor_call,
 };
 use crate::linked::mapping::{RefKind, UserRef};
 
@@ -84,7 +84,7 @@ pub(crate) async fn edit_message(
         client.edit_message(peer, message_id, message.clone())
     })
     .await?;
-    Ok(json!({ "message_ref": mapping::message_ref(&conversation, message_id) }))
+    Ok(mapping::ref_only_result(&conversation, message_id))
 }
 
 /// `delete_message` — a delete that did not happen is an error, never
@@ -110,10 +110,7 @@ pub(crate) async fn delete_message(
     if deleted == 0 {
         return Err(mapping::failed(StandardMessagingErrorCode::UnknownMessage));
     }
-    Ok(json!({
-        "deleted": true,
-        "message_ref": mapping::message_ref(&conversation, message_id),
-    }))
+    Ok(mapping::delete_result(&conversation, message_id))
 }
 
 /// `add_reaction` — `emoji` is the unicode emoji itself; Telegram has no
@@ -131,10 +128,11 @@ pub(crate) async fn add_reaction(
         client.send_reactions(peer, message_id, reactions.clone())
     })
     .await?;
-    Ok(json!({
-        "message_ref": mapping::message_ref(&conversation, message_id),
-        "emoji": emoji,
-    }))
+    Ok(mapping::add_reaction_result(
+        &conversation,
+        message_id,
+        emoji,
+    ))
 }
 
 /// `remove_reaction` — clears **all** of the linked account's reactions on the
@@ -158,7 +156,7 @@ pub(crate) async fn remove_reaction(
         client.send_reactions(peer, message_id, InputReactions::remove())
     })
     .await?;
-    Ok(json!({ "message_ref": mapping::message_ref(&conversation, message_id) }))
+    Ok(mapping::ref_only_result(&conversation, message_id))
 }
 
 /// `open_dm` — re-encodes a user ref as the conversation ref for the
@@ -178,7 +176,5 @@ pub(crate) fn open_dm(input: &Value) -> Result<Value, ToolError> {
         // None of them names a person, so none of them can open a DM.
         _ => return Err(mapping::failed(StandardMessagingErrorCode::UnknownUser)),
     };
-    Ok(json!({
-        "conversation": ConversationRef::from_peer_ref(peer_ref).encode(),
-    }))
+    Ok(mapping::open_dm_result(peer_ref))
 }

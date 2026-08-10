@@ -56,6 +56,12 @@
 //! and terminalizes. That is a **fail-closed hole, not a working path**: no
 //! link can complete until either the port carries the flow's scope or the
 //! minting seam lands host-side. Reconcile before PR 5's risk gate.
+//!
+//! Whichever side ends up making the call, the account it mints must be built
+//! by `ironclaw_auth::NewCredentialAccount::for_linked_device` — the ownership
+//! pin of PROPOSAL §4.5 lives in that constructor, and
+//! `CredentialAccountService::bump_link_revision` refuses any account that does
+//! not carry it, so a hand-rolled literal cannot complete a link.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -255,19 +261,29 @@ impl SnapshotDeviceLinkDriver {
     /// `DeviceLinkDriver` port, which has no revoke leg — unlink runs through
     /// extension credential cleanup, and this is the entry point it calls.
     pub async fn revoke(&self, request: &DeviceLinkRequest) -> Result<(), DeviceLinkError> {
+        self.revoke_link(request)
+            .await
+            .map_err(DriverFailure::into_link_error)
+    }
+
+    /// The revoke engine, kept separate from the public face for the same
+    /// reason `cancel_link` is: "no extension binds an adapter" is a different
+    /// answer from "the vendor refused", and a caller that can act on the
+    /// difference (the linked-device revoker port) must not be handed a
+    /// flattened one.
+    async fn revoke_link(&self, request: &DeviceLinkRequest) -> Result<(), DriverFailure> {
         if request.account.is_none() {
             return Err(DeviceLinkError::Internal {
                 reason: "device-link revoke requires an established account grant",
-            });
+            }
+            .into());
         }
-        let resolved = self
-            .resolve(&request.extension_id)
-            .map_err(DriverFailure::into_link_error)?;
+        let resolved = self.resolve(&request.extension_id)?;
         self.forget(&request.flow_id);
         let grant = self.custody_grant(request)?;
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
-        resolved.adapter.revoke(&context).await
+        Ok(resolved.adapter.revoke(&context).await?)
     }
 
     async fn cancel_link(&self, request: &DeviceLinkRequest) -> Result<(), DriverFailure> {

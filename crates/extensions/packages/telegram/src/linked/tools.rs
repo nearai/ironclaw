@@ -167,7 +167,11 @@ fn undeclared_capability(id: &str) -> ToolError {
     }
 }
 
-fn tool_result(output: Value) -> ToolResult {
+/// Projects one op's canonical output as the adapter's success result — the
+/// package-side face of a `Completed` outcome. `pub(crate)` so the conformance
+/// suite (`super::conformance`, test-only) can assert what an op's output
+/// actually becomes rather than re-deriving it.
+pub(crate) fn tool_result(output: Value) -> ToolResult {
     let output_bytes = serde_json::to_vec(&output)
         .map(|bytes| bytes.len() as u64)
         .unwrap_or_default();

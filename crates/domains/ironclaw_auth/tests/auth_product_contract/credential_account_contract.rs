@@ -1024,11 +1024,12 @@ async fn opaque_material_access_is_gated_on_the_accounts_link_revision() {
 
     let services = InMemoryAuthProductServices::new();
     let owner = scope("custody-revision");
+    let linking_extension = ExtensionId::new("acme-link").expect("valid extension id");
     let account = services
-        .create_account(account_request(
+        .create_account(linked_device_account_request(
             owner.clone(),
             "linked-device",
-            CredentialAccountStatus::Configured,
+            &linking_extension,
         ))
         .await
         .expect("account");
@@ -1046,7 +1047,7 @@ async fn opaque_material_access_is_gated_on_the_accounts_link_revision() {
     let stale = OpaqueMaterialRequest {
         scope: owner.clone(),
         account_id: account.id,
-        requester_extension: None,
+        requester_extension: Some(linking_extension),
         link_revision: 0,
     };
     assert_eq!(
@@ -1066,5 +1067,68 @@ async fn opaque_material_access_is_gated_on_the_accounts_link_revision() {
             .await
             .expect_err("and must not write"),
         AuthProductError::LinkRevisionStale { current: 1 }
+    );
+}
+
+/// PROPOSAL §4.5: the ownership pin is a property of the *contract*, not of one
+/// implementation. `bump_link_revision` is the operation that makes an account
+/// a linked device, so every implementation must refuse it on an account whose
+/// ownership would leave the resulting device reachable by every installed
+/// extension (`UserReusable` authorizes any requester) or shared with one
+/// (`granted_extensions`).
+#[tokio::test]
+async fn bump_link_revision_refuses_an_account_that_is_not_pinned_to_one_owning_extension() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("ownership-pin");
+    let owning_extension = ExtensionId::new("acme-link").expect("valid extension id");
+
+    let reusable = services
+        .create_account(account_request(
+            owner.clone(),
+            "reusable",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("account");
+    let error = services
+        .bump_link_revision(&owner, reusable.id)
+        .await
+        .expect_err("a reusable account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a reusable account: {error:?}"
+    );
+
+    let mut shared = linked_device_account_request(owner.clone(), "shared", &owning_extension);
+    shared.granted_extensions = vec![ExtensionId::new("other-ext").expect("valid extension id")];
+    let shared = services.create_account(shared).await.expect("account");
+    let error = services
+        .bump_link_revision(&owner, shared.id)
+        .await
+        .expect_err("a granted account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a granted account: {error:?}"
+    );
+
+    let pinned = services
+        .create_account(linked_device_account_request(
+            owner.clone(),
+            "pinned",
+            &owning_extension,
+        ))
+        .await
+        .expect("account");
+    let linked = services
+        .bump_link_revision(&owner, pinned.id)
+        .await
+        .expect("the sanctioned mint shape links");
+    assert_eq!(linked.link_revision, 1);
+    assert!(linked.is_linked_device());
+    assert!(
+        !linked.is_authorized_for_requester(Some(
+            &ExtensionId::new("other-ext").expect("valid extension id")
+        )),
+        "the linked account must not be reachable by another installed extension"
     );
 }

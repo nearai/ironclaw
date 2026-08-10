@@ -118,7 +118,7 @@ pub(crate) async fn resolve_user(
     }
 
     // 2. Dialog-title scan. This is the half that must never auto-resolve.
-    let ceiling = limit.saturating_mul(mapping::MAX_PAGES_PER_CALL);
+    let ceiling = limit.saturating_mul(crate::linked::MAX_PAGES_PER_CALL);
     let mut iterator = client.iter_dialogs().limit(ceiling);
     let mut walked = 0usize;
     while matches.len() < limit && walked < ceiling {

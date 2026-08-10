@@ -35,9 +35,10 @@ pub use channel::{
     TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
 };
 pub use linked::{
-    LinkedAccountResolutionError, LinkedAccountResolver, MAX_PEER_CACHE_ENTRIES, MAX_PENDING_LINKS,
-    MAX_POOLED_SESSIONS, PENDING_LINK_TTL, SESSION_IDLE_TIMEOUT, SessionPool, TOOL_CALL_TIMEOUT,
-    TelegramDeviceLinkAdapter, TelegramLinkedToolAdapter,
+    LinkedAccountResolutionError, LinkedAccountResolver, MAX_ITEMS_PER_PAGE,
+    MAX_MESSAGE_TEXT_BYTES, MAX_PAGES_PER_CALL, MAX_PEER_CACHE_ENTRIES, MAX_PENDING_LINKS,
+    MAX_POOLED_SESSIONS, MAX_RESULT_BYTES, PENDING_LINK_TTL, SESSION_IDLE_TIMEOUT, SessionPool,
+    TOOL_CALL_TIMEOUT, TelegramDeviceLinkAdapter, TelegramLinkedToolAdapter,
 };
 pub use payload::{
     GroupTriggerPolicy, PayloadParseError, TELEGRAM_API_HOST, TELEGRAM_FILE_API_HOST,

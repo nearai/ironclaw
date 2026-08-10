@@ -38,6 +38,27 @@ No `ironclaw_assistant`, no registry, no extension host: a concrete package crat
 is linked only by the binary and by tests
 (`concrete_extension_crates_link_only_from_the_binary_and_tests`).
 
+### The `grammers-*` edges are a security pin, not a version range
+
+The linked-device (MTProto) half links `grammers-*`, which runs **in-process
+with full process authority** — it can read the heap that holds every user's
+decrypted session key. Three rules, and none of them is style:
+
+- Every edge is `=0.10.0` exactly, with `default-features = false` and an
+  explicit feature allowlist. `0.10.0` is the last release whose `update_config`
+  discards Telegram's server-pushed datacenter list; that is the only reason
+  `Session::dc_option` gates 100% of dials.
+- The socks5 `proxy` feature must stay **off**. A proxied dial never reaches
+  that seam, so enabling it falsifies the validation claim rather than weakening
+  it.
+- Versions, `.crate` checksums, and the *resolved* feature sets (including the
+  five transitive members no manifest can pin) are frozen by
+  `crates/app/ironclaw_architecture_tests/tests/reborn_linked_device_supply_chain_pin.rs`,
+  and `.github/dependabot.yml` ignores `grammers-*` so no bot proposes a bump.
+  Read that file's module docs — and the bump checklist in it — before changing
+  any of this. Design record:
+  `docs/internal/design/telegram-linked-device/{PROPOSAL.md §11.1, ADR-device-link-auth-hook.md}`.
+
 ## Do Not Move In Here
 
 - Shared channel contracts, registry semantics, or product workflow orchestration.

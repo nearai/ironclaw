@@ -264,6 +264,16 @@ where
         if !scope_matches(scope, &account.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
+        // The ownership pin (PROPOSAL §4.5). Refusing here is what stops a
+        // reusable account — reachable by EVERY installed extension, and
+        // deliberately not deleted by ownership-aware cleanup — from acquiring
+        // a live vendor device authorization.
+        if !account.linked_device_ownership_is_pinned() {
+            return Err(AuthProductError::invalid_request(
+                "a linked-device account must be extension-owned by exactly one \
+                 extension and carry no grants",
+            ));
+        }
         account.link_revision = account.link_revision.saturating_add(1);
         account.updated_at = Utc::now();
         self.write_account(&account, CasExpectation::Version(version))

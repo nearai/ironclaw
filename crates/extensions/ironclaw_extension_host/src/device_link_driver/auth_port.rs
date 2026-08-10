@@ -17,11 +17,13 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthFlowId, DeviceLinkBeginRequest, DeviceLinkBinding, DeviceLinkCancelRequest,
     DeviceLinkDriver, DeviceLinkDriverError, DeviceLinkPollRequest, DeviceLinkStepOutcome,
-    DeviceLinkSubmitRequest,
+    DeviceLinkSubmitRequest, LinkedDeviceRevokeError, LinkedDeviceRevokeRequest,
+    LinkedDeviceRevoker,
 };
 use ironclaw_extension_contracts::device_link::{
     DeviceLinkError, DeviceLinkFlowId, DeviceLinkStep,
 };
+use ironclaw_extension_contracts::linked_session::{LinkedAccountGrant, LinkedAccountRef};
 
 use super::{DeviceLinkRequest, DriverFailure, SnapshotDeviceLinkDriver};
 
@@ -75,6 +77,74 @@ impl DeviceLinkDriver for SnapshotDeviceLinkDriver {
     }
 }
 
+/// Prefix for the synthetic flow id a revoke runs under.
+///
+/// A teardown is not a flow: there is no card, no payload, and nothing to
+/// resume. The driver's request type still names one because every other entry
+/// point has one, so this mints an id that cannot collide with a live link's
+/// (which is an `AuthFlowId` rendering) and whose `forget` is a no-op.
+const REVOKE_FLOW_PREFIX: &str = "revoke.";
+
+#[async_trait]
+impl LinkedDeviceRevoker for SnapshotDeviceLinkDriver {
+    /// End the vendor authorization behind one established linked device.
+    ///
+    /// Called by `ironclaw_auth`'s cleanup **before** the credential is
+    /// unbound, which is the only order in which it can work: after the unbind
+    /// the session blob this call needs is deleted, and after the extension is
+    /// removed the adapter that could make the vendor call is gone.
+    async fn revoke_linked_device(
+        &self,
+        request: LinkedDeviceRevokeRequest,
+    ) -> Result<(), LinkedDeviceRevokeError> {
+        // Revision 0 is the provisional (pre-mint) grant a link in progress
+        // holds. Accepting it here would open a custody handle onto a
+        // half-established link and ask a vendor to log out of a device that
+        // was never authorized.
+        if request.link_revision == 0 {
+            return Err(LinkedDeviceRevokeError::Unavailable);
+        }
+        let flow_id = DeviceLinkFlowId::new(format!(
+            "{REVOKE_FLOW_PREFIX}{account}",
+            account = request.account_id
+        ))
+        .map_err(|error| {
+            tracing::debug!(%error, "linked-device revoke id does not form a flow id");
+            LinkedDeviceRevokeError::Unavailable
+        })?;
+        let account = LinkedAccountRef::new(request.account_id.to_string()).map_err(|error| {
+            tracing::debug!(%error, "credential account id does not form a linked-account ref");
+            LinkedDeviceRevokeError::Unavailable
+        })?;
+        let driver_request = DeviceLinkRequest {
+            flow_id,
+            extension_id: request.extension_id,
+            // The owner of the durable credential record, never a value an
+            // adapter or a card supplied.
+            user_id: request.scope.resource.user_id.clone(),
+            account: Some(LinkedAccountGrant::new(account, request.link_revision)),
+        };
+        self.revoke_link(&driver_request)
+            .await
+            .map_err(revoke_error)
+    }
+}
+
+/// Project a driver failure onto the revoker port's closed vocabulary.
+///
+/// Every variant quarantines the same way on the auth side, so this only has to
+/// stay honest about *which* half failed: nothing was bound, the vendor
+/// refused, or the host could not mediate the call at all.
+fn revoke_error(failure: DriverFailure) -> LinkedDeviceRevokeError {
+    match failure {
+        DriverFailure::NoBinding => LinkedDeviceRevokeError::NoBinding,
+        DriverFailure::Link(DeviceLinkError::Vendor { .. } | DeviceLinkError::UnknownFlow) => {
+            LinkedDeviceRevokeError::Vendor
+        }
+        DriverFailure::Link(_) => LinkedDeviceRevokeError::Unavailable,
+    }
+}
+
 /// Project an auth-side call onto the host driver's request.
 ///
 /// The account is always `None`: this port drives a link that is being
@@ -104,6 +174,9 @@ fn host_request(
 /// and this crate cannot mint one — see the module header of the parent. Until
 /// that is reconciled, a completion reports `account: None`, which the
 /// auth-side driver terminalizes rather than announcing a link it cannot back.
+/// When the minting seam lands it must build the account through
+/// `ironclaw_auth::NewCredentialAccount::for_linked_device`, which is where the
+/// §4.5 ownership pin lives.
 fn outcome(step: DeviceLinkStep) -> DeviceLinkStepOutcome {
     DeviceLinkStepOutcome {
         step,

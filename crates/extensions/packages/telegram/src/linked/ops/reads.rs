@@ -21,12 +21,10 @@ use super::{
     ConversationRef, Cursor, OpFamily, PooledSession, ToolError, conversation_arg, cursor_arg,
     input_str, limit_arg, mapping, message_ref_arg, reject_cursor, vendor_call,
 };
-use crate::linked::mapping::MAX_PAGES_PER_CALL;
+use crate::linked::MAX_PAGES_PER_CALL;
 
 /// How many vendor rows one call may walk while filling a page of `limit`
-/// items. Bounds the pathological case where nearly every fetched row is
-/// filtered — a chat of nothing but join/leave notices — and the loop would
-/// otherwise walk the entire history looking for something to return.
+/// items ([`MAX_PAGES_PER_CALL`], PROPOSAL §7.2).
 fn walk_ceiling(limit: usize) -> usize {
     limit.saturating_mul(MAX_PAGES_PER_CALL)
 }

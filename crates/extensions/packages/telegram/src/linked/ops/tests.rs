@@ -55,15 +55,24 @@ fn a_message_ref_missing_its_conversation_half_is_refused() {
     assert!(summary(&error).contains(StandardMessagingErrorCode::UnknownMessage.as_str()));
 }
 
+/// The per-page item cap is a content bound (PROPOSAL §6.4/§7.2), so what
+/// matters is that nothing a *caller* supplies can raise it — not the absent
+/// case, not a large number, not a number larger than `usize` arithmetic
+/// expects. Every list-shaped read multiplies this by `MAX_PAGES_PER_CALL` to
+/// get its walk ceiling, so an unclamped value would also uncap the vendor
+/// walk.
 #[test]
 fn limits_clamp_to_the_adapter_page_ceiling() {
-    assert_eq!(limit_arg(&json!({})), mapping::MAX_ITEMS_PER_PAGE);
+    assert_eq!(limit_arg(&json!({})), MAX_ITEMS_PER_PAGE);
     assert_eq!(limit_arg(&json!({ "limit": 5 })), 5);
-    assert_eq!(
-        limit_arg(&json!({ "limit": 1000 })),
-        mapping::MAX_ITEMS_PER_PAGE
-    );
+    assert_eq!(limit_arg(&json!({ "limit": 1000 })), MAX_ITEMS_PER_PAGE);
+    assert_eq!(limit_arg(&json!({ "limit": u64::MAX })), MAX_ITEMS_PER_PAGE);
     assert_eq!(limit_arg(&json!({ "limit": 0 })), 1);
+    // A non-numeric or negative `limit` cannot reach here past the canonical
+    // schema, but falling back to the ceiling rather than to "unbounded" is
+    // what makes that a defence rather than a coincidence.
+    assert_eq!(limit_arg(&json!({ "limit": -1 })), MAX_ITEMS_PER_PAGE);
+    assert_eq!(limit_arg(&json!({ "limit": "many" })), MAX_ITEMS_PER_PAGE);
 }
 
 /// The rule this protects: a cursor the adapter cannot honour must be an
