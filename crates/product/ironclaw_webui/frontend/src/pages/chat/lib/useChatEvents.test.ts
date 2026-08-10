@@ -2691,7 +2691,7 @@ test("useChatEvents: terminal failure settles the run as not successful", () => 
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
 });
 
-test("useChatEvents: no-progress failure replaces an unfinished assistant draft", () => {
+function assertNoProgressFailureClearsDraft(terminalStatus) {
   const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
 
   harness.handleEvent({
@@ -2727,7 +2727,7 @@ test("useChatEvents: no-progress failure replaces an unfinished assistant draft"
           {
             run_status: {
               run_id: "run-1",
-              status: "failed",
+              status: terminalStatus,
               failure_category: "no_progress_detected",
             },
           },
@@ -2771,7 +2771,13 @@ test("useChatEvents: no-progress failure replaces an unfinished assistant draft"
     ["assistant", "error"],
     "a late projection must not restore the unfinished draft after failure",
   );
-});
+}
+
+for (const terminalStatus of ["failed", "recovery_required"]) {
+  test(`useChatEvents: no-progress ${terminalStatus} replaces an unfinished assistant draft`, () => {
+    assertNoProgressFailureClearsDraft(terminalStatus);
+  });
+}
 
 test("useChatEvents: terminal cancellation settles the run as not successful", () => {
   const harness = createUseChatEventsHarness();
