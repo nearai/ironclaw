@@ -32,6 +32,8 @@ CORPUS_PATH = (
 )
 LIVE_QA_PATH = ROOT / "scripts/reborn_webui_v2_live_qa/run_live_qa.py"
 GENERATOR_VERSION = "tool-search-scale-v2"
+OBSERVATION_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 2
 SEED = 7405
 AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 
@@ -185,6 +187,12 @@ def generate_catalog(tool_count: int) -> list[dict[str, Any]]:
                 "annotations": {"readOnlyHint": True},
             }
         )
+    for namespace, tools in buckets.items():
+        if not tools:
+            raise ValueError(
+                f"empty benchmark namespace {namespace!r} at tool_count={tool_count}; "
+                "increase the catalog size so every MCP package is installable"
+            )
     return [{"namespace": namespace, "tools": buckets[namespace]} for namespace in NAMESPACES]
 
 
@@ -502,6 +510,11 @@ def aggregate_observations(observations: list[dict[str, Any]]) -> list[dict[str,
     for (arm, tool_count), items in sorted(groups.items()):
         latencies = [item["latency_ms"]["end_to_end"] for item in items]
         completed = sum(bool(item["task"]["completed"]) for item in items)
+        failure_categories: dict[str, int] = {}
+        for item in items:
+            failure = item.get("failure")
+            if isinstance(failure, str):
+                failure_categories[failure] = failure_categories.get(failure, 0) + 1
         aggregates.append({
             "arm": arm,
             "tool_count": tool_count,
@@ -509,9 +522,11 @@ def aggregate_observations(observations: list[dict[str, Any]]) -> list[dict[str,
             "completion_rate": completed / len(items),
             "latency_ms_median": statistics.median(latencies),
             "latency_ms_worst": max(latencies),
+            "latency_ms_spread": max(latencies) - min(latencies),
             "unauthorized_tool_leaks": sum(
                 item["task"]["unauthorized_tool_leaks"] for item in items
             ),
+            "failure_categories": failure_categories,
         })
     return aggregates
 
@@ -528,7 +543,7 @@ def _trace_metrics(
     metrics = live_qa.parse_case_llm_trace_metrics(trace_path)
     payload = json.loads(trace_path.read_text(encoding="utf-8"))
     calls = []
-    for step in payload.get("steps", []):
+    for model_turn, step in enumerate(payload.get("steps", [])):
         response = step.get("response") if isinstance(step, dict) else None
         if not isinstance(response, dict):
             continue
@@ -536,10 +551,49 @@ def _trace_metrics(
             if isinstance(call, dict) and isinstance(call.get("name"), str):
                 calls.append({
                     "name": call["name"],
+                    "model_turn": model_turn,
                     "arguments": call.get("arguments")
                     if isinstance(call.get("arguments"), dict) else {},
                 })
     return metrics, calls
+
+
+def discovery_turn_count(calls: list[dict[str, Any]]) -> int:
+    discovery_names = {"tool_search", "tool_describe", "capability_info"}
+    return len({
+        call["model_turn"]
+        for call in calls
+        if call.get("name") in discovery_names and isinstance(call.get("model_turn"), int)
+    })
+
+
+def run_cache_metadata(
+    repetitions: list[int], group_position: int, repetition: int,
+) -> dict[str, object]:
+    return {
+        "thermal_class": "cold" if group_position == 0 else "warm",
+        "repetition": repetition,
+        "resumed_group": bool(repetitions and repetitions[0] != 0),
+    }
+
+
+async def git_head() -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "rev-parse",
+        "HEAD",
+        cwd=ROOT,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        reason = stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git rev-parse HEAD failed: {reason or 'no error output'}")
+    head = stdout.decode("utf-8", errors="strict").strip()
+    if not head:
+        raise RuntimeError("git rev-parse HEAD returned an empty commit")
+    return head
 
 
 def _metric_delta(after: dict[str, object], before: dict[str, object], key: str) -> int | None:
@@ -591,7 +645,7 @@ async def run_task_group(
         trace_path = output_dir / "llm-traces" / f"{group_name}.json"
         prior_metrics, prior_trace_calls = _trace_metrics(live_qa, trace_path)
         observations = []
-        for repetition in repetitions:
+        for group_position, repetition in enumerate(repetitions):
             case_name = f"{group_name}-{repetition}"
             print(
                 f"[tool-benchmark] arm={arm} tools={tool_count} "
@@ -620,7 +674,7 @@ async def run_task_group(
             tool_names = [call["name"] for call in trace_calls]
             scored = score_task(task, calls, trace_calls)
             observation = {
-                "schema_version": 2,
+                "schema_version": OBSERVATION_SCHEMA_VERSION,
                 "observation_id": f"{arm}:{tool_count}:{task['id']}:{repetition}",
                 "catalog": {
                     "generator_version": GENERATOR_VERSION,
@@ -642,10 +696,7 @@ async def run_task_group(
                     ),
                     "temperature": 0.0,
                 },
-                "run": {
-                    "thermal_class": "cold" if repetition == 0 else "warm",
-                    "repetition": repetition,
-                },
+                "run": run_cache_metadata(repetitions, group_position, repetition),
                 "task": {"id": task["id"], **scored},
                 "counts": {
                     "model_turns": _metric_delta(
@@ -657,6 +708,7 @@ async def run_task_group(
                     "synthetic_tool_calls": len(calls),
                     "tool_search_calls": tool_names.count("tool_search"),
                     "tool_describe_calls": tool_names.count("tool_describe"),
+                    "discovery_turns": discovery_turn_count(trace_calls),
                 },
                 "tokens": {
                     "input": _metric_delta(metrics, prior_metrics, "input_tokens"),
@@ -675,11 +727,12 @@ async def run_task_group(
                     ),
                     "end_to_end": latency_ms,
                 },
+                "cache": {"tool_definition_signature_changes": None},
                 "ui_probe_success": result.success,
                 "installed_namespaces": len(packages),
                 "failure": None
                 if result.success and scored["completed"]
-                else ("task_incomplete" if result.success else "agent_run_failure"),
+                else "task_incomplete",
             }
             append_observation(observations_path, observation)
             observations.append(observation)
@@ -715,6 +768,12 @@ def load_observations(path: Path) -> list[dict[str, Any]]:
         if not line.strip():
             continue
         observation = json.loads(line)
+        if observation.get("schema_version") != OBSERVATION_SCHEMA_VERSION:
+            raise ValueError(
+                f"{path}:{line_number} has schema_version "
+                f"{observation.get('schema_version')!r}; expected "
+                f"{OBSERVATION_SCHEMA_VERSION}"
+            )
         observation_id = observation.get("observation_id")
         if not isinstance(observation_id, str) or not observation_id:
             raise ValueError(
@@ -771,8 +830,8 @@ async def async_main(args: argparse.Namespace) -> int:
                     observations.append(observation)
                     completed_ids.add(observation["observation_id"])
     summary = {
-        "schema_version": 2,
-        "head": os.popen("git rev-parse HEAD").read().strip(),
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "head": await git_head(),
         "observation_count": len(observations),
         "observations_path": str(observations_path),
         "provider_usage_available": any(

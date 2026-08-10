@@ -243,7 +243,7 @@ impl CapabilityCatalog {
         &self,
         policy: &CapabilitySurfacePolicy,
     ) -> Vec<NamespaceCatalogSummary> {
-        let mut namespaces: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut namespaces: BTreeMap<DiscoveryNamespace, Vec<String>> = BTreeMap::new();
         for entry in self.entries.iter().filter(|entry| {
             entry.tier == ToolTier::Discoverable
                 && policy.permits_capability_id(&entry.definition.capability_id)
@@ -256,7 +256,7 @@ impl CapabilityCatalog {
         namespaces
             .into_iter()
             .map(|(namespace, tool_names)| NamespaceCatalogSummary {
-                namespace,
+                namespace: namespace.to_string(),
                 tool_names,
             })
             .collect()
@@ -315,51 +315,108 @@ impl CapabilityCatalog {
 /// Extension-owned tools retain their stable extension id. First-party ids use
 /// intent-oriented groups because `builtin` and `ironclaw` describe ownership,
 /// not what the tools help the model accomplish.
-fn discovery_namespace(capability_id: &CapabilityId) -> String {
-    let raw = capability_id.as_str();
-    if let Some(local_id) = raw.strip_prefix("builtin.") {
-        return builtin_discovery_namespace(local_id).to_string();
-    }
-    if raw.starts_with("ironclaw.memory.") {
-        return "memory".to_string();
-    }
-    if raw.starts_with("ironclaw.") {
-        return "system".to_string();
-    }
-    raw.split_once('.')
-        .map_or(raw, |(extension_id, _)| extension_id)
-        .to_string()
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscoveryNamespace {
+    Agents,
+    Coding,
+    Data,
+    Extensions,
+    Memory,
+    Messaging,
+    Observability,
+    Scheduling,
+    Settings,
+    Skills,
+    System,
+    Web,
+    Extension(String),
 }
 
-fn builtin_discovery_namespace(local_id: &str) -> &'static str {
+impl DiscoveryNamespace {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Agents => "agents",
+            Self::Coding => "coding",
+            Self::Data => "data",
+            Self::Extensions => "extensions",
+            Self::Memory => "memory",
+            Self::Messaging => "messaging",
+            Self::Observability => "observability",
+            Self::Scheduling => "scheduling",
+            Self::Settings => "settings",
+            Self::Skills => "skills",
+            Self::System => "system",
+            Self::Web => "web",
+            Self::Extension(extension_id) => extension_id,
+        }
+    }
+}
+
+impl PartialOrd for DiscoveryNamespace {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DiscoveryNamespace {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl std::fmt::Display for DiscoveryNamespace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+fn discovery_namespace(capability_id: &CapabilityId) -> DiscoveryNamespace {
+    let raw = capability_id.as_str();
+    if let Some(local_id) = raw.strip_prefix("builtin.") {
+        return builtin_discovery_namespace(local_id);
+    }
+    if raw.starts_with("ironclaw.memory.") {
+        return DiscoveryNamespace::Memory;
+    }
+    if raw.starts_with("ironclaw.") {
+        return DiscoveryNamespace::System;
+    }
+    DiscoveryNamespace::Extension(
+        raw.split_once('.')
+            .map_or(raw, |(extension_id, _)| extension_id)
+            .to_string(),
+    )
+}
+
+fn builtin_discovery_namespace(local_id: &str) -> DiscoveryNamespace {
     if matches!(
         local_id,
         "read_file" | "write_file" | "list_dir" | "glob" | "grep" | "apply_patch" | "shell"
     ) {
-        "coding"
+        DiscoveryNamespace::Coding
     } else if local_id == "http" || local_id.starts_with("http.") {
-        "web"
+        DiscoveryNamespace::Web
     } else if local_id.starts_with("extension_") || local_id.starts_with("ironhub_") {
-        "extensions"
+        DiscoveryNamespace::Extensions
     } else if local_id.starts_with("skill_") {
-        "skills"
+        DiscoveryNamespace::Skills
     } else if local_id.starts_with("trigger_") {
-        "scheduling"
+        DiscoveryNamespace::Scheduling
     } else if local_id.starts_with("outbound_")
         || local_id.starts_with("notification_")
         || local_id == "attach_workspace_file_to_reply"
     {
-        "messaging"
+        DiscoveryNamespace::Messaging
     } else if local_id.starts_with("trace_commons.") {
-        "observability"
+        DiscoveryNamespace::Observability
     } else if local_id.starts_with("admin_") || local_id.starts_with("operator_config_") {
-        "settings"
+        DiscoveryNamespace::Settings
     } else if local_id == "spawn_subagent" {
-        "agents"
+        DiscoveryNamespace::Agents
     } else if local_id == "json" {
-        "data"
+        DiscoveryNamespace::Data
     } else {
-        "system"
+        DiscoveryNamespace::System
     }
 }
 
@@ -2032,8 +2089,10 @@ mod tests {
         // Structural-awareness regression: a model handed a coding-heavy core on a
         // non-coding task never reaches for integrations it cannot see. The
         // tool_search description must expose semantic namespace counts plus fair
-        // representative names so the model can discover integrations without
-        // defaulting to the advertised builtins and giving up. Names only — the
+        // representative-name rounds within its fixed byte cap; it is not an
+        // exhaustive listing of every discoverable tool. This lets the model find
+        // integrations without defaulting to the advertised builtins and giving
+        // up. Names only — the
         // index is a capability safe-description and arbitrary tool descriptions
         // both blow its byte budget and can carry denylisted content.
         let definitions = vec![

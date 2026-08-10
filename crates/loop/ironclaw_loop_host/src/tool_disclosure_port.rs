@@ -33,9 +33,11 @@ use crate::tool_search::{
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
-/// Maximum canonical JSON bytes devoted to complete input signatures in one
-/// `tool_search` response. Compact result metadata is always returned.
-const MAX_SEARCH_SIGNATURE_BYTES_TOTAL: usize = 24 * 1024;
+/// Maximum canonical JSON bytes for the complete `tool_search` response.
+/// This mirrors the model-visible inline result ceiling: a result may claim a
+/// complete schema only when the query, metadata, schemas, and JSON envelope
+/// all fit in the bytes the model receives without a follow-up `result_read`.
+const MAX_SEARCH_RESPONSE_BYTES: usize = 24 * 1024;
 
 /// A single schema above this ceiling stays discoverable but requires
 /// `tool_describe`; this prevents one result from consuming the whole budget.
@@ -214,34 +216,51 @@ fn serialized_len_within(value: &Value, limit: usize) -> Option<usize> {
         .map(|()| writer.bytes_written)
 }
 
-fn bounded_search_results(
+fn bounded_search_output(
+    query: &str,
     results: Vec<CatalogSearchResult>,
-    total_signature_bytes: usize,
+    total_response_bytes: usize,
     per_signature_bytes: usize,
-) -> Vec<Value> {
-    let mut remaining_signature_bytes = total_signature_bytes;
-    results
-        .into_iter()
-        .map(|result| {
-            let limit = per_signature_bytes.min(remaining_signature_bytes);
-            let schema_bytes = serialized_len_within(&result.parameters, limit);
-            let schema_complete = schema_bytes.is_some();
-            if let Some(schema_bytes) = schema_bytes {
-                remaining_signature_bytes = remaining_signature_bytes.saturating_sub(schema_bytes);
+) -> Value {
+    let mut output_results = Vec::new();
+    for result in results {
+        let output = json!({
+            "name": result.name,
+            "capability_id": result.capability_id.as_str(),
+            "description": result.description,
+            "required": result.required_params,
+            "schema_complete": false,
+        });
+        let schema_fits = serialized_len_within(&result.parameters, per_signature_bytes).is_some();
+        if schema_fits {
+            let mut complete = output.clone();
+            complete["schema_complete"] = Value::Bool(true);
+            complete["parameters"] = result.parameters;
+            let mut candidate_results = output_results.clone();
+            candidate_results.push(complete.clone());
+            if serialized_len_within(
+                &json!({"query": query, "results": candidate_results}),
+                total_response_bytes,
+            )
+            .is_some()
+            {
+                output_results.push(complete);
+                continue;
             }
-            let mut output = json!({
-                "name": result.name,
-                "capability_id": result.capability_id.as_str(),
-                "description": result.description,
-                "required": result.required_params,
-                "schema_complete": schema_complete,
-            });
-            if schema_complete {
-                output["parameters"] = result.parameters;
-            }
-            output
-        })
-        .collect()
+        }
+        let mut candidate_results = output_results.clone();
+        candidate_results.push(output.clone());
+        if serialized_len_within(
+            &json!({"query": query, "results": candidate_results}),
+            total_response_bytes,
+        )
+        .is_none()
+        {
+            break;
+        }
+        output_results.push(output);
+    }
+    json!({"query": query, "results": output_results})
 }
 
 fn compact_search_results(results: Vec<CatalogSearchResult>) -> Vec<Value> {
@@ -1146,24 +1165,33 @@ impl ToolDisclosureCapabilityPort {
                 state
                     .search_ranks
                     .insert(name.clone(), index.saturating_add(1));
-                state.disclosed_names.insert(name.clone());
                 if let Some(result) = state.catalog.search_result(&name) {
                     ranked_results.push(result);
                 }
             }
-            let results = if self.mode.includes_complete_signatures() {
-                bounded_search_results(
+            let output = if self.mode.includes_complete_signatures() {
+                bounded_search_output(
+                    query,
                     ranked_results,
-                    MAX_SEARCH_SIGNATURE_BYTES_TOTAL,
+                    MAX_SEARCH_RESPONSE_BYTES,
                     MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT,
                 )
             } else {
-                compact_search_results(ranked_results)
+                json!({
+                    "query": query,
+                    "results": compact_search_results(ranked_results),
+                })
             };
-            json!({
-                "query": query,
-                "results": results,
-            })
+            if let Some(results) = output.get("results").and_then(Value::as_array) {
+                for result in results {
+                    if result.get("schema_complete").and_then(Value::as_bool) == Some(true)
+                        && let Some(name) = result.get("name").and_then(Value::as_str)
+                    {
+                        state.disclosed_names.insert(name.to_string());
+                    }
+                }
+            }
+            output
         };
         self.completed_bridge_result(request, output, "tool_search returned catalog matches")
             .await
@@ -2273,55 +2301,63 @@ mod tests {
             .await
             .expect("visible surface");
 
-        for (name, arguments) in [
-            (TOOL_SEARCH_NAME, json!({"query": "hidden", "limit": 1})),
-            (TOOL_DESCRIBE_NAME, json!({"name": "hidden_tool"})),
-        ] {
-            let candidate = port
-                .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                    name, arguments,
-                )))
-                .await
-                .expect("bridge registers");
-            port.invoke_capability(LoopRequest {
-                activity_id: candidate.activity_id,
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("bridge invokes");
-        }
-
-        {
-            let outputs = writer.outputs.lock().expect("captured outputs lock");
-            assert_eq!(outputs.len(), 2, "incomplete signature needs one describe");
-            assert_eq!(outputs[0]["results"][0]["schema_complete"], false);
-            assert!(outputs[0]["results"][0].get("parameters").is_none());
-            assert_eq!(outputs[1]["name"], "hidden_tool");
-            assert!(outputs[1].get("parameters").is_some());
-        }
-
-        let target = port
+        let search = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": r#"{"path":"demo"}"#}),
+                TOOL_SEARCH_NAME,
+                json!({"query": "hidden", "limit": 1}),
             )))
             .await
-            .expect("described tool registers");
+            .expect("search registers");
         port.invoke_capability(LoopRequest {
-            activity_id: target.activity_id,
-            surface_version: target.surface_version,
-            capability_id: target.capability_id,
-            input_ref: target.input_ref,
+            activity_id: search.activity_id,
+            surface_version: search.surface_version,
+            capability_id: search.capability_id,
+            input_ref: search.input_ref,
             approval_resume: None,
             auth_resume: None,
         })
         .await
-        .expect("described tool dispatches");
-        assert_eq!(inner.invocations.lock().expect("invocations lock").len(), 1);
+        .expect("search invokes");
+
+        {
+            let outputs = writer.outputs.lock().expect("captured outputs lock");
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0]["results"][0]["schema_complete"], false);
+            assert!(outputs[0]["results"][0].get("parameters").is_none());
+        }
+
+        let describe_first = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": "{}"}),
+            )))
+            .await
+            .expect("invalid undisclosed call registers describe-first");
+        port.invoke_capability(LoopRequest {
+            activity_id: describe_first.activity_id,
+            surface_version: describe_first.surface_version,
+            capability_id: describe_first.capability_id,
+            input_ref: describe_first.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("describe-first invokes");
+        {
+            let outputs = writer.outputs.lock().expect("captured outputs lock");
+            assert_eq!(outputs.len(), 2, "incomplete signature auto-loads once");
+            assert_eq!(outputs[1]["status"], "schema_loaded");
+            assert_eq!(outputs[1]["name"], "hidden_tool");
+            assert!(outputs[1].get("parameters").is_some());
+        }
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "invalid call must not dispatch before its schema is visible"
+        );
     }
 
     #[tokio::test]
@@ -3803,18 +3839,25 @@ mod tests {
     #[test]
     fn bounded_search_signatures_respect_exact_and_overflow_budgets() {
         let result = search_result_with_schema("alpha", json!({"type": "object"}));
-        let schema_bytes = serde_json::to_vec(&result.parameters)
-            .expect("test schema serializes")
+        let unlimited =
+            bounded_search_output("alpha", vec![result.clone()], usize::MAX, usize::MAX);
+        let response_bytes = serde_json::to_vec(&unlimited)
+            .expect("test response serializes")
             .len();
 
-        let exact = bounded_search_results(vec![result.clone()], schema_bytes, schema_bytes);
-        assert_eq!(exact[0]["schema_complete"], true);
-        assert_eq!(exact[0]["parameters"], result.parameters);
+        let exact =
+            bounded_search_output("alpha", vec![result.clone()], response_bytes, usize::MAX);
+        assert_eq!(exact["results"][0]["schema_complete"], true);
+        assert_eq!(exact["results"][0]["parameters"], result.parameters);
 
-        let overflow =
-            bounded_search_results(vec![result], schema_bytes.saturating_sub(1), schema_bytes);
-        assert_eq!(overflow[0]["schema_complete"], false);
-        assert!(overflow[0].get("parameters").is_none());
+        let overflow = bounded_search_output(
+            "alpha",
+            vec![result],
+            response_bytes.saturating_sub(1),
+            usize::MAX,
+        );
+        assert_eq!(overflow["results"][0]["schema_complete"], false);
+        assert!(overflow["results"][0].get("parameters").is_none());
     }
 
     #[test]
@@ -3847,19 +3890,26 @@ mod tests {
         let small_bytes = serde_json::to_vec(&small.parameters)
             .expect("test schema serializes")
             .len();
-        let results =
-            bounded_search_results(vec![oversized, small.clone()], small_bytes, small_bytes);
+        let results = bounded_search_output(
+            "query",
+            vec![oversized, small.clone()],
+            usize::MAX,
+            small_bytes,
+        );
 
-        assert_eq!(results[0]["name"], "first");
-        assert_eq!(results[0]["schema_complete"], false);
-        assert_eq!(results[1]["name"], "second");
-        assert_eq!(results[1]["schema_complete"], true);
-        assert_eq!(results[1]["parameters"], small.parameters);
+        assert_eq!(results["results"][0]["name"], "first");
+        assert_eq!(results["results"][0]["schema_complete"], false);
+        assert_eq!(results["results"][1]["name"], "second");
+        assert_eq!(results["results"][1]["schema_complete"], true);
+        assert_eq!(results["results"][1]["parameters"], small.parameters);
     }
 
     #[test]
     fn bounded_search_signatures_are_deterministic_for_empty_and_multiple_results() {
-        assert!(bounded_search_results(Vec::new(), 100, 100).is_empty());
+        assert_eq!(
+            bounded_search_output("query", Vec::new(), 100, 100)["results"],
+            json!([])
+        );
         let first = search_result_with_schema("first", json!({"type": "object"}));
         let second = search_result_with_schema("second", json!({"type": "string"}));
         let total_bytes = [&first, &second]
@@ -3871,26 +3921,42 @@ mod tests {
             })
             .sum();
         let inputs = vec![first, second];
-        let complete = bounded_search_results(inputs.clone(), total_bytes, total_bytes);
+        let complete = bounded_search_output("query", inputs.clone(), usize::MAX, total_bytes);
         assert!(
-            complete
+            complete["results"]
+                .as_array()
+                .expect("results array")
                 .iter()
                 .all(|result| result["schema_complete"] == true)
         );
+        let first_only_bytes = serde_json::to_vec(&bounded_search_output(
+            "query",
+            vec![inputs[0].clone()],
+            usize::MAX,
+            total_bytes,
+        ))
+        .expect("first result serializes")
+        .len();
         let overflow =
-            bounded_search_results(inputs.clone(), total_bytes.saturating_sub(1), total_bytes);
-        assert_eq!(overflow[0]["schema_complete"], true);
-        assert_eq!(overflow[1]["schema_complete"], false);
+            bounded_search_output("query", inputs.clone(), first_only_bytes, total_bytes);
+        assert_eq!(overflow["results"][0]["schema_complete"], true);
+        assert_eq!(overflow["results"].as_array().expect("results").len(), 1);
 
         assert_eq!(
-            serde_json::to_vec(&bounded_search_results(
+            serde_json::to_vec(&bounded_search_output(
+                "query",
                 inputs.clone(),
                 usize::MAX,
                 usize::MAX
             ))
             .expect("first result serializes"),
-            serde_json::to_vec(&bounded_search_results(inputs, usize::MAX, usize::MAX))
-                .expect("second result serializes")
+            serde_json::to_vec(&bounded_search_output(
+                "query",
+                inputs,
+                usize::MAX,
+                usize::MAX
+            ))
+            .expect("second result serializes")
         );
     }
 

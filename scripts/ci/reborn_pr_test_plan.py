@@ -734,6 +734,7 @@ def build_plan(
     run_qa_replay = True
     run_sandbox_docker = False
     qa_evidence_changed = False
+    nextest_config_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
@@ -771,10 +772,8 @@ def build_plan(
             # under-select). Unclassified until 2026-08-10, when deleting the
             # dead `live_tests::zizmor_scan*` overrides failed the whole
             # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
-            return _full_plan(
-                "nextest runner config changed; this PR runs the exhaustive plan",
-                canonical_packages,
-            )
+            nextest_config_changed = True
+            continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
@@ -1007,6 +1006,12 @@ def build_plan(
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
             raise ValueError(f"unmapped test or CI path: {path}")
         raise ValueError(f"unclassified pull-request path: {path}")
+
+    if nextest_config_changed:
+        return _full_plan(
+            "nextest runner config changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
 
     canonical_set = set(canonical_packages)
     changed_packages = production_packages | direct_test_packages

@@ -10,6 +10,8 @@ approval, hooks, safety, and MCP dispatch.
 
 ```bash
 cargo build -p ironclaw
+# Requires NEARAI_API_KEY or LIVE_OPENAI_COMPATIBLE_API_KEY.
+export NEARAI_API_KEY=...
 python3 scripts/tool_discovery_benchmark/run_benchmark.py \
   --output-dir /tmp/ironclaw-tool-discovery-benchmark
 ```

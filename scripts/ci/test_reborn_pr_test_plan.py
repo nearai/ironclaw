@@ -936,6 +936,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
         self.assertIn("nextest runner config changed", plan["reasons"][0])
 
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [".config/nextest.toml", "scripts/some-undecided-helper.sh"],
+            )
+
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
 
@@ -1107,6 +1113,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/reborn-e2e-rust.sh",
             "scripts/check-version-bumps.sh",
             "scripts/run-reborn-webui.sh",
+            "scripts/e2e-skill-self-creation.sh",
             "scripts/codebase-graph.sh",
             "scripts/mutation-audit.sh",
             ".gitignore",

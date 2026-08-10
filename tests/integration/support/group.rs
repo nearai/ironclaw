@@ -962,10 +962,12 @@ impl RebornIntegrationGroupBuilder {
         let restart_builder = self.clone();
         // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
         // if the override is set without Bridged mode also selected.
-        if self.narrowed_bridged_policy.is_some() && !self.tool_disclosure.is_enabled() {
+        if self.narrowed_bridged_policy.is_some()
+            && self.tool_disclosure != ToolDisclosureMode::Bridged
+        {
             return Err(
                 "with_narrowed_capability_surface_policy_for_bridged_test() was set but \
-                 tool_disclosure is Off — the override only applies to \
+                 tool_disclosure is not Bridged — the override only applies to \
                  bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
                     .into(),
             );

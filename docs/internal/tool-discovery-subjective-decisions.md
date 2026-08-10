@@ -372,9 +372,13 @@ valid production object and documentation cannot enforce the call sequence.
 **Decision:** Keep unpinned `namespaces` as the production default and retain
 `bridged` as an explicit, deployment-reviewed optimization.
 
-**Evidence:** The corrected v2 runner executed 56 exact-head observations at
-commit `1a674e7724`: two arms, seven task classes, and one cold plus three warm
-repetitions against the 100-tool semantic catalog. `namespaces` completed 26/28
+**Evidence:** Benchmark artifact identity
+`tool-discovery-v2-1a674e7-nearai-deepseek-v4-flash-seed7405-100tools-56obs`
+records 56 exact-head observations at commit `1a674e7724`. It used the NearAI
+route with `deepseek-ai/DeepSeek-V4-Flash`, temperature `0.0`, catalog generator
+`tool-search-scale-v2`, seed `7405`, two arms, seven task classes, and per-arm/task
+repetitions labeled one cold followed by three warm against the 100-tool semantic
+catalog. `namespaces` completed 26/28
 (92.9%) with a 21.6s overall median; `bridged` completed 24/28 (85.7%) with a
 14.6s median. Both had zero forbidden-tool attempts. The simple calendar and
 upload tasks were materially faster with pins, but the two-step Gmail-to-calendar

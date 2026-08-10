@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -38,6 +39,13 @@ def test_catalog_rejects_tool_count_below_fixed_corpus():
 
     with pytest.raises(ValueError, match=f"at least {corpus_size}"):
         BENCH.generate_catalog(corpus_size - 1)
+
+
+def test_catalog_rejects_empty_namespace_packages():
+    corpus_size = len(BENCH.json.loads(BENCH.CORPUS_PATH.read_text())["tools"])
+
+    with pytest.raises(ValueError, match="empty benchmark namespace"):
+        BENCH.generate_catalog(corpus_size)
 
 
 def test_score_requires_complete_workflow_and_no_match_silence():
@@ -125,17 +133,37 @@ def test_first_correct_tool_latency_skips_unrelated_calls():
     assert BENCH.first_correct_tool_call_latency_ms((), calls, 1.0) is None
 
 
+def test_discovery_turns_count_model_steps_not_calls():
+    calls = [
+        {"name": "tool_search", "model_turn": 1},
+        {"name": "tool_describe", "model_turn": 1},
+        {"name": "tool_search", "model_turn": 3},
+        {"name": "github__get_repo", "model_turn": 4},
+    ]
+
+    assert BENCH.discovery_turn_count(calls) == 2
+
+
+def test_git_head_is_nonempty_checked_provenance():
+    head = asyncio.run(BENCH.git_head())
+
+    assert len(head) == 40
+    assert all(character in "0123456789abcdef" for character in head)
+
+
 def test_upload_task_is_self_contained_and_does_not_require_a_workspace_fixture():
     upload = next(task for task in BENCH.TASKS if task["id"] == "nested-argument-vocabulary")
 
     assert "report.csv" in upload["prompt"]
     assert "benchmark-report" in upload["prompt"]
     assert "mime_type" in upload["prompt"]
+    assert "text/csv" in upload["prompt"]
 
 
 def test_observations_are_durable_and_resume_without_duplicates(tmp_path):
     path = tmp_path / "observations.jsonl"
     observation = {
+        "schema_version": BENCH.OBSERVATION_SCHEMA_VERSION,
         "observation_id": "namespaces:100:no-match:0",
         "arm": "namespaces",
         "catalog": {"tool_count": 100},
@@ -150,6 +178,20 @@ def test_observations_are_durable_and_resume_without_duplicates(tmp_path):
     assert loaded == [observation]
 
 
+def test_observation_resume_rejects_stale_schema_before_deduplication(tmp_path):
+    path = tmp_path / "observations.jsonl"
+    path.write_text(
+        BENCH.json.dumps({
+            "schema_version": BENCH.OBSERVATION_SCHEMA_VERSION - 1,
+            "observation_id": "namespaces:100:no-match:0",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        BENCH.load_observations(path)
+
+
 def test_aggregate_keeps_completion_and_latency_by_arm_and_size():
     observations = [
         {
@@ -157,15 +199,16 @@ def test_aggregate_keeps_completion_and_latency_by_arm_and_size():
             "catalog": {"tool_count": 100},
             "task": {"completed": True, "unauthorized_tool_leaks": 0},
             "latency_ms": {"end_to_end": 10},
+            "failure": None,
         },
         {
             "arm": "bridged",
             "catalog": {"tool_count": 100},
             "task": {"completed": False, "unauthorized_tool_leaks": 0},
             "latency_ms": {"end_to_end": 30},
+            "failure": "task_incomplete",
         },
     ]
-
     assert BENCH.aggregate_observations(observations) == [
         {
             "arm": "bridged",
@@ -174,6 +217,21 @@ def test_aggregate_keeps_completion_and_latency_by_arm_and_size():
             "completion_rate": 0.5,
             "latency_ms_median": 20.0,
             "latency_ms_worst": 30,
+            "latency_ms_spread": 20,
             "unauthorized_tool_leaks": 0,
+            "failure_categories": {"task_incomplete": 1},
         }
     ]
+
+
+def test_run_cache_metadata_marks_first_resumed_execution_cold():
+    assert BENCH.run_cache_metadata([2, 3], 0, 2) == {
+        "thermal_class": "cold",
+        "repetition": 2,
+        "resumed_group": True,
+    }
+    assert BENCH.run_cache_metadata([2, 3], 1, 3) == {
+        "thermal_class": "warm",
+        "repetition": 3,
+        "resumed_group": True,
+    }

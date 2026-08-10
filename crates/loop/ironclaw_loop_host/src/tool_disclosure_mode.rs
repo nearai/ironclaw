@@ -107,8 +107,18 @@ mod tests {
             !ToolDisclosureMode::from_raw(Some("garbage")).is_enabled(),
             "unrecognized values must fail closed to Off"
         );
-        assert!(ToolDisclosureMode::from_raw(Some("bridged")).is_enabled());
-        assert!(ToolDisclosureMode::from_raw(Some("BRIDGED")).is_enabled());
+        for (raw, expected) in [
+            ("compact", ToolDisclosureMode::Compact),
+            ("COMPACT", ToolDisclosureMode::Compact),
+            ("signatures", ToolDisclosureMode::Signatures),
+            ("SIGNATURES", ToolDisclosureMode::Signatures),
+            ("namespaces", ToolDisclosureMode::Namespaces),
+            ("NAMESPACES", ToolDisclosureMode::Namespaces),
+            ("bridged", ToolDisclosureMode::Bridged),
+            ("BRIDGED", ToolDisclosureMode::Bridged),
+        ] {
+            assert_eq!(ToolDisclosureMode::from_raw(Some(raw)), expected);
+        }
         assert!(
             !ToolDisclosureMode::from_raw(Some("off")).is_enabled(),
             "explicit REBORN_TOOL_DISCLOSURE=off disables disclosure"

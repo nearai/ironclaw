@@ -72,8 +72,9 @@ capability-surface profile. The initial reviewed benchmark map is:
 REBORN_TOOL_DISCLOSURE_PROFILE_PINS='{"interactive_tools":["gmail.list_messages","google-calendar.list_events","github.search_code"],"mission_tools":["github.search_issues_pull_requests","github.get_file_content"],"subagent_tools":["github.search_issues_pull_requests","github.get_file_content"]}'
 ```
 
-Invalid JSON or any invalid capability ID fails closed to an empty pin map. A
-pin absent from the effective authorized surface has no effect.
+Invalid JSON or any invalid profile/capability ID rejects runtime startup with
+the parse cause retained. An unset variable remains the empty pin map. A pin
+absent from the effective authorized surface has no effect.
 
 The 100-, 500-, and 1,000-tool catalogs must preserve the same judged tasks.
 Each size may add deterministic distractors, but the report must record the
@@ -87,14 +88,14 @@ per-task observations so a broad score cannot hide a failed capability.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "catalog": {
-    "generator_version": "tool-search-scale-v1",
+    "generator_version": "tool-search-scale-v2",
     "seed": 7405,
     "tool_count": 500,
     "namespace_count": 20
   },
-  "arm": "bounded_complete_signatures",
+  "arm": "signatures",
   "model": {
     "provider": "provider-id",
     "model": "model-id",
@@ -127,11 +128,15 @@ per-task observations so a broad score cannot hide a failed capability.
     "end_to_end": 2400
   },
   "cache": {
-    "tool_definition_signature_changes": 0
+    "tool_definition_signature_changes": null
   },
   "failure": null
 }
 ```
+
+`arm` is always the exact canonical `REBORN_TOOL_DISCLOSURE` selector value.
+`cache.tool_definition_signature_changes` is `null` when the provider trace
+does not expose a trustworthy signature-change count; it is never estimated.
 
 `failure`, when present, uses a stable category such as `retrieval_miss`,
 `invalid_arguments`, `authorization_denied`, `approval_blocked`,
@@ -152,9 +157,10 @@ arguments are not retained in aggregate benchmark observations.
   capability exists.
 
 Every model/provider configuration runs at least one cold repetition and three
-warm repetitions. Reports include median, worst case, spread, and failure
-categories; cache-provider measurements additionally report cached-input
-tokens and tool-definition signature changes.
+warm repetitions. Reports include median, worst case, spread, and
+failure-category counts; cache-provider measurements additionally report
+cached-input tokens and tool-definition signature changes. Missing provider
+cache measurements remain explicitly `null`.
 
 Deterministic repository tests gate catalog construction, retrieval quality,
 protocol shape, authorization fitting, namespace fairness, and stable
