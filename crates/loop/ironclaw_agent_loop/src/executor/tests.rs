@@ -27,15 +27,16 @@ use ironclaw_loop_contracts::{
 };
 
 use crate::state::{
-    CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
-    LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
-    ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
-    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
-    TerminalWarningObservation,
+    CapabilityCallSignature, CapabilityOutputObservation, CheckpointKind,
+    DeferredCompactionWatermark, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
+    ModelErrorObservationClass, ModelErrorRecoveryObservation, PendingApprovalResume,
+    PendingAuthResume, PendingModelRetryDirective, RepeatedCallWarningPhase,
+    RepeatedCallWarningState, TerminalWarningObservation,
 };
 use crate::strategies::{
-    CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
-    StopKind, TurnSummary,
+    BoundedParallelBatchPolicyStrategy, CapabilityBatchTurnSummary, CapabilityFilter,
+    DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
+    capability_error_to_failure_kind,
 };
 use crate::test_support::compaction::{
     active_task_preserving_compaction_index, compaction_metadata,
@@ -43,6 +44,10 @@ use crate::test_support::compaction::{
 use crate::test_support::{
     MockAgentLoopDriverHost as DriverMockHost, MockHostCall, ScenarioScript,
     ScriptedCapabilityCall, ScriptedCapabilityOutcome, ScriptedModelResponse,
+};
+use crate::{
+    default_planner::DefaultPlanner,
+    family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
 };
 
 use super::{
@@ -3374,17 +3379,20 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
 
 #[tokio::test]
 async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_gate() {
-    // Two independent gate-raising outcomes in the same bounded-parallel
-    // window — TWO Approval gates (first in input order, second a same-kind
-    // sibling) — plus a completed call. Handling the first gate exit must not
-    // silently discard the later sibling: every launched call stays durably
-    // represented — signature, result refs, and the later approval's
-    // model-visible "pending" safe-summary ref in the single BeforeBlock
-    // checkpoint — and the first input-order gate controls the exit.
+    // Independent gate-raising outcomes in the same bounded-parallel window —
+    // TWO Approval gates (first in input order, second a same-kind sibling),
+    // a later DependentRun sibling, plus a completed call. Handling the first
+    // gate exit must not silently discard the later siblings: every launched
+    // call stays durably represented — signature, result refs, and the later
+    // approval's model-visible "pending" safe-summary ref in the single
+    // BeforeBlock checkpoint — while the DependentRun sibling persists its
+    // CONCRETE result ref (not a pending summary), and the first input-order
+    // gate controls the exit.
     let first_approval_request_id = ApprovalRequestId::new();
     let first_gate_ref =
         LoopGateRef::new(format!("gate:approval-{first_approval_request_id}")).expect("valid");
     let second_gate_ref = LoopGateRef::new("gate:parallel-sibling-approval-2").expect("valid");
+    let dependent_gate_ref = LoopGateRef::new("gate:parallel-sibling-dependent").expect("valid");
     let first_approval_resume = CapabilityApprovalResume {
         approval_request_id: first_approval_request_id,
         resume_token: CapabilityResumeToken::new("resume-token:parallel-sibling-approval")
@@ -3393,6 +3401,7 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         input_ref: CapabilityInputRef::new("input:sibling-approval-1").expect("valid"),
     };
     let completed_ref = LoopResultRef::new("result:parallel-sibling-completed").expect("valid");
+    let dependent_ref = LoopResultRef::new("result:parallel-sibling-dependent").expect("valid");
     // The later approval call carries provider replay metadata so its merged
     // "approval gate pending" safe-summary ref materializes through the
     // existing safe-summary persistence (which no-ops without replay).
@@ -3441,6 +3450,14 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
                     signature: None,
                 }),
             },
+            CapabilityCallCandidate {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:sibling-dependent").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: None,
+            },
         ]),
         effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
             .expect("valid"),
@@ -3468,6 +3485,14 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
             None,
         )
         .resolution,
+        resolution::await_dependent_run(
+            dependent_gate_ref.clone(),
+            dependent_ref.clone(),
+            "dependent run sibling result".to_string(),
+            4_096,
+            None,
+        )
+        .resolution,
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -3490,20 +3515,29 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
     );
 
     // Every launched call is dispatched exactly once; the completed sibling's
-    // result ref and the later approval's "pending" summary ref are durable
-    // before the gate exit.
-    assert_eq!(host.single_invocations().len(), 3);
+    // result ref, the later approval's "pending" summary ref, and the later
+    // dependent run's CONCRETE result ref are all durable before the gate
+    // exit.
+    assert_eq!(host.single_invocations().len(), 4);
     let appended = host.appended_result_refs();
     assert_eq!(
         appended
             .iter()
             .map(|request| request.result_ref.clone())
             .collect::<Vec<_>>(),
-        vec![completed_ref.clone(), pending_ref.clone()]
+        vec![
+            completed_ref.clone(),
+            pending_ref.clone(),
+            dependent_ref.clone()
+        ]
     );
     assert_eq!(
         appended[1].safe_summary, "approval gate pending",
         "the later approval must be durably model-visible as a pending gate"
+    );
+    assert_eq!(
+        appended[2].safe_summary, "dependent run sibling result",
+        "the later dependent run must persist its concrete result, not a pending summary"
     );
 
     // ONE coherent BeforeBlock checkpoint: the exit's own — a resumer reading
@@ -3538,6 +3572,11 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
             &serde_json::json!({ "message": "second approval" }),
         )
         .expect("signature"),
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "input_ref": "input:sibling-dependent" }),
+        )
+        .expect("signature"),
     ];
     assert_eq!(
         before_block_state
@@ -3550,8 +3589,8 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
     );
     assert_eq!(
         before_block_state.result_refs,
-        vec![completed_ref, pending_ref],
-        "the exit checkpoint must retain the completed result and the later approval's pending summary"
+        vec![completed_ref, pending_ref, dependent_ref],
+        "the exit checkpoint must retain the completed result, the later approval's pending summary, and the dependent run's concrete result"
     );
     assert_eq!(
         before_block_state.last_gate.as_ref(),
@@ -3666,6 +3705,553 @@ async fn parallel_batch_preserves_success_when_sibling_returns_recoverable_port_
             } if detail == "second invocation rejected"
         ),
         "the recoverable error must be attributed only to its matching call"
+    );
+}
+
+#[tokio::test]
+async fn parallel_batch_merges_exiting_sibling_state_into_gate_checkpoint() {
+    // CodeRabbit #3748865793 regression: `BatchStep::Exit` carries no state, so
+    // an exiting sibling's outcome processing (error ref, failure explanation
+    // ref, recent failure bookkeeping) ran on a snapshot clone whose mutations
+    // were dropped instead of merged into the shared drain state. The first
+    // gate's BeforeBlock checkpoint — the durable resume state — must retain
+    // every processed sibling's mutations, while the first input-order exit
+    // still controls the exit selection.
+    let gate_ref = LoopGateRef::new("gate:parallel-exiting-sibling").expect("valid");
+    let completed_ref =
+        LoopResultRef::new("result:parallel-exiting-sibling-success").expect("valid"); // safety: test-only fixture
+    let digest = ironclaw_loop_contracts::ContentDigest(4242);
+    let error_ref = LoopResultRef::new(format!(
+        "result:provider-error-{}-{}",
+        sanitize_result_ref_suffix("turn_7"),
+        sanitize_result_ref_suffix("call_7"),
+    ))
+    .expect("valid");
+    let host = MockHost::new(vec![
+        ironclaw_loop_contracts::LoopModelResponse {
+            chunks: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![
+                // Input order: gate (owns the exit), exiting sibling, success.
+                CapabilityCallCandidate {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:gate").expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    provider_replay: None,
+                },
+                CapabilityCallCandidate {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:exiting").expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    // Provider replay materializes the abort's error ref in
+                    // `state.result_refs` (the safe-summary persistence seam
+                    // no-ops without replay).
+                    provider_replay: Some(ProviderToolCallReplay {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "turn_7".to_string(),
+                        provider_call_id: "call_7".to_string(),
+                        provider_tool_name: ProviderToolName::new("demo__echo")
+                            .expect("provider tool name"),
+                        arguments: serde_json::json!({"message": "exiting sibling"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: Some("sig-exit".to_string()),
+                    }),
+                },
+                CapabilityCallCandidate {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:success").expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    provider_replay: None,
+                },
+            ]),
+            effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
+                .expect("valid"),
+            usage: None,
+        },
+        // Second model response: the exiting sibling's failure explanation.
+        reply_response(),
+    ])
+    .with_single_outcomes(vec![
+        resolution::approval_required(gate_ref.clone(), "approval required".to_string(), None)
+            .resolution,
+        resolution::failed(
+            FailureKind::OperationFailed,
+            "exiting sibling failed".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "exiting sibling failure detail".to_string(),
+            },
+        ),
+        resolution::completed(
+            completed_ref.clone(),
+            "exiting sibling success".to_string(),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            Some(digest),
+            None,
+        ),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    // Bounded-parallel dispatch (so gate + failing sibling share one window)
+    // with a recovery strategy that aborts capability errors (so the sibling
+    // outcome exits).
+    let planner = DefaultPlanner::compose_default()
+        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
+        .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
+    let family = LoopFamily::new(
+        LoopFamilyId::new("executor-exit-sibling-merge-test").expect("valid test family id"),
+        ComponentIdentity::from_static(
+            "executor-exit-sibling-merge-test",
+            ComponentDigest([17; 32]),
+        ),
+        Arc::new(planner),
+    );
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    // The first gate in input order owns the exit; the later sibling's exit is
+    // processed and merged but never selected.
+    let LoopExit::Blocked(blocked) = exit else {
+        panic!("expected Blocked exit, got {exit:?}");
+    };
+    assert_eq!(
+        blocked.gate_ref, gate_ref,
+        "the first input-order gate must control the exit"
+    );
+
+    // Host-side durability: every processed sibling's ref is appended.
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended
+            .iter()
+            .map(|request| request.result_ref.clone())
+            .collect::<Vec<_>>(),
+        vec![completed_ref.clone(), error_ref.clone()],
+        "the successful sibling's result and the exiting sibling's error ref must both be durable"
+    );
+
+    // State-side durability: the first gate's BeforeBlock checkpoint — the
+    // state a resumer reads — retains the exiting sibling's error ref,
+    // explanation ref, and failure bookkeeping alongside the successful
+    // sibling's result and seen output digest.
+    let before_block = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert_eq!(
+        before_block.result_refs,
+        vec![completed_ref.clone(), error_ref.clone()],
+        "the resume checkpoint must retain the exiting sibling's appended error ref"
+    );
+    assert_eq!(
+        before_block.assistant_refs,
+        vec![message_ref("msg:assistant")],
+        "the resume checkpoint must retain the exiting sibling's failure explanation ref"
+    );
+    assert_eq!(
+        before_block
+            .recent_failure_kinds
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![
+            capability_error_to_failure_kind(FailureKind::OperationFailed),
+            LoopFailureKind::CapabilityProtocolError,
+        ],
+        "the resume checkpoint must retain the exiting sibling's failure bookkeeping"
+    );
+    let expected_signature = CapabilityCallSignature::from_call(
+        capability_id(),
+        &serde_json::json!({ "input_ref": "input:success" }),
+    )
+    .expect("signature");
+    assert_eq!(
+        before_block
+            .seen_capability_output_digests
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![CapabilityOutputObservation {
+            signature: expected_signature,
+            output_digest: digest,
+        }],
+        "the resume checkpoint must retain the successful sibling's seen output digest"
+    );
+    assert_eq!(
+        before_block.last_gate.as_ref(),
+        Some(&gate_ref),
+        "the checkpoint must resume the first input-order gate"
+    );
+}
+
+#[tokio::test]
+async fn parallel_batch_rebuilds_pre_gate_terminal_exit_against_merged_checkpoint() {
+    // Gap-1 regression (review follow-up): when the first input-order terminal
+    // sibling exit precedes the deferred gate, later siblings are still
+    // processed and merged, and the selected exit is rebuilt against a fresh
+    // Final checkpoint so its checkpoint carries every processed sibling's
+    // mutations. The deferred gate is persisted durably as a pending outcome
+    // instead of staging an orphaned BeforeBlock the run never resumes from.
+    let gate_ref = LoopGateRef::new("gate:parallel-rebuilt-exit").expect("valid");
+    let error_ref_a = LoopResultRef::new(format!(
+        "result:provider-error-{}-{}",
+        sanitize_result_ref_suffix("turn_7"),
+        sanitize_result_ref_suffix("call_7"),
+    ))
+    .expect("valid");
+    let error_ref_b = LoopResultRef::new(format!(
+        "result:provider-error-{}-{}",
+        sanitize_result_ref_suffix("turn_8"),
+        sanitize_result_ref_suffix("call_8"),
+    ))
+    .expect("valid");
+    let pending_ref = LoopResultRef::new(format!(
+        "result:provider-error-{}-{}",
+        sanitize_result_ref_suffix("turn_9"),
+        sanitize_result_ref_suffix("call_9"),
+    ))
+    .expect("valid");
+    let host = MockHost::new(vec![
+        ironclaw_loop_contracts::LoopModelResponse {
+            chunks: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![
+                CapabilityCallCandidate {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:failing-a").expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    provider_replay: Some(ProviderToolCallReplay {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "turn_7".to_string(),
+                        provider_call_id: "call_7".to_string(),
+                        provider_tool_name: ProviderToolName::new("demo__echo")
+                            .expect("provider tool name"),
+                        arguments: serde_json::json!({"message": "failing A"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: Some("sig-a".to_string()),
+                    }),
+                },
+                CapabilityCallCandidate {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:failing-b").expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    provider_replay: Some(ProviderToolCallReplay {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "turn_8".to_string(),
+                        provider_call_id: "call_8".to_string(),
+                        provider_tool_name: ProviderToolName::new("demo__echo")
+                            .expect("provider tool name"),
+                        arguments: serde_json::json!({"message": "failing B"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: Some("sig-b".to_string()),
+                    }),
+                },
+                CapabilityCallCandidate {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:gate").expect("valid"),
+                    effective_capability_ids: vec![capability_id()],
+                    provider_replay: Some(ProviderToolCallReplay {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "turn_9".to_string(),
+                        provider_call_id: "call_9".to_string(),
+                        provider_tool_name: ProviderToolName::new("demo__echo")
+                            .expect("provider tool name"),
+                        arguments: serde_json::json!({"message": "gate call"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: Some("sig-gate".to_string()),
+                    }),
+                },
+            ]),
+            effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
+                .expect("valid"),
+            usage: None,
+        },
+        // One failure-explanation model call per aborting sibling.
+        reply_response(),
+        reply_response(),
+    ])
+    .with_single_outcomes(vec![
+        resolution::failed(
+            FailureKind::OperationFailed,
+            "failing A".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "A detail".to_string(),
+            },
+        ),
+        resolution::failed(
+            FailureKind::InputEncode,
+            "failing B".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "B detail".to_string(),
+            },
+        ),
+        resolution::approval_required(gate_ref.clone(), "approval required".to_string(), None)
+            .resolution,
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let planner = DefaultPlanner::compose_default()
+        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
+        .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
+    let family = LoopFamily::new(
+        LoopFamilyId::new("executor-rebuilt-exit-test").expect("valid test family id"),
+        ComponentIdentity::from_static("executor-rebuilt-exit-test", ComponentDigest([19; 32])),
+        Arc::new(planner),
+    );
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    // The first input-order terminal exit (the aborting sibling) still wins,
+    // now rebuilt against the fully merged checkpoint.
+    let LoopExit::Failed(failed) = exit else {
+        panic!("expected Failed exit, got {exit:?}");
+    };
+    assert_eq!(failed.reason_kind, LoopFailureKind::CapabilityProtocolError);
+    assert!(
+        failed.checkpoint_id.is_some(),
+        "the rebuilt exit must reference the fresh Final checkpoint"
+    );
+    assert_eq!(
+        failed.explanation_message_refs,
+        vec![message_ref("msg:assistant")],
+        "the rebuilt exit must re-derive and deduplicate explanation refs from the merged state"
+    );
+
+    // Both failing siblings were processed, and the deferred gate was
+    // persisted as a pending outcome — no orphaned BeforeBlock.
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended
+            .iter()
+            .map(|request| request.result_ref.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            error_ref_a.clone(),
+            error_ref_b.clone(),
+            pending_ref.clone()
+        ],
+        "every processed sibling and the persisted pending gate must be durably appended"
+    );
+    assert_eq!(
+        appended[2].safe_summary, "approval gate pending",
+        "the deferred gate must be model-visibly pending, not resumable"
+    );
+    assert!(
+        !host
+            .checkpoint_kinds()
+            .contains(&LoopCheckpointKind::BeforeBlock),
+        "a terminal pre-gate exit must not stage the gate's BeforeBlock"
+    );
+
+    // The exit's Final checkpoint is the fresh one: it carries BOTH failing
+    // siblings' bookkeeping and the persisted gate, unlike the exit's
+    // originally staged checkpoint which predated sibling B.
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.result_refs,
+        vec![error_ref_a, error_ref_b, pending_ref],
+        "the rebuilt exit's checkpoint must carry every processed sibling's refs"
+    );
+    assert_eq!(
+        final_state
+            .recent_failure_kinds
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![
+            LoopFailureKind::CapabilityProtocolError,
+            LoopFailureKind::CapabilityProtocolError,
+            LoopFailureKind::ModelError,
+            LoopFailureKind::CapabilityProtocolError,
+        ],
+        "the rebuilt exit's checkpoint must carry both siblings' failure bookkeeping"
+    );
+    assert_eq!(
+        final_state.assistant_refs,
+        vec![message_ref("msg:assistant"), message_ref("msg:assistant")],
+        "the rebuilt exit's checkpoint must carry both siblings' explanation refs"
+    );
+    let expected_signatures = vec![
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "message": "failing A" }),
+        )
+        .expect("signature"),
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "message": "failing B" }),
+        )
+        .expect("signature"),
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "message": "gate call" }),
+        )
+        .expect("signature"),
+    ];
+    assert_eq!(
+        final_state
+            .recent_call_signatures
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_signatures,
+        "every launched call's signature must survive in the rebuilt exit's checkpoint"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn parallel_batch_cancelled_sibling_ends_run_with_checked_state() {
+    // Gap-2 regression (review follow-up): a cancellation passthrough exit
+    // (`OutcomeStep::Exit { state: None }`) must end the run immediately with
+    // the cancelled sibling's own coherent checkpoint — not let the deferred
+    // gate produce a later cancellation checkpoint from the older shared
+    // state that omits the sibling's pre-cancel mutations.
+    let gate_ref = LoopGateRef::new("gate:parallel-cancelled-sibling").expect("valid");
+    let error_ref = LoopResultRef::new(format!(
+        "result:provider-error-{}-{}",
+        sanitize_result_ref_suffix("turn_5"),
+        sanitize_result_ref_suffix("call_5"),
+    ))
+    .expect("valid");
+    let host = MockHost::new(vec![ironclaw_loop_contracts::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![
+            CapabilityCallCandidate {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:gate").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: None,
+            },
+            CapabilityCallCandidate {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:cancelled").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    provider_turn_id: "turn_5".to_string(),
+                    provider_call_id: "call_5".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
+                    arguments: serde_json::json!({"message": "cancelled sibling"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: Some("sig-cancel".to_string()),
+                }),
+            },
+        ]),
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    }])
+    .with_single_outcomes(vec![
+        resolution::approval_required(gate_ref.clone(), "approval required".to_string(), None)
+            .resolution,
+        resolution::failed(
+            FailureKind::OperationFailed,
+            "cancelled sibling".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "cancelled detail".to_string(),
+            },
+        ),
+    ])
+    .with_single_invoke_delays(vec![
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(75),
+    ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    // Drive the executor on a separate task so the test controls the paused
+    // clock: the cancellation signal is raised while both invocations are
+    // parked, before the drain processes the failing sibling.
+    let run_host = host.clone();
+    let executor = tokio::spawn(async move {
+        CanonicalAgentLoopExecutor
+            .execute_family(
+                &support::family_with_parallel_batch_execution(),
+                &run_host,
+                state,
+            )
+            .await
+    });
+    while host.single_invocations().len() < 2 && !executor.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    host.request_cancellation(LoopCancelReasonKind::UserRequested);
+    tokio::time::advance(std::time::Duration::from_millis(5)).await;
+    tokio::time::advance(std::time::Duration::from_millis(75)).await;
+
+    let exit = executor
+        .await
+        .expect("executor task must not panic")
+        .expect("execute");
+
+    let LoopExit::Cancelled(cancelled) = exit else {
+        panic!("expected Cancelled exit, got {exit:?}");
+    };
+    assert_eq!(
+        cancelled.reason_kind,
+        LoopCancelledReasonKind::HostCancellation
+    );
+    assert!(
+        cancelled.checkpoint_id.is_some(),
+        "the cancelled sibling's checked state must be checkpointed"
+    );
+    assert!(
+        !host
+            .checkpoint_kinds()
+            .contains(&LoopCheckpointKind::BeforeBlock),
+        "the deferred gate must not stage a BeforeBlock after a cancellation exit"
+    );
+
+    // The exit's Final checkpoint is the cancelled sibling's own: it carries
+    // the pre-cancel mutations (error ref + failure kind) that the older
+    // shared state — which the deferred gate would have checkpointed — omits.
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.result_refs,
+        vec![error_ref],
+        "the cancelled sibling's checked state must retain its appended error ref"
+    );
+    assert_eq!(
+        final_state
+            .recent_failure_kinds
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![capability_error_to_failure_kind(
+            FailureKind::OperationFailed
+        )],
+        "the cancelled sibling's checked state must retain its failure bookkeeping"
     );
 }
 

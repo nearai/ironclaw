@@ -21,8 +21,8 @@ use ironclaw_loop_contracts::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail, CapabilityInputIssue,
     CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
-    LoopDriverNoteKind, LoopFailureKind, LoopProcessRef, LoopProgressEvent, LoopRecoveryClass,
-    LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch,
+    LoopDriverNoteKind, LoopExit, LoopFailureKind, LoopProcessRef, LoopProgressEvent,
+    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch,
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation, ObservationTrust,
     ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
     VisibleCapabilitySurface,
@@ -33,14 +33,14 @@ use super::{
     CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
     GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
     append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
-    attach_failure_explanation, batch_policy_kind, cancelled_exit, capability_batch_counts,
-    capability_call_signature, capability_error_failure_category, capability_host_error,
-    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_port_error_is_terminal, capability_summary,
-    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    gate_tool_result_summary, honor_capability_retry_alteration,
-    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary_or_fallback,
+    attach_failure_explanation, batch_policy_kind, cancelled_exit, cancelled_exit_with_reason,
+    capability_batch_counts, capability_call_signature, capability_error_failure_category,
+    capability_host_error, capability_invocation_from_auth_resume_candidate,
+    capability_invocation_from_candidate, capability_is_visible, capability_port_error_is_terminal,
+    capability_summary, clear_matching_pending_auth_resume,
+    clear_matching_pending_external_tool_resume, failed_exit, gate_tool_result_summary,
+    honor_capability_retry_alteration, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 use crate::{
     state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
@@ -62,6 +62,69 @@ pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) calls: Vec<CapabilityCallCandidate>,
+}
+
+/// Outcome-processing step for the capability batch drain.
+///
+/// Unlike `BatchStep`, the `Exit` arm carries the state the outcome was
+/// processed against, so every processed sibling's mutations (assistant/result
+/// refs, seen output digests, recent failure bookkeeping) can be merged back
+/// into the shared drain state even when the outcome exits. `state` is `None`
+/// only where the exit was produced by a stage that consumed the state itself
+/// (gate stages, cancellation checks): those exits carry their own durable
+/// checkpoint, and the run ends (or blocks) on them regardless.
+enum OutcomeStep {
+    Continue(Box<LoopExecutionState>),
+    Exit {
+        exit: LoopExit,
+        state: Option<Box<LoopExecutionState>>,
+    },
+}
+
+/// Convert a `BatchStep` produced by a stage that consumed the state itself
+/// (gate stages, cancellation checks) into an [`OutcomeStep`]. The exit's
+/// durable state lives in the checkpoint the stage wrote, so no merged state
+/// is carried back (`None`).
+fn outcome_step_from_consumed_step(step: BatchStep) -> OutcomeStep {
+    match step {
+        BatchStep::Continue(next) => OutcomeStep::Continue(next),
+        BatchStep::Exit(exit) => OutcomeStep::Exit { exit, state: None },
+    }
+}
+
+/// Rebuild a selected terminal sibling exit against a freshly staged Final
+/// checkpoint so its checkpoint carries every processed sibling's mutations
+/// (siblings after the exit were processed and merged after the exit's own
+/// checkpoint was staged). The original reason/kind metadata and safe summary
+/// are preserved; explanation refs are re-derived from the merged state's
+/// assistant refs — the exit's own explanation was already appended to them
+/// during its outcome processing.
+fn rebuild_terminal_exit_against_checkpoint(
+    ctx: StageContext<'_>,
+    exit: LoopExit,
+    state: LoopExecutionState,
+    checkpoint_id: ironclaw_host_api::turn::TurnCheckpointId,
+) -> Result<LoopExit, AgentLoopExecutorError> {
+    match exit {
+        LoopExit::Failed(failed) => failed_exit(
+            ctx.host,
+            state,
+            failed.reason_kind,
+            Some(checkpoint_id),
+            FailedExitDetails {
+                safe_summary: failed.safe_summary,
+                explanation_message_ref: None,
+            },
+        ),
+        LoopExit::Cancelled(cancelled) => {
+            cancelled_exit_with_reason(ctx.host, state, cancelled.reason_kind, Some(checkpoint_id))
+        }
+        LoopExit::Completed(_) | LoopExit::Blocked(_) => {
+            Err(AgentLoopExecutorError::PlannerContract {
+                detail: "selected sibling exit was not terminal failure or cancellation",
+            })
+        }
+    }
 }
 
 impl CapabilityStage {
@@ -228,8 +291,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             ))
             .await?
             {
-                BatchStep::Continue(next) => state = *next,
-                BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                OutcomeStep::Continue(next) => state = *next,
+                OutcomeStep::Exit { exit, .. } => return Ok(TurnCompletedStep::Exit(exit)),
             }
         }
 
@@ -398,8 +461,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     ))
                     .await?
                     {
-                        BatchStep::Continue(next) => state = *next,
-                        BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                        OutcomeStep::Continue(next) => state = *next,
+                        OutcomeStep::Exit { exit, .. } => {
+                            return Ok(TurnCompletedStep::Exit(exit));
+                        }
                     }
                 }
                 return self
@@ -434,8 +499,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     ))
                     .await?
                     {
-                        BatchStep::Continue(next) => state = *next,
-                        BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                        OutcomeStep::Continue(next) => state = *next,
+                        OutcomeStep::Exit { exit, .. } => {
+                            return Ok(TurnCompletedStep::Exit(exit));
+                        }
                     }
                 }
                 return self
@@ -589,7 +656,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 None => {
                     // No gate outcome in this batch: keep the original
                     // early-return drain, which is exact for error-only
-                    // batches.
+                    // batches. Exit-producing handlers have already persisted
+                    // their own terminal checkpoint before returning.
                     for (_, call, outcome) in sibling_outcomes {
                         match self
                             .handle_capability_outcome(
@@ -601,8 +669,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             )
                             .await?
                         {
-                            BatchStep::Continue(next) => state = *next,
-                            BatchStep::Exit(exit) => {
+                            OutcomeStep::Continue(next) => state = *next,
+                            OutcomeStep::Exit { exit, .. } => {
                                 return Ok(TurnCompletedStep::Exit(exit));
                             }
                         }
@@ -630,8 +698,33 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                                 )
                                 .await?
                             {
-                                BatchStep::Continue(next) => state = *next,
-                                BatchStep::Exit(exit) => {
+                                OutcomeStep::Continue(next) => state = *next,
+                                OutcomeStep::Exit {
+                                    exit,
+                                    state: mutated,
+                                } => {
+                                    // `state: None` marks a cancellation
+                                    // passthrough (gate-arm exits never reach
+                                    // the sibling loop): a cancellation signal
+                                    // is pending, so every later stage —
+                                    // including the first gate — would exit
+                                    // Cancelled too. End the run now with this
+                                    // coherent exit instead of letting the gate
+                                    // produce a later cancellation checkpoint
+                                    // from the older shared state.
+                                    let Some(mutated) = mutated else {
+                                        return Ok(TurnCompletedStep::Exit(exit));
+                                    };
+                                    // Adopt every processed sibling's mutations
+                                    // even when it exits, so the first gate's
+                                    // BeforeBlock checkpoint — the durable
+                                    // resume state — retains the exiting
+                                    // sibling's appended refs and failure
+                                    // bookkeeping. A pre-gate exit is rebuilt
+                                    // against a fresh Final checkpoint below,
+                                    // so later siblings' mutations reach it
+                                    // too.
+                                    state = *mutated;
                                     if index < first_exit_index {
                                         first_exit_index = index;
                                         first_exit = Some(exit);
@@ -640,10 +733,39 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             }
                         }
                     }
+                    // A selected terminal exit that precedes the deferred gate
+                    // in input order wins the run — but its checkpoint was
+                    // staged before later siblings were processed. Represent
+                    // the deferred gate durably as a pending outcome (no
+                    // orphaned BeforeBlock — the run never resumes from it),
+                    // then stage a fresh Final checkpoint from the fully
+                    // merged state and rebuild the exit metadata against it,
+                    // so the exit's checkpoint carries every processed
+                    // sibling's mutations.
+                    if first_exit_index < gate_index {
+                        let Some(exit) = first_exit.take() else {
+                            return Err(AgentLoopExecutorError::PlannerContract {
+                                detail: "terminal sibling exit index was recorded without its exit",
+                            });
+                        };
+                        persist_later_gate_outcome(ctx, &mut state, first_call, first_outcome)
+                            .await?;
+                        let checked = CheckpointStage
+                            .write(ctx, state, CheckpointKind::Final)
+                            .await?;
+                        let exit = rebuild_terminal_exit_against_checkpoint(
+                            ctx,
+                            exit,
+                            checked.state,
+                            checked.checkpoint_id,
+                        )?;
+                        return Ok(TurnCompletedStep::Exit(exit));
+                    }
                     // First-gate pass: the batch's single BeforeBlock
                     // checkpoint is staged here, last, with every sibling's
-                    // merged resume state already in `state`. Its exit (when
-                    // the gate blocks) is the first exit in input order.
+                    // merged resume state already in `state`. No earlier exit
+                    // is pending (those returned above), so the gate's exit
+                    // controls the run whenever the gate blocks.
                     match self
                         .handle_capability_outcome(
                             ctx,
@@ -654,13 +776,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         )
                         .await?
                     {
-                        BatchStep::Continue(next) => state = *next,
-                        BatchStep::Exit(exit) => {
-                            let selected_exit = match first_exit {
-                                Some(earlier) if first_exit_index < gate_index => earlier,
-                                _ => exit,
-                            };
-                            return Ok(TurnCompletedStep::Exit(selected_exit));
+                        OutcomeStep::Continue(next) => state = *next,
+                        OutcomeStep::Exit { exit, .. } => {
+                            return Ok(TurnCompletedStep::Exit(exit));
                         }
                     }
                 }
@@ -856,7 +974,7 @@ impl CapabilityStage {
         call: CapabilityCallCandidate,
         resolution: Resolution,
         capability_batch: &mut CapabilityBatchTurnSummary,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+    ) -> Result<OutcomeStep, AgentLoopExecutorError> {
         // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` re-splits on
         // its typed `ToolVerdict`; every gate/suspension arm reconstructs the loop
         // ref from the channel's preserved `origin`. Model-visible content comes
@@ -877,7 +995,7 @@ impl CapabilityStage {
                         capability_batch,
                     )
                     .await?;
-                    Ok(BatchStep::Continue(Box::new(state)))
+                    Ok(OutcomeStep::Continue(Box::new(state)))
                 }
                 ToolVerdict::ChildSpawned { .. } => {
                     clear_matching_pending_approval_resume(&mut state, &call);
@@ -892,7 +1010,7 @@ impl CapabilityStage {
                         capability_batch,
                     )
                     .await?;
-                    Ok(BatchStep::Continue(Box::new(state)))
+                    Ok(OutcomeStep::Continue(Box::new(state)))
                 }
                 ToolVerdict::RecoverableFailure {
                     ref error_kind,
@@ -980,20 +1098,22 @@ impl CapabilityStage {
                 let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
                 let approval_resume =
                     approval_resume_from_gate(&gate_ref, waypoint.resume.as_ref(), &call);
-                GateStage
-                    .process(
-                        ctx,
-                        GateInput {
-                            state,
-                            call,
-                            kind: GateKind::Approval,
-                            gate_ref,
-                            credential_requirements: Vec::new(),
-                            approval_resume,
-                            auth_resume: None,
-                        },
-                    )
-                    .await
+                Ok(outcome_step_from_consumed_step(
+                    GateStage
+                        .process(
+                            ctx,
+                            GateInput {
+                                state,
+                                call,
+                                kind: GateKind::Approval,
+                                gate_ref,
+                                credential_requirements: Vec::new(),
+                                approval_resume,
+                                auth_resume: None,
+                            },
+                        )
+                        .await?,
+                ))
             }
             Resolution::Blocked(Blocked::Auth(waypoint)) => {
                 let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
@@ -1014,72 +1134,80 @@ impl CapabilityStage {
                 // (§5.2.9), not this model-visible channel; the runner re-reads them
                 // from the record at the blocked exit to rebuild
                 // `TurnRunRecord.credential_requirements`.
-                GateStage
-                    .process(
-                        ctx,
-                        GateInput {
-                            state,
-                            call,
-                            kind: GateKind::Auth,
-                            gate_ref,
-                            credential_requirements: Vec::new(),
-                            approval_resume: prior_approval,
-                            auth_resume,
-                        },
-                    )
-                    .await
+                Ok(outcome_step_from_consumed_step(
+                    GateStage
+                        .process(
+                            ctx,
+                            GateInput {
+                                state,
+                                call,
+                                kind: GateKind::Auth,
+                                gate_ref,
+                                credential_requirements: Vec::new(),
+                                approval_resume: prior_approval,
+                                auth_resume,
+                            },
+                        )
+                        .await?,
+                ))
             }
             Resolution::Blocked(Blocked::Resource(waypoint)) => {
                 let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
-                GateStage
-                    .process(
-                        ctx,
-                        GateInput {
-                            state,
-                            call,
-                            kind: GateKind::Resource,
-                            gate_ref,
-                            credential_requirements: Vec::new(),
-                            approval_resume: None,
-                            auth_resume: None,
-                        },
-                    )
-                    .await
+                Ok(outcome_step_from_consumed_step(
+                    GateStage
+                        .process(
+                            ctx,
+                            GateInput {
+                                state,
+                                call,
+                                kind: GateKind::Resource,
+                                gate_ref,
+                                credential_requirements: Vec::new(),
+                                approval_resume: None,
+                                auth_resume: None,
+                            },
+                        )
+                        .await?,
+                ))
             }
             Resolution::Suspended(Suspension::ExternalTool(waypoint)) => {
                 let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
                 // The model called a client-supplied tool: park the run and return
                 // control to the API client. No resume payload — the client submits
                 // the tool output on resume.
-                GateStage
-                    .process(
-                        ctx,
-                        GateInput {
-                            state,
-                            call,
-                            kind: GateKind::ExternalTool,
-                            gate_ref,
-                            credential_requirements: Vec::new(),
-                            approval_resume: None,
-                            auth_resume: None,
-                        },
-                    )
-                    .await
+                Ok(outcome_step_from_consumed_step(
+                    GateStage
+                        .process(
+                            ctx,
+                            GateInput {
+                                state,
+                                call,
+                                kind: GateKind::ExternalTool,
+                                gate_ref,
+                                credential_requirements: Vec::new(),
+                                approval_resume: None,
+                                auth_resume: None,
+                            },
+                        )
+                        .await?,
+                ))
             }
             Resolution::Suspended(Suspension::DependentRun { waypoint, result }) => {
                 let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
                 let resolved_result = dependent_run_result_message(&result)?;
-                AwaitDependentRunGateStage
-                    .process(
-                        ctx,
-                        AwaitDependentRunGateInput {
-                            state,
-                            call,
-                            gate_ref,
-                            resolved_result,
-                        },
-                    )
-                    .await
+                Ok(outcome_step_from_consumed_step(
+                    AwaitDependentRunGateStage
+                        .process(
+                            ctx,
+                            AwaitDependentRunGateInput {
+                                state,
+                                call,
+                                gate_ref,
+                                resolved_result,
+                            },
+                        )
+                        .await?,
+                ))
             }
             Resolution::Suspended(Suspension::Process(waypoint)) => {
                 let process_ref = loop_process_ref_from_origin(waypoint.origin.as_ref())?;
@@ -1097,7 +1225,7 @@ impl CapabilityStage {
         mut summary: CapabilityErrorSummary,
         mut model_observation: Option<ironclaw_loop_contracts::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+    ) -> Result<OutcomeStep, AgentLoopExecutorError> {
         // Snapshot resume-origin flags for this call BEFORE clearing the pending
         // slots.
         //
@@ -1189,9 +1317,11 @@ impl CapabilityStage {
                         .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
-                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                        CancelCheck::Exit(exit) => {
+                            return Ok(OutcomeStep::Exit { exit, state: None });
+                        }
                     }
-                    return Ok(BatchStep::Continue(Box::new(state)));
+                    return Ok(OutcomeStep::Continue(Box::new(state)));
                 }
                 RecoveryOutcome::Abort {
                     recovery,
@@ -1211,7 +1341,9 @@ impl CapabilityStage {
                     .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
-                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                        CancelCheck::Exit(exit) => {
+                            return Ok(OutcomeStep::Exit { exit, state: None });
+                        }
                     }
                     let explanation_message_ref =
                         attach_failure_explanation(ctx, &mut state, failure_kind).await?;
@@ -1222,23 +1354,29 @@ impl CapabilityStage {
                     if let Some(detail) = terminal_detail {
                         safe_failure = safe_failure.with_detail(detail);
                     }
-                    return Ok(BatchStep::Exit(failed_exit(
+                    let exit = failed_exit(
                         ctx.host,
-                        checked.state,
+                        checked.state.clone(),
                         failure_kind,
                         Some(checked.checkpoint_id),
                         FailedExitDetails {
                             safe_summary: Some(safe_failure),
                             explanation_message_ref,
                         },
-                    )?));
+                    )?;
+                    return Ok(OutcomeStep::Exit {
+                        exit,
+                        state: Some(Box::new(checked.state)),
+                    });
                 }
                 RecoveryOutcome::Retry {
                     recovery, alter, ..
                 } => {
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
-                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                        CancelCheck::Exit(exit) => {
+                            return Ok(OutcomeStep::Exit { exit, state: None });
+                        }
                     }
                     if matches!(alter, Some(RetryAlteration::RepairInvalidModelOutput)) {
                         return Err(AgentLoopExecutorError::PlannerContract {
@@ -1373,16 +1511,20 @@ impl CapabilityStage {
         if let Some(detail) = terminal_detail {
             safe_failure = safe_failure.with_detail(detail);
         }
-        Ok(BatchStep::Exit(failed_exit(
+        let exit = failed_exit(
             ctx.host,
-            checked.state,
+            checked.state.clone(),
             failure_kind,
             Some(checked.checkpoint_id),
             FailedExitDetails {
                 safe_summary: Some(safe_failure),
                 explanation_message_ref,
             },
-        )?))
+        )?;
+        Ok(OutcomeStep::Exit {
+            exit,
+            state: Some(Box::new(checked.state)),
+        })
     }
 
     async fn fail_unsupported_process_wait(
@@ -1391,7 +1533,7 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         call: &CapabilityCallCandidate,
         _process_ref: &ironclaw_loop_contracts::LoopProcessRef,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+    ) -> Result<OutcomeStep, AgentLoopExecutorError> {
         append_capability_safe_summary_ref(
             ctx.host,
             &mut state,
@@ -1405,23 +1547,27 @@ impl CapabilityStage {
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
-        Ok(BatchStep::Exit(failed_exit(
+        let exit = failed_exit(
             ctx.host,
-            checked.state,
+            checked.state.clone(),
             LoopFailureKind::CapabilityProtocolError,
             Some(checked.checkpoint_id),
             FailedExitDetails {
                 safe_summary: None,
                 explanation_message_ref,
             },
-        )?))
+        )?;
+        Ok(OutcomeStep::Exit {
+            exit,
+            state: Some(Box::new(checked.state)),
+        })
     }
 
     async fn cancelled_after_checkpoint(
         &self,
         ctx: StageContext<'_>,
         state: LoopExecutionState,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+    ) -> Result<OutcomeStep, AgentLoopExecutorError> {
         // Called when a capability invocation surfaced `FailureKind::Cancelled`
         // and no `LoopCancellationSignal` is in scope, so the cooperative-boundary
         // reason cannot be derived from a signal. `cancelled_exit` hardcodes
@@ -1432,11 +1578,11 @@ impl CapabilityStage {
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
-        Ok(BatchStep::Exit(cancelled_exit(
-            ctx.host,
-            checked.state,
-            Some(checked.checkpoint_id),
-        )?))
+        let exit = cancelled_exit(ctx.host, checked.state.clone(), Some(checked.checkpoint_id))?;
+        Ok(OutcomeStep::Exit {
+            exit,
+            state: Some(Box::new(checked.state)),
+        })
     }
 
     /// Shared denied-resume short-circuit for both auth and approval gates.
@@ -1522,8 +1668,8 @@ impl CapabilityStage {
             ))
             .await?
             {
-                BatchStep::Continue(next) => state = *next,
-                BatchStep::Exit(exit) => {
+                OutcomeStep::Continue(next) => state = *next,
+                OutcomeStep::Exit { exit, .. } => {
                     return Ok(ControlFlow::Break(TurnCompletedStep::Exit(exit)));
                 }
             }
@@ -2034,15 +2180,32 @@ async fn append_completed_capability_result(
     Ok(())
 }
 
+/// The gate kind this outcome would stage a BeforeBlock checkpoint for, or
+/// `None` when the outcome is not gate-writing.
+///
+/// Single source of truth for the gate-writing variant set:
+/// [`gate_outcome_writes_before_block`] and [`persist_later_gate_outcome`]
+/// both derive from this mapping, so a future gate-writing `Resolution`
+/// variant can never be added to the predicate without the later-sibling
+/// persistence handling it (a divergence would otherwise surface only at
+/// runtime as the terminal `PlannerContract` error). `DependentRun` maps to
+/// `GateKind::AwaitDependentRun` but is persisted with its concrete result.
+fn gate_outcome_kind(resolution: &Resolution) -> Option<GateKind> {
+    match resolution {
+        Resolution::Blocked(Blocked::Approval(_)) => Some(GateKind::Approval),
+        Resolution::Blocked(Blocked::Auth(_)) => Some(GateKind::Auth),
+        Resolution::Blocked(Blocked::Resource(_)) => Some(GateKind::Resource),
+        Resolution::Suspended(Suspension::ExternalTool(_)) => Some(GateKind::ExternalTool),
+        Resolution::Suspended(Suspension::DependentRun { .. }) => Some(GateKind::AwaitDependentRun),
+        _ => None,
+    }
+}
+
 /// Whether handling this outcome through [`handle_capability_outcome`] stages
 /// a BeforeBlock checkpoint — the gate-writing outcomes the drain must treat
 /// as candidates for the batch's single gate exit.
 fn gate_outcome_writes_before_block(resolution: &Resolution) -> bool {
-    matches!(
-        resolution,
-        Resolution::Blocked(Blocked::Approval(_) | Blocked::Auth(_) | Blocked::Resource(_))
-            | Resolution::Suspended(Suspension::ExternalTool(_) | Suspension::DependentRun { .. })
-    )
+    gate_outcome_kind(resolution).is_some()
 }
 
 /// Complete a later sibling gate model-visibly without allocating another
@@ -2063,22 +2226,18 @@ async fn persist_later_gate_outcome(
     clear_matching_pending_approval_resume(state, &call);
     clear_matching_pending_auth_resume(state, &call);
     clear_matching_pending_external_tool_resume(state, &call);
-    let kind = match resolution {
-        Resolution::Blocked(Blocked::Approval(_)) => GateKind::Approval,
-        Resolution::Blocked(Blocked::Auth(_)) => GateKind::Auth,
-        Resolution::Blocked(Blocked::Resource(_)) => GateKind::Resource,
-        Resolution::Suspended(Suspension::ExternalTool(_)) => GateKind::ExternalTool,
-        Resolution::Suspended(Suspension::DependentRun { result, .. }) => {
-            let result = dependent_run_result_message(&result)?;
-            append_capability_result_ref(ctx.host, &call, &result).await?;
-            push_completed_result(state, &call.capability_id, result);
-            return Ok(());
-        }
-        _ => {
-            return Err(AgentLoopExecutorError::PlannerContract {
-                detail: "persist_later_gate_outcome called for a non-gate outcome",
-            });
-        }
+    // A dependent run already has a concrete result; persist that result
+    // instead of a pending summary.
+    if let Resolution::Suspended(Suspension::DependentRun { result, .. }) = &resolution {
+        let result = dependent_run_result_message(result)?;
+        append_capability_result_ref(ctx.host, &call, &result).await?;
+        push_completed_result(state, &call.capability_id, result);
+        return Ok(());
+    }
+    let Some(kind) = gate_outcome_kind(&resolution) else {
+        return Err(AgentLoopExecutorError::PlannerContract {
+            detail: "persist_later_gate_outcome called for a non-gate outcome",
+        });
     };
     append_capability_safe_summary_ref(
         ctx.host,
@@ -2249,6 +2408,63 @@ mod tests {
         assert!(result.is_some());
         let (gate, _) = result.unwrap();
         assert_eq!(gate.as_str(), "gate:batch-2");
+    }
+
+    #[test]
+    fn gate_outcome_kind_maps_every_gate_writing_variant() {
+        let cases = [
+            (
+                resolution::approval_required(
+                    LoopGateRef::new("gate:kind-approval").unwrap(),
+                    "approval".to_string(),
+                    None,
+                )
+                .resolution,
+                Some(GateKind::Approval),
+            ),
+            (
+                resolution::auth_required(
+                    LoopGateRef::new("gate:kind-auth").unwrap(),
+                    Vec::new(),
+                    "auth".to_string(),
+                    None,
+                )
+                .resolution,
+                Some(GateKind::Auth),
+            ),
+            (
+                resolution::resource_blocked(
+                    LoopGateRef::new("gate:kind-resource").unwrap(),
+                    "resource".to_string(),
+                )
+                .resolution,
+                Some(GateKind::Resource),
+            ),
+            (
+                resolution::external_tool_pending(
+                    LoopGateRef::new("gate:kind-external-tool").unwrap(),
+                    "external tool".to_string(),
+                )
+                .resolution,
+                Some(GateKind::ExternalTool),
+            ),
+            (
+                await_dependent("gate:kind-dependent", "r"),
+                Some(GateKind::AwaitDependentRun),
+            ),
+            (completed("r-none"), None),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(
+                gate_outcome_kind(&outcome),
+                expected,
+                "gate_outcome_kind must agree with gate_outcome_writes_before_block"
+            );
+            assert_eq!(
+                gate_outcome_writes_before_block(&outcome),
+                expected.is_some()
+            );
+        }
     }
 
     #[test]
