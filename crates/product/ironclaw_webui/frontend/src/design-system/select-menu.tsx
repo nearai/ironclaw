@@ -308,7 +308,14 @@ export function SelectMenu({
   };
 
   const handleSearchKeyDown = (event) => {
-    if (event.key !== " " && event.key !== "Tab") handleKeyDown(event);
+    if (
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp" ||
+      event.key === "Enter" ||
+      event.key === "Escape"
+    ) {
+      handleKeyDown(event);
+    }
   };
 
   const handleRootBlur = (event) => {
