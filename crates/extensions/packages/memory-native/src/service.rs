@@ -392,52 +392,74 @@ const EXCERPT_POST_BYTES: usize = 256;
 const EXCERPT_DELIMITER: &str = "\n…\n";
 
 /// Join bounded excerpts around every exact-literal occurrence of `query`
-/// in `snippet`, stopping at [`MAX_SEARCH_SNIPPET_BYTES`]. Each excerpt is
-/// `[position - EXCERPT_PRE_BYTES, position + query.len() + EXCERPT_POST_BYTES)`
-/// rounded to UTF-8 char boundaries; an occurrence already fully inside the
-/// previously emitted window is skipped because its query context is already
-/// present. The scan is a single left-to-right pass (no occurrence list
-/// is materialized), and it stops as soon as the cap is reached. Returns
-/// `None` when even one excerpt cannot fit (a query at or above the cap),
-/// so the caller falls back to the bounded head.
+/// in `snippet`, stopping at [`MAX_SEARCH_SNIPPET_BYTES`]. Each excerpt keeps
+/// up to [`EXCERPT_PRE_BYTES`] before the match and [`EXCERPT_POST_BYTES`]
+/// after it, reducing that context when the exact query would otherwise exceed
+/// the remaining budget. Endpoints are rounded to UTF-8 character boundaries.
+/// Overlapping or touching windows are joined directly; separated windows use
+/// [`EXCERPT_DELIMITER`]. The scan is a single left-to-right pass (no
+/// occurrence list is materialized), and it stops as soon as the cap is
+/// reached. Returns `None` when no exact occurrence can fit, so the caller
+/// falls back to the bounded head.
 fn bounded_excerpts(snippet: &str, query: &str) -> Option<String> {
     let mut out = String::new();
     let mut search_from = 0usize;
     let mut previous_end = 0usize;
     while let Some(relative) = snippet[search_from..].find(query) {
         let position = search_from + relative;
-        let mut start = position.saturating_sub(EXCERPT_PRE_BYTES);
-        while start > 0 && !snippet.is_char_boundary(start) {
-            start -= 1;
+        let query_end = position + query.len();
+        let mut desired_start = position.saturating_sub(EXCERPT_PRE_BYTES);
+        while desired_start < position && !snippet.is_char_boundary(desired_start) {
+            desired_start += 1;
         }
-        let mut end = (position + query.len() + EXCERPT_POST_BYTES).min(snippet.len());
-        while !snippet.is_char_boundary(end) {
-            end -= 1;
+        let mut desired_end = (query_end + EXCERPT_POST_BYTES).min(snippet.len());
+        while !snippet.is_char_boundary(desired_end) {
+            desired_end -= 1;
         }
-        if start < previous_end {
-            if end <= previous_end {
-                // Fully covered by the previous excerpt; the query context
-                // is already present.
-                search_from = position + query.len();
-                continue;
-            }
-            start = previous_end;
+        if desired_start < previous_end && desired_end <= previous_end {
+            // Fully covered by the previous excerpt; the query context
+            // is already present.
+            search_from = query_end;
+            continue;
         }
-        let excerpt = &snippet[start..end];
-        let added = if out.is_empty() {
-            excerpt.len()
+
+        let contiguous = !out.is_empty() && desired_start <= previous_end;
+        let delimiter_len = if out.is_empty() || contiguous {
+            0
         } else {
-            EXCERPT_DELIMITER.len() + excerpt.len()
+            EXCERPT_DELIMITER.len()
         };
-        if out.len() + added > MAX_SEARCH_SNIPPET_BYTES {
+        let Some(available) = MAX_SEARCH_SNIPPET_BYTES
+            .checked_sub(out.len())
+            .and_then(|remaining| remaining.checked_sub(delimiter_len))
+        else {
+            break;
+        };
+        let mut start = if contiguous {
+            previous_end
+        } else {
+            let Some(max_pre) = available.checked_sub(query.len()) else {
+                break;
+            };
+            desired_start.max(position.saturating_sub(max_pre))
+        };
+        while start < position && !snippet.is_char_boundary(start) {
+            start += 1;
+        }
+        if query_end.saturating_sub(start) > available {
             break;
         }
-        if !out.is_empty() {
+
+        let mut end = desired_end.min(start + available);
+        while end > query_end && !snippet.is_char_boundary(end) {
+            end -= 1;
+        }
+        if delimiter_len > 0 {
             out.push_str(EXCERPT_DELIMITER);
         }
-        out.push_str(excerpt);
+        out.push_str(&snippet[start..end]);
         previous_end = end;
-        search_from = position + query.len();
+        search_from = query_end;
     }
     if out.is_empty() {
         return None;
@@ -1042,6 +1064,35 @@ mod tests {
         assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
         assert!(bounded.contains(QUERY));
         assert_eq!(bound_search_snippet(body, QUERY), bounded);
+    }
+
+    #[test]
+    fn exact_query_near_cap_keeps_the_full_match_beyond_head() {
+        let query = format!("q{}z", "x".repeat(MAX_SEARCH_SNIPPET_BYTES - 66));
+        let position = MAX_SEARCH_SNIPPET_BYTES + 128;
+        let mut body = "a".repeat(position + query.len() + 512);
+        body.replace_range(position..position + query.len(), &query);
+
+        let bounded = bound_search_snippet(body, &query);
+
+        assert!(bounded.len() <= MAX_SEARCH_SNIPPET_BYTES);
+        assert!(bounded.contains(&query));
+    }
+
+    #[test]
+    fn overlapping_excerpt_windows_preserve_contiguous_source() {
+        let first = 4_000;
+        let second = 4_100;
+        let mut body = "a".repeat(MAX_SEARCH_SNIPPET_BYTES + 1_000);
+        body.replace_range(first..first + QUERY.len(), QUERY);
+        body.replace_range(second..second + QUERY.len(), QUERY);
+        let expected =
+            body[first - EXCERPT_PRE_BYTES..second + QUERY.len() + EXCERPT_POST_BYTES].to_string();
+
+        let bounded = bound_search_snippet(body, QUERY);
+
+        assert_eq!(bounded, expected);
+        assert!(!bounded.contains(EXCERPT_DELIMITER));
     }
 
     #[test]
