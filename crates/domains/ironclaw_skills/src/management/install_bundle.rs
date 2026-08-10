@@ -32,10 +32,6 @@ pub struct SkillInstallFile<'a> {
     pub contents: &'a [u8],
 }
 
-pub fn validate_install_bundle_relative_path(path: &str) -> Result<(), SkillManagementError> {
-    normalize_install_bundle_relative_path(path).map(|_| ())
-}
-
 /// Validate and canonicalize a package-relative install destination.
 pub fn normalize_install_bundle_relative_path(path: &str) -> Result<String, SkillManagementError> {
     normalize_install_relative_path(path)
@@ -624,7 +620,7 @@ mod tests {
             SKILL_FILE_NAME,
             INSTALL_METADATA_FILE_NAME,
         ] {
-            assert!(validate_install_bundle_relative_path(path).is_err());
+            assert!(normalize_install_bundle_relative_path(path).is_err());
         }
     }
 
