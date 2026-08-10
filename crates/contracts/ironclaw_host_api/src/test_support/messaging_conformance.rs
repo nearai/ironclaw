@@ -1,5 +1,5 @@
 //! Conformance test-support for the standardized messaging framework
-//! (`docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
+//! (`docs/internal/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
 //! §10.4).
 //!
 //! Every extension that binds a tool to a [`StandardMessagingOp`]

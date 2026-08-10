@@ -19,7 +19,7 @@
 //! engine, or workflow.
 //!
 //! Two rules this crate is enforced against, both in
-//! `crates/ironclaw_architecture_tests/tests/`:
+//! `crates/app/ironclaw_architecture_tests/tests/`:
 //!
 //! - **Contracts purity** (§11.2.3, `reborn_dependency_boundaries.rs`): the
 //!   only internal dependencies are `ironclaw_host_api` and
@@ -46,6 +46,7 @@ pub mod descriptors;
 pub mod error;
 pub mod inbound;
 pub mod inbound_requests;
+pub mod inspector;
 pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
@@ -59,7 +60,7 @@ pub mod product_wire;
 pub mod project_service;
 pub mod projection;
 pub mod prompt_source;
-pub mod subject_route;
+pub mod shared_admission;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
+use ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
@@ -36,9 +36,14 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_host::HostInputEnqueuePort;
+
+/// Attribution bucket for the background-run notifier's own run-delivery
+/// services. Never a channel selector — the notifier picks the delivering
+/// extension per notification target from that target's catalog entry.
+const BACKGROUND_RUN_NOTIFIER_ID: &str = "background-run-notifier";
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStorePort,
-    TriggeredRunDelivery, TriggeredRunDeliveryStore,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
+    OutboundStateStorePort, TriggeredRunDelivery, TriggeredRunDeliveryStore,
 };
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::channel_workflow::{
@@ -77,8 +82,10 @@ const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 
 /// The deployment identity every per-extension workflow binds under: the
-/// composed runtime's tenant/agent/project plus the operator user inbound
-/// conversations default their subject to.
+/// composed runtime's tenant/agent/project plus the fallback operator user
+/// host-initiated work is attributed to (notice-thread scopes, the durable
+/// idempotency-ledger scope). Inbound conversations run as their invoking
+/// actor, not this user.
 #[derive(Clone)]
 pub struct ChannelWorkflowIdentity {
     pub tenant_id: TenantId,
@@ -98,6 +105,10 @@ pub struct ChannelWorkflowDeliveryServices {
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// The owner-scoped outbound target catalog. The background-run notifier
+    /// resolves the creator's stored notification-channel ids through it at
+    /// fire time.
+    pub delivery_targets: Arc<dyn OutboundDeliveryTargetProvider>,
     pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
@@ -147,31 +158,34 @@ impl RebornChannelWorkflowFactory {
         Arc::clone(&self.services.inbound_attachments)
     }
 
-    /// The proactive delivery driver for one channel extension, or `None` when
-    /// the composed runtime has no delivery coordinator (nothing can deliver).
+    /// The single background-run notifier, or `None` when the composed
+    /// runtime has no delivery coordinator (nothing can notify).
     ///
-    /// Binding-free by construction: the triggered path resolves its target
-    /// from the creator's stored preference, never from a conversation
-    /// binding, so the driver is wired with the no-op binding service below.
-    pub fn triggered_run_delivery(
+    /// One notifier serves every channel extension: it resolves the creator's
+    /// stored notification channels at fire time and decodes each target
+    /// through the LIVE codec view supplied here (§12.11 D-A: the hook in
+    /// `ironclaw_extension_host` names no product type, so composition builds
+    /// the notifier through this factory). Binding-free by construction: a
+    /// notification never resolves from a conversation binding, so the
+    /// notifier is wired with the no-op binding service below.
+    pub fn background_run_notifier(
         &self,
-        extension_id: &str,
-        target_codec: Arc<dyn PreferenceTargetCodec>,
+        target_codecs: Arc<dyn ActivePreferenceTargetCodecs>,
     ) -> Option<Arc<dyn TriggeredRunDelivery>> {
         let delivery = self.services.delivery.as_ref()?;
         let identity = &self.services.identity;
-        let notice_thread_id = match ThreadId::new(format!("{extension_id}-channel-notices")) {
-            Ok(thread_id) => thread_id,
-            Err(error) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::channel_workflow",
-                    extension_id,
-                    %error,
-                    "invalid channel-notice thread id; triggered delivery unavailable"
-                );
-                return None;
-            }
-        };
+        let notice_thread_id =
+            match ThreadId::new(format!("{BACKGROUND_RUN_NOTIFIER_ID}-channel-notices")) {
+                Ok(thread_id) => thread_id,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "ironclaw::reborn::channel_workflow",
+                        %error,
+                        "invalid channel-notice thread id; background run notification unavailable"
+                    );
+                    return None;
+                }
+            };
         let services = RunDeliveryServices {
             project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
@@ -180,8 +194,9 @@ impl RebornChannelWorkflowFactory {
             outbound_store: Arc::clone(&delivery.outbound_store),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
+            delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
-            extension_id: extension_id.to_string(),
+            extension_id: BACKGROUND_RUN_NOTIFIER_ID.to_string(),
             fallback_notice_scope: self.notice_scope(notice_thread_id),
             approval_context: delivery.approval_context.clone(),
             blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
@@ -191,7 +206,7 @@ impl RebornChannelWorkflowFactory {
             services,
             crate::run_delivery::triggered_run_delivery_settings(),
             Arc::clone(&delivery.triggered_delivery_store),
-            target_codec,
+            target_codecs,
             identity.agent_id.clone(),
         )) as Arc<dyn TriggeredRunDelivery>)
     }
@@ -305,14 +320,13 @@ impl ChannelWorkflowFactory for RebornChannelWorkflowFactory {
             identity.tenant_id.clone(),
             identity.agent_id.clone(),
             identity.project_id.clone(),
-        )
-        .with_default_subject_user_id(identity.operator_user_id.clone());
-        // Generic shared-channel admission (§5.3): with a subject-route
-        // resolver installed, unrouted shared conversations fail closed.
-        if let Some(resolver) = request.subject_route_resolver {
-            scope = scope
-                .with_conversation_subject_route_resolver(resolver)
-                .without_default_subject_for_unrouted_shared_conversations();
+        );
+        // Generic shared-conversation admission (§5.3), fail-closed either
+        // way: without a resolver every shared conversation is rejected; with
+        // one, exactly the connected conversations are admitted. A run acts
+        // as the user who invoked it, so there is no subject to default.
+        if let Some(admission) = request.shared_admission {
+            scope = scope.with_shared_conversation_admission(admission);
         }
         let scope = scope.with_actor_user_resolver(
             request.actor_user_resolver,
@@ -409,6 +423,7 @@ impl RebornChannelWorkflowFactory {
             outbound_store: Arc::clone(&delivery.outbound_store),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
+            delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
             extension_id: extension_id.to_string(),
             fallback_notice_scope: self.notice_scope(notice_thread_id),

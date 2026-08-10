@@ -8,6 +8,11 @@ import { componentSourceForTest } from "../../../lib/vm-component-harness";
 import "../../../test/vm-tsx-setup";
 import { channelConnectionFromGate } from "./gates";
 import { messageBelongsToActiveRun } from "./message-types";
+import {
+  inspectorDebugEnabled,
+  latestInspectorRunId,
+  persistInspectorDebugPreference,
+} from "../inspector/inspector-shell";
 
 function chatSourceForTest() {
   return componentSourceForTest(
@@ -134,6 +139,9 @@ function renderChat({
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
     channelConnectionFromGate,
+    inspectorDebugEnabled,
+    latestInspectorRunId,
+    persistInspectorDebugPreference,
     messageBelongsToActiveRun,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
@@ -142,12 +150,14 @@ function renderChat({
     clearTimeout: () => {},
     window: {
       addEventListener: () => {},
+      location: { search: "" },
       removeEventListener: () => {},
     },
     useChat: () => hookState,
     useChatCommands: () => [],
     matchCommand: () => null,
     useInterfacePreferences: () => ({ showChatLogsShortcut }),
+    useLocation: () => ({ search: "" }),
     useT: () => (key) => key,
     ...contextOverrides,
   };

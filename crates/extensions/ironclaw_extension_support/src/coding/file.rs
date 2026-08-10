@@ -50,7 +50,13 @@ pub(super) async fn read_file(
         .stat(&resolved.virtual_path)
         .await
         .map_err(|error| {
-            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+            // Same ordering hint as `list_dir`: `.skills/<name>` exists only after activation.
+            match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
+                Some(hint) => operation_error_with_summary(hint),
+                None => {
+                    filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+                }
+            }
         })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
@@ -548,6 +554,24 @@ fn stale_read_error(operation: &str, scoped_path: &str) -> CodingCapabilityError
 pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
+    // `list_dir "/"` is an agent asking what the filesystem contains. It used to fail with
+    // `path  is not under an available scoped root` -- blank, because the safe-summary encoder maps
+    // `/` to a space -- when the roots it was asking for were right there in the mount view.
+    if let Some(path) = request.input.get("path").and_then(Value::as_str)
+        && super::paths::is_filesystem_root_request(path)
+    {
+        let mounts = request.mounts.ok_or_else(|| {
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        })?;
+        let entries = super::paths::root_alias_entries(mounts);
+        let count = entries.len();
+        return Ok(json!({
+            "path": "/",
+            "entries": entries,
+            "count": count,
+            "truncated": false
+        }));
+    }
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
     // A missing mount ROOT lists as empty (the grant names it; nothing has
     // been written under it yet), so the sensitive-stat guard tolerates its
@@ -560,7 +584,17 @@ pub(super) async fn list_dir(
         }
         Some(_) => {}
         None if resolved.is_mount_root() => {}
-        None => return Err(operation_error()),
+        None => {
+            // A miss under `.skills/<name>` is an ordering mistake, not a missing file: activation is
+            // what stages a bundle into the workspace. Saying so costs one line and saved an agent two
+            // failed calls spent discovering it.
+            return Err(
+                match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
+                    Some(hint) => operation_error_with_summary(hint),
+                    None => operation_error(),
+                },
+            );
+        }
     }
     let recursive = request
         .input

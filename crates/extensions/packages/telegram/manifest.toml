@@ -22,6 +22,10 @@ fields = [
   { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
   { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
   { handle = "bot_username", label = "Bot username", secret = false, required = true },
+  # Shared-conversation admission (run-acts-as-invoker): group/supergroup
+  # chats are served only when listed here; unlisted groups fail closed and
+  # each participant runs as themselves once paired.
+  { handle = "telegram_allowed_channels", label = "Allowed group chats (JSON array of Telegram chat IDs)", secret = false, required = false },
 ]
 
 # ---- channel surface -------------------------------------------------------
@@ -43,7 +47,10 @@ submit_label = "Open pairing"
 error_message = "Telegram pairing failed. Get a fresh code and try again."
 connection_success_message = "Telegram is installed as an inbound entrypoint. If WebChat shows a Telegram pairing panel, tell the user to pair via the link, the QR code, or by sending the shown code to the bot in Telegram — nothing is pasted into normal chat. Once paired the user can DM the bot directly. Telegram exposes no tools and cannot read messages or send on the user's behalf."
 deep_link_template = "https://t.me/{bot_username}?start={code}"
-inbound_code_prefixes = ["/start"]
+# `/start` is the vendor deep-link convention and stays the only prefix any
+# instruction wording suggests; `/pair` is an accepted alias for users who
+# type it from habit and must never appear in suggested wording.
+inbound_code_prefixes = ["/start", "/pair"]
 
 [channel.connection.notices]
 connect_required = "👋 Pair your Telegram account in the IronClaw web app, then message me here again."

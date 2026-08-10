@@ -21,6 +21,7 @@ use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::{
@@ -35,7 +36,7 @@ use ironclaw_host_api::{
     runtime::{RuntimeKind, TrustClass},
     scope::Principal,
 };
-use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
+use ironclaw_host_runtime::SurfaceKind;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
     CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
@@ -45,10 +46,10 @@ use ironclaw_loop_contracts::{
     VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    CapabilityResolveError, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RejectingInputEnqueue, RunCancellationFactory, RunCancellationHandle,
@@ -195,10 +196,7 @@ async fn enable_host_runtime_auto_approve_for_harness_user(
         .expect("standalone host runtime auto-approve settings");
     let scope = ResourceScope {
         tenant_id: binding.tenant_id.clone(),
-        user_id: binding
-            .subject_user_id
-            .clone()
-            .expect("harness subject user id"),
+        user_id: binding.actor_user_id.clone(),
         agent_id: binding.agent_id.clone(),
         project_id: binding.project_id.clone(),
         mission_id: None,
@@ -224,6 +222,7 @@ pub fn capability_call_response(
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         effective_fallback_index: Some(0),
+        diagnostic_effective_model: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
@@ -241,8 +240,7 @@ impl ProductLiveAgentLoopHarness {
         let user_id = UserId::new(config.user_id).expect("valid harness user id");
         let binding = ResolvedBinding {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
-            actor_user_id: user_id.clone(),
-            subject_user_id: Some(user_id),
+            actor_user_id: user_id,
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
@@ -251,7 +249,7 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: binding.tenant_id.clone(),
             agent_id: binding.agent_id.clone().expect("harness agent id"),
             project_id: binding.project_id.clone(),
-            owner_user_id: binding.subject_user_id.clone(),
+            owner_user_id: Some(binding.actor_user_id.clone()),
             mission_id: None,
         };
         let thread_service = InMemorySessionThreadService::default();
@@ -342,10 +340,7 @@ impl ProductLiveAgentLoopHarness {
                 results: Arc::clone(&capability_results),
                 capability_id: harness_capability_id(&capability.capability_id),
                 input: capability.input,
-                user_id: binding
-                    .subject_user_id
-                    .clone()
-                    .expect("harness subject user id"),
+                user_id: binding.actor_user_id.clone(),
                 cancellation_factory: cancellation_factory.clone(),
                 model_provider: config.model_provider.clone(),
                 model_id: config.model_id.clone(),
@@ -385,6 +380,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: None,
             gate_record_store: turn_executor_gate_store,
             process_system,
@@ -599,7 +595,7 @@ impl ProductLiveAgentLoopHarness {
             self.binding.agent_id.clone(),
             self.binding.project_id.clone(),
             self.binding.thread_id.clone(),
-            self.binding.subject_user_id.clone(),
+            Some(self.binding.actor_user_id.clone()),
         )
     }
 }
@@ -681,6 +677,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_reasoning_deltas: Vec::new(),
             usage: None,
             effective_fallback_index: Some(request.fallback_index),
+            diagnostic_effective_model: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,
@@ -781,7 +778,7 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 }),
                 capability_input_resolver: self.io.clone(),
                 capability_result_writer: self.io.clone(),
-                capability_allow_set: capability_allowlist([self.capability_id.clone()]),
+                capability_surface_policy: capability_allowlist([self.capability_id.clone()]),
                 model_routes: ProductLiveModelRouteSettings::new(
                     self.model_provider.clone(),
                     self.model_id.clone(),
@@ -1014,8 +1011,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 

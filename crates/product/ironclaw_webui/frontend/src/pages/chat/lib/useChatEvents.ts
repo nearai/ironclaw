@@ -26,11 +26,12 @@ import {
   STREAM_FAILURE_ID_PREFIX,
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
+import { publishProductInspectorEnvelope } from "../inspector/product-activity-publisher";
+import { AMBIGUOUS_RUN_ID, mergeRunIdCandidate } from "./run-id-candidate";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
 const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
-const AMBIGUOUS_RUN_ID = Symbol("ambiguous-run-id");
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -71,6 +72,7 @@ export function useChatEvents({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  runTrackingRef,
   noteConnectionInterruptedRunId = noop,
   connectionContextForRunFailure = emptyConnectionContext,
   onStreamError = noop,
@@ -80,23 +82,36 @@ export function useChatEvents({
   if (typeof t !== "function") {
     throw new TypeError("useChatEvents requires a translation function");
   }
-  // Track which runIds we've already settled so that SSE replays
-  // (reconnect with `last-event-id`, repeated snapshots) don't trigger
-  // duplicate timeline refetches. A run settles on ANY terminal status,
-  // not only success — every terminal run reloads the timeline so tool
-  // input/output previews are recovered from the durable record even when
-  // the run failed, was cancelled, or needs recovery.
-  const settledRunsRef = React.useRef(new Set());
-  // Last `run_status.run_id` we've observed, persisted across event frames.
-  // Used to reject stale terminal statuses after a locally resolved gate
-  // resumes a newer active run.
-  const latestRunIdRef = React.useRef(null);
-  const promptRunIdRef = React.useRef(null);
 
   return React.useCallback(
     (envelope) => {
       const { type, frame } = envelope || {};
       if (!type || !frame) return;
+
+      // Per-thread run bookkeeping, owned and reset by `useChat` (see
+      // `lib/run-tracking-state.ts`). Read from the ref on every event rather
+      // than closing over the slots, so a thread switch that swaps in fresh
+      // state cannot be observed through a stale binding:
+      //
+      //   settledRuns — run ids already settled, so SSE replays (reconnect
+      //     with last-event-id, repeated snapshots) settle each run once.
+      //     A run settles on ANY terminal status, not only success; every
+      //     terminal run reloads the timeline so tool input/output previews
+      //     are recovered from the durable record.
+      //   latestRunId — last `run_status.run_id` seen, used to reject stale
+      //     terminal statuses after a locally resolved gate resumed a newer
+      //     run, and to scope capability frames that omit a run id.
+      //   promptRunId — run id whose gate prompt is on screen.
+      const {
+        settledRuns: settledRunsRef,
+        latestRunId: latestRunIdRef,
+        promptRunId: promptRunIdRef,
+      } = runTrackingRef.current;
+      publishProductInspectorEnvelope(
+        envelope,
+        threadId,
+        activeRunRef?.current?.runId || latestRunIdRef.current,
+      );
 
       switch (type) {
         case "accepted": {
@@ -312,6 +327,7 @@ export function useChatEvents({
       activeRunRef,
       locallyResolvedGatesRef,
       toolActivityStateRef,
+      runTrackingRef,
       noteConnectionInterruptedRunId,
       connectionContextForRunFailure,
       onRunSettled,
@@ -340,6 +356,7 @@ const TERMINAL_RUN_STATUSES = new Set([
 ]);
 
 const SUCCESS_RUN_STATUSES = new Set(["completed", "succeeded"]);
+const FAILURE_RUN_STATUSES = new Set(["failed", "recovery_required"]);
 const PROMPT_RUN_STATUSES = new Set([
   "blocked_auth",
   "blocked_approval",
@@ -611,7 +628,23 @@ function applyProjectionItems({
       // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
       const textRunId = item.text.run_id || null;
+      if (
+        textRunId &&
+        FAILURE_RUN_STATUSES.has(batchRunStatusByRunId.get(textRunId))
+      ) {
+        continue;
+      }
       setMessages((prev) => {
+        if (
+          textRunId &&
+          prev.some(
+            (message) =>
+              isErrorChatMessage(message) &&
+              message.id === `${RUN_FAILURE_ID_PREFIX}${textRunId}`,
+          )
+        ) {
+          return prev;
+        }
         const phaseAware = textRunId
           ? prev.map((message) =>
               message?.role === "assistant" &&
@@ -756,12 +789,6 @@ function fallbackTurnRunIdForActivity({
   return candidate === AMBIGUOUS_RUN_ID ? null : candidate;
 }
 
-function mergeRunIdCandidate(current, runId) {
-  if (typeof runId !== "string" || runId.length === 0) return current;
-  if (current === null) return runId;
-  return current === runId ? current : AMBIGUOUS_RUN_ID;
-}
-
 function settleTerminalRunAfterResolvedPrompt({
   runId,
   activePromptRunId,
@@ -838,7 +865,8 @@ function appendRunFailureMessage(
       ? connectionContextForRunFailure(runId) || {}
       : {};
   setMessages((prev) => {
-    const existing = prev.findIndex((m) => m.id === messageId);
+    const visibleMessages = withoutStreamingAssistantPhaseForRun(prev, runId);
+    const existing = visibleMessages.findIndex((m) => m.id === messageId);
     const content = failureMessageForRunStatus({
       status,
       failureCategory,
@@ -847,27 +875,37 @@ function appendRunFailureMessage(
     }, t);
     if (existing >= 0) {
       const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
-      if (!hasUsefulUpdate || prev[existing].content === content) return prev;
-      const next = [...prev];
+      if (
+        !hasUsefulUpdate ||
+        visibleMessages[existing].content === content
+      ) {
+        return visibleMessages;
+      }
+      const next = [...visibleMessages];
       next[existing] = {
         ...next[existing],
         content,
         failureStatus: status,
         failureCategory,
         failureSummary,
+        turnRunId: runId,
       };
       return next;
     }
-    const lastMessage = prev[prev.length - 1];
+    const lastMessage = visibleMessages[visibleMessages.length - 1];
     if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
-      const replacement = promotedRunFailureMessage(lastMessage, messageId);
-      if (replacement === lastMessage) return prev;
-      const next = [...prev];
+      const replacement = promotedRunFailureMessage(
+        lastMessage,
+        messageId,
+        runId,
+      );
+      if (replacement === lastMessage) return visibleMessages;
+      const next = [...visibleMessages];
       next[next.length - 1] = replacement;
       return next;
     }
     return [
-      ...prev,
+      ...visibleMessages,
       createErrorChatMessage({
         id: messageId,
         content,
@@ -875,9 +913,28 @@ function appendRunFailureMessage(
         failureStatus: status,
         failureCategory,
         failureSummary,
+        // Lets the failed-run bubble reuse the same run-artifact/trace
+        // export as a completed assistant reply (#7369) — without this the
+        // error message has no run id and the download action never has
+        // anything to fetch.
+        turnRunId: runId,
       }),
     ];
   });
+}
+
+function withoutStreamingAssistantPhaseForRun(messages, runId) {
+  if (!runId) return messages;
+  const next = messages.filter(
+    (message) =>
+      !(
+        message?.role === "assistant" &&
+        message.turnRunId === runId &&
+        message.isFinalReply === false &&
+        message.isStreaming === true
+      ),
+  );
+  return next.length === messages.length ? messages : next;
 }
 
 // A projection can report an unknown run failure before the send response maps
@@ -891,10 +948,10 @@ function isAdjacentDuplicateRunFailure(message, content) {
   );
 }
 
-function promotedRunFailureMessage(message, messageId) {
+function promotedRunFailureMessage(message, messageId, runId) {
   return message?.id === UNKNOWN_RUN_FAILURE_ID &&
     messageId !== UNKNOWN_RUN_FAILURE_ID
-    ? { ...message, id: messageId }
+    ? { ...message, id: messageId, turnRunId: runId }
     : message;
 }
 

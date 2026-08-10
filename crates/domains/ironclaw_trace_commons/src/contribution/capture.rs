@@ -120,7 +120,22 @@ pub fn capture_turns_from_conversation_messages(
 pub(crate) fn parse_capture_tool_calls(content: &str) -> Vec<RawTraceCaptureToolCall> {
     let value = match serde_json::from_str::<Value>(content) {
         Ok(value) => value,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            // Dropping every tool call with no trace left `required_tools`
+            // empty while `replayable` was computed independently — so the
+            // envelope shipped a positive false claim (replayable with no
+            // required tools), lost its coverage bonus, and omitted the
+            // "Tools used:" line from the embedding text, all silently (#7144).
+            // The empty result is still the right *value* here; what was missing
+            // is any way to know it happened.
+            tracing::debug!(
+                target: "ironclaw::reborn::traces::capture",
+                error = %error,
+                content_len = content.len(),
+                "tool_calls payload is not JSON; recording zero tool calls for this turn"
+            );
+            return Vec::new();
+        }
     };
     let calls = match value {
         Value::Array(calls) => calls,

@@ -218,8 +218,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let slack = g
         .channel_connection()
         .ok_or("extension_lifecycle group must carry the channel-connection bundle")?;
-    // Direct-chat bindings resolve subject == actor, so this one identity is
-    // both the capability dispatch user and the authenticated actor removal
+    // A direct-chat run acts as the user who invoked it, so this one identity
+    // is both the capability dispatch user and the authenticated actor removal
     // cleanup disconnects.
     let actor = g.canonical_actor_user();
 

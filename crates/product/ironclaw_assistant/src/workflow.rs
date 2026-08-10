@@ -819,7 +819,7 @@ struct SelectedDeliveredRoute {
 /// error, and `Some(Ok(routes))` with the candidates ordered most-recent-first.
 /// The caller walks the candidates, resolving the newest still-live gate and
 /// pruning any already-resolved routes it skips (see [`order_delivered_routes`]).
-// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/internal/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn select_delivered_gate_routes(
     envelope: &ProductInboundEnvelope,
@@ -873,7 +873,7 @@ async fn select_delivered_gate_routes(
         .collect()))
 }
 
-// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/internal/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn resolve_via_delivered_approval_route(
     envelope: &ProductInboundEnvelope,
@@ -998,7 +998,7 @@ fn is_stale_approval_error(error: &ProductSurfaceFailure) -> bool {
     )
 }
 
-// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/internal/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn resolve_via_delivered_auth_route(
     envelope: &ProductInboundEnvelope,
@@ -1661,12 +1661,14 @@ fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {
 }
 
 fn turn_scope_for_thread(binding: &ResolvedBinding, thread_id: ThreadId) -> TurnScope {
+    // A run acts as the user who invoked it: the turn's explicit owner is the
+    // binding's actor on every route kind.
     TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),
         binding.project_id.clone(),
         thread_id,
-        binding.subject_user_id.clone(),
+        Some(binding.actor_user_id.clone()),
     )
 }
 

@@ -261,7 +261,7 @@ async fn nearai_hosted_mcp_isolates_provider_accounts_across_actors() {
         .await
         .expect("actor B lifecycle thread builds");
     assert_ne!(
-        actor_a.binding.subject_user_id, actor_b.binding.subject_user_id,
+        actor_a.binding.actor_user_id, actor_b.binding.actor_user_id,
         "the isolation test requires distinct authenticated actors"
     );
     actor_b
@@ -314,7 +314,7 @@ async fn mcp_tool_call_reaches_mock_server() {
 }
 
 /// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
-/// application/json, text/event-stream` header (`crates/ironclaw_mcp/src/lib.rs`),
+/// application/json, text/event-stream` header (`crates/lanes/ironclaw_mcp/src/lib.rs`),
 /// but here the mock server answers every leg with SSE framing instead of
 /// plain JSON. Exercises `parse_mcp_response`/`response_is_sse` against a
 /// real reqwest response's headers, not just the hand-built fixtures in the

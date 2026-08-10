@@ -26,6 +26,8 @@ const paths = {
       d="M12 7.5v5l3.2 2"
     /></>),
 
+  code: (<><path d="m9 7-5 5 5 5" /><path d="m15 7 5 5-5 5" /></>),
+
   download: (<><path d="M12 3.8v10" /><path d="m8 10 4 4 4-4" /><path
       d="M5 17.5v2.7h14v-2.7"
     /></>),

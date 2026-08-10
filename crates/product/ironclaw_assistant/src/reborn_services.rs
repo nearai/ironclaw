@@ -33,6 +33,10 @@ use ironclaw_product_contracts::operator_service::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+pub use ironclaw_product_contracts::product_wire::{
+    RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
+    RebornAdminThreadScrapeRunArtifactRequest,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
@@ -113,6 +117,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
     ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::inspector::{
+    INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
+};
 
 mod admin_configuration;
 mod admin_users;
@@ -122,6 +129,7 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod fs_browse;
+mod inspector;
 mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
@@ -202,7 +210,8 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
     RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornNotificationChannel, RebornNotificationChannelsResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
@@ -211,21 +220,21 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
     RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProductCommandInfo, RebornProductCommandListResponse,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
+    RebornOutboundDeliveryTargetSummary, RebornProductCommandInfo,
+    RebornProductCommandListResponse, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetNotificationChannelsRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
+    SettingsToolPermissionState,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -240,18 +249,20 @@ pub use operator_config_views::{
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
 };
 pub use outbound_delivery_capability_surface::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
-    OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-    OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
-    OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
+    NOTIFICATION_CHANNELS_SET_MAX_ITEMS, NotificationChannelsSetInput,
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION,
+    OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_DESCRIPTION,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_PROVIDER_TOOL_NAME, OutboundDeliveryCapabilityInputError,
     OutboundDeliveryTargetsListInput, list_outbound_delivery_targets_for_model,
-    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
-    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
-    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
-    set_outbound_delivery_target_for_model,
+    notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
+    outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
+    parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
+    set_notification_channels_for_model,
 };
 pub use outbound_preferences::RebornOutboundPreferencesService;
-pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
+pub use outbound_views::{NOTIFICATION_CHANNELS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -299,9 +310,6 @@ pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY: ProductCapabilityDescr
 pub const OPERATOR_SETUP_RUN_CAPABILITY_ID: &str = "builtin.operator_setup_run";
 pub const OPERATOR_SETUP_RUN_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_SETUP_RUN_CAPABILITY_ID);
-pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
-pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
-    ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
 pub const LLM_PROVIDER_UPSERT_CAPABILITY_ID: &str = "builtin.llm_provider_upsert";
 pub const LLM_PROVIDER_UPSERT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_PROVIDER_UPSERT_CAPABILITY_ID);
@@ -432,6 +440,16 @@ pub const TRACE_HOLD_AUTHORIZE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse,
 > = ProductSurfaceCommandDescriptor::new(TRACE_HOLD_AUTHORIZE_COMMAND_ID);
+/// WebUI-facing full-replace notification-channels write. See
+/// `outbound_views::RebornServices::set_notification_channels`'s doc comment
+/// for why this is a product command (webui-only, no approval gate) rather
+/// than a composition-registered capability like the sibling model-callable
+/// `builtin.notification_channels_set` tool.
+pub const NOTIFICATION_CHANNELS_SET_COMMAND_ID: &str = "outbound.notification_channels_set";
+pub const NOTIFICATION_CHANNELS_SET_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornSetNotificationChannelsRequest,
+    RebornNotificationChannelsResponse,
+> = ProductSurfaceCommandDescriptor::new(NOTIFICATION_CHANNELS_SET_COMMAND_ID);
 pub const OPERATOR_CONFIG_SET_KEY_COMMAND_ID: &str = "operator.config.set_key";
 pub const OPERATOR_CONFIG_SET_KEY_COMMAND: ProductSurfaceCommandDescriptor<
     RebornOperatorConfigSetProductRequest,
@@ -547,6 +565,18 @@ pub const ADMIN_USER_SECRETS_VIEW: ProductView<
     RebornAdminUserRequest,
     RebornAdminUserSecretsListResponse,
 > = ProductView::unpaginated("admin_user_secrets");
+pub const ADMIN_THREAD_SCRAPE_THREADS_VIEW: ProductView<
+    RebornAdminThreadScrapeListRequest,
+    RebornListThreadsResponse,
+> = ProductView::paginated("admin_thread_scrape_threads");
+pub const ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW: ProductView<
+    RebornAdminThreadScrapeArtifactRequest,
+    RebornThreadArtifact,
+> = ProductView::unpaginated("admin_thread_scrape_artifact");
+pub const ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW: ProductView<
+    RebornAdminThreadScrapeRunArtifactRequest,
+    RebornRunArtifact,
+> = ProductView::unpaginated("admin_thread_scrape_run_artifact");
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
@@ -817,29 +847,6 @@ impl SkillsProductService for UnsupportedSkillsProductService {}
 
 #[async_trait]
 pub trait OutboundPreferencesProductService: Send + Sync {
-    /// Return the authenticated caller's scoped outbound preferences.
-    ///
-    /// Real implementations must scope stored preferences by the caller's
-    /// tenant/user identity. The Phase 1 unsupported implementation returns an
-    /// empty projection so read callers can treat "not configured yet" as a
-    /// stable state while mutation and target inventory remain fail-closed.
-    async fn get_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
-
-    /// Persist the caller's scoped outbound delivery preferences.
-    ///
-    /// Implementations must scope writes by the caller's tenant/user identity.
-    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductService`
-    /// by default, which keeps Phase 1 mutation attempts fail-closed with a
-    /// non-retryable service-unavailable response until a real service is wired.
-    async fn set_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
-
     /// List delivery targets available to the authenticated caller.
     ///
     /// Implementations must scope target inventory by the caller's tenant/user
@@ -851,6 +858,41 @@ pub trait OutboundPreferencesProductService: Send + Sync {
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError>;
+
+    /// Persist the caller's scoped notification-channel target list — a full
+    /// replace of the current set (spec §7). An empty list means notifications
+    /// stay in the web app only.
+    ///
+    /// Implementations must scope writes by the caller's tenant/user identity,
+    /// validate each id through the caller-scoped target registry, dedup
+    /// preserving order, and cap at `NOTIFICATION_TARGETS_CAP`. Defaults to a
+    /// non-retryable service-unavailable response so the pre-existing
+    /// implementors of this trait that predate notification channels do not
+    /// need to opt in explicitly.
+    async fn set_notification_channels(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let _ = (caller, request);
+        Err(outbound_preferences_unavailable())
+    }
+
+    /// Return the authenticated caller's scoped notification-channel targets,
+    /// resolved to channel options. Stored ids that no longer resolve are
+    /// omitted rather than erroring (see
+    /// [`RebornNotificationChannelsResponse`]).
+    ///
+    /// Implementations must scope reads by the caller's tenant/user identity.
+    /// Defaults to an empty projection, so "not configured yet" is a stable
+    /// read state.
+    async fn get_notification_channels(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let _ = caller;
+        Ok(RebornNotificationChannelsResponse::default())
+    }
 }
 
 #[derive(Debug)]
@@ -864,26 +906,26 @@ impl UnsupportedOutboundPreferencesProductService {
 
 #[async_trait]
 impl OutboundPreferencesProductService for UnsupportedOutboundPreferencesProductService {
-    async fn get_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        Ok(RebornOutboundPreferencesResponse::default())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        Err(outbound_preferences_unavailable())
-    }
-
     async fn list_outbound_delivery_targets(
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Err(outbound_preferences_unavailable())
+    }
+
+    async fn set_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn get_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        Ok(RebornNotificationChannelsResponse::default())
     }
 }
 
@@ -1412,6 +1454,10 @@ fn product_view_requires_operator_config(view_id: &str) -> bool {
             || id == OPERATOR_SETUP_VIEW.id
             || id == OPERATOR_DIAGNOSTICS_VIEW.id
             || id == OPERATOR_STATUS_VIEW.id
+            || id == INSPECTOR_SNAPSHOT_VIEW.id
+            || id == INSPECTOR_PROMPT_VIEW.id
+            || id == INSPECTOR_TOOL_VIEW.id
+            || id == INSPECTOR_UPDATES_VIEW.id
     )
 }
 
@@ -2188,6 +2234,7 @@ pub struct RebornServices<
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
+    diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -2269,8 +2316,19 @@ where
             ironhub_link: None,
             active_model_reader: None,
             operator_approval_config: None,
+            diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    /// Override the process-local diagnostic store used by the operator
+    /// inspector. Capture adapters and this read surface must share one store.
+    pub fn with_diagnostic_store(
+        mut self,
+        diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
+    ) -> Self {
+        self.diagnostic_store = diagnostic_store;
+        self
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
@@ -2728,7 +2786,7 @@ where
     /// implicit owner; otherwise the caller's persisted role must be admin or
     /// owner. The role is read from the directory on EVERY call (never cached),
     /// so a demoted admin loses access immediately — see
-    /// `product_surface/CLAUDE.md` ("No caching. Caching the authz result is
+    /// this crate's `AGENTS.md` ("No caching. Caching the authz result is
     /// explicitly forbidden").
     async fn authorize_admin(
         &self,
@@ -2771,6 +2829,30 @@ where
             .ok_or_else(|| {
                 ProductSurfaceError::from_status(ProductSurfaceErrorCode::NotFound, 404, false)
             })
+    }
+
+    /// Mint the admin->target scope transition for one thread-scrape request.
+    ///
+    /// Revalidates the caller as an active admin and the target as an
+    /// existing same-tenant user (absence maps to a sanitized 404), then
+    /// returns a `ProductSurfaceCaller` scoped to the *target* user so the
+    /// downstream artifact builders read that user's threads through the
+    /// caller-owned redaction and ownership gates. Never caches the admin
+    /// decision: the revalidation runs per request.
+    async fn thread_scrape_subject(
+        &self,
+        caller: &ProductSurfaceCaller,
+        user_id: UserId,
+    ) -> Result<ProductSurfaceCaller, ProductSurfaceError> {
+        self.authorize_admin(caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        Ok(ProductSurfaceCaller::new(
+            caller.tenant_id.clone(),
+            user_id,
+            caller.agent_id.clone(),
+            caller.project_id.clone(),
+        ))
     }
 
     /// Reject a mutation that would strand the tenant without an admin.
@@ -3143,6 +3225,124 @@ where
             .require_admin_target(&caller.tenant_id, &user_id)
             .await?;
         Ok(RebornAdminUserResponse { user })
+    }
+
+    pub async fn list_admin_thread_scrape_threads(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeListRequest,
+    ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_threads_view(
+                subject,
+                ProductListThreadsRequest {
+                    limit: request.limit,
+                    cursor: request.cursor,
+                    candidate_thread_id: None,
+                    needs_approval: false,
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        // debug! + the audit target, not info!: the operator-log buffer
+        // captures INFO+ and would otherwise re-embed these audit fields
+        // (including the admin's identity) into the scraped user's own
+        // artifact export. Security-boundary diagnostics are debug-level per
+        // TracingSecurityAuditSink; a durable audit sink is composition wiring.
+        tracing::debug!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "threads_listed",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            "thread scraping"
+        );
+        result
+    }
+
+    pub async fn build_admin_thread_scrape_artifact(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeArtifactRequest,
+    ) -> Result<RebornThreadArtifact, ProductSurfaceError> {
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        // Validate the id before it can reach any audit emission: a raw path
+        // segment Display-formatted into the audit line would let a caller
+        // forge audit entries (e.g. embedded newlines). Only validated
+        // ThreadIds (newline-free by construction) are ever logged.
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id.clone())?;
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_thread_artifact(
+                subject,
+                RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        // debug!, not info!: see threads_listed — the operator-log buffer
+        // captures INFO+ and would leak these audit fields (admin identity,
+        // target thread) into the scraped user's artifact export.
+        tracing::debug!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "thread_artifact_exported",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            thread_id = %thread_id,
+            "thread scraping"
+        );
+        result
+    }
+
+    pub async fn build_admin_thread_scrape_run_artifact(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeRunArtifactRequest,
+    ) -> Result<RebornRunArtifact, ProductSurfaceError> {
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        // Validate ids before any audit emission (see thread_artifact_exported):
+        // only validated ThreadId/TurnRunId values are ever Display-formatted
+        // into the audit trail, so path-segment injection cannot forge lines.
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id.clone())?;
+        let run_id = parse_run_id_field("run_id", request.run_id.clone())?;
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_run_artifact(
+                subject,
+                RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        // debug!, not info!: see threads_listed — the operator-log buffer
+        // captures INFO+ and would leak these audit fields into the scraped
+        // user's artifact export.
+        tracing::debug!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "run_artifact_exported",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            thread_id = %thread_id,
+            run_id = %run_id,
+            "thread scraping"
+        );
+        result
     }
 
     pub async fn create_admin_user(
@@ -3842,6 +4042,47 @@ where
                 .await;
         }
         match query.view_id.as_str() {
+            id if id == INSPECTOR_SNAPSHOT_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::snapshot(self.diagnostic_store.as_ref(), caller, request)
+            }
+            id if id == INSPECTOR_PROMPT_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::prompt(self.diagnostic_store.as_ref(), caller, request)
+            }
+            id if id == INSPECTOR_TOOL_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::tool(self.diagnostic_store.as_ref(), caller, request)
+            }
+            id if id == INSPECTOR_UPDATES_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::updates(
+                    self.diagnostic_store.as_ref(),
+                    caller,
+                    request,
+                    query.cursor,
+                )
+            }
             id if id == LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -3881,14 +4122,14 @@ where
                 let response = self.build_automations_view(caller, request).await?;
                 views::view_page(response)
             }
-            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
-                views::parse_empty_view_params(query.params)?;
-                let response = self.build_outbound_preferences_view(caller).await?;
-                views::view_page(response)
-            }
             id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_outbound_delivery_targets_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == NOTIFICATION_CHANNELS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_notification_channels_view(caller).await?;
                 views::view_page(response)
             }
             id if id == TRACE_CREDITS_VIEW.id => {
@@ -3994,6 +4235,33 @@ where
                     .list_admin_user_secrets(caller, request.user_id)
                     .await?;
                 views::view_page(response)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_THREADS_VIEW.id => {
+                let mut request: RebornAdminThreadScrapeListRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self
+                    .list_admin_thread_scrape_threads(caller, request)
+                    .await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self
+                    .build_admin_thread_scrape_artifact(caller, request)
+                    .await?;
+                views::view_page(artifact)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self
+                    .build_admin_thread_scrape_run_artifact(caller, request)
+                    .await?;
+                views::view_page(artifact)
             }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
@@ -7187,6 +7455,18 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_views_require_operator_config() {
+        for view in [
+            INSPECTOR_SNAPSHOT_VIEW.id,
+            INSPECTOR_PROMPT_VIEW.id,
+            INSPECTOR_TOOL_VIEW.id,
+            INSPECTOR_UPDATES_VIEW.id,
+        ] {
+            assert!(product_view_requires_operator_config(view));
+        }
+    }
 
     /// The WebUI settings/tools request enum must use the exact wire strings
     /// the operator-config storage parser accepts and the entry writer emits.

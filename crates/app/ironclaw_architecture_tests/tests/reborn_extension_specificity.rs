@@ -576,7 +576,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     //    registration-sourced list is unpopulated exactly when it matters.
     //
     // Pinned by `inline_secret_guard_is_a_safety_denylist_not_package_inventory`
-    // in `crates/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
+    // in `crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
     (
         "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
         "github",
@@ -1205,9 +1205,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_assistant/Cargo.toml", "telegram"),
     // `conversation_binding.rs` was carved for a vendor example in
     // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
-    // `ironclaw_product_contracts::subject_route`, where a vendor name is
-    // forbidden outright, so the example was rewritten generically rather than
-    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
+    // `ironclaw_product_contracts::subject_route` (today's
+    // `shared_admission`, after the subject retirement), where a vendor name
+    // is forbidden outright, so the example was rewritten generically rather
+    // than re-carved. The entry is deleted, not repointed — the allowlist
+    // shrinks.
     ("crates/ironclaw_assistant/src/lib.rs", "telegram"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
@@ -1405,10 +1407,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // repoint: the count is unchanged and this stays a `lane-4: doc-str` row
     // awaiting the owner's reword-or-leave call, not a new debt.
     ("crates/domains/ironclaw_identity/src/projects.rs", "github"),
-    (
-        "crates/ironclaw_composition/src/automation/trigger_poller.rs",
-        "slack",
-    ),
     (
         "crates/ironclaw_assistant/src/blocked_auth_resume.rs",
         "google",
@@ -1675,7 +1673,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// list is where the trace-redaction classifier already records the identical
 /// disposition. Net vendor-name surface is unchanged: three rows moved list,
 /// zero terms appeared or vanished.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 119;
+///
+/// **119 → 118, 2026-08-06 (channel-generic trigger settlement delivery).**
+/// The trigger-poller bridge now describes its owner as the channel delivery
+/// hook instead of naming one concrete extension. The stale `slack` exception
+/// was removed after the specificity scan proved the production file no
+/// longer contains that vendor term.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 118;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

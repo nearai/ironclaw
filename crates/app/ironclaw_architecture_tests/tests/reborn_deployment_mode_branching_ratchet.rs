@@ -21,7 +21,7 @@
 //!
 //! ## What this freezes
 //!
-//! The **set** of production files under `crates/ironclaw_composition/src`
+//! The **set** of production files under `crates/app/ironclaw_composition/src`
 //! that name a `RebornCompositionProfile` variant. Set membership, not a count,
 //! per §10: a count lets a new violation silently replace a retired one; only
 //! set membership catches a *swap*. A file entering the set fails; a file

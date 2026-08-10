@@ -15,15 +15,10 @@
 //! host-execution fallback path for sandboxed command execution. See
 //! `docs/safety-and-sandbox.md`.
 //!
-//! Ships unwired. `sandbox_process`'s own `connect_docker` is still the
-//! single-attempt path the live transport uses; this module is re-exported at
-//! the crate root for its two real future consumers in
-//! `ironclaw_composition`: `sandbox_reaper_task`, which calls
-//! [`connect_docker_with_retry`] before entering the reaper loop, and
-//! `sandbox_composition`'s boot diagnostic, which calls
-//! [`sandbox_docker_readiness`]. Repointing `connect_docker` at the retrying
-//! path changes the live transport's failure timing, so it ships in the PR
-//! that carries a test for it rather than riding in on this module's arrival.
+//! [`RebornScopedSandboxCommandTransport::connect`](super::RebornScopedSandboxCommandTransport::connect)
+//! uses [`connect_docker_with_retry`] as the single canonical local Docker
+//! connection path. [`sandbox_docker_readiness`] reuses the same bounded
+//! single-attempt primitive for boot diagnostics.
 
 #[cfg(unix)]
 use std::path::PathBuf;

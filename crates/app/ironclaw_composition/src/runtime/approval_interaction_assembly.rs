@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct RegistryPersistentApprovalGranteeResolver {
     registry: Arc<ExtensionRegistry>,
-    outbound_delivery_target_set_provider: ExtensionId,
+    notification_channels_set_provider: ExtensionId,
 }
 
 impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
@@ -10,9 +10,9 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
         if let Some(descriptor) = self.registry.get_capability(capability_id) {
             return Some(Principal::Extension(descriptor.provider.clone()));
         }
-        if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+        if capability_id.as_str() == OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID {
             return Some(Principal::Extension(
-                self.outbound_delivery_target_set_provider.clone(),
+                self.notification_channels_set_provider.clone(),
             ));
         }
         None
@@ -21,13 +21,15 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
 
 impl RegistryPersistentApprovalGranteeResolver {
     pub(super) fn new(registry: Arc<ExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
-        let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+        let notification_channels_set_provider =
+            outbound_delivery_synthetic_provider().map_err(|error| {
+                RebornRuntimeError::InvalidArgument {
+                    reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+                }
             })?;
         Ok(Self {
             registry,
-            outbound_delivery_target_set_provider,
+            notification_channels_set_provider,
         })
     }
 }
@@ -60,7 +62,6 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     let capability_leases = &runtime.capability_leases;
     let extension_registry = &runtime.extension_registry;
     let workspace_mounts = &runtime.workspace_mounts;
-    let skill_mounts = &runtime.skill_mounts;
     let memory_mounts = &runtime.memory_mounts;
     let system_extensions_lifecycle_mounts = &runtime.system_extensions_lifecycle_mounts;
     let persistent_approval_policies = &runtime.persistent_approval_policies;
@@ -84,7 +85,6 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
                 builtin_capability_policy,
                 Arc::clone(extension_registry),
                 workspace_mounts.clone(),
-                skill_mounts.clone(),
                 memory_mounts.clone(),
                 system_extensions_lifecycle_mounts.clone(),
                 ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource::new(

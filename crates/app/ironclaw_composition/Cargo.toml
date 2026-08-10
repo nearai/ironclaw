@@ -63,6 +63,7 @@ ironclaw_host_ingress = { path = "../../product/ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../../extensions/ironclaw_extension_host" }
 ironclaw_extension_manager = { path = "../../extensions/ironclaw_extension_manager" }
 ironclaw_host_runtime = { path = "../../kernel/ironclaw_host_runtime" }
+ironclaw_sandbox = { path = "../../lanes/ironclaw_sandbox" }
 ironclaw_llm = { path = "../../domains/ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host" }
 ironclaw_libsql_runtime = { path = "../../substrates/ironclaw_libsql_runtime" }

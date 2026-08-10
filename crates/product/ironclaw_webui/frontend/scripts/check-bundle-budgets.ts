@@ -50,8 +50,12 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // can open in the in-app preview, including for cached messages rendered on the
 // initial route, and prevents model-authored `data-workspace-path` metadata
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
-// retains about 1.2 KB of explicit headroom without weakening the feature.
-const CHAT_GZIP_BUDGET = 217_000;
+// retained about 1.2 KB of explicit headroom without weakening the feature.
+// The shared native file-picker interaction then replaced three route-local
+// implementations. Vite correctly emits its 0.3 KB gzip helper as a shared
+// chunk because Chat, Settings, and Extensions all consume it; the measured
+// /chat closure is 217.2 KB gzip. Keep 0.3 KB of explicit headroom for it.
+const CHAT_GZIP_BUDGET = 217_500;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

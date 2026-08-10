@@ -26,7 +26,7 @@ const EMBEDDED_REBORN_SKILL_BUNDLES_JSON: &str = include_str!(concat!(
 ));
 const BUNDLED_MARKER_FILE: &str = ".ironclaw-reborn-bundled.json";
 const BUNDLED_INSTALL_LOCK_FILE: &str = ".ironclaw-reborn-bundled.lock";
-const BUNDLED_MARKER_OWNER: &str = "ironclaw_reborn_composition_bundled_skill";
+const BUNDLED_MARKER_OWNER: &str = "ironclaw_composition_bundled_skill";
 const BUNDLED_INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUNDLED_INSTALL_LOCK_RETRY: Duration = Duration::from_millis(25);
 const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
@@ -238,27 +238,60 @@ struct BundledSkillMarker {
 pub async fn ensure_bundled_reborn_skills_installed(
     standalone_storage_root: &Path,
 ) -> Result<(), RebornBuildError> {
-    let bundled_skills = embedded_reborn_skill_bundles()?;
     let filesystem = standalone_storage_filesystem(standalone_storage_root)?;
     let system_skills_root = system_skills_root_path()?;
-    create_dir_all(&filesystem, &system_skills_root).await?;
-    let install_lock = BundledSkillInstallLock::acquire(&filesystem, &system_skills_root).await?;
+    ensure_bundled_reborn_skills_installed_in(&filesystem, &system_skills_root).await
+}
 
+/// Install the bundled skills into ANY skill root, on any filesystem backend.
+///
+/// Extracted from [`ensure_bundled_reborn_skills_installed`], which builds a `DiskFilesystem` from a
+/// storage root and is only reachable from the standalone bootstrap. Hosted multi-tenant production
+/// has no tenant host disk and never ran that bootstrap, so it shipped with **zero** built-in skills:
+/// `/system/skills` is mounted there, to the database, and nothing ever wrote to it. The Skills page
+/// read an empty root and correctly said "No skills installed".
+///
+/// Every helper below already took `&dyn RootFilesystem`; only the entry point was disk-bound. The
+/// marker, install lock, and stale-skill removal are unchanged, so this stays idempotent across boots
+/// and safe when several instances share one database.
+pub async fn ensure_bundled_reborn_skills_installed_in(
+    filesystem: &dyn RootFilesystem,
+    system_skills_root: &VirtualPath,
+) -> Result<(), RebornBuildError> {
+    let bundled_skills = embedded_reborn_skill_bundles()?;
+    // Best-effort, and it must be: `RootFilesystem::create_dir_all` is documented as deprecated
+    // because "the entry plane infers directories from path prefixes" -- writing a leaf establishes
+    // its hierarchy. On the database backends it also cannot succeed for a root that is itself a
+    // mount: `create_dir_all("/system/skills")` walks up to `/system`, which is not a known virtual
+    // root, and fails with "virtual path must begin with a known root". That is exactly the
+    // production shape, where `/system/skills` is mounted straight onto the database, so insisting on
+    // it is what kept production from ever having a single built-in skill.
+    //
+    // Still attempted, because the disk backend does want the directory to exist up front.
+    if let Err(error) = create_dir_all(filesystem, system_skills_root).await {
+        tracing::debug!(
+            %error,
+            root = system_skills_root.as_str(),
+            "skill root directory not created explicitly; the backend infers directories from path \
+             prefixes"
+        );
+    }
+    let install_lock = BundledSkillInstallLock::acquire(filesystem, system_skills_root).await?;
     let result = async {
         let bundled_names = bundled_skills
             .iter()
             .map(|skill| skill.name.as_str())
             .collect::<HashSet<_>>();
-        remove_stale_managed_skills(&filesystem, &system_skills_root, &bundled_names).await?;
+        remove_stale_managed_skills(filesystem, system_skills_root, &bundled_names).await?;
 
         for skill in bundled_skills {
-            install_bundled_skill(&filesystem, &system_skills_root, skill).await?;
+            install_bundled_skill(filesystem, system_skills_root, skill).await?;
         }
         Ok(())
     }
     .await;
 
-    let release_result = install_lock.release(&filesystem).await;
+    let release_result = install_lock.release(filesystem).await;
     match (result, release_result) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),
@@ -267,9 +300,23 @@ pub async fn ensure_bundled_reborn_skills_installed(
 }
 
 pub fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, RebornBuildError> {
+    // Which bundled skills ship a `scripts/` directory, read from the embedded bundles rather than
+    // assumed. `portfolio` ships four Python scripts today, and reporting `has_scripts: false` for it
+    // would tell the Skills page it is a prose-only skill.
+    let skills_with_scripts = embedded_reborn_skill_bundles()?
+        .into_iter()
+        .filter(|bundle| {
+            bundle
+                .files
+                .iter()
+                .any(|file| file.path.starts_with("scripts/") || file.path.contains("/scripts/"))
+        })
+        .map(|bundle| bundle.name)
+        .collect::<HashSet<_>>();
     Ok(embedded_reborn_skill_summaries()?
         .into_iter()
         .map(|skill| SkillSummary {
+            has_scripts: skills_with_scripts.contains(&skill.name),
             name: skill.name,
             version: skill.version,
             description: skill.description,
@@ -695,6 +742,11 @@ mod tests {
     /// automation tools (`routine_create` / `routine_list`) misdirects every
     /// Reborn automation conversation its keywords match. The automation
     /// advisor must teach the Reborn capability surface instead.
+    ///
+    /// Delivery is explicit-prompt-step-only now (`builtin__outbound_deliver`,
+    /// per `crates/contracts/ironclaw_loop_contracts/prompts/delivery.md`): the skill must not
+    /// resurrect the retired `delivery_target_id` routing field or claim
+    /// external delivery happens automatically to a stored target.
     #[test]
     fn embedded_skills_teach_reborn_trigger_tools_not_retired_v1_routines() {
         let bundles = embedded_reborn_skill_bundles().expect("embedded bundles parse");
@@ -725,17 +777,34 @@ mod tests {
             "routine-advisor must teach delivery-target selection"
         );
         assert!(
-            skill_md.contains("delivered automatically"),
-            "routine-advisor must state host-owned result delivery"
+            // Not `contains("builtin__outbound_deliver")` alone: that's a literal
+            // prefix of `builtin__outbound_delivery_targets_list`, already proven
+            // present above, so that check alone can never fail. Assert the
+            // call-site phrase instead.
+            skill_md.contains("call `builtin__outbound_deliver`"),
+            "routine-advisor must teach the explicit outbound-delivery tool"
         );
         assert!(
-            skill_md.contains("delivery_target_id"),
-            "routine-advisor must teach per-trigger routing, not only the user-wide default"
+            skill_md.contains("delivery as an explicit prompt step"),
+            "routine-advisor must frame delivery as an explicit prompt-authored step, not a \
+             stored routing target"
         );
         assert!(
-            skill_md.contains("delivery routing, not a task step"),
-            "routine-advisor must frame send-me asks as routing so prompts never carry a \
-             send-to-requester step"
+            skill_md.contains("delivers nothing externally"),
+            "routine-advisor must state that a fire with no delivery call delivers nothing \
+             externally (successor to the dropped 'delivery routing, not a task step' pin)"
+        );
+        assert!(
+            skill_md.contains("builtin__notification_channels_set"),
+            "routine-advisor must teach the background-run notification channel tool"
+        );
+        assert!(
+            !skill_md.contains("delivery_target_id"),
+            "routine-advisor must not resurrect the retired delivery_target_id parameter"
+        );
+        assert!(
+            !skill_md.contains("delivered automatically"),
+            "routine-advisor must not claim external delivery happens automatically"
         );
     }
 

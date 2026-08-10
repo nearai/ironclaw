@@ -53,6 +53,7 @@ mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_mounts;
+mod sandbox;
 mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
@@ -126,17 +127,20 @@ pub use memory_provider_factory::{
 };
 // consumer: composition's operator LLM-key wiring test · pinned by: `composition/tests/operator_llm_key_store_wiring.rs`
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
+// consumer: `ironclaw_cli` explicit sandbox-profile boot wiring · pinned by: `ironclaw_cli` runtime build + profile tests
+pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 // consumer: `ironclaw_cli` serve + runtime, `harness/latency/runner`, root QA suites · pinned by: `composition/tests/profile_acceptance.rs`
 // (`RebornRuntimeProfileError` left: `deployment` is a `pub mod`, so it stays nameable there.)
 pub use deployment::{
     RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
+    hosted_single_tenant_volume_runtime_policy,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options, standalone_runtime_policy,
     standalone_unrestricted_runtime_policy,
 };
 // consumer: `ironclaw_assistant/tests/support/planned_agent_loop.rs`, root integration harness · pinned by: `composition/tests/budget_e2e.rs`
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::local_filesystem_build_input;
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 // consumer: `ironclaw_cli` serve wiring · pinned by: `composition/tests/webui_v2_serve.rs`
 pub use ironhub_link_serve::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
@@ -210,7 +214,7 @@ pub mod ironhub {
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
-/// Kept narrow on purpose — the composition CLAUDE.md says "Expose
+/// Kept narrow on purpose — the composition CONTRACT.md says "Expose
 /// facade-shaped handles only"; these host-api identity types are the
 /// host-identity facade.
 pub mod host_api {
@@ -227,7 +231,7 @@ pub mod host_api {
 /// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
 /// `UserDirectory` adapter) depends on the facade vocabulary, never on
 /// `ironclaw_identity` directly. The concrete filesystem-backed store
-/// stays private to this composition layer (composition CLAUDE.md: "keep
+/// stays private to this composition layer (composition CONTRACT.md: "keep
 /// lower substrate handles private").
 // consumer: `ironclaw_cli` user_directory + webui_auth (no `ironclaw_identity` dep) · pinned by: `composition/tests/production_runtime_identity.rs`
 pub use ironclaw_identity::{
@@ -425,7 +429,7 @@ const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/
 /// isolation is structural rather than a convention. `/tenant-shared`
 /// resolves to `/tenants/<tenant>/shared`; `/system/{settings,
 /// extensions, skills}` route globally as read-only. See
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::resource::ResourceScope::system`]) routes records under
@@ -615,12 +619,12 @@ pub enum RebornCompositionError {
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
     RunProfile(#[from] ironclaw_loop_contracts::RunProfileRegistryError),
-    #[error("production tenant-sandbox process backend requires a tenant sandbox process binding")]
-    MissingTenantSandboxProcessPort,
+    #[error("production user-sandbox process backend requires a user sandbox process binding")]
+    MissingUserSandboxProcessPort,
     #[error(
-        "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+        "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,

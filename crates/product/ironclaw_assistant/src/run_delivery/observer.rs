@@ -1,3 +1,4 @@
+// arch-exempt: large_file, live source-route delivery loop pending the run_delivery split, plan #6175
 //! The live source-route half of run delivery: watch the run an inbound
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
@@ -294,7 +295,7 @@ impl RunDeliveryObserver {
             match claim {
                 DeliveryClaim::AlreadyActive => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target: "ironclaw::reborn::run_delivery",
                         %run_id,
                         "skipping redundant delivery loop: a loop is already watching this run"
                     );
@@ -302,7 +303,7 @@ impl RunDeliveryObserver {
                 }
                 DeliveryClaim::AlreadyDelivered => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target: "ironclaw::reborn::run_delivery",
                         %run_id,
                         "skipping redundant delivery loop: this run's final reply was already delivered"
                     );
@@ -319,7 +320,7 @@ impl RunDeliveryObserver {
         };
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 "final reply delivery skipped because the delivery semaphore was closed"
             );
             return;
@@ -328,7 +329,7 @@ impl RunDeliveryObserver {
         drop(_delivery_guard);
         if let Err(error) = delivery_result {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 error = %error,
                 "final reply delivery failed after immediate ACK"
             );
@@ -445,7 +446,7 @@ impl RunDeliveryObserver {
                     && matches!(error.category(), TurnErrorCategory::ScopeNotFound) =>
             {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "skipping live delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
                 );
@@ -807,8 +808,16 @@ impl RunDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id =
-            prompts::run_notification_projection_id(run_id, notification.event_kind);
+        // Key gate prompts by their gate ref: one run can park on several
+        // gates in sequence, and each is its own durable delivery fact (a
+        // repeat announcement of the SAME gate still dedupes to
+        // `AlreadyDelivered`). Kinds that carry no gate ref keep the
+        // historical undiscriminated id shape.
+        let projection_id = prompts::run_notification_projection_id(
+            run_id,
+            notification.event_kind,
+            notification.gate_ref_for_routing.as_deref(),
+        );
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {
@@ -834,7 +843,6 @@ impl RunDeliveryObserver {
             .coordinator
             .deliver(
                 &outbound_policy,
-                self.services.communication_preferences.as_ref(),
                 &target_authority,
                 self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
@@ -917,7 +925,7 @@ impl RunDeliveryObserver {
             Ok(binding) => binding,
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %error,
                     "skipped rejection hint because the originating conversation was not authorized"
                 );
@@ -1114,7 +1122,7 @@ impl RunDeliveryObserver {
         };
         if already_seen {
             tracing::debug!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 "busy-thread hint suppressed: already posted for this (conversation, event_id) pair (transport retry)"
             );
             return;
@@ -1138,7 +1146,7 @@ impl RunDeliveryObserver {
             }
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %error,
                     "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
                 );
@@ -1174,7 +1182,7 @@ impl RunDeliveryObserver {
             Ok(scope) => scope,
             Err(err) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %err,
                     "busy-thread hint scope derivation failed; using generic copy"
                 );
@@ -1235,7 +1243,7 @@ impl RunDeliveryObserver {
             },
             Err(err) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %err,
                     "busy-thread hint run-state lookup failed; using generic copy"
                 );
@@ -1362,7 +1370,7 @@ fn render_command_result(
         Ok(rendered) => rendered,
         Err(error) => {
             tracing::debug!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 %error,
                 "could not render product command result payload"
             );
