@@ -11,7 +11,8 @@ import { messageBelongsToActiveRun } from "./message-types";
 import {
   inspectorDebugEnabled,
   latestInspectorRunId,
-} from "../inspector/inspector-state";
+  persistInspectorDebugPreference,
+} from "../inspector/inspector-shell";
 
 function chatSourceForTest() {
   return componentSourceForTest(
@@ -140,6 +141,7 @@ function renderChat({
     channelConnectionFromGate,
     inspectorDebugEnabled,
     latestInspectorRunId,
+    persistInspectorDebugPreference,
     messageBelongsToActiveRun,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),

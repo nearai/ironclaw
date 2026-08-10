@@ -283,6 +283,7 @@ async fn build_qa_fire_runtime(
     .expect("local-yolo runtime input")
     .with_local_runtime_confirmed_host_home_root(host_home_root);
     let input = RebornRuntimeInput::from_build_input(input)
+        .with_tool_disclosure(ironclaw_loop_host::ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: QA_TENANT.to_string(),
             agent_id: QA_AGENT.to_string(),

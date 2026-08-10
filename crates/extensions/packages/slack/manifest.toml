@@ -20,12 +20,15 @@ fields = [
   { handle = "slack_api_app_id", label = "App ID", secret = false, required = true },
   { handle = "slack_installation_id", label = "Installation ID", secret = false, required = true },
   { handle = "slack_bot_user_id", label = "Bot user ID", secret = false, required = true },
-  { handle = "slack_shared_subject_user_id", label = "Shared subject user ID (optional)", secret = false, required = false },
   { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
   { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true },
   { handle = "slack_allowed_channels", label = "Allowed channels (JSON array of Slack channel IDs)", secret = false, required = false },
-  { handle = "slack_subject_routes", label = "Subject routes (JSON object: channel ID -> subject user ID)", secret = false, required = false },
 ]
+# Retired handles (run-acts-as-invoker): `slack_shared_subject_user_id` and
+# `slack_subject_routes` are gone — a shared channel runs as whoever invoked
+# the bot, so there is no subject to configure. Saved values are inert and new
+# saves fail closed as unknown fields. Channels formerly admitted only through
+# subject routes are re-admitted by listing them in `slack_allowed_channels`.
 
 # Least-privilege scopes: the read-only tools request only read scopes; only
 # send_message requests chat:write. The slack OAuth grant is the union of

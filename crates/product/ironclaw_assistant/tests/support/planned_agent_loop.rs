@@ -196,10 +196,7 @@ async fn enable_host_runtime_auto_approve_for_harness_user(
         .expect("standalone host runtime auto-approve settings");
     let scope = ResourceScope {
         tenant_id: binding.tenant_id.clone(),
-        user_id: binding
-            .subject_user_id
-            .clone()
-            .expect("harness subject user id"),
+        user_id: binding.actor_user_id.clone(),
         agent_id: binding.agent_id.clone(),
         project_id: binding.project_id.clone(),
         mission_id: None,
@@ -225,6 +222,7 @@ pub fn capability_call_response(
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         effective_fallback_index: Some(0),
+        diagnostic_effective_model: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
@@ -242,8 +240,7 @@ impl ProductLiveAgentLoopHarness {
         let user_id = UserId::new(config.user_id).expect("valid harness user id");
         let binding = ResolvedBinding {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
-            actor_user_id: user_id.clone(),
-            subject_user_id: Some(user_id),
+            actor_user_id: user_id,
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
@@ -252,7 +249,7 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: binding.tenant_id.clone(),
             agent_id: binding.agent_id.clone().expect("harness agent id"),
             project_id: binding.project_id.clone(),
-            owner_user_id: binding.subject_user_id.clone(),
+            owner_user_id: Some(binding.actor_user_id.clone()),
             mission_id: None,
         };
         let thread_service = InMemorySessionThreadService::default();
@@ -343,10 +340,7 @@ impl ProductLiveAgentLoopHarness {
                 results: Arc::clone(&capability_results),
                 capability_id: harness_capability_id(&capability.capability_id),
                 input: capability.input,
-                user_id: binding
-                    .subject_user_id
-                    .clone()
-                    .expect("harness subject user id"),
+                user_id: binding.actor_user_id.clone(),
                 cancellation_factory: cancellation_factory.clone(),
                 model_provider: config.model_provider.clone(),
                 model_id: config.model_id.clone(),
@@ -601,7 +595,7 @@ impl ProductLiveAgentLoopHarness {
             self.binding.agent_id.clone(),
             self.binding.project_id.clone(),
             self.binding.thread_id.clone(),
-            self.binding.subject_user_id.clone(),
+            Some(self.binding.actor_user_id.clone()),
         )
     }
 }
@@ -683,6 +677,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_reasoning_deltas: Vec::new(),
             usage: None,
             effective_fallback_index: Some(request.fallback_index),
+            diagnostic_effective_model: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,

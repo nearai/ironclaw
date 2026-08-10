@@ -137,9 +137,11 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     // `ResolvedProductActorUser` contracts-legal. Its request and response
     // types moved with it and the error became `ProductOperationFailure`.
     ("ProductActorUserResolver", EXTENSION_HOST),
-    // WS2.2: inverted once `ProductOperationFailure` gave it a contracts-legal
-    // error. Its request type and route key moved with it.
-    ("ProductConversationSubjectRouteResolver", EXTENSION_HOST),
+    // WS2.2 inverted this port as `ProductConversationSubjectRouteResolver`
+    // once `ProductOperationFailure` gave it a contracts-legal error; the
+    // shared-route subject retirement (run-acts-as-invoker) reshaped it to
+    // admission-only — same declaration home, same implementor.
+    ("SharedConversationAdmission", EXTENSION_HOST),
     // WS2.4: the admin-configuration view provider is a credential/admin view.
     ("RebornViewProvider", EXTENSION_MANAGER),
 ];

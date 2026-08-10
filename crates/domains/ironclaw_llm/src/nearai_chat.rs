@@ -812,7 +812,9 @@ impl LlmProvider for NearAiChatProvider {
             tools: None,
             tool_choice: None,
             stream: true,
-            stream_options: None,
+            stream_options: Some(ChatCompletionStreamOptions {
+                include_usage: true,
+            }),
         };
 
         let response = self.send_streaming_request(&request, sink).await?;
@@ -984,7 +986,9 @@ impl LlmProvider for NearAiChatProvider {
             req.tool_choice,
         );
         request.stream = true;
-        request.stream_options = None;
+        request.stream_options = Some(ChatCompletionStreamOptions {
+            include_usage: true,
+        });
 
         let response = self.send_streaming_request(&request, sink).await?;
         let provider_reasoning =
@@ -1919,7 +1923,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
-            let (mut socket, _) = accept_chat_request(&listener).await;
+            let (mut socket, request) = accept_chat_request(&listener).await;
+            assert_eq!(request["stream"], true);
+            assert_eq!(request["stream_options"]["include_usage"], true);
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
@@ -1974,6 +1980,24 @@ data: [DONE]
     }
 
     #[tokio::test]
+    async fn complete_with_tools_streaming_requests_and_preserves_usage() {
+        let response = complete_search_tool_streaming_from_sse(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"near ai\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":13}}}
+
+data: [DONE]
+
+"#,
+        )
+        .await;
+
+        assert_eq!(response.input_tokens, 21);
+        assert_eq!(response.output_tokens, 8);
+        assert_eq!(response.cache_read_input_tokens, 13);
+    }
+
+    #[tokio::test]
     async fn complete_streaming_emits_delta_before_response_completes() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -1996,10 +2020,7 @@ data: [DONE]
                 let request_json: serde_json::Value =
                     serde_json::from_str(&body).expect("request json");
                 assert_eq!(request_json["stream"], true);
-                assert!(
-                    request_json.get("stream_options").is_none(),
-                    "NEAR streaming requests should use the documented stream=true shape"
-                );
+                assert_eq!(request_json["stream_options"]["include_usage"], true);
 
                 socket
                     .write_all(

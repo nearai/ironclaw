@@ -6,8 +6,9 @@ use crate::{
 use ironclaw_host_api::Timestamp;
 
 use super::{
-    TriggerAcceptedFireSettlement, TriggerPollerFailureReason, TriggerPollerFireOutcome,
-    TriggerPollerWorker, TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
+    TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerPollerFailureReason,
+    TriggerPollerFireOutcome, TriggerPollerWorker, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerSubmitRequest,
     failure::{SubmitFailureKind, classify_failure, classify_submit_failure},
 };
 
@@ -220,6 +221,17 @@ impl TriggerPollerWorker {
         disposition: FailedFireDisposition,
         reason: TriggerPollerFailureReason,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
+        let failed_fire = crate::TriggerFire {
+            identity: crate::TriggerFireIdentity::new(
+                record.tenant_id.clone(),
+                record.trigger_id,
+                fire_slot,
+            ),
+            creator_user_id: record.creator_user_id.clone(),
+            agent_id: record.agent_id.clone(),
+            project_id: record.project_id.clone(),
+            prompt: record.prompt.clone(),
+        };
         match disposition {
             FailedFireDisposition::Retryable => {
                 self.deps
@@ -233,7 +245,8 @@ impl TriggerPollerWorker {
                 Ok(TriggerPollerFireOutcome::RetryableFailed { reason })
             }
             FailedFireDisposition::RecurringPermanentReschedule(next_run_at) => {
-                self.deps
+                let updated = self
+                    .deps
                     .repository
                     .mark_fire_permanently_failed(FirePermanentFailedRequest {
                         tenant_id: record.tenant_id,
@@ -242,10 +255,20 @@ impl TriggerPollerWorker {
                         next_run_at,
                     })
                     .await?;
+                if updated.is_some() {
+                    self.deps
+                        .fire_settlement_observer
+                        .on_failed_fire_settled(TriggerFailedFireSettlement {
+                            fire: failed_fire,
+                            reason,
+                        })
+                        .await;
+                }
                 Ok(TriggerPollerFireOutcome::PermanentFailed { reason })
             }
             FailedFireDisposition::OncePermanentComplete => {
-                self.deps
+                let updated = self
+                    .deps
                     .repository
                     .mark_fire_terminally_failed(FireTerminalFailedRequest {
                         tenant_id: record.tenant_id,
@@ -253,6 +276,15 @@ impl TriggerPollerWorker {
                         fire_slot,
                     })
                     .await?;
+                if updated.is_some() {
+                    self.deps
+                        .fire_settlement_observer
+                        .on_failed_fire_settled(TriggerFailedFireSettlement {
+                            fire: failed_fire,
+                            reason,
+                        })
+                        .await;
+                }
                 Ok(TriggerPollerFireOutcome::OncePermanentFailed { reason })
             }
         }

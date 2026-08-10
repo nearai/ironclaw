@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_extension_contracts::recipe::IngressVerificationRecipe;
@@ -49,9 +50,12 @@ use ironclaw_product_contracts::channel_workflow::{
     ChannelRunDeliveryObserver, ChannelWorkflowFactory, ChannelWorkflowRequest,
     ChannelWorkflowStorageRoots,
 };
-use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductInboundEnvelope};
-use ironclaw_product_contracts::subject_route::ProductConversationSubjectRouteResolver;
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+};
+use ironclaw_product_contracts::shared_admission::SharedConversationAdmission;
 
+use crate::channel_dm_targets::{FilesystemChannelDmTargetStore, dm_target_payload};
 use crate::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -74,6 +78,41 @@ fn admin_configuration_fields(
             secret: field.secret,
         })
         .collect()
+}
+
+/// The manifest-driven default admission resolver, or `None` (= reject every
+/// shared conversation). `None` when the manifest declares no
+/// `*_allowed_channels` handle — and unconditionally when the channel's actor
+/// identity is not per-user: an operator-resolver channel that admitted a
+/// group would run every participant as the operator, the exact exposure the
+/// run-acts-as-invoker rule removed.
+fn default_shared_admission(
+    actor_identity_is_per_user: bool,
+    source: &HostedChannelSource,
+    adapter_id: &ProductAdapterId,
+    installation_id: &AdapterInstallationId,
+    channel_config: &Arc<ChannelConfigService>,
+) -> Result<Option<Arc<dyn SharedConversationAdmission>>, String> {
+    if !actor_identity_is_per_user {
+        return Ok(None);
+    }
+    let fields = admin_configuration_fields(source.resolved());
+    let Some(handle) =
+        ironclaw_extension_host::channel_shared_admission::shared_channel_admission_handle(&fields)
+    else {
+        return Ok(None);
+    };
+    let extension_id = ExtensionId::new(source.extension_id())
+        .map_err(|error| format!("invalid extension id: {error}"))?;
+    Ok(Some(Arc::new(
+        ironclaw_extension_host::channel_shared_admission::ChannelConfigSharedAdmission::new(
+            adapter_id.clone(),
+            installation_id.clone(),
+            extension_id,
+            handle,
+            Arc::clone(channel_config),
+        ),
+    )))
 }
 
 /// Derive the trusted-evidence shape the generic inbound sink mints from the
@@ -122,11 +161,11 @@ pub struct ChannelExtras {
     /// The vendor half of the triggered-delivery driver; consumed by the
     /// lane that builds the triggered hook.
     pub preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
-    /// Optional shared-channel subject-route resolver override. Absent, the
+    /// Optional shared-conversation admission override. Absent, the
     /// assembly installs the DEFAULT generic resolver over the extension's
-    /// `*_allowed_channels` / `*_subject_routes` `[channel.config]` values
-    /// when the manifest declares either handle.
-    pub subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    /// `*_allowed_channels` `[channel.config]` value when the manifest
+    /// declares the handle.
+    pub shared_admission: Option<Arc<dyn SharedConversationAdmission>>,
     /// Legacy storage-root override for the per-extension workflow state.
     pub storage_roots: Option<ChannelWorkflowStorageRoots>,
 }
@@ -135,13 +174,14 @@ pub struct ChannelExtras {
 #[derive(Clone, Default)]
 struct StoredChannelExtras {
     preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
-    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    shared_admission: Option<Arc<dyn SharedConversationAdmission>>,
     storage_roots: Option<ChannelWorkflowStorageRoots>,
 }
 
 /// The deployment identity every per-extension workflow binds under: the
-/// composed runtime's tenant/agent/project plus the operator user inbound
-/// conversations default their subject to.
+/// composed runtime's tenant/agent/project plus the operator user that
+/// host-initiated work is attributed to. Inbound conversations run as their
+/// invoking actor, never as this operator identity.
 #[derive(Clone)]
 pub struct ChannelHostIdentity {
     pub tenant_id: TenantId,
@@ -239,6 +279,11 @@ pub struct GenericChannelHostDeps {
     /// operator-actor policy.
     pub identity_lookup:
         Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
+    /// Durable owner-scoped catalog of proven personal channel destinations.
+    /// A successfully admitted direct inbound message backfills this catalog,
+    /// covering identities that were bound before DM-target provisioning was
+    /// introduced or whose original bind callback did not carry a DM route.
+    pub dm_targets: Option<Arc<FilesystemChannelDmTargetStore>>,
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
     /// for extensions that pair without an OAuth vendor.
@@ -373,7 +418,7 @@ impl GenericChannelHostAssembly {
     pub async fn register_extras(&self, extension_id: &ExtensionId, extras: ChannelExtras) {
         let ChannelExtras {
             preference_target_codec,
-            subject_route_resolver,
+            shared_admission,
             storage_roots,
         } = extras;
         if let Ok(mut stored) = self.extras.lock() {
@@ -381,7 +426,7 @@ impl GenericChannelHostAssembly {
                 extension_id.as_str().to_owned(),
                 StoredChannelExtras {
                     preference_target_codec,
-                    subject_route_resolver,
+                    shared_admission,
                     storage_roots,
                 },
             );
@@ -603,6 +648,11 @@ impl GenericChannelHostAssembly {
 
         let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
+        let actor_user_resolver = self.actor_user_resolver(source);
+        // Per-user identity iff a provider lookup exists (OAuth vendor or
+        // pairing strategy); the `None` arm is the operator resolver, which
+        // must never be combined with shared-conversation admission.
+        let actor_identity_is_per_user = self.provider_identity_lookup(source).1.is_some();
         let graph = self
             .deps
             .channel_workflow
@@ -611,14 +661,28 @@ impl GenericChannelHostAssembly {
                 extras,
                 adapter_id.clone(),
                 command_roles,
+                Arc::clone(&actor_user_resolver),
+                actor_identity_is_per_user,
             )?)
             .await?;
-        let observer = graph.observer.map(|observer| {
-            Arc::new(RunDeliveryPostAdmissionObserver::new(
-                observer,
+        let dm_target_backfill =
+            self.deps
+                .dm_targets
+                .as_ref()
+                .map(|store| DirectInboundDmTargetBackfill {
+                    extension_id: source.extension_id().to_string(),
+                    actor_user_resolver,
+                    store: Arc::clone(store),
+                });
+        let observer = if graph.observer.is_some() || dm_target_backfill.is_some() {
+            Some(Arc::new(RunDeliveryPostAdmissionObserver::new(
+                graph.observer,
                 self.connection_notices(source),
-            ))
-        });
+                dm_target_backfill,
+            )))
+        } else {
+            None
+        };
 
         let pairing = self
             .deps
@@ -697,20 +761,46 @@ impl GenericChannelHostAssembly {
         }
     }
 
+    /// Build the one actor resolver shared by conversation admission and the
+    /// post-admission DM-target backfill. Sharing the instance is important:
+    /// the admission path has already resolved and freshness-checked the
+    /// actor, so the observer can reuse that positive resolution without a
+    /// third identity-store read after the acknowledgement is committed.
+    fn actor_user_resolver(
+        &self,
+        source: &HostedChannelSource,
+    ) -> Arc<dyn ProductActorUserResolver> {
+        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        match provider_lookup {
+            Some(lookup) => Arc::new(
+                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
+                    provider,
+                    source.extension_id(),
+                    lookup,
+                ),
+            ),
+            None => Arc::new(OperatorActorUserResolver {
+                operator_user_id: self.deps.identity.operator_user_id.clone(),
+            }),
+        }
+    }
+
     /// The per-extension inputs the product-side workflow factory needs.
     ///
     /// Everything here is host policy: where the durable state lives, which
     /// identity policy resolves a verified actor, whether shared conversations
-    /// route to a subject, which commands the manifest declares, and how the
-    /// channel words its connect notices. What product does with them — the
-    /// installation scope, the binding service, the surface, the observer — is
-    /// behind the port.
+    /// are admitted (the `*_allowed_channels` connected-channel list), which
+    /// commands the manifest declares, and how the channel words its connect
+    /// notices. What product does with them — the installation scope, the
+    /// binding service, the surface, the observer — is behind the port.
     fn workflow_request(
         &self,
         source: &HostedChannelSource,
         extras: &StoredChannelExtras,
         adapter_id: ProductAdapterId,
         command_roles: Arc<dyn ironclaw_product_contracts::command::CommandActorRoleResolver>,
+        actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+        actor_identity_is_per_user: bool,
     ) -> Result<ChannelWorkflowRequest, String> {
         let identity = &self.deps.identity;
         let storage_roots = match &extras.storage_roots {
@@ -721,55 +811,26 @@ impl GenericChannelHostAssembly {
         };
         let installation_id = AdapterInstallationId::new(source.installation_id())
             .map_err(|error| format!("invalid installation id: {error}"))?;
-        // Auth-declaring channel extensions resolve verified inbound actors
-        // through the generic installation-scoped identity bindings written
-        // by the post-OAuth channel-identity hook; unbound actors fall to
-        // the pairing service (fail-closed pairing flow). Extensions without
-        // an auth vendor keep the operator-actor policy: the ingress
-        // verification secret gates who reaches the installation and no
-        // binding can exist to resolve.
-        let (provider, provider_lookup) = self.provider_identity_lookup(source);
-        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match provider_lookup {
-            Some(lookup) => Arc::new(
-                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    provider,
-                    source.extension_id(),
-                    lookup,
-                ),
-            ),
-            None => Arc::new(OperatorActorUserResolver {
-                operator_user_id: identity.operator_user_id.clone(),
-            }),
-        };
-        // Generic shared-channel admission (§5.3): with a subject-route
-        // resolver installed, unrouted shared conversations fail closed —
-        // an extras override wins; otherwise a channel declaring the
-        // `*_allowed_channels` / `*_subject_routes` config convention gets
-        // the default resolver over its `[channel.config]` values.
-        let subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>> =
-            match &extras.subject_route_resolver {
+        // Generic shared-conversation admission (§5.3): fail-closed either
+        // way — an extras override wins; otherwise a channel declaring the
+        // `*_allowed_channels` config convention gets the default resolver
+        // over its `[channel.config]` value, and a channel declaring no
+        // admission handle gets `None`, which rejects every shared
+        // conversation. A channel WITHOUT per-user actor identity (no OAuth
+        // vendor, no pairing strategy) never admits shared conversations at
+        // all, allowlisted or not: every participant there resolves to the
+        // operator, which is exactly the exposure run-acts-as-invoker
+        // removed — closed structurally rather than by manifest inventory.
+        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> =
+            match &extras.shared_admission {
                 Some(resolver) => Some(Arc::clone(resolver)),
-                None => {
-                    let fields = admin_configuration_fields(source.resolved());
-                    let handles =
-                        ironclaw_extension_host::shared_channel_admission_handles(&fields);
-                    if handles.declared() {
-                        let extension_id = ExtensionId::new(source.extension_id())
-                            .map_err(|error| format!("invalid extension id: {error}"))?;
-                        Some(Arc::new(
-                            ironclaw_extension_host::ChannelConfigSubjectRouteResolver::new(
-                                adapter_id.clone(),
-                                installation_id.clone(),
-                                identity.tenant_id.clone(),
-                                extension_id,
-                                handles,
-                                Arc::clone(&self.deps.channel_config),
-                            ),
-                        ))
-                    } else {
-                        None
-                    }
-                }
+                None => default_shared_admission(
+                    actor_identity_is_per_user,
+                    source,
+                    &adapter_id,
+                    &installation_id,
+                    &self.deps.channel_config,
+                )?,
             };
         let channel = source.resolved().channel.as_ref();
         Ok(ChannelWorkflowRequest {
@@ -777,7 +838,7 @@ impl GenericChannelHostAssembly {
             installation_id,
             storage_roots,
             actor_user_resolver,
-            subject_route_resolver,
+            shared_admission,
             commands: channel
                 .map(|channel| channel.commands.clone())
                 .unwrap_or_default(),
@@ -947,26 +1008,107 @@ impl IngressConfigurationPort for ChannelConfigIngressConfiguration {
 /// Adapts the generic run-delivery observer onto the generic sink's
 /// post-admission observer seam.
 pub struct RunDeliveryPostAdmissionObserver {
-    observer: Arc<dyn ChannelRunDeliveryObserver>,
+    observer: Option<Arc<dyn ChannelRunDeliveryObserver>>,
     connection_notices: ChannelConnectionNoticePolicy,
+    dm_target_backfill: Option<DirectInboundDmTargetBackfill>,
+}
+
+struct DirectInboundDmTargetBackfill {
+    extension_id: String,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    store: Arc<FilesystemChannelDmTargetStore>,
 }
 
 impl RunDeliveryPostAdmissionObserver {
     fn new(
-        observer: Arc<dyn ChannelRunDeliveryObserver>,
+        observer: Option<Arc<dyn ChannelRunDeliveryObserver>>,
         connection_notices: ChannelConnectionNoticePolicy,
+        dm_target_backfill: Option<DirectInboundDmTargetBackfill>,
     ) -> Self {
         Self {
             observer,
             connection_notices,
+            dm_target_backfill,
         }
+    }
+
+    async fn backfill_direct_dm_target(
+        backfill: &DirectInboundDmTargetBackfill,
+        envelope: &ProductInboundEnvelope,
+    ) {
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return;
+        };
+        if payload.trigger != ProductTriggerReason::DirectChat {
+            return;
+        }
+
+        let request = ProductActorUserResolutionRequest::new(
+            envelope.adapter_id().clone(),
+            envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
+        );
+        let user_id = match backfill
+            .actor_user_resolver
+            .resolve_product_actor_user(request)
+            .await
+        {
+            Ok(Some(actor)) => actor.user_id,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_host",
+                    extension_id = %backfill.extension_id,
+                    %error,
+                    "direct channel target backfill actor resolution failed"
+                );
+                return;
+            }
+        };
+        let conversation = envelope.external_conversation_ref();
+        if let Err(error) = backfill
+            .store
+            .upsert(
+                &backfill.extension_id,
+                &user_id,
+                envelope.external_actor_ref().id().to_string(),
+                dm_target_payload(conversation.space_id(), conversation.conversation_id()),
+            )
+            .await
+        {
+            tracing::warn!(
+                target: "ironclaw::reborn::channel_host",
+                extension_id = %backfill.extension_id,
+                %error,
+                "direct channel target backfill failed"
+            );
+        }
+    }
+}
+
+fn ack_confirms_direct_admission(ack: &ProductInboundAck) -> bool {
+    match ack {
+        ProductInboundAck::Accepted { .. }
+        | ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::RejectedBusy { .. } => true,
+        ProductInboundAck::Duplicate { prior } => ack_confirms_direct_admission(prior),
+        ProductInboundAck::Rejected(_)
+        | ProductInboundAck::CommandResult { .. }
+        | ProductInboundAck::NoOp => false,
     }
 }
 
 #[async_trait]
 impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.observer.observe_ack(envelope, ack).await;
+        if ack_confirms_direct_admission(&ack)
+            && let Some(backfill) = &self.dm_target_backfill
+        {
+            Self::backfill_direct_dm_target(backfill, &envelope).await;
+        }
+        if let Some(observer) = &self.observer {
+            observer.observe_ack(envelope, ack).await;
+        }
     }
 
     async fn observe_error(
@@ -974,7 +1116,9 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
         envelope: ProductInboundEnvelope,
         error: ironclaw_host_api::product_adapter_error::ProductAdapterError,
     ) {
-        self.observer.observe_error(envelope, error).await;
+        if let Some(observer) = &self.observer {
+            observer.observe_error(envelope, error).await;
+        }
     }
 }
 
@@ -998,9 +1142,11 @@ impl ChannelPairingOutcomeObserver for RunDeliveryPostAdmissionObserver {
                 &self.connection_notices.expired_or_unknown
             }
         };
-        self.observer
-            .post_connection_status_notice(&conversation, &event_id, text)
-            .await;
+        if let Some(observer) = &self.observer {
+            observer
+                .post_connection_status_notice(&conversation, &event_id, text)
+                .await;
+        }
     }
 }
 

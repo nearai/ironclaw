@@ -56,6 +56,7 @@ use ironclaw_host_api::{
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
+    process::RuntimeProcessError,
     resource::ResourceScope,
     scope::Principal,
 };
@@ -117,7 +118,7 @@ use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
@@ -134,13 +135,13 @@ use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
-use crate::outbound::{
-    MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-    OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
-    outbound_delivery_synthetic_provider,
-};
+use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
+use ironclaw_assistant::{
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID, RebornOutboundPreferencesService,
+    outbound_delivery_synthetic_provider,
+};
 use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
 pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
@@ -177,9 +178,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            destination: ironclaw_outbound::RunFinalReplyDestination::External {
-                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            },
+            destination: self.reply_target_binding_ref.clone(),
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
@@ -517,6 +516,8 @@ pub enum RebornRuntimeError {
     SkillExecutionUnavailable,
     #[error("skill execution failed: {0}")]
     SkillExecution(String),
+    #[error("user sandbox shutdown failed: {0}")]
+    UserSandboxShutdown(#[source] RuntimeProcessError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -546,6 +547,7 @@ pub(crate) struct OutboundTestStores {
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
+    user_sandbox_process_port: Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
@@ -574,8 +576,8 @@ pub struct RebornRuntime {
         dead_code,
         reason = "held for test-support rebinding after runtime construction"
     )]
-    pub(crate) trigger_source_reply_target:
-        Arc<std::sync::RwLock<Arc<dyn crate::factory::TriggerSourceReplyTarget>>>,
+    pub(crate) trigger_source_turn_state:
+        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -754,7 +756,6 @@ pub(crate) struct InteractionServiceTestParts {
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
     workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
-    skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -1044,12 +1045,14 @@ impl RebornRuntime {
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
         Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+        Arc<dyn OutboundDeliveryTargetProvider>,
     )> {
         Some((
             Arc::clone(&self.outbound_state.state),
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
             Arc::clone(&self.outbound_state.reply_attachment_intents),
+            self.outbound_delivery_target_provider()?,
         ))
     }
 
@@ -1128,8 +1131,11 @@ impl RebornRuntime {
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
+            outbound_delivery_targets: Arc::clone(self.outbound_delivery_target_registry.as_ref()?)
+                as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
             identity_lookup: Arc::clone(&self.channel_identity_store)
                 as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            dm_targets: Arc::clone(&self.channel_dm_target_store),
             deployment_channels: Arc::clone(&self.deployment_channels),
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
@@ -2418,6 +2424,12 @@ impl RebornRuntime {
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
+        if let Some(process_port) = self.user_sandbox_process_port {
+            process_port
+                .shutdown()
+                .await
+                .map_err(RebornRuntimeError::UserSandboxShutdown)?;
+        }
         Ok(())
     }
 
@@ -3347,6 +3359,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         durable_milestone_sink,
         live_projection_publisher,
     );
+    let diagnostic_store_impl =
+        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
+    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
+        diagnostic_store_impl.clone();
     let (
         capability_factory,
         capability_input_resolver,
@@ -3356,12 +3372,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
         builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            tracing::error!(%error, "capability policy is invalid");
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("capability policy is invalid: {error}"),
-            }
-        })?);
+        let builtin_capability_policy = Arc::clone(&services.capability_policy);
+        let tool_diagnostic_sink = Arc::new(
+            ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
+                diagnostic_store_impl.clone()
+                    as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
+                ironclaw_loop_host::DEFAULT_TOOL_DIAGNOSTIC_QUEUE_CAPACITY,
+            )
+            .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
+        )
+            as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3372,6 +3392,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
+            Some(tool_diagnostic_sink),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -3632,10 +3653,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
-    let diagnostic_store_impl =
-        Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
-    let diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort> =
-        diagnostic_store_impl.clone();
     let prompt_diagnostic_sink = Arc::new(
         ironclaw_loop_host::BufferedPromptDiagnosticSink::new(
             diagnostic_store_impl as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>,
@@ -3916,6 +3933,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map(|started| Arc::clone(&started.workflow_factory));
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
+    // Forward-migrate pre-removal routines that still carry a stored delivery
+    // target: rewrite the route into the routine's prompt (the only place a
+    // fire can still act on it) and clear the field. Run immediately before an
+    // enabled poller starts. Target metadata enriches the prompt when its
+    // registry is available; the durable target id remains actionable without
+    // it. Idempotent, so every later enabled boot is a no-op.
+    if trigger_poller.enabled {
+        crate::automation::trigger_delivery_migration::migrate_trigger_delivery_targets_at_boot(
+            trigger_repository.as_ref(),
+            outbound_delivery_target_registry.as_deref(),
+            &thread_scope.tenant_id,
+        )
+        .await
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("stored trigger delivery-target migration failed: {error}"),
+        })?;
+    }
+
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
@@ -4053,31 +4088,23 @@ pub(crate) async fn build_runtime_with_resource_governor(
         local_runtime,
     ) {
         let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-        let outbound_preferences = &local_runtime.outbound_preferences;
-        // One driver per codec-bearing channel binding, built by the SAME
-        // product-side workflow factory the channel host graphs are built by
-        // (§12.11 D-A) and from the SAME binding list `register_extras` feeds
-        // the assembly, so the hook's routing set and its driver set cannot
-        // disagree. Construction is product's; routing stays in the hook.
-        let drivers: Vec<(String, Arc<dyn ironclaw_outbound::TriggeredRunDelivery>)> = services
-            .channel_extension_bindings
-            .iter()
-            .filter_map(|binding| {
-                let codec = binding.preference_target_codec.clone()?;
-                workflow_factory
-                    .triggered_run_delivery(binding.extension_id.as_str(), codec)
-                    .map(|driver| (binding.extension_id.as_str().to_owned(), driver))
-            })
-            .collect();
+        // ONE background-run notifier for every channel extension, built by
+        // the SAME product-side workflow factory the channel host graphs are
+        // built by (§12.11 D-A). It decodes each stored notification target
+        // through the assembly's LIVE codec view, so a channel activated
+        // after boot still decodes its own targets.
+        let notifier = workflow_factory.background_run_notifier(Arc::new(
+            ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
+                Arc::clone(assembly),
+            ),
+        ));
+
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
-                Arc::clone(assembly),
+                notifier,
                 Arc::clone(triggered_run_delivery),
-                Arc::clone(outbound_preferences),
-                Arc::clone(&local_runtime.outbound_delivery_targets),
-                drivers,
             ),
         );
         if slot.set(generic_trigger_hook).is_err() {
@@ -4096,7 +4123,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             capability_leases: Arc::clone(&local_runtime.capability_leases),
             extension_registry: Arc::clone(&local_runtime.extension_registry),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
-            skill_mounts: local_runtime.skill_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
@@ -4217,6 +4243,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
+        user_sandbox_process_port: services.user_sandbox_process_port.clone(),
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
         skill_management: services.skill_management.clone(),
@@ -4230,7 +4257,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
         #[cfg(any(test, feature = "test-support"))]
-        trigger_source_reply_target: Arc::clone(&services.trigger_source_reply_target),
+        trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),
@@ -4499,22 +4526,32 @@ fn skill_activation_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
     activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
+    process_execution_available: bool,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
-        // `ExplicitAndCriteria` (the upstream default) lets a learned skill
-        // auto-activate when a later request matches its keywords/patterns —
-        // not only when the user types `$name`/`/name`. This is what closes
-        // the learn→reuse loop: a skill distilled from one task is applied
-        // automatically on the next similar task. Explicit mentions still
-        // force-activate; criteria selection is additive and bounded by
-        // `max_active_skills` / `max_context_tokens`. Under the default
-        // `Listing` injection mode a criteria match ranks the skill in the
-        // one-line listing instead of injecting its body.
-        selection_mode: ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria,
+        // `selection_mode` is deliberately NOT set here: it inherits
+        // `SkillActivationSelectorConfig`'s default, which this PR makes
+        // `ExplicitOnly`.
+        //
+        // The model decides which skill applies. It sees every installed skill in
+        // the one-line listing and calls `skill_activate` for the one it wants;
+        // the host does not keyword-match on its behalf. A scoring function
+        // guessing from the user's wording is strictly worse at this than the
+        // model reading the same listing, and a wrong guess spends the skill
+        // budget on the wrong body.
+        //
+        // Pinning `ExplicitAndCriteria` here previously made that default
+        // unreachable on the Reborn path — the value in `activation.rs` was dead
+        // code as far as any real user was concerned, so changing it looked like a
+        // behaviour change and was not one. `reborn_skill_selection_is_model_decided`
+        // fails if it is re-pinned. Criteria selection is still available to
+        // callers that opt in via `set_selection_mode`, and explicit `$name` /
+        // `/name` mentions force-activate under either mode.
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         activation_strategy,
+        process_execution_available,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4622,16 +4659,55 @@ fn filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    // Whether this deployment can execute a process at all. Under `ProcessBackendKind::None` (hosted
+    // multi-tenant + secure default) a skill that says "run scripts/foo.py" is instructing the model to
+    // do something impossible, and it does not degrade gracefully -- see
+    // `SkillActivationSelectorConfig::process_execution_available`.
+    //
+    // MULTI-TENANT ENABLEMENT: this is one of the two places that change when the tenant sandbox
+    // lands. Once `HostedMultiTenant` + `SecureDefault` resolves to `ProcessBackendKind::TenantSandbox`
+    // instead of `None`, this returns true on its own and skills stop being told they cannot run
+    // anything. See docs/skills/multi_tenant_enablement.md.
+    //
+    // `unwrap_or(true)` is not a fail-open: `build_runtime` rejects a services input with no
+    // resolved policy long before this, so only local test harnesses (which do have a shell) can
+    // observe the fallback.
+    let process_execution_available = runtime
+        .runtime_policy
+        .as_ref()
+        .map(|policy| {
+            policy.process_backend != ironclaw_host_api::runtime_policy::ProcessBackendKind::None
+        })
+        .unwrap_or(true);
     let selector_config = skill_activation_selector_config(
         regex_skill_activation_enabled,
         skill_injection_mode_env()?,
         skill_activation_env()?,
+        process_execution_available,
     );
-    let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        selector_config,
-        Arc::clone(workspace_filesystem),
-        Arc::clone(skill_auto_activate_learned),
+    // Staging needs a READ-WRITE workspace handle: `workspace_filesystem` beside it is deliberately
+    // read-only (it backs setup-marker reads) and fails closed on write. Same recipe the inbound
+    // attachment lander uses, and the same reason -- under a per-caller policy it addresses the
+    // caller's own subtree rather than the shared root.
+    let staging_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &runtime.extension_filesystem,
+        &runtime.workspace_mounts,
     );
+    let selectable_skills = match staging_filesystem {
+        Some(staging_filesystem) => extension.selectable_skill_runtime_with_staging(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            staging_filesystem,
+            Arc::clone(skill_auto_activate_learned),
+        ),
+        // No writable workspace (hosted multi-tenant today) -- skills still activate, and a body that
+        // promises execution gets the "cannot execute processes" note instead of a staged path.
+        None => extension.selectable_skill_runtime_with_setup_markers(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            Arc::clone(skill_auto_activate_learned),
+        ),
+    };
     let bundle_source = extension.bundle_source();
     Ok(ComposedSkillContextSource {
         source: selectable_skills.host_skill_context_source(),

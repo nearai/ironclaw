@@ -405,13 +405,17 @@ async def test_inspector_debug_activation_and_responsive_shell(
         )
         await expect(panel).to_be_visible(timeout=15000)
         await expect(panel).to_have_attribute("data-layout", "sidebar")
+        inspector_toggle = page.locator(SEL_V2["inspector_open"])
+        await expect(inspector_toggle).to_be_visible()
+        await expect(inspector_toggle).to_have_attribute("aria-pressed", "true")
 
         stats_tab = page.locator(SEL_V2["inspector_tab_stats"])
         await stats_tab.click()
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
         await page.locator(SEL_V2["inspector_close"]).click()
         await expect(panel).to_have_count(0)
-        await page.locator(SEL_V2["inspector_open"]).click()
+        await expect(inspector_toggle).to_have_attribute("aria-pressed", "false")
+        await inspector_toggle.click()
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
 
         await page.set_viewport_size({"width": 900, "height": 900})
@@ -426,18 +430,23 @@ async def test_inspector_debug_activation_and_responsive_shell(
         await expect(panel).to_be_visible(timeout=15000)
         await expect(stats_tab).to_have_attribute("aria-selected", "true")
         await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(panel).to_be_visible(timeout=15000)
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=false&token={REBORN_V2_AUTH_TOKEN}"
+        )
         await expect(panel).to_have_count(0)
     finally:
         await context.close()
 
 
-async def test_inspector_prompt_renders_host_resolved_diagnostics(
+async def test_inspector_prompt_and_stats_render_host_diagnostics(
     reborn_v2_server,
     reborn_v2_browser,
 ):
-    """A real model turn reaches the bounded operator-only Prompt tab."""
+    """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
     marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
-    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
         submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
         assistant = await _wait_for_assistant_message(
@@ -473,6 +482,249 @@ async def test_inspector_prompt_renders_host_resolved_diagnostics(
                 "Reconstructed content reflects the latest host prompt boundary",
             )
         ).to_have_count(1)
+
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        await expect(activity).to_be_visible(timeout=30000)
+        await expect(
+            activity.locator("[data-activity-kind='turn_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='prompt_prepared']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
+        activity_kinds = await activity.locator("[data-activity-kind]").evaluate_all(
+            "entries => entries.map(entry => entry.dataset.activityKind)"
+        )
+        assert activity_kinds.index("turn_started") < activity_kinds.index(
+            "prompt_prepared"
+        )
+        assert activity_kinds.index("model_call_started") < activity_kinds.index(
+            "model_call_completed"
+        )
+        await expect(activity.get_by_text("Turn 1 of 1", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        stats = page.locator(SEL_V2["inspector_stats_content"])
+        await expect(stats).to_be_visible()
+        model_calls = (
+            stats.get_by_text("Model calls", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
+        )
+        await expect(model_calls).to_have_text("1")
+        input_tokens = (
+            stats.get_by_text("Input tokens", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
+        )
+        await expect(input_tokens).to_have_text("10")
+        await expect(stats.get_by_text("Output tokens", exact=True).locator("..")).not_to_contain_text(
+            "Unavailable"
+        )
+        await expect(stats.get_by_text("Tool calls", exact=True).locator("..")).to_contain_text(
+            "0"
+        )
+        await expect(
+            stats.get_by_text("Successful tool calls", exact=True).locator("..")
+        ).to_contain_text("0")
+        await expect(
+            stats.get_by_text("Failed tool calls", exact=True).locator("..")
+        ).to_contain_text("0")
+        await expect(stats.get_by_text("Browser-observed stream health", exact=True)).to_be_visible()
+        # A settled run's last diagnostic update schedules a background
+        # snapshot refresh. That refresh must not downgrade the open stream,
+        # so the browser-observed state settles on "Live" and stays there.
+        await expect(page.locator(SEL_V2["inspector_stream_state"])).to_have_text("Live")
+        await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
+        await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
+
+        second_marker = f"turn-navigation-e2e-{uuid.uuid4()}"
+        await page.locator(SEL_V2["inspector_close"]).click()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_have_count(0)
+        inspector_run_prefix = (
+            f"/operator/inspector/threads/{thread_id}/runs/"
+        )
+        async with page.expect_request(
+            lambda request: inspector_run_prefix in request.url
+            and run_id not in request.url,
+            timeout=30000,
+        ) as background_observation:
+            async with httpx.AsyncClient(headers=headers) as client:
+                await _send_and_settle(
+                    client,
+                    reborn_v2_server,
+                    thread_id,
+                    second_marker,
+                    expected=2,
+                )
+        observed_request = await background_observation.value
+        assert inspector_run_prefix in observed_request.url
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            second_assistant = await _wait_for_assistant_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+            )
+        second_run_id = second_assistant.get("turn_run_id")
+        assert second_run_id and second_run_id != run_id, second_assistant
+        assert second_run_id in observed_request.url
+
+        await page.locator(SEL_V2["inspector_open"]).click()
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible(
+            timeout=30000
+        )
+        await expect(activity.get_by_label("Previous turn")).to_be_enabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 1 of 2", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_enabled()
+        await expect(activity.get_by_label("Latest turn")).to_be_enabled()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(run_id)
+
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+
+        # A third turn takes navigation past the old two-run retention depth.
+        # Stopping at two made the browser's wider navigation window look sound
+        # while every turn beyond the second rendered blank, so this walks back
+        # two turns and asserts the FIRST run still renders real activity rather
+        # than the empty state.
+        async with httpx.AsyncClient(headers=headers) as client:
+            await _send_and_settle(
+                client,
+                reborn_v2_server,
+                thread_id,
+                f"retention-depth-e2e-{uuid.uuid4()}",
+                expected=3,
+            )
+        # An operator who navigated to a turn keeps it: the arriving turn widens
+        # the window without yanking the selection to the newest run. Following
+        # it is an explicit "Latest" click.
+        await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible(
+            timeout=30000
+        )
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 1 of 3", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(run_id)
+        # The timeline container only renders when the run has retained
+        # activity; the empty state omits it. Its presence two turns back is the
+        # evidence that host retention actually covers the navigable window.
+        await expect(page.locator(SEL_V2["inspector_activity_content"])).to_be_visible()
+        await expect(
+            activity.get_by_text("No activity yet", exact=True)
+        ).to_have_count(0)
+
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+
+        await page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true,
+                value: "hidden",
+              });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await expect(page.locator(SEL_V2["inspector_health"])).to_have_text("Idle")
+        async with page.expect_response(
+            lambda response: "/operator/inspector/" in response.url
+            and "/events" in response.url
+            and "connection_generation=" in response.url,
+            timeout=30000,
+        ) as reconnect_info:
+            await page.evaluate(
+                """() => {
+                  Object.defineProperty(document, "visibilityState", {
+                    configurable: true,
+                    value: "visible",
+                  });
+                  document.dispatchEvent(new Event("visibilitychange"));
+                }"""
+            )
+        reconnect_response = await reconnect_info.value
+        assert reconnect_response.status == 200, reconnect_response.url
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        # The thread now holds three turns and navigation was left on the
+        # latest, so the reconnect resumes observing that run.
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
+
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        reconnects = page.locator(SEL_V2["inspector_stream_reconnects"])
+        await expect(reconnects).to_have_text(re.compile(r"^[1-9][0-9,]*$"))
+        updates = page.locator(SEL_V2["inspector_stream_updates"])
+        updates_before_reload = int((await updates.inner_text()).replace(",", ""))
+        await page.reload()
+        await expect(page.locator(SEL_V2["inspector_stats_content"])).to_be_visible(
+            timeout=30000
+        )
+        await expect(updates).to_have_text(f"{updates_before_reload:,}")
+    finally:
+        await context.close()
+
+
+async def test_inspector_uses_the_selected_locale(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """Inspector chrome, status, tabs, and accessibility labels follow the locale."""
+    context = await reborn_v2_browser.new_context(
+        locale="zh-CN",
+        viewport={"width": 1440, "height": 900},
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        panel = page.locator(SEL_V2["inspector_panel"])
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(panel.get_by_text("Web 调试检查器", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_health"])).to_have_text("空闲")
+        await expect(page.locator(SEL_V2["inspector_close"])).to_have_attribute(
+            "aria-label", "关闭检查器"
+        )
+        await expect(page.locator(SEL_V2["inspector_tab_prompt"])).to_have_text(
+            "提示词"
+        )
     finally:
         await context.close()
 

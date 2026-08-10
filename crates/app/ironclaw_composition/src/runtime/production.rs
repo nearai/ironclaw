@@ -4,7 +4,7 @@ use ironclaw_assistant::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
-use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
+use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::InvocationId};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
     LoopRunContext, PromptMode,
@@ -57,6 +57,14 @@ impl LoopCapabilityResultWriter for UnavailableCapabilityIo {
             AgentLoopHostErrorKind::Unavailable,
             "capability result writer is unavailable for production runtime launch",
         ))
+    }
+
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _input_ref: &CapabilityInputRef,
+    ) {
     }
 }
 

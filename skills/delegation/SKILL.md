@@ -1,6 +1,6 @@
 ---
 name: delegation
-version: 0.1.0
+version: 0.1.1
 description: Helps users delegate tasks, break them into steps, set deadlines, and track progress via routines and memory.
 activation:
   keywords:
@@ -46,7 +46,7 @@ Decompose the task into concrete, actionable steps. Use `memory_write` to persis
 ## 3. Set Up Tracking
 
 If the task is recurring or has a deadline:
-- Create a routine using `builtin__trigger_create` for scheduled check-ins (its prompt describes the check-in task only; results are delivered automatically)
+- Create a routine using `builtin__trigger_create` for scheduled check-ins (its prompt describes the check-in task; each fire's result is recorded in the routine's own run thread, so add an explicit `builtin__outbound_deliver` step to the prompt only when the user wants it pushed to another surface — resolving the destination id from `builtin__outbound_delivery_targets_list` while creating the routine and pinning that id in the step)
 - Add a heartbeat item if it needs daily monitoring
 - Set up an event-triggered routine if it depends on external input
 

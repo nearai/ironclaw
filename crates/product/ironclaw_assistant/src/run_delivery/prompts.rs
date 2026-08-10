@@ -27,6 +27,16 @@ pub(crate) const PAIRING_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web ap
 /// Posted when an OAuth challenge reaches a non-private target: the setup link
 /// is single-use and must not be echoed into a shared thread.
 pub(crate) const OAUTH_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to complete this private authorization step, then ask me again here.";
+/// Posted to a background run's notification channels when it fails. The
+/// failure detail itself stays in the run history — a notification channel is
+/// a shared surface and carries no diagnostics.
+pub(crate) const BACKGROUND_RUN_FAILED_MESSAGE: &str =
+    "A routine run failed — open the Ironclaw web app for details.";
+/// Redacted stand-in for an OAuth auth prompt on a notification channel that
+/// is NOT a personal DM: the authorization URL is a bearer-grade secret and
+/// must never land in a shared conversation.
+pub(crate) const BACKGROUND_RUN_REAUTH_MESSAGE: &str =
+    "A routine needs re-authorization — open the Ironclaw web app to continue.";
 pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
@@ -39,9 +49,16 @@ pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending
 pub(crate) const BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 /// Stable per-(run, kind) projection id for run-notification deliveries.
+///
+/// `discriminator` separates notices that share an event kind within one run.
+/// The delivery id hashes this ref, so two notices that collapse to the same
+/// string share a durable delivery identity: the second is reported
+/// `AlreadyDelivered` and never actually sent. `None` preserves the historical
+/// id shape for kinds that can only occur once per run.
 pub(crate) fn run_notification_projection_id(
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
+    discriminator: Option<&str>,
 ) -> String {
     let suffix = match event_kind {
         RunNotificationEventKind::FinalReplyReady => "final",
@@ -50,8 +67,44 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::AuthRequired => "auth",
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
+        RunNotificationEventKind::ModelDelivery => "model-delivery",
     };
-    format!("run-notification:{suffix}:{run_id}")
+    match discriminator {
+        Some(discriminator) => {
+            let discriminator = bounded_discriminator(discriminator);
+            format!("run-notification:{suffix}:{discriminator}:{run_id}")
+        }
+        None => format!("run-notification:{suffix}:{run_id}"),
+    }
+}
+
+/// Longest discriminator embedded verbatim in a projection id. The composed
+/// id must fit `ProjectionUpdateRef`'s 256-byte cap for ANY legal input — a
+/// `TurnGateRef` may itself be up to 256 bytes — or the notice becomes
+/// undeliverable at the ref constructor. Production gate refs are far shorter
+/// (`gate:approval-<uuid>`), so this bound never changes their id shape.
+const DISCRIMINATOR_VERBATIM_MAX: usize = 96;
+
+/// Over-long discriminators keep a readable prefix plus a stable FNV-1a 64
+/// content hash: still one id per distinct gate, never truncation-collided.
+/// FNV-1a is implemented inline because these ids are DURABLE delivery
+/// identities — a std hasher whose output can change across releases would
+/// silently re-key them.
+fn bounded_discriminator(discriminator: &str) -> std::borrow::Cow<'_, str> {
+    if discriminator.len() <= DISCRIMINATOR_VERBATIM_MAX {
+        return std::borrow::Cow::Borrowed(discriminator);
+    }
+    // Room for the ':' + 16 hex digits inside the verbatim budget.
+    let mut end = DISCRIMINATOR_VERBATIM_MAX - 17;
+    while !discriminator.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in discriminator.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    std::borrow::Cow::Owned(format!("{}:{hash:016x}", &discriminator[..end]))
 }
 
 /// Build the approval-gate prompt view. The body carries only the semantic
@@ -228,6 +281,109 @@ mod tests {
     use super::*;
     use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
     use ironclaw_host_api::turn::TurnRunId;
+
+    /// The delivery id is derived from this ref, so two notices that share a
+    /// string share a durable delivery identity — the second comes back
+    /// `AlreadyDelivered` and is silently never sent while still recorded as
+    /// delivered. One run legitimately emits several `RunBlocked` notices, so
+    /// they must not collapse.
+    #[test]
+    fn run_blocked_notices_in_one_run_do_not_share_a_projection_id() {
+        let run_id = TurnRunId::new();
+        let discriminated: Vec<String> = ["reauth", "auth-unavailable", "failed"]
+            .into_iter()
+            .map(|discriminator| {
+                run_notification_projection_id(
+                    run_id,
+                    RunNotificationEventKind::RunBlocked,
+                    Some(discriminator),
+                )
+            })
+            .collect();
+
+        let unique: std::collections::HashSet<&String> = discriminated.iter().collect();
+        assert_eq!(
+            unique.len(),
+            discriminated.len(),
+            "each RunBlocked notice needs its own delivery identity: {discriminated:?}"
+        );
+        for id in &discriminated {
+            assert!(
+                id.contains(&run_id.to_string()),
+                "{id} must stay run-scoped"
+            );
+        }
+    }
+
+    /// Kinds that occur at most once per run keep the historical id shape, so
+    /// this change does not re-identify existing deliveries.
+    #[test]
+    fn undiscriminated_projection_ids_keep_their_historical_shape() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::ApprovalNeeded, None),
+            format!("run-notification:approval:{run_id}")
+        );
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
+            format!("run-notification:auth:{run_id}")
+        );
+        // FinalReplyReady is the kind production always sends refless: its
+        // suffix keys the in-flight final-reply delivery identities, so a
+        // rename would double-post final replies across a deploy.
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::FinalReplyReady, None),
+            format!("run-notification:final:{run_id}")
+        );
+    }
+
+    #[test]
+    fn discriminated_projection_ids_embed_short_gate_refs_verbatim() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::ApprovalNeeded,
+                Some("gate:approval-1234"),
+            ),
+            format!("run-notification:approval:gate:approval-1234:{run_id}")
+        );
+    }
+
+    /// A legal `TurnGateRef` can be up to 256 bytes while `ProjectionUpdateRef`
+    /// caps at 256: over-long discriminators must compress rather than make
+    /// the gate notice undeliverable, without colliding distinct gates.
+    #[test]
+    fn over_long_discriminators_stay_deliverable_and_distinct() {
+        let run_id = TurnRunId::new();
+        let shared_prefix = "g".repeat(240);
+        let ref_a = format!("{shared_prefix}-a");
+        let ref_b = format!("{shared_prefix}-b");
+        let id_a = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(&ref_a),
+        );
+        let id_b = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(&ref_b),
+        );
+        assert!(
+            id_a.len() <= 256,
+            "composed id must fit the ref cap: {id_a}"
+        );
+        assert_ne!(id_a, id_b, "prefix-sharing gates must not collide");
+        // Deterministic: the same gate re-announced computes the same id.
+        assert_eq!(
+            id_a,
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::ApprovalNeeded,
+                Some(&ref_a),
+            )
+        );
+    }
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
         AuthPromptView {

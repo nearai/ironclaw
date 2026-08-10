@@ -28,14 +28,16 @@ pub use memory_provider_factory::{
     memory_lifecycle_consumers, resolve_memory_provider,
 };
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
+pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 pub use deployment::{
     RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
+    hosted_single_tenant_volume_runtime_policy,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options, standalone_runtime_policy,
     standalone_unrestricted_runtime_policy,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::local_filesystem_build_input;
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironhub_link_serve::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
 };

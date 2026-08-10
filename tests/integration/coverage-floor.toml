@@ -339,11 +339,33 @@ name = "ironclaw_extension_host"
 # lane produces a coverage verdict (#7036), so these numbers could not be read
 # off this PR's own run; **the next dispatch should recapture this entry and
 # replace this block with a real capture.**
-floor_percent = 87.97
-floor_covered_lines = 21580
-captured_total_lines = 24529
-captured_date = "2026-08-04"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out, then again on the WS2 closeout as the source side of the NEAR AI embed move; adjusted (not recaptured) for the retired-identity branch deletion in #7143 — see the block above."
+#
+# RECAPTURED 2026-08-07 from run 31208592262 (the `df90072c4e` main-push run,
+# read off this gate's own ratchet output — the same aggregation that enforces
+# this file), discharging the instruction directly above. Two things moved
+# since the 8/04 adjustment:
+#
+# 1. The denominator fell 24,529 -> 24,415 (-114): code left the crate in the
+#    post-8/04 moves, the "source side of a move" shape this entry's own WS2
+#    block documents as the recapture trigger. Covered fell 21,580 -> 21,515
+#    with it while the RATIO — the invariant that survives a move — ROSE
+#    87.98% -> 88.12%. This is a floor that stopped describing its crate, not
+#    a coverage regression.
+# 2. The same commit measured DIFFERENTLY across lanes: the merge-queue run at
+#    18:37Z (green) put covered lines at or above 21,560 while the push run at
+#    18:47Z and its retry both measured 21,515 — a >=45-line same-commit
+#    spread, exactly the "DA: hit counts flipping across the lane+bucket split
+#    under timing" wobble the [global] tolerance comment calls PROVISIONAL.
+#    The default 20-line tolerance sits under this crate's measured wobble, so
+#    it reds on noise; `tolerance_lines` is raised to 60, sized to the
+#    observed spread with the same headroom ratio the 0.5pp percent tolerance
+#    carries. The percent floor (tolerance 0.5pp) stays the tight guard.
+floor_percent = 88.12
+floor_covered_lines = 21515
+tolerance_lines = 60
+captured_total_lines = 24415
+captured_date = "2026-08-07"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split, the WS2 closeout embed move, the #7143 deletion adjustment, and again 2026-08-07 as the source side of the post-8/04 moves — with tolerance_lines sized to the measured same-commit cross-lane wobble; see the blocks above."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
