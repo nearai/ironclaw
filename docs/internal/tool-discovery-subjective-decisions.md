@@ -226,3 +226,37 @@ exact deferred invocation. The guard now allows `tool_search`/`tool_describe`
 and the exact requested target to reach the normal capability policy while it
 continues suppressing unrelated substitute calls. A fresh live `signatures`
 screen then completed search, signature return, and the correct MCP invocation.
+
+## D14 — Default to namespace summaries without pins
+
+**Decision:** Make `namespaces` the production default. Keep `bridged` available
+as an explicit opt-in for deployments whose profile pins have been validated
+against representative end-to-end workflows.
+
+**Evidence:** The stopped-on-request live run at commit `753f091b2c` produced
+268 completed observations with the production server, NearAI
+`deepseek-ai/DeepSeek-V4-Flash`, 20 hosted MCP namespaces, and deterministic
+100- and 500-tool catalogs. At both completed sizes, `namespaces` achieved
+28/28 task completions with zero unauthorized calls. Its median end-to-end
+latency was 12.8s at 100 tools and 11.4s at 500 tools. The pinned `bridged` arm
+also achieved 28/28 at 100 tools with a 7.0s median, but at 500 tools its first
+cross-namespace run called the pinned `google_calendar__list_events` tool
+instead of the required `google_calendar__create_event`, then claimed the event
+was created. A later repetition also failed. The completed comparable 500-tool
+single-tool subset was 16/16, but the interrupted four-repetition workflow
+group was not written to the observation JSONL.
+
+**Why:** Pins can substantially reduce latency for a known compact workflow,
+but a nearby high-value primitive can attract the model away from the required
+action. Namespace summaries retained perfect observed completion at both
+catalog sizes without paying this correctness risk or a standing pinned-schema
+budget. The 1,000-tool tier was not run because the user requested a decision
+from the evidence already collected; this is therefore the best-supported
+default, not a claim of exhaustive scale validation.
+
+**Alternative considered:** Keep `bridged` as the default because it was the
+fastest perfect arm at 100 tools. Rejected because the 500-tool trace showed a
+specific pin-induced wrong-tool call and false success claim. Latency does not
+override the task-completion gate. Removing only the calendar pin was also
+rejected as overfitting this seven-task fixture; pins remain an explicit,
+reviewable deployment choice.

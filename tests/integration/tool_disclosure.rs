@@ -310,9 +310,9 @@ async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
         .await
         .expect("production default defers the flat wide catalog");
     harness
-        .assert_model_tools_contains("github__search_code")
+        .assert_model_tools_excludes("github__search_code")
         .await
-        .expect("interactive profile's reviewed read-only GitHub pin is directly visible");
+        .expect("namespace-summary production default does not expose opt-in profile pins");
 }
 
 #[tokio::test]

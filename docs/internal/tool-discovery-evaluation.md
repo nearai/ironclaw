@@ -58,8 +58,8 @@ All five arms are selectable from the same binary:
 | Full advertised schemas | `off` |
 | Current compact search/describe/call | `compact` |
 | Bounded complete signatures | `signatures` |
-| Namespace summaries + signatures | `namespaces` |
-| Namespace summaries + signatures + pins | `bridged` (default) |
+| Namespace summaries + signatures | `namespaces` (default) |
+| Namespace summaries + signatures + pins | `bridged` (opt-in) |
 
 Unknown values fail closed to `off`. A benchmark runner should restart the
 service between arms, keep the model route and catalog seed fixed, and capture

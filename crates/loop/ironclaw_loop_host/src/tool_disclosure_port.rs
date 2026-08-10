@@ -77,7 +77,7 @@ impl ToolDisclosureCapabilityDecorator {
     }
 
     /// Select one of the benchmarkable disclosure arms. Production uses the
-    /// default `Bridged` arm; the other variants are explicit controls.
+    /// default `Namespaces` arm; the other variants are explicit controls.
     pub fn with_mode(mut self, mode: crate::ToolDisclosureMode) -> Self {
         self.mode = mode;
         self

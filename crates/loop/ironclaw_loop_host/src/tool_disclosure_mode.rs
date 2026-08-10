@@ -19,10 +19,10 @@ pub enum ToolDisclosureMode {
     Compact,
     /// Bounded complete signatures with the legacy alphabetical preview.
     Signatures,
-    /// Namespace-aware preview and bounded signatures, without profile pins.
-    Namespaces,
-    /// Production arm: namespace-aware preview, bounded signatures, and pins.
+    /// Production arm: namespace-aware preview and bounded signatures, without profile pins.
     #[default]
+    Namespaces,
+    /// Opt-in arm: namespace-aware preview, bounded signatures, and reviewed pins.
     Bridged,
 }
 
@@ -45,7 +45,7 @@ impl ToolDisclosureMode {
         }
     }
 
-    /// Progressive tool disclosure defaults to bridged for unset or empty
+    /// Progressive tool disclosure defaults to namespace summaries for unset or empty
     /// configuration. Explicit `off` remains the rollback path, while
     /// unrecognized values fail closed to `Off`.
     fn from_raw(raw: Option<&str>) -> Self {
@@ -90,8 +90,11 @@ mod tests {
     use super::ToolDisclosureMode;
 
     #[test]
-    fn tool_disclosure_mode_defaults_bridged_with_off_kill_switch() {
-        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Bridged);
+    fn tool_disclosure_mode_defaults_namespaces_with_off_kill_switch() {
+        assert_eq!(
+            ToolDisclosureMode::default(),
+            ToolDisclosureMode::Namespaces
+        );
         // Unset / empty use the production default. Invalid configuration and
         // explicit `off` fail closed to the rollback path.
         // `is_bridged()` is what gates whether the gateway attaches the decorator.
