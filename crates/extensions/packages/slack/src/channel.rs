@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAdapter, ChannelError, DeliveryReport, ImmediateResponse, InboundOutcome,
-    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
-    VerifiedInbound,
+    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate,
+    TargetQuery, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -65,7 +65,12 @@ impl ChannelAdapter for SlackChannelAdapter {
                 body: Vec::new(),
             })),
             SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
-            SlackInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
+            SlackInboundEvent::Message(mut message) => {
+                if !request.can_reply_in_threads {
+                    flatten_self_rooted_topic(&mut message)?;
+                }
+                Ok(InboundOutcome::Messages(vec![*message]))
+            }
         }
     }
 
@@ -75,6 +80,22 @@ impl ChannelAdapter for SlackChannelAdapter {
         egress: &dyn RestrictedEgress,
     ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         crate::attachment_transfer::fetch_attachment(attachment, egress).await
+    }
+
+    /// Thread pings fetch that thread's replies; top-level channel pings
+    /// fetch recent channel history. Uses the workspace bot token over the
+    /// manifest-restricted egress and degrades to `Ok(None)` on any vendor
+    /// refusal (e.g. a missing `channels:history` scope) or transport
+    /// failure — context is advisory and never fails admission.
+    async fn fetch_conversation_context(
+        &self,
+        conversation: &ExternalConversationRef,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<
+        Option<ironclaw_extension_contracts::channel_adapter::ChannelConversationContext>,
+        ChannelError,
+    > {
+        crate::conversation_context::fetch_conversation_context(conversation, egress).await
     }
 
     async fn deliver(
@@ -447,6 +468,33 @@ fn parse_error(error: SlackPayloadParseError) -> ChannelError {
     }
 }
 
+/// Honor `presentation.can_reply_in_threads = false`: a top-level mention
+/// normally roots its own vendor thread (topic set to its own message ts) so
+/// the whole exchange threads. When the channel declares it does not reply in
+/// threads, that self-rooting is undone — the message stays in the flat
+/// conversation and replies anchor inline. Detected exactly as the hydration
+/// path does: a self-rooted top-level ping is the one whose topic equals its
+/// own message id; a genuine in-thread reply (topic = an earlier message)
+/// keeps its thread. This is what makes the manifest flag load-bearing rather
+/// than decorative.
+fn flatten_self_rooted_topic(message: &mut NormalizedInboundMessage) -> Result<(), ChannelError> {
+    let conversation = &message.conversation;
+    let topic = conversation.topic_id();
+    if topic.is_none() || topic != conversation.reply_target_message_id() {
+        return Ok(());
+    }
+    message.conversation = ExternalConversationRef::new(
+        conversation.space_id(),
+        conversation.conversation_id(),
+        None,
+        conversation.reply_target_message_id(),
+    )
+    .map_err(|error| ChannelError::Parse {
+        reason: format!("failed to flatten self-rooted conversation: {error}"),
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
@@ -471,6 +519,7 @@ mod tests {
             config: &[],
             body,
             headers: &owned_headers,
+            can_reply_in_threads: true,
         })
     }
 
@@ -542,6 +591,110 @@ mod tests {
             messages[0].conversation.topic_id(),
             Some("1710000000.000200"),
             "mention without thread anchors on its own ts"
+        );
+    }
+
+    /// `inbound` with an explicit `can_reply_in_threads` (the helpers above
+    /// pin `true`, Slack's shipped manifest value) — the seam for proving the
+    /// flag drives placement rather than decorating the manifest.
+    fn inbound_with_threading(
+        body: &[u8],
+        can_reply_in_threads: bool,
+    ) -> Result<InboundOutcome, ChannelError> {
+        SlackChannelAdapter.inbound(VerifiedInbound {
+            extension_id: "slack",
+            installation_id: "install_alpha",
+            config: &[],
+            body,
+            headers: &[],
+            can_reply_in_threads,
+        })
+    }
+
+    /// Pin for #7377: `presentation.can_reply_in_threads` is LOAD-BEARING.
+    /// The SAME top-level `app_mention` self-roots a vendor thread (topic =
+    /// its own ts) when the flag is true, and is flattened back into the
+    /// plain conversation (no topic; the ts survives only as the inline reply
+    /// anchor) when the flag is false. If `flatten_self_rooted_topic` were a
+    /// no-op — or the `inbound` dispatch stopped consulting the flag — the
+    /// false arm would still carry the self-rooted topic and fail here.
+    #[test]
+    fn can_reply_in_threads_decides_whether_a_top_level_mention_roots_a_thread() {
+        let top_level_mention: &[u8] = br#"{
+            "type": "event_callback",
+            "event_id": "Ev301",
+            "team_id": "T-A",
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "channel": "C123",
+                "text": "<@UBOT> ship it",
+                "ts": "1710000000.000900"
+            }
+        }"#;
+
+        let InboundOutcome::Messages(rooted) =
+            inbound_with_threading(top_level_mention, true).expect("mention parses")
+        else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            rooted[0].conversation.topic_id(),
+            Some("1710000000.000900"),
+            "threading channel: a top-level mention roots its own thread"
+        );
+
+        let InboundOutcome::Messages(flat) =
+            inbound_with_threading(top_level_mention, false).expect("mention parses")
+        else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            flat[0].conversation.topic_id(),
+            None,
+            "non-threading channel: the self-rooted topic is flattened away"
+        );
+        assert_eq!(
+            flat[0].conversation.reply_target_message_id(),
+            Some("1710000000.000900"),
+            "flattening keeps the message id as the inline reply anchor"
+        );
+        assert_eq!(
+            flat[0].conversation.conversation_id(),
+            rooted[0].conversation.conversation_id(),
+            "flattening only strips the topic — same conversation either way"
+        );
+    }
+
+    /// The false arm flattens ONLY self-rooted top-level pings: a mention
+    /// inside a genuine vendor thread (thread_ts = an EARLIER message) keeps
+    /// its thread even when the channel does not open new ones — the reply
+    /// must go where the conversation already is.
+    #[test]
+    fn can_reply_in_threads_false_keeps_a_genuine_in_thread_mention_threaded() {
+        let in_thread_mention: &[u8] = br#"{
+            "type": "event_callback",
+            "event_id": "Ev302",
+            "team_id": "T-A",
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "channel": "C123",
+                "text": "<@UBOT> and here?",
+                "ts": "1710000000.000901",
+                "thread_ts": "1710000000.000800"
+            }
+        }"#;
+
+        let InboundOutcome::Messages(messages) =
+            inbound_with_threading(in_thread_mention, false).expect("mention parses")
+        else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            messages[0].conversation.topic_id(),
+            Some("1710000000.000800"),
+            "an existing thread is not flattened — only self-rooting is undone"
         );
     }
 

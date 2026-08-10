@@ -114,7 +114,14 @@ use ironclaw_product_contracts::product_wire::{
     RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
     SettingsToolPermissionState,
 };
+use ironclaw_product_contracts::product_wire::{
+    RebornWebPushStatusResponse, RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse,
+    RebornWebPushUnsubscribeRequest, RebornWebPushUnsubscribeResponse,
+};
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
+use ironclaw_product_contracts::web_push::{
+    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND, WEB_PUSH_UNSUBSCRIBE_COMMAND,
+};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
@@ -2255,6 +2262,56 @@ pub async fn set_notification_channels(
         body,
     )
     .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/web-push/status`
+///
+/// The deployment's VAPID public key (`applicationServerKey`) plus the
+/// caller's enrolled browsers — redacted to push-service hosts; endpoint
+/// capability URLs never leave the backend.
+pub async fn web_push_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornWebPushStatusResponse>, WebUiV2HttpError> {
+    let response = query_product_view(
+        state.services(),
+        caller,
+        WEB_PUSH_STATUS_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/web-push/subscriptions`
+///
+/// Enroll (or refresh) the caller's current browser for web push. Body:
+/// [`RebornWebPushSubscribeRequest`]; the endpoint is validated against the
+/// supported push-service allowlist before persistence.
+pub async fn web_push_subscribe(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornWebPushSubscribeRequest>,
+) -> Result<Json<RebornWebPushSubscribeResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, WEB_PUSH_SUBSCRIBE_COMMAND, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/web-push/subscriptions/remove`
+///
+/// Remove one of the caller's browser enrollments by endpoint. POST (not
+/// DELETE) because the endpoint is a long capability URL carried in the body.
+pub async fn web_push_unsubscribe(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornWebPushUnsubscribeRequest>,
+) -> Result<Json<RebornWebPushUnsubscribeResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, WEB_PUSH_UNSUBSCRIBE_COMMAND, body)
+            .await?;
     Ok(Json(response))
 }
 

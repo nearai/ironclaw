@@ -148,6 +148,7 @@ mod thread_artifact;
 mod trace_credits;
 mod types;
 mod views;
+mod web_push;
 
 pub use admin_configuration::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
@@ -234,7 +235,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
-    SettingsToolPermissionState,
+    RebornWebPushStatusResponse, RebornWebPushSubscribeOutcome, RebornWebPushSubscribeRequest,
+    RebornWebPushSubscribeResponse, RebornWebPushSubscriptionInfo, RebornWebPushUnsubscribeRequest,
+    RebornWebPushUnsubscribeResponse, SettingsToolPermissionState,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -291,6 +294,15 @@ pub use types::{
     RebornVendorAuthAccounts,
 };
 pub use views::UnavailableRebornViewProvider;
+pub use web_push::{
+    RebornWebPushProductService, UnsupportedWebPushProductService, WebPushProductService,
+};
+// The web-push descriptors live in `ironclaw_product_contracts::web_push`
+// (transport/product boundary: transports consume the boundary crate). One
+// import path, no re-export (§11.2.4).
+use ironclaw_product_contracts::web_push::{
+    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND_ID, WEB_PUSH_UNSUBSCRIBE_COMMAND_ID,
+};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -2220,6 +2232,7 @@ pub struct RebornServices<
     channel_connection_service: Arc<dyn ChannelConnectionService>,
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
+    web_push_service: Arc<dyn WebPushProductService>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
@@ -2303,6 +2316,7 @@ where
             outbound_preferences_service: Arc::new(
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
+            web_push_service: Arc::new(UnsupportedWebPushProductService),
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
@@ -2484,6 +2498,14 @@ where
         outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     ) -> Self {
         self.outbound_preferences_service = outbound_preferences_service;
+        self
+    }
+
+    pub fn with_web_push_product_service(
+        mut self,
+        web_push_service: Arc<dyn WebPushProductService>,
+    ) -> Self {
+        self.web_push_service = web_push_service;
         self
     }
 
@@ -4130,6 +4152,11 @@ where
             id if id == NOTIFICATION_CHANNELS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_notification_channels_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == WEB_PUSH_STATUS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.web_push_service.status(caller).await?;
                 views::view_page(response)
             }
             id if id == TRACE_CREDITS_VIEW.id => {

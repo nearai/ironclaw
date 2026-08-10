@@ -526,17 +526,10 @@ def _slack_setup_payload(
         "bot_user_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_USER_ID",
     )
-    # Shared-channel admission (run-acts-as-invoker): there is no subject user
-    # or subject route any more. `slack_allowed_channels` is the sole shared
-    # admission surface — a JSON array of channel ids — and the bot answers
-    # each participant in an allowed channel as themselves.
-    resolved_allowed_channels = _slack_setup_field(
-        setup,
-        config_text,
-        "allowed_channels",
-        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ALLOWED_CHANNELS",
-        default="[]",
-    )
+    # Shared-channel admission (run-acts-as-invoker): there is no subject
+    # user, subject route, or channel allowlist any more. Admission is
+    # presence-based — adding the bot to a channel is what enables it — and
+    # the bot answers each paired participant as themselves.
     required = {
         "installation_id": preflight.get("installation_id"),
         "team_id": preflight.get("team_id"),
@@ -557,7 +550,6 @@ def _slack_setup_payload(
         "bot_token": bot_token,
         "signing_secret": signing_secret,
         "bot_user_id": str(required["bot_user_id"]),
-        "allowed_channels": str(resolved_allowed_channels or "[]"),
         "oauth_client_id": str(required["oauth_client_id"]),
         "oauth_client_secret": required["oauth_client_secret"],
     }

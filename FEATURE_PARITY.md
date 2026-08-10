@@ -654,7 +654,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Control UI i18n | ✅ | ❌ | P3 | English, Chinese, Portuguese; expanded with Persian (fa), Dutch (nl), Vietnamese (vi), Italian (it), Arabic (ar), Thai (th), Traditional Chinese (zh-TW) |
 | WebChat theme sync | ✅ | ❌ | P3 | Sync with system dark/light mode |
 | Partial output on abort | ✅ | ❌ | P2 | Preserve partial output when aborting |
-| PWA + Web Push | ✅ | ❌ | P3 | PWA install + Web Push notifications for Gateway chat |
+| PWA + Web Push | ✅ | ✅ | P3 | PWA install (root-scope service worker) + Web Push notifications: the `web-push` channel delivers RFC 8030/8291/8292 browser pushes for automation notices and model-directed deliveries |
 | Talk Mode (browser realtime voice) | ✅ | ❌ | P3 | OpenAI Realtime + Google Live WebSocket; Gateway-minted ephemeral secrets; backend realtime relay |
 | Steer queued messages | ✅ | ❌ | P3 | Steer action on queued messages injects follow-up into active run without retyping |
 | Quick Settings dashboard | ✅ | ❌ | P3 | Refreshed grid + presets + quick-create flows + assistant avatar overrides |

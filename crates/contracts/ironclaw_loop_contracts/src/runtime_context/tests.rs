@@ -152,6 +152,7 @@ fn renders_channel_presentation_hint() {
                     presentation: Some(ChannelPresentation {
                         supports_markdown: false,
                         supports_threads: false,
+                        can_reply_in_threads: false,
                         max_message_chars: Some(4000),
                         command_prefix: None,
                     }),
@@ -163,6 +164,7 @@ fn renders_channel_presentation_hint() {
                     presentation: Some(ChannelPresentation {
                         supports_markdown: true,
                         supports_threads: true,
+                        can_reply_in_threads: false,
                         max_message_chars: None,
                         command_prefix: None,
                     }),

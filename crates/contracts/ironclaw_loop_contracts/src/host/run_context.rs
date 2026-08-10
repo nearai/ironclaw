@@ -291,13 +291,17 @@ impl LoopRunContext {
         self.actor.as_ref()
     }
 
-    /// The identity this run ACTS AS: the authenticated actor who invoked it,
-    /// falling back to the thread's explicit owner only when the run carries
-    /// no actor (a host-initiated run), then to the host's configured
-    /// fallback. One derivation, declared on the contract type, because the
-    /// scope-keyed gate-dance stores (approval request, replay payload, gate
-    /// record, capability lease) are written and read from different crates —
-    /// hand-synced copies of this ladder have already diverged once.
+    /// The identity this run acts as: the authenticated actor who invoked it,
+    /// falling back to the run's explicit thread owner only when the run
+    /// carries no actor (a host/trigger-initiated run with a bound creator),
+    /// then to the host's configured fallback. One derivation, declared on the
+    /// contract type, because the scope-keyed gate-dance stores (approval
+    /// request, replay payload, gate record, capability lease) are written and
+    /// read from different crates — hand-synced copies have already diverged
+    /// once. This is legitimate run-user resolution, not an owner-vs-actor
+    /// choice: since the ephemeral-per-ping remodel owner == actor, so the
+    /// actor and explicit-owner rungs never disagree (an `ActorFallback` run
+    /// resolves to its actor, an explicit-owner trigger run to its creator).
     pub fn acting_user_id(&self, fallback_user_id: &UserId) -> UserId {
         self.actor
             .as_ref()
@@ -306,12 +310,13 @@ impl LoopRunContext {
             .unwrap_or_else(|| fallback_user_id.clone())
     }
 
-    /// The acting-user resource scope: the run's scope projected to a
+    /// The run's resource scope: the run's scope projected to a
     /// [`ResourceScope`] whose user is [`Self::acting_user_id`]. The raise-side
     /// gate-dance stores (`ironclaw_composition`) and the resume-side replay
     /// load (`ironclaw_loop_host`) both key by THIS derivation; it lives on the
-    /// contract type for the same reason as the ladder itself — the two sides
-    /// were previously byte-identical copies kept matched only by comments.
+    /// contract type for the same reason as the derivation itself — the two
+    /// sides were previously byte-identical copies kept matched only by
+    /// comments.
     pub fn acting_resource_scope(&self, fallback_user_id: &UserId) -> ResourceScope {
         let mut scope = self.scope.to_resource_scope();
         scope.user_id = self.acting_user_id(fallback_user_id);

@@ -392,6 +392,7 @@ fn delivery_run_services(
 /// durable binding the workflow will find at admission (through the SAME
 /// binding service the registered sink uses) — so the scripted model
 /// gateway can be registered for the run's scope up front.
+#[allow(clippy::too_many_arguments)]
 async fn preresolve_vendor_turn_scope(
     binding_service: &Arc<dyn ProductBindingResolver>,
     adapter: &dyn ChannelAdapter,
@@ -400,6 +401,13 @@ async fn preresolve_vendor_turn_scope(
     non_secret_config: &[(String, String)],
     evidence: &ProtocolAuthEvidence,
     body: &str,
+    // The channel's manifest `presentation.can_reply_in_threads`, mirroring
+    // the value the host stamps from the resolved descriptor (#7377 made the
+    // flag load-bearing for inbound placement): slack ships true, telegram
+    // false. Must match the registered channel's manifest or this
+    // pre-resolution can normalize a different conversation shape than the
+    // admission path will.
+    can_reply_in_threads: bool,
 ) -> (TurnScope, ironclaw_host_api::ids::UserId) {
     let outcome = adapter
         .inbound(VerifiedInbound {
@@ -408,6 +416,7 @@ async fn preresolve_vendor_turn_scope(
             config: non_secret_config,
             body: body.as_bytes(),
             headers: &[],
+            can_reply_in_threads,
         })
         .expect("the vendor body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
@@ -446,6 +455,9 @@ async fn preresolve_vendor_turn_scope(
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
+            // Owner == actor under ephemeral-per-ping: the run's thread scope
+            // is the acting user (the pinger). Mirrors production
+            // `run_delivery::thread_scope_from_binding`.
             Some(binding.actor_user_id.clone()),
         ),
         binding.actor_user_id,
@@ -1295,6 +1307,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         &[],
         &evidence,
         &body,
+        true,
     )
     .await;
     inbound.register_scope_gateway_for_test(
@@ -1487,10 +1500,12 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
             {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
             {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
-            {"handle": "bot_username", "value": "itest_delivery_bot"},
-            // Shared-conversation admission: the supergroup this scenario
-            // drives must be connected, or its @-mention fails closed.
-            {"handle": "telegram_allowed_channels", "value": "[\"-1008675309\"]"}
+            {"handle": "bot_username", "value": "itest_delivery_bot"}
+            // Deliberately NO admission-related config: shared-conversation
+            // admission is presence-based, so the supergroup this scenario
+            // drives is served because the bot received its update through
+            // the authenticated webhook — there is no allowlist. The served
+            // supergroup turn below is the presence pin.
         ]),
     )
     .await;
@@ -1684,6 +1699,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         )],
         &evidence,
         &body,
+        false,
     )
     .await;
     let paused_gateway = Arc::new(PausedReplyGateway::new(TELEGRAM_REPLY));
@@ -1718,49 +1734,6 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             .count(),
         send_message_count_before_rejected_update,
         "a rejected update must not add a turn delivery; earlier pairing feedback is preserved"
-    );
-
-    // Fail-closed group admission at the caller path: a correctly-signed
-    // update from a supergroup NOT listed in `telegram_allowed_channels` is
-    // acknowledged on the wire (no vendor retry storm) but produces no turn
-    // and no reply — the conversation is simply not connected.
-    let unlisted_body = json!({
-        "update_id": 502,
-        "message": {
-            "message_id": 12,
-            "message_thread_id": 5,
-            "date": 1710000001,
-            "text": "@itest_delivery_bot are you there?",
-            "entities": [{"type": "mention", "offset": 0, "length": 19}],
-            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
-            "chat": {"id": -1009999999_i64, "type": "supergroup"}
-        }
-    })
-    .to_string();
-    let status = ingress
-        .post(
-            TELEGRAM_ROUTE,
-            &unlisted_body,
-            vec![(
-                "X-Telegram-Bot-Api-Secret-Token",
-                TELEGRAM_WEBHOOK_SECRET.to_string(),
-            )],
-        )
-        .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "an unlisted group's update is acknowledged, not retried"
-    );
-    ingress.drain().await;
-    assert_eq!(
-        inbound
-            .captured_network_requests_for_test()
-            .iter()
-            .filter(|request| request.url.ends_with("/sendMessage"))
-            .count(),
-        send_message_count_before_rejected_update,
-        "an unlisted supergroup must produce no turn delivery and no reply"
     );
 
     let status = ingress
@@ -1905,6 +1878,169 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "cleanup uses the authoritative message_id returned by sendMessage"
     );
 
+    // ── Second participant (#7377 run-acts-as-invoker): the same supergroup
+    // topic is ONE shared canonical thread. A SECOND paired user's mention
+    // resolves the SAME thread through the same production binding service,
+    // their run acts as THEM, and their reply stays anchored in the topic.
+    let second_user =
+        ironclaw_host_api::ids::UserId::new("user-telegram-bravo").expect("second user id");
+    // The second user joins the installation through the production
+    // membership transition (what their own install/enable action performs),
+    // which makes the pairing surface visible to them.
+    installation_store
+        .activate_membership(&installation_id, &second_user)
+        .await
+        .expect("second user joins the Telegram installation membership");
+    let (second_code, _, _) = services
+        .pairing_issue_for_test("telegram", &second_user)
+        .await
+        .expect("telegram issues a second WebGeneratedCode pairing");
+    let second_paired = services
+        .pairing_consume_for_test(
+            "telegram",
+            TELEGRAM_INSTALLATION,
+            &second_code,
+            ("user", "9912", None, "8675310"),
+            (
+                lifecycle.turn_coordinator_for_test(),
+                lifecycle.process_gates_for_test(),
+                inbound.binding.tenant_id.clone(),
+            ),
+        )
+        .await
+        .expect("second pairing consume dispatches");
+    assert_eq!(second_paired.as_ref(), Some(&second_user));
+
+    let second_topic_body = json!({
+        "update_id": 550,
+        "message": {
+            "message_id": 42,
+            "message_thread_id": 77,
+            "date": 1710000100,
+            "text": "@itest_delivery_bot bravo follows up in the topic",
+            "entities": [{"type": "mention", "offset": 0, "length": 19}],
+            "from": {"id": 9912, "is_bot": false, "first_name": "Bea"},
+            "chat": {"id": -1008675309_i64, "type": "supergroup"}
+        }
+    })
+    .to_string();
+    // Ephemeral-per-ping (#7397) at the binding seam: the second participant's
+    // mention mints its OWN pinger-owned ephemeral thread — a DISTINCT scope
+    // from the first participant's, owned by the second actor (owner == actor),
+    // never the first binder. Their run still acts as THEM and the reply still
+    // anchors in the same forum topic (asserted below).
+    let (second_scope, second_actor_user_id) = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_delivery_bot".to_string(),
+        )],
+        &evidence,
+        &second_topic_body,
+        false,
+    )
+    .await;
+    assert_ne!(
+        second_scope.thread_id, vendor_scope.thread_id,
+        "each ping mints its own ephemeral thread — the second participant does not join the first's"
+    );
+    assert_eq!(
+        second_scope.explicit_owner_user_id(),
+        Some(&second_user),
+        "the second participant's ephemeral thread is owned by the second actor (owner == actor)"
+    );
+    assert_eq!(second_actor_user_id, second_user);
+    assert_ne!(
+        second_actor_user_id, vendor_actor_user_id,
+        "the second participant is a genuinely distinct canonical user"
+    );
+    // The second turn executes under its OWN ephemeral scope, so the scripted
+    // gateway must be registered for that scope (the first gateway only serves
+    // the first participant's thread).
+    let second_gateway = Arc::new(PausedReplyGateway::new(TELEGRAM_REPLY));
+    inbound.register_scope_gateway_for_test(
+        second_scope.clone(),
+        Arc::clone(&second_gateway) as Arc<dyn HostManagedModelGateway>,
+    );
+
+    let reply_sends_before = inbound
+        .captured_network_requests_for_test()
+        .iter()
+        .filter(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
+        })
+        .count();
+    // The second participant's own scope-registered gateway serves its run:
+    // pre-release one permit so the second turn completes unpaused.
+    second_gateway.release();
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &second_topic_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the second participant is admitted");
+    ingress.drain().await;
+    let second_run_id = second_gateway.wait_for_run_id().await;
+    assert_ne!(
+        second_run_id, run_id,
+        "the second participant's run is distinct from the first participant's"
+    );
+    wait_for_run_status_in_scope(
+        &coordinator,
+        &second_scope,
+        second_run_id,
+        TurnStatus::Completed,
+    )
+    .await;
+    let second_run = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: second_scope.clone(),
+            run_id: second_run_id,
+        })
+        .await
+        .expect("second participant's completed run remains readable");
+    assert_eq!(
+        second_run.actor.as_ref().expect("second run actor").user_id,
+        second_user,
+        "the second participant's run acts as its own invoker",
+    );
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let bravo_reply = loop {
+        let replies: Vec<serde_json::Value> = inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .filter(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
+            })
+            .map(|request| {
+                serde_json::from_slice(&request.body).expect("Telegram sendMessage body is JSON")
+            })
+            .collect();
+        if replies.len() > reply_sends_before {
+            break replies.last().cloned().expect("latest reply body");
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "the second participant's coordinated reply must land on the wire"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(bravo_reply["chat_id"], "-1008675309");
+    assert_eq!(
+        bravo_reply["message_thread_id"], 77,
+        "the second participant's reply stays anchored inside the same forum topic"
+    );
+
     // Updating the authorized manifest group refreshes every active consumer.
     // Activation-time values such as Telegram's webhook URL therefore take
     // effect without reintroducing a caller-visible configure/activate action.
@@ -1980,6 +2116,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         )],
         &evidence,
         &attachment_body,
+        false,
     )
     .await;
     let attachment_gateway = Arc::new(PausedReplyGateway::new("Attachment received."));
@@ -2166,6 +2303,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         )],
         &evidence,
         &outbound_body,
+        false,
     )
     .await;
     group
@@ -2234,6 +2372,121 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .assert_tool_invoked(ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID)
         .await
         .expect("Telegram file delivery was sourced from the explicit reply-attachment tool");
+}
+
+/// Added with the run-acts-as-invoker ruling (#7377): presence admits the
+/// supergroup, pairing gates the RUN. A mention from a `from` id that never
+/// paired executes nothing; the manifest's fixed `connect_required` notice is
+/// posted back INTO the conversation as a reply anchored on the sender's own
+/// message (`reply_to_message_id` — telegram declares
+/// `presentation.can_reply_in_threads = false`, so anchored quoting is its
+/// in-place placement), and the wire carries exactly that one send.
+#[tokio::test]
+async fn telegram_unpaired_group_mention_gets_a_quoted_pairing_notice() {
+    let group = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("delivery group builds");
+    let services = reborn_services(&group);
+    let inbound = group
+        .thread("conv-telegram-unpaired-group")
+        .script([RebornScriptedReply::text("must stay unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    let assembly = start_channel_host_assembly(&group, services, &inbound);
+    let _binding = wait_for_production_registration(&assembly, services, "telegram").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built generic ingress"),
+    );
+    configure_admin_group(
+        &group,
+        "extension.telegram",
+        0,
+        json!([
+            {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
+            {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
+            {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
+            {"handle": "bot_username", "value": "itest_unpaired_bot"}
+            // Deliberately NO admission-related config: the supergroup is
+            // admitted by presence (the verified webhook delivering the
+            // update IS the admission); only the SENDER's pairing is missing.
+        ]),
+    )
+    .await;
+
+    let message = "unpaired supergroup mention must not reach the agent";
+    let body = json!({
+        "update_id": 8101,
+        "message": {
+            "message_id": 8111,
+            "message_thread_id": 88,
+            "date": 1710000000,
+            "text": format!("@itest_unpaired_bot {message}"),
+            "entities": [{"type": "mention", "offset": 0, "length": 19}],
+            "from": {"id": 424243, "is_bot": false, "first_name": "Uma"},
+            "chat": {"id": -1008675310_i64, "type": "supergroup"}
+        }
+    })
+    .to_string();
+    let send_message_count_before = inbound
+        .captured_network_requests_for_test()
+        .iter()
+        .filter(|request| request.url.ends_with("/sendMessage"))
+        .count();
+    let (status, response_body) = ingress
+        .post_with_body(
+            TELEGRAM_ROUTE,
+            &body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the verified unpaired update is acknowledged: {response_body}"
+    );
+    ingress.drain().await;
+
+    let notice = services
+        .pairing_connection_notices_for_test("telegram")
+        .expect("the bundled manifest composes Telegram's pairing notices");
+    let sends: Vec<serde_json::Value> = inbound
+        .captured_network_requests_for_test()
+        .iter()
+        .filter(|request| request.url.ends_with("/sendMessage"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("Telegram sendMessage body is JSON")
+        })
+        .collect();
+    assert_eq!(
+        sends.len(),
+        send_message_count_before + 1,
+        "exactly one pairing notice and nothing else crosses the wire: {sends:?}"
+    );
+    let nudge = sends.last().expect("one sendMessage recorded");
+    assert!(
+        nudge["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(notice.connect_required.as_str())),
+        "the notice carries the manifest's connect_required copy: {nudge}"
+    );
+    assert_eq!(
+        nudge["reply_to_message_id"], 8111,
+        "the nudge quotes the unpaired sender's own message"
+    );
+    assert_eq!(nudge["chat_id"], "-1008675310");
+    assert!(
+        inbound
+            .assert_model_request_contains(message)
+            .await
+            .is_err(),
+        "the unpaired supergroup mention must not admit an agent turn"
+    );
 }
 
 /// §5.5 WebGeneratedCode pairing on the generic route (the P2 seam, DEL-10
@@ -2541,6 +2794,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         )],
         &evidence,
         &chat_body,
+        false,
     )
     .await;
     assert_eq!(
@@ -2764,6 +3018,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         )],
         &evidence,
         &repaired_chat_body,
+        false,
     )
     .await;
     assert_ne!(
@@ -2807,6 +3062,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         )],
         &evidence,
         &race_first_body,
+        false,
     )
     .await;
     let paused = Arc::new(PausedReplyGateway::new(RACE_REPLY));

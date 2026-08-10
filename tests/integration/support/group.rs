@@ -1560,6 +1560,8 @@ impl<'g> RebornThreadBuilder<'g> {
             .resolve_binding(binding_request(&probe))
             .await?;
         let thread_scope = thread_scope_from_binding(&binding)?;
+        // The run is scoped to the acting user (the pinger); owner == actor
+        // under ephemeral-per-ping. Mirrors production scope derivation.
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),

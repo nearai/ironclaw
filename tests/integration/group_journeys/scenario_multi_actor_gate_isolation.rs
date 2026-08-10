@@ -11,9 +11,10 @@
 //!
 //! Complementary to (not a duplicate of): `reborn_group_approvals`'s
 //! `concurrent_dual_gate_resume` (SAME actor, two threads parked simultaneously)
-//! and `reborn_group_multiuser`'s `two_actors_own_threads` (distinct actors, NO
-//! gate). This is distinct-actor × gate-resolution-binding — the axis neither
-//! covers.
+//! and `reborn_group_multiuser`'s `shared_route_refuses_direct_reclassification`
+//! (a Shared-route conversation runs as its pinger and refuses Direct
+//! re-classification, NO gate). This is distinct-actor ×
+//! gate-resolution-binding — the axis neither covers.
 
 use super::reborn_support::builder::RebornIntegrationHarness;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
