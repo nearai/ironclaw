@@ -10,7 +10,23 @@ use crate::strategies::{
 
 mod subagent;
 
-pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent, subagent_with_parallel_tool_batch};
+pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent, subagent_with_tool_batch_strategy};
+
+/// Capability batch strategy selection, owned by the family layer.
+///
+/// [`ToolBatchStrategy::HostBatch`] selects the existing host-batch/default
+/// strategy; [`ToolBatchStrategy::BoundedParallel`] opts a family into the
+/// bounded fan-out strategy. Only the planner's batch slot is re-composed —
+/// the executor is never touched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolBatchStrategy {
+    /// The existing host-batch/default strategy.
+    #[default]
+    HostBatch,
+    /// Bounded parallel fan-out for batches whose capability descriptors
+    /// all permit parallel execution.
+    BoundedParallel,
+}
 
 /// Replay-relevant fingerprint of the default family composition, with its
 /// override-able knobs substituted in.
@@ -23,12 +39,13 @@ pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent, subagent_with_parallel_tool
 fn default_family_fingerprint(
     iteration_limit: u32,
     model_availability_attempts: u32,
-    parallel_tool_batch: bool,
+    tool_batch_strategy: ToolBatchStrategy,
 ) -> String {
-    let batch_strategy = if parallel_tool_batch {
-        "BoundedParallelBatchPolicyStrategy(parallel_unless_exclusive,bounded_fanout=4)"
-    } else {
-        "DefaultBatchPolicyStrategy(exclusive_sequential)"
+    let batch_strategy = match tool_batch_strategy {
+        ToolBatchStrategy::HostBatch => "DefaultBatchPolicyStrategy(exclusive_sequential)",
+        ToolBatchStrategy::BoundedParallel => {
+            "BoundedParallelBatchPolicyStrategy(parallel_unless_exclusive,bounded_fanout=4)"
+        }
     };
     format!(
         "ironclaw_agent_loop.default_family.v2:\
@@ -86,8 +103,8 @@ pub struct FamilyOverrides {
     /// Availability-class model retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`).
     pub model_availability_attempts: Option<u32>,
-    /// Execute eligible capability batches through the bounded fan-out strategy.
-    pub parallel_tool_batch: bool,
+    /// Capability batch strategy; defaults to the host-batch strategy.
+    pub tool_batch_strategy: ToolBatchStrategy,
 }
 
 impl FamilyOverrides {
@@ -101,8 +118,8 @@ impl FamilyOverrides {
         self
     }
 
-    pub fn enable_parallel_tool_batch(mut self) -> Self {
-        self.parallel_tool_batch = true;
+    pub fn with_tool_batch_strategy(mut self, strategy: ToolBatchStrategy) -> Self {
+        self.tool_batch_strategy = strategy;
         self
     }
 }
@@ -132,7 +149,7 @@ pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     let digest = ComponentDigest::from_blake3(default_family_fingerprint(
         iteration_limit,
         max_model_availability_attempts,
-        overrides.parallel_tool_batch,
+        overrides.tool_batch_strategy,
     ));
     let planner = DefaultPlanner::compose_default()
         .with_version(ComponentIdentity::new("default", digest))
@@ -144,10 +161,11 @@ pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
             max_model_availability_attempts,
             ..DefaultRecoveryStrategy::default()
         }));
-    let planner = if overrides.parallel_tool_batch {
-        planner.with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
-    } else {
-        planner
+    let planner = match overrides.tool_batch_strategy {
+        ToolBatchStrategy::HostBatch => planner,
+        ToolBatchStrategy::BoundedParallel => {
+            planner.with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
+        }
     };
     let id = planner.id().clone();
     let version = planner.version().clone();
@@ -181,10 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn parallel_batch_override_selects_family_strategy_without_changing_executor() {
+    fn tool_batch_strategy_override_selects_family_strategy_without_changing_executor() {
         let baseline = default();
-        let parallel =
-            default_with_overrides(FamilyOverrides::default().enable_parallel_tool_batch());
+        let parallel = default_with_overrides(
+            FamilyOverrides::default().with_tool_batch_strategy(ToolBatchStrategy::BoundedParallel),
+        );
 
         assert_eq!(
             baseline.planner().batch().execution_mode(),
@@ -204,7 +223,7 @@ mod tests {
             ComponentDigest::from_blake3(default_family_fingerprint(
                 DEFAULT_ITERATION_BACKSTOP,
                 DefaultRecoveryStrategy::default().max_model_availability_attempts,
-                false,
+                ToolBatchStrategy::HostBatch,
             ))
         );
     }
@@ -246,9 +265,21 @@ mod tests {
                 .set_iteration_limit(DEFAULT_ITERATION_BACKSTOP)
                 .set_model_availability_attempts(
                     DefaultRecoveryStrategy::default().max_model_availability_attempts,
-                ),
+                )
+                .with_tool_batch_strategy(ToolBatchStrategy::HostBatch),
         );
         assert_eq!(explicit_defaults.version().digest, DEFAULT_FAMILY_DIGEST);
+
+        // The bounded-parallel strategy is replay-relevant: it changes the
+        // identity from the static host-batch one, deterministically.
+        let bounded = default_with_overrides(
+            FamilyOverrides::default().with_tool_batch_strategy(ToolBatchStrategy::BoundedParallel),
+        );
+        let bounded_again = default_with_overrides(
+            FamilyOverrides::default().with_tool_batch_strategy(ToolBatchStrategy::BoundedParallel),
+        );
+        assert_ne!(bounded.version().digest, DEFAULT_FAMILY_DIGEST);
+        assert_eq!(bounded.version().digest, bounded_again.version().digest);
     }
 
     #[tokio::test]

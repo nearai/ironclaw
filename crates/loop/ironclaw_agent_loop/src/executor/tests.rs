@@ -3276,7 +3276,7 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn parallel_batch_stops_launching_new_calls_after_a_park() {
     let mut outcomes = vec![
         resolution::approval_required(
@@ -3310,13 +3310,38 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
         ]);
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(
-            &support::family_with_parallel_batch_execution(),
-            &host,
-            state,
-        )
+    // Drive the executor on a separate task so the test controls the paused
+    // clock: the scripted sleeps only complete when time is explicitly
+    // advanced, so the park-before-replacement ordering no longer depends on
+    // wall-clock sleep margins (a loaded runner can no longer let a 75 ms
+    // sibling finish before the 5 ms parking call).
+    let run_host = host.clone();
+    let executor = tokio::spawn(async move {
+        CanonicalAgentLoopExecutor
+            .execute_family(
+                &support::family_with_parallel_batch_execution(),
+                &run_host,
+                state,
+            )
+            .await
+    });
+
+    // Wait for the initial four-call window to be launched (every invocation
+    // is parked in its paused sleep) before advancing the clock.
+    while host.single_invocations().len() < 4 && !executor.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    // Call 0 (5 ms) completes first by construction, parks the batch, and
+    // closes the launch window; nothing can launch a replacement before the
+    // park is processed.
+    tokio::time::advance(std::time::Duration::from_millis(5)).await;
+    // In-flight siblings (75 ms) finish; the calls outside the window stay
+    // unlaunched.
+    tokio::time::advance(std::time::Duration::from_millis(75)).await;
+
+    let exit = executor
         .await
+        .expect("executor task must not panic")
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Blocked(_)));
@@ -3344,6 +3369,202 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
         final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock).result_refs,
         persisted_refs,
         "the suspension checkpoint must retain all completed siblings"
+    );
+}
+
+#[tokio::test]
+async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_gate() {
+    // Two independent gate-raising outcomes in the same bounded-parallel
+    // window — TWO Approval gates (first in input order, second a same-kind
+    // sibling) — plus a completed call. Handling the first gate exit must not
+    // silently discard the later sibling: every launched call stays durably
+    // represented — signature, result refs, and the later approval's
+    // model-visible "pending" safe-summary ref in the single BeforeBlock
+    // checkpoint — and the first input-order gate controls the exit.
+    let first_approval_request_id = ApprovalRequestId::new();
+    let first_gate_ref =
+        LoopGateRef::new(format!("gate:approval-{first_approval_request_id}")).expect("valid");
+    let second_gate_ref = LoopGateRef::new("gate:parallel-sibling-approval-2").expect("valid");
+    let first_approval_resume = CapabilityApprovalResume {
+        approval_request_id: first_approval_request_id,
+        resume_token: CapabilityResumeToken::new("resume-token:parallel-sibling-approval")
+            .expect("valid token"),
+        correlation_id: CorrelationId::new(),
+        input_ref: CapabilityInputRef::new("input:sibling-approval-1").expect("valid"),
+    };
+    let completed_ref = LoopResultRef::new("result:parallel-sibling-completed").expect("valid");
+    // The later approval call carries provider replay metadata so its merged
+    // "approval gate pending" safe-summary ref materializes through the
+    // existing safe-summary persistence (which no-ops without replay).
+    let pending_ref = LoopResultRef::new(format!(
+        "result:provider-error-{}-{}",
+        sanitize_result_ref_suffix("turn_2"),
+        sanitize_result_ref_suffix("call_2"),
+    ))
+    .expect("valid");
+    let host = MockHost::new(vec![ironclaw_loop_contracts::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![
+            CapabilityCallCandidate {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:sibling-completed").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: None,
+            },
+            CapabilityCallCandidate {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:sibling-approval-1").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: None,
+            },
+            CapabilityCallCandidate {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:sibling-approval-2").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    provider_turn_id: "turn_2".to_string(),
+                    provider_call_id: "call_2".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
+                    arguments: serde_json::json!({"message": "second approval"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                }),
+            },
+        ]),
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    }])
+    .with_single_outcomes(vec![
+        resolution::completed(
+            completed_ref.clone(),
+            "parallel sibling completed".to_string(),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ),
+        resolution::approval_required(
+            first_gate_ref.clone(),
+            "first approval required".to_string(),
+            Some(first_approval_resume),
+        )
+        .resolution,
+        resolution::approval_required(
+            second_gate_ref.clone(),
+            "second approval required".to_string(),
+            None,
+        )
+        .resolution,
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect("execute");
+
+    let LoopExit::Blocked(blocked) = exit else {
+        panic!("expected Blocked exit, got {exit:?}");
+    };
+    assert_eq!(
+        blocked.gate_ref, first_gate_ref,
+        "the first input-order gate must control the exit"
+    );
+
+    // Every launched call is dispatched exactly once; the completed sibling's
+    // result ref and the later approval's "pending" summary ref are durable
+    // before the gate exit.
+    assert_eq!(host.single_invocations().len(), 3);
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended
+            .iter()
+            .map(|request| request.result_ref.clone())
+            .collect::<Vec<_>>(),
+        vec![completed_ref.clone(), pending_ref.clone()]
+    );
+    assert_eq!(
+        appended[1].safe_summary, "approval gate pending",
+        "the later approval must be durably model-visible as a pending gate"
+    );
+
+    // ONE coherent BeforeBlock checkpoint: the exit's own — a resumer reading
+    // the (single) staged BeforeBlock state sees exactly the gate the exit
+    // points at.
+    assert_eq!(
+        host.checkpoint_kinds()
+            .into_iter()
+            .filter(|kind| *kind == LoopCheckpointKind::BeforeBlock)
+            .count(),
+        1,
+        "the batch must stage exactly one BeforeBlock checkpoint"
+    );
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+
+    // Every launched call's signature is durable in the exit's checkpoint, in
+    // input order (the second approval's signature derives from its replay
+    // arguments, mirroring capability_call_signature).
+    let expected_signatures = vec![
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "input_ref": "input:sibling-completed" }),
+        )
+        .expect("signature"),
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "input_ref": "input:sibling-approval-1" }),
+        )
+        .expect("signature"),
+        CapabilityCallSignature::from_call(
+            capability_id(),
+            &serde_json::json!({ "message": "second approval" }),
+        )
+        .expect("signature"),
+    ];
+    assert_eq!(
+        before_block_state
+            .recent_call_signatures
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_signatures,
+        "the exit checkpoint must represent every launched call's signature"
+    );
+    assert_eq!(
+        before_block_state.result_refs,
+        vec![completed_ref, pending_ref],
+        "the exit checkpoint must retain the completed result and the later approval's pending summary"
+    );
+    assert_eq!(
+        before_block_state.last_gate.as_ref(),
+        Some(&first_gate_ref),
+        "the checkpoint must resume the first input-order gate"
+    );
+    assert_eq!(
+        before_block_state
+            .pending_approval_resume
+            .as_ref()
+            .map(|resume| resume.gate_ref.clone()),
+        Some(first_gate_ref.clone()),
+        "the single approval resume slot must belong to the first input-order gate"
     );
 }
 #[tokio::test]

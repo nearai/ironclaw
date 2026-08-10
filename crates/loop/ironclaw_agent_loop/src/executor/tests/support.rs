@@ -917,20 +917,24 @@ impl ironclaw_loop_contracts::LoopCapabilityPort for MockHost {
         request: LoopRequest,
     ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
-        let outcome = self
-            .single_outcomes
-            .lock()
-            .expect("lock")
-            .pop_front()
-            .ok_or_else(|| {
+        // Pop the scripted outcome and its matching delay index under one
+        // lock: the pairing must be atomic so concurrent invocations cannot
+        // interleave the outcome pop with the delay fetch (outcome *i* would
+        // otherwise run with delay *j*, silently diverging the scripted
+        // timing from the scripted result).
+        let (outcome, delay) = {
+            let mut outcomes = self.single_outcomes.lock().expect("lock");
+            let outcome = outcomes.pop_front().ok_or_else(|| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "single script exhausted")
             })?;
-        let delay_index = self.next_single_invoke_delay.fetch_add(1, Ordering::SeqCst);
-        let delay = self
-            .single_invoke_delays
-            .get(delay_index)
-            .copied()
-            .unwrap_or_default();
+            let delay_index = self.next_single_invoke_delay.fetch_add(1, Ordering::SeqCst);
+            let delay = self
+                .single_invoke_delays
+                .get(delay_index)
+                .copied()
+                .unwrap_or_default();
+            (outcome, delay)
+        };
         let active = self
             .active_single_invocations
             .fetch_add(1, Ordering::SeqCst)

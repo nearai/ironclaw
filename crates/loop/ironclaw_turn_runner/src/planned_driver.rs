@@ -462,6 +462,7 @@ mod tests {
         build_loop_family_registry, build_loop_family_registry_with_overrides,
     };
     use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
+    use ironclaw_agent_loop::families::ToolBatchStrategy;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
         ScriptedCapabilityOutcome, ScriptedModelResponse, test_run_context,
@@ -596,8 +597,12 @@ mod tests {
 
     #[tokio::test]
     async fn configured_planned_driver_uses_individual_parallel_capability_calls() {
-        let registry =
-            build_loop_family_registry_with_overrides(None, None, true).expect("registry");
+        let registry = build_loop_family_registry_with_overrides(
+            None,
+            None,
+            ToolBatchStrategy::BoundedParallel,
+        )
+        .expect("registry");
         let family = registry
             .get(&LoopFamilyId::DEFAULT)
             .expect("default family");

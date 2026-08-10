@@ -38,8 +38,9 @@ use super::{
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_port_error_is_terminal, capability_summary,
     clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    honor_capability_retry_alteration, model_visible_capability_failure_observation,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
+    gate_tool_result_summary, honor_capability_retry_alteration,
+    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
+    sanitized_strategy_summary_or_fallback,
 };
 use crate::{
     state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
@@ -550,17 +551,122 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // so anything left in `pending_outcomes` after the gate step would
             // be silently dropped — losing signature bookkeeping and side
             // effects for outcomes the parent must observe on resume.
-            for (call, outcome) in pending_outcomes {
-                push_call_signature_once(&mut state, &mut signatures, &call)?;
-                match self
-                    .handle_capability_outcome(ctx, state, call, outcome, &mut capability_batch)
-                    .await?
-                {
-                    BatchStep::Continue(next) => {
-                        state = *next;
-                    }
-                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+            //
+            // Bounded-parallel dispatch launches truly concurrent invocations,
+            // so TWO sibling outcomes in one window can each raise their own
+            // Approval/Auth/ExternalTool gate. Returning on the first
+            // `BatchStep::Exit` would drop the later siblings the same way:
+            // their signatures, gate records, pending resumes, and checkpoints
+            // would never be written.
+            //
+            // The FIRST gate-writing outcome in input order owns the batch's
+            // SINGLE BeforeBlock checkpoint. It is deferred and processed
+            // LAST, after every sibling's resume state has been merged into
+            // `state`, so its checkpoint is the only one staged for this
+            // batch, it carries the merged resume slots, and the exit it
+            // produces is coherent with the checkpoint a resumer would read.
+            //
+            // Signatures are pushed for every pending call BEFORE any
+            // exit-producing outcome runs, so the first gate's BeforeBlock
+            // checkpoint — the one the run resumes from — durably represents
+            // every launched call in the batch, not just the outcomes
+            // processed ahead of it.
+            for (call, _) in &pending_outcomes {
+                push_call_signature_once(&mut state, &mut signatures, call)?;
+            }
+            let mut first_gate: Option<(usize, CapabilityCallCandidate, Resolution)> = None;
+            let mut sibling_outcomes = Vec::with_capacity(pending_outcomes.len());
+            for (index, item) in pending_outcomes.into_iter().enumerate() {
+                if first_gate.is_none() && gate_outcome_writes_before_block(&item.1) {
+                    first_gate = Some((index, item.0, item.1));
+                } else {
+                    sibling_outcomes.push((index, item.0, item.1));
                 }
+            }
+            let mut first_exit: Option<ironclaw_loop_contracts::LoopExit> = None;
+            let mut first_exit_index = usize::MAX;
+            match first_gate {
+                None => {
+                    // No gate outcome in this batch: keep the original
+                    // early-return drain, which is exact for error-only
+                    // batches.
+                    for (_, call, outcome) in sibling_outcomes {
+                        match self
+                            .handle_capability_outcome(
+                                ctx,
+                                state,
+                                call,
+                                outcome,
+                                &mut capability_batch,
+                            )
+                            .await?
+                        {
+                            BatchStep::Continue(next) => state = *next,
+                            BatchStep::Exit(exit) => {
+                                return Ok(TurnCompletedStep::Exit(exit));
+                            }
+                        }
+                    }
+                }
+                Some((gate_index, first_call, first_outcome)) => {
+                    // The first gate alone owns resumable checkpoint state.
+                    // Every later gate is completed model-visibly as pending
+                    // (or with its dependent-run result), so no single-slot
+                    // resume field can overwrite or be consumed by a sibling.
+                    // The model can retry that call after the first gate
+                    // resolves, and every provider call receives a result.
+                    for (index, call, outcome) in sibling_outcomes {
+                        if gate_outcome_writes_before_block(&outcome) {
+                            persist_later_gate_outcome(ctx, &mut state, call, outcome).await?;
+                        } else {
+                            let snapshot = state.clone();
+                            match self
+                                .handle_capability_outcome(
+                                    ctx,
+                                    snapshot,
+                                    call,
+                                    outcome,
+                                    &mut capability_batch,
+                                )
+                                .await?
+                            {
+                                BatchStep::Continue(next) => state = *next,
+                                BatchStep::Exit(exit) => {
+                                    if index < first_exit_index {
+                                        first_exit_index = index;
+                                        first_exit = Some(exit);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // First-gate pass: the batch's single BeforeBlock
+                    // checkpoint is staged here, last, with every sibling's
+                    // merged resume state already in `state`. Its exit (when
+                    // the gate blocks) is the first exit in input order.
+                    match self
+                        .handle_capability_outcome(
+                            ctx,
+                            state,
+                            first_call,
+                            first_outcome,
+                            &mut capability_batch,
+                        )
+                        .await?
+                    {
+                        BatchStep::Continue(next) => state = *next,
+                        BatchStep::Exit(exit) => {
+                            let selected_exit = match first_exit {
+                                Some(earlier) if first_exit_index < gate_index => earlier,
+                                _ => exit,
+                            };
+                            return Ok(TurnCompletedStep::Exit(selected_exit));
+                        }
+                    }
+                }
+            }
+            if let Some(exit) = first_exit {
+                return Ok(TurnCompletedStep::Exit(exit));
             }
             if let Some((shared_gate_ref, first_call)) = coalesced_gate_step {
                 match GateStage
@@ -1926,6 +2032,61 @@ async fn append_completed_capability_result(
     capability_batch.record_result(signature, progress, result.terminate_hint);
     push_completed_result(state, &call.capability_id, result);
     Ok(())
+}
+
+/// Whether handling this outcome through [`handle_capability_outcome`] stages
+/// a BeforeBlock checkpoint — the gate-writing outcomes the drain must treat
+/// as candidates for the batch's single gate exit.
+fn gate_outcome_writes_before_block(resolution: &Resolution) -> bool {
+    matches!(
+        resolution,
+        Resolution::Blocked(Blocked::Approval(_) | Blocked::Auth(_) | Blocked::Resource(_))
+            | Resolution::Suspended(Suspension::ExternalTool(_) | Suspension::DependentRun { .. })
+    )
+}
+
+/// Complete a later sibling gate model-visibly without allocating another
+/// resumable gate slot. The first gate in input order owns the batch's single
+/// BeforeBlock checkpoint; later calls return a durable "pending" observation
+/// so no provider call is left without a result and the model can retry after
+/// the first gate resolves. A dependent run already has a concrete result, so
+/// preserve that result instead of replacing it with a pending summary.
+async fn persist_later_gate_outcome(
+    ctx: StageContext<'_>,
+    state: &mut LoopExecutionState,
+    call: CapabilityCallCandidate,
+    resolution: Resolution,
+) -> Result<(), AgentLoopExecutorError> {
+    // A later sibling may itself be a resumed call. Its new pending/concrete
+    // result consumes the prior resume token; only the first gate may remain
+    // resumable in the checkpoint this batch returns.
+    clear_matching_pending_approval_resume(state, &call);
+    clear_matching_pending_auth_resume(state, &call);
+    clear_matching_pending_external_tool_resume(state, &call);
+    let kind = match resolution {
+        Resolution::Blocked(Blocked::Approval(_)) => GateKind::Approval,
+        Resolution::Blocked(Blocked::Auth(_)) => GateKind::Auth,
+        Resolution::Blocked(Blocked::Resource(_)) => GateKind::Resource,
+        Resolution::Suspended(Suspension::ExternalTool(_)) => GateKind::ExternalTool,
+        Resolution::Suspended(Suspension::DependentRun { result, .. }) => {
+            let result = dependent_run_result_message(&result)?;
+            append_capability_result_ref(ctx.host, &call, &result).await?;
+            push_completed_result(state, &call.capability_id, result);
+            return Ok(());
+        }
+        _ => {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "persist_later_gate_outcome called for a non-gate outcome",
+            });
+        }
+    };
+    append_capability_safe_summary_ref(
+        ctx.host,
+        state,
+        &call,
+        gate_tool_result_summary(kind, "pending"),
+    )
+    .await
 }
 
 fn shared_await_dependent_gate(

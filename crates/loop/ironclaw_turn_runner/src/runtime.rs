@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, sync::Arc};
 
+use ironclaw_agent_loop::families::ToolBatchStrategy;
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
@@ -134,9 +135,14 @@ impl ParallelToolBatchMode {
             }
         }
     }
+}
 
-    const fn is_enabled(self) -> bool {
-        matches!(self, Self::On)
+impl From<ParallelToolBatchMode> for ToolBatchStrategy {
+    fn from(mode: ParallelToolBatchMode) -> Self {
+        match mode {
+            ParallelToolBatchMode::Off => Self::HostBatch,
+            ParallelToolBatchMode::On => Self::BoundedParallel,
+        }
     }
 }
 
@@ -593,11 +599,10 @@ where
 {
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
-    let parallel_tool_batch = parts.config.parallel_tool_batch.is_enabled();
     let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
         parts.config.planned_model_availability_retry_attempts,
-        parallel_tool_batch,
+        parts.config.parallel_tool_batch.into(),
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
@@ -995,6 +1000,7 @@ mod tests {
         scheduler_permit_count,
     };
     use async_trait::async_trait;
+    use ironclaw_agent_loop::families::ToolBatchStrategy;
     use ironclaw_host_api::{
         capability_surface::CapabilitySurfacePolicy,
         ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
@@ -1037,7 +1043,12 @@ mod tests {
             ParallelToolBatchMode::from_raw(Some("off")),
             ParallelToolBatchMode::Off
         );
-        assert!(!ParallelToolBatchMode::Off.is_enabled());
+        // Off selects the family boundary's host-batch strategy directly —
+        // never flattened to a bool.
+        assert_eq!(
+            ToolBatchStrategy::from(ParallelToolBatchMode::Off),
+            ToolBatchStrategy::HostBatch
+        );
     }
 
     #[test]
@@ -1048,7 +1059,10 @@ mod tests {
                 ParallelToolBatchMode::On
             );
         }
-        assert!(ParallelToolBatchMode::On.is_enabled());
+        assert_eq!(
+            ToolBatchStrategy::from(ParallelToolBatchMode::On),
+            ToolBatchStrategy::BoundedParallel
+        );
     }
 
     #[test]
