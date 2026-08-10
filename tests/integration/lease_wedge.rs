@@ -24,6 +24,7 @@ use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::doubles::ParkingCapabilityGate;
 use reborn_support::reply::RebornScriptedReply;
+use reborn_support::scripted_provider::ParkingModelGate;
 use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
@@ -73,4 +74,64 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
         Some("lease_expired"),
         "recovered run must be tagged with the lease_expired failure category"
     );
+}
+
+/// The other side of the same boundary: a run whose lease expires while it is
+/// parked *before a model call* has committed no external effect, so recovery
+/// requeues it and it finishes. The user sees a normal answer, not a dead run.
+///
+/// The wedged-tool test above and this one differ only in where the run was
+/// standing when its lease lapsed, which is exactly the distinction the
+/// recorded checkpoint kind carries: `BeforeSideEffect` (there) still fails
+/// closed, `BeforeModel` (here) is reclaimed after one full lease TTL of grace.
+#[tokio::test]
+async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed() {
+    let gate = ParkingModelGate::new();
+
+    let harness = RebornIntegrationHarness::test_default()
+        .park_model(gate.clone())
+        .with_runner_lease_ttl_for_test(chrono::Duration::milliseconds(200))
+        .with_lease_recovery_interval_for_test(Duration::from_millis(50))
+        .script([
+            // Consumed by the resumed run, which is the reply the user sees.
+            RebornScriptedReply::text("recovered and finished"),
+            // Consumed by the abandoned worker once it is released; its
+            // transitions are refused because its lease is gone.
+            RebornScriptedReply::text("stale worker output"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn_async("answer a question")
+        .await
+        .expect("turn submitted");
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_parked())
+        .await
+        .expect("model call parks before the timeout");
+
+    // Never released before recovery: the lease lapses under a worker that is
+    // still holding the run, which is precisely the ambiguous case the grace
+    // window exists to resolve.
+    let state = tokio::time::timeout(
+        Duration::from_secs(30),
+        harness.wait_for_status(run_id, TurnStatus::Completed),
+    )
+    .await
+    .expect("requeued run completes before the timeout")
+    .expect("a before-model checkpoint is resumed, not failed");
+    assert!(
+        state.failure.is_none(),
+        "the user must never see a failure for a run that was safely resumable, got {:?}",
+        state.failure
+    );
+
+    harness
+        .assert_reply_contains("recovered and finished")
+        .await
+        .expect("the resumed run's reply is the one persisted");
+
+    gate.release();
 }

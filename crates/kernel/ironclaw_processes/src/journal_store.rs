@@ -768,8 +768,17 @@ where
         &self,
         request: RecoverExpiredProcessLeasesRequest,
     ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
+        let lease_duration_millis =
+            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
+                ProcessJournalStoreError::InvalidRequest(
+                    "process lease duration exceeds journal representation".to_string(),
+                )
+            })?;
         let response = match self
-            .execute(StoredProcessCommand::RecoverExpired(request))
+            .execute(StoredProcessCommand::RecoverExpired {
+                request,
+                lease_duration_millis,
+            })
             .await?
         {
             StoredCommandOutcome::Recovered(response) => response,

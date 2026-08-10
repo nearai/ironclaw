@@ -804,6 +804,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
             payload: ProcessCheckpointPayload::new(b"final checkpoint".to_vec()).expect("payload"),
             created_at: Utc::now(),
             link_to_process: true,
+            kind: None,
             metadata: serde_json::json!({
                 "kind": ironclaw_loop_contracts::LoopCheckpointKind::Final,
             }),
@@ -909,6 +910,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
                 .expect("checkpoint payload"),
             created_at: Utc::now(),
             link_to_process: true,
+            kind: None,
             metadata: serde_json::json!({
                 "source": "retry-test",
                 "kind": ironclaw_loop_contracts::LoopCheckpointKind::BeforeModel,
