@@ -19,7 +19,7 @@ import tomllib
 # traceback with no actionable next step.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 try:
-    from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+    from crate_tree import CrateTreeError, crate_directories  # noqa: E402
 except ImportError as error:  # pragma: no cover - deployment error, not logic
     raise SystemExit(
         "cut_ironclaw_release: cannot import scripts/ci/lib/crate_tree.py "
@@ -37,6 +37,7 @@ VERSION_PATTERN = re.compile(
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 MAX_ANNOTATED_TAG_DEPTH = 8
+SHIPPING_PACKAGE_NAME = "ironclaw"
 
 
 class ReleaseTagError(RuntimeError):
@@ -166,22 +167,44 @@ def _checked_out_sha(candidate_root: Path) -> str:
 
 
 def _manifest_version(candidate_root: Path) -> str:
-    # Resolved by crate NAME through the shared inventory
-    # (scripts/ci/lib/crate_tree.py) against the CANDIDATE checkout, not a
-    # literal `crates/ironclaw_cli` path — the target-architecture
-    # family move (PROPOSAL §5) would otherwise make this raise FileNotFoundError
-    # (or, worse, silently resolve nothing) once the candidate commit has moved
-    # past the flat layout (docs/reborn/target-architecture/CHECKLIST.md WS10).
+    # Resolve the shipping Cargo PACKAGE through the candidate's crate
+    # inventory. Directory names are not a stable release contract: supported
+    # release branches use `ironclaw_reborn_cli`, while main uses
+    # `app/ironclaw_cli` after the target-architecture move.
     try:
-        crate_dir = crate_directory("ironclaw_cli", candidate_root)
+        crate_dirs = crate_directories(candidate_root)
     except CrateTreeError as error:
         raise ReleaseTagError(
-            "cannot resolve the ironclaw_cli crate in the candidate "
+            "cannot inventory crates in the candidate "
             f"checkout: {error}"
         ) from error
-    manifest = candidate_root / crate_dir / "Cargo.toml"
-    with manifest.open("rb") as manifest_file:
-        return str(tomllib.load(manifest_file)["package"]["version"])
+
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for crate_dir in crate_dirs:
+        manifest = candidate_root / crate_dir / "Cargo.toml"
+        try:
+            with manifest.open("rb") as manifest_file:
+                document = tomllib.load(manifest_file)
+        except OSError as error:
+            raise ReleaseTagError(
+                f"cannot read candidate manifest {manifest}: {error}"
+            ) from error
+        package = document.get("package")
+        if isinstance(package, dict) and package.get("name") == SHIPPING_PACKAGE_NAME:
+            matches.append((manifest, package))
+
+    if len(matches) != 1:
+        paths = [str(manifest.relative_to(candidate_root)) for manifest, _ in matches]
+        raise ReleaseTagError(
+            f"expected exactly one candidate package named {SHIPPING_PACKAGE_NAME!r}, "
+            f"found {len(matches)}: {paths}"
+        )
+
+    manifest, package = matches[0]
+    version = package.get("version")
+    if not isinstance(version, str):
+        raise ReleaseTagError(f"candidate package manifest {manifest} has no version")
+    return version
 
 
 def main() -> int:

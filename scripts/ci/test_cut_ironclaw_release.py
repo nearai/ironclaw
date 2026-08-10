@@ -27,15 +27,19 @@ SHA = "a" * 40
 
 
 def _write_candidate_manifest(
-    root: Path, crate_relative_dir: str, version: str
+    root: Path,
+    crate_relative_dir: str,
+    version: str,
+    *,
+    package_name: str = "ironclaw",
 ) -> None:
-    """A candidate checkout fixture: the reborn-cli crate at
+    """A candidate checkout fixture: the shipping crate at
     `crate_relative_dir` plus enough filler crates to clear crate_tree's
     discovery floor (a realistic-enough tree, not a one-crate stub)."""
     manifest = root / crate_relative_dir / "Cargo.toml"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
-        f'[package]\nname = "ironclaw"\nversion = "{version}"\n',
+        f'[package]\nname = "{package_name}"\nversion = "{version}"\n',
         encoding="utf-8",
     )
     for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
@@ -232,6 +236,13 @@ class ReleaseTagTests(unittest.TestCase):
         )
         self.assertNotIn("candidate/scripts/ci/cut_ironclaw_release.py", workflow)
 
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "python3 scripts/ci/test_cut_ironclaw_release.py", code_style
+        )
+
     def test_candidate_metadata_comes_from_supplied_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
@@ -250,10 +261,8 @@ class ReleaseTagTests(unittest.TestCase):
     def test_candidate_manifest_resolves_through_crate_inventory_when_nested(
         self,
     ) -> None:
-        """WS10: the candidate's ironclaw_cli manifest is found by
-        crate NAME even after the target-architecture family move
-        (crates/<family>/ironclaw_cli, PROPOSAL §5) — this is exactly
-        the shape a release cut against a moved candidate commit hits."""
+        """WS10: the shipping package is found after the target-architecture
+        family move (`crates/<family>/ironclaw_cli`, PROPOSAL §5)."""
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
             _write_candidate_manifest(
@@ -261,12 +270,51 @@ class ReleaseTagTests(unittest.TestCase):
             )
             self.assertEqual(release._manifest_version(candidate_root), VERSION)
 
+    def test_candidate_manifest_resolves_historical_reborn_cli_layout(self) -> None:
+        """Release tooling on main must validate supported release branches
+        without requiring them to adopt main's current crate directory layout."""
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root, "crates/ironclaw_reborn_cli", VERSION
+            )
+            self.assertEqual(release._manifest_version(candidate_root), VERSION)
+
+    def test_candidate_manifest_resolution_uses_package_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root,
+                "crates/ironclaw_cli",
+                VERSION,
+                package_name="not-the-shipping-package",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "exactly one candidate package named 'ironclaw', found 0",
+            ):
+                release._manifest_version(candidate_root)
+
+    def test_candidate_manifest_resolution_rejects_ambiguous_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root, "crates/ironclaw_reborn_cli", VERSION
+            )
+            _write_candidate_manifest(
+                candidate_root, "crates/app/ironclaw_cli", VERSION
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "exactly one candidate package named 'ironclaw', found 2",
+            ):
+                release._manifest_version(candidate_root)
+
     def test_candidate_manifest_resolution_fails_closed_when_crate_missing(
         self,
     ) -> None:
-        """A candidate checkout that cannot resolve ironclaw_cli must
-        refuse loudly, not silently read `manifest_version` as empty/wrong —
-        the WS10 failure mode this whole module guards against."""
+        """A candidate without the shipping package must refuse loudly, not
+        silently read `manifest_version` as empty or wrong."""
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
             for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
@@ -278,7 +326,7 @@ class ReleaseTagTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(
                 release.ReleaseTagError,
-                "cannot resolve the ironclaw_cli crate",
+                "exactly one candidate package named 'ironclaw', found 0",
             ):
                 release._manifest_version(candidate_root)
 
