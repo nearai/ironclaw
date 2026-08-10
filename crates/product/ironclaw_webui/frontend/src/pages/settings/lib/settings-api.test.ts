@@ -2,11 +2,48 @@ import assert from "node:assert/strict";
 import { test, vi } from "vitest";
 
 import {
+  fetchUserModelCatalog,
+  fetchUserModelPreference,
+  setUserModelPreference,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
   updateToolPermission,
   upsertLlmProvider,
 } from "./settings-api";
+
+test("user model preference API uses caller-safe endpoints and reset payload", async () => {
+  const requests = [];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal("fetch", async (path, options = {}) => {
+    requests.push({ path, options });
+    return new Response(JSON.stringify({ model: null, models: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  try {
+    await fetchUserModelCatalog();
+    await fetchUserModelPreference();
+    await setUserModelPreference(null);
+
+    assert.deepEqual(
+      requests.map(({ path, options }) => [path, options.method || "GET"]),
+      [
+        ["/api/webchat/v2/llm/models", "GET"],
+        ["/api/webchat/v2/llm/model-preference", "GET"],
+        ["/api/webchat/v2/llm/model-preference", "PUT"],
+      ]
+    );
+    assert.deepEqual(JSON.parse(requests[2].options.body), { model: null });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 function toolPermissionResponse({
   name = "builtin.echo",
