@@ -7,10 +7,12 @@ import { afterEach, test, vi } from "vitest";
 import { MarqueeText } from "./marquee-text";
 
 const roots = [];
+const originalResizeObserver = globalThis.ResizeObserver;
 
 afterEach(() => {
   for (const root of roots.splice(0)) root.unmount();
   vi.restoreAllMocks();
+  globalThis.ResizeObserver = originalResizeObserver;
 });
 
 async function renderMarquee({ clientWidth, scrollWidth }) {
@@ -50,4 +52,8 @@ test("MarqueeText leaves a fitting title static", async () => {
 
   assert.equal(marquee?.getAttribute("data-marquee-overflow"), "false");
   assert.equal(marquee?.querySelector("[aria-hidden='true']"), null);
+});
+
+test("MarqueeText tests restore the environment ResizeObserver", () => {
+  assert.equal(globalThis.ResizeObserver, originalResizeObserver);
 });
