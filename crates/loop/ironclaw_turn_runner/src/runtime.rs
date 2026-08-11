@@ -1101,8 +1101,7 @@ mod tests {
         DefaultPlannedRuntimeConfig, ParallelToolBatchMode,
         REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV, RuntimeProfiledCapabilityPortFactory,
         SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
-        ToolDisclosureMode, parse_tool_disclosure_profile_pins,
-        scheduler_permit_count,
+        ToolDisclosureMode, parse_tool_disclosure_profile_pins, scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
