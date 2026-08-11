@@ -1,4 +1,4 @@
-// arch-exempt: large_file, four comment lines recording why classify() must keep matching Role::User rather than the wire shape (#6985); no logic added, plan #6985
+// arch-exempt: large_file, routing-classification logic still lacks a dedicated owner/module aggregation; four comment lines record why classify() must keep matching Role::User rather than the wire shape (#6985), with no logic added, plan #6985
 //! Smart routing provider that routes requests to cheap or primary models based on task complexity.
 //!
 //! Uses a 13-dimension complexity scorer (from PR #208 by @onlyamicrowave) to analyze prompts

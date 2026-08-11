@@ -62,9 +62,9 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **55** flat integration bins (49 in
+Totals: **51** group scenarios · **63** flat integration bins (57 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**869** test functions).
+**104** Python scenario files (**1,155** test functions).
 
 ---
 
@@ -158,7 +158,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (63)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -311,7 +311,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (104 files, 1,154 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (104 files, 1,155 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -454,7 +454,7 @@ entries.
 | Every lifecycle state-machine claim names executable evidence, with zero gaps | `test_state_machine_coverage.py` (12) |
 | The product-surface coverage report can't pass vacuously or hide lost evidence | `test_product_surface_coverage.py` (7) |
 | Playwright diagnostic artifacts stay bounded | `test_reborn_webui_harness_artifacts.py` (10) |
-| No mock-LLM test may churn the provider-cached prompt prefix — the `assert_prompt_cache_reuse` autouse fixture applies this to EVERY such test, and these self-tests prove the gate itself catches the regression, permits a tool-surface change, and does not false-positive across conversations | `test_prompt_cache_gate.py` (12) |
+| No mock-LLM test may churn the provider-cached prompt prefix — the `assert_prompt_cache_reuse` autouse fixture applies this to EVERY such test, and these self-tests prove the gate itself catches the regression, permits a tool-surface change, documents its conservative history-rewrite blind spot, and does not false-positive across conversations | `test_prompt_cache_gate.py` (13) |
 
 > These gates fail loudly when coverage regresses. Prefer adding a row to one of their
 > registries over adding a line to §7.

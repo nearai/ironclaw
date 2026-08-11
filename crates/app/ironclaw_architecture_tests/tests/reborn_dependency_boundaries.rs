@@ -727,8 +727,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // Typed leading inline roles keep subagent framing ahead of persisted
-        // conversation history without moving provider assembly into the host.
+        // 13_306 -> 13_390 (2026-08-11, #6985 prompt-prefix stability): typed
+        // leading inline roles keep subagent framing ahead of persisted
+        // conversation history. Role vocabulary and its partition only —
+        // provider assembly stays in ironclaw_llm. Count read from this test's
+        // own failure message.
         ("ironclaw_loop_contracts", 13_390),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,

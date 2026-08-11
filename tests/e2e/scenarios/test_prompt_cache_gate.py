@@ -169,6 +169,33 @@ def test_history_rewrite_is_measured_but_not_gated():
     assert observation["history_messages_reused"] == 1
 
 
+def test_churn_plus_history_rewrite_starts_a_new_chain_and_is_not_gated():
+    """Pin the conservative `_conversation_key` blind spot.
+
+    A request that rewrites history and churns the prefix matches no
+    continuation branch, so it starts a new chain without recording churn.
+    """
+    observe(
+        "You are IronClaw. Current time: 10:00",
+        [
+            {"role": "user", "content": "turn one"},
+            {"role": "assistant", "content": "reply one"},
+        ],
+        TOOLS,
+    )
+    observe(
+        "You are IronClaw. Current time: 10:01",
+        [
+            {"role": "user", "content": "turn one"},
+            {"role": "assistant", "content": "reply one REWRITTEN"},
+        ],
+        TOOLS,
+    )
+
+    assert mock_llm._cache_violations == []
+    assert len(mock_llm._cache_chains) == 2
+
+
 def test_compaction_starts_a_new_chain_rather_than_reporting_churn():
     """Documents conservative history-continuation behavior after compaction.
 

@@ -24,8 +24,8 @@ def _message_text(message: dict) -> str:
 
 
 # Frame delimiters for host-authored, transcript-positioned guidance. Must
-# match `REMINDER_OPEN`/`REMINDER_CLOSE` in `crates/ironclaw_llm/src/provider.rs`,
-# which is what actually emits them.
+# match `REMINDER_OPEN`/`REMINDER_CLOSE` in
+# `crates/domains/ironclaw_llm/src/provider.rs`, which actually emits them.
 REMINDER_OPEN = "<system-reminder>"
 REMINDER_CLOSE = "</system-reminder>"
 

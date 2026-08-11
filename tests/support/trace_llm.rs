@@ -288,7 +288,7 @@ pub struct TraceLlm {
     /// to the model on each iteration (used for runtime-policy filtering
     /// caller-tier coverage). Captured in lock-step with `captured_requests`
     /// — same index = same call.
-    captured_tool_definitions: Mutex<Vec<Vec<ToolDefinition>>>,
+    captured_tool_definitions: Mutex<Vec<Option<Vec<ToolDefinition>>>>,
 }
 
 /// One request whose cached prompt prefix churned with no surface change.
@@ -320,20 +320,18 @@ pub fn leading_system_block(messages: &[ChatMessage]) -> String {
         .join("\n\n")
 }
 
-fn tool_surface_signature(tools: Option<&Vec<ToolDefinition>>) -> Vec<String> {
-    tools
-        .map(|defs| {
-            let mut definitions = defs
-                .iter()
-                .map(|def| {
-                    serde_json::to_string(&(&def.name, &def.description, &def.parameters))
-                        .expect("ToolDefinition fields are JSON-serializable")
-                })
-                .collect::<Vec<_>>();
-            definitions.sort();
-            definitions
-        })
-        .unwrap_or_default()
+fn tool_surface_signature(tools: Option<&Vec<ToolDefinition>>) -> Option<Vec<String>> {
+    tools.map(|defs| {
+        let mut definitions = defs
+            .iter()
+            .map(|def| {
+                serde_json::to_string(&(&def.name, &def.description, &def.parameters))
+                    .expect("ToolDefinition fields are JSON-serializable")
+            })
+            .collect::<Vec<_>>();
+        definitions.sort();
+        definitions
+    })
 }
 
 #[cfg(test)]
@@ -367,6 +365,10 @@ mod prompt_cache_tests {
         assert_ne!(
             tool_surface_signature(Some(&baseline)),
             tool_surface_signature(Some(&parameters_changed))
+        );
+        assert_ne!(
+            tool_surface_signature(None),
+            tool_surface_signature(Some(&vec![]))
         );
     }
 }
@@ -587,7 +589,7 @@ impl TraceLlm {
     /// Mirrors the `_observe_cache_prefix` gate in `tests/e2e/mock_llm.py`.
     pub fn prompt_cache_prefix_churn(&self) -> Vec<PromptCachePrefixChurn> {
         let requests = self.captured_requests();
-        let surfaces = self.captured_tool_definitions();
+        let surfaces = self.captured_tool_definitions.lock().unwrap().clone();
         let mut churn = Vec::new();
         for index in 1..requests.len() {
             let before = leading_system_block(&requests[index - 1]);
@@ -595,9 +597,16 @@ impl TraceLlm {
             if before == after {
                 continue;
             }
-            let surface_changed = tool_surface_signature(surfaces.get(index - 1))
-                != tool_surface_signature(surfaces.get(index));
-            if surface_changed {
+            let before_surface = surfaces
+                .get(index - 1)
+                .and_then(|surface| tool_surface_signature(surface.as_ref()));
+            let after_surface = surfaces
+                .get(index)
+                .and_then(|surface| tool_surface_signature(surface.as_ref()));
+            if before_surface.is_none() || after_surface.is_none() {
+                continue;
+            }
+            if before_surface != after_surface {
                 continue;
             }
             churn.push(PromptCachePrefixChurn {
@@ -612,7 +621,12 @@ impl TraceLlm {
     /// model. Index `i` matches the `i`-th `captured_requests()` entry.
     /// Empty for `complete()`-only calls (text-only paths).
     pub fn captured_tool_definitions(&self) -> Vec<Vec<ToolDefinition>> {
-        self.captured_tool_definitions.lock().unwrap().clone()
+        self.captured_tool_definitions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|tools| tools.clone().unwrap_or_default())
+            .collect()
     }
 
     /// Enqueue one more step at the back of the FIFO. For scenarios where a
@@ -642,11 +656,12 @@ impl TraceLlm {
             .lock()
             .unwrap()
             .push(messages.to_vec());
-        // Capture the `tools` argument in lock-step (empty for `complete()`).
+        // Capture the `tools` argument in lock-step. Preserve `None` so
+        // text-only calls are not mistaken for capability-surface changes.
         self.captured_tool_definitions
             .lock()
             .unwrap()
-            .push(tools.map(|t| t.to_vec()).unwrap_or_default());
+            .push(tools.map(|t| t.to_vec()));
 
         let last_user_content: Option<String> = messages
             .iter()

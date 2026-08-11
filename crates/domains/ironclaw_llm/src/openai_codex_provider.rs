@@ -1,4 +1,4 @@
-// arch-exempt: large_file, one match arm forced by the new Role::HostReminder variant (#6985); no new concern in this file, plan #6985
+// arch-exempt: large_file, Codex provider-wire logic still lacks a dedicated owner/module aggregation; one match arm is forced by the new Role::HostReminder variant (#6985), with no new concern in this file, plan #6985
 //! OpenAI Codex Responses API client.
 //!
 //! Implements `LlmProvider` using the Responses API at

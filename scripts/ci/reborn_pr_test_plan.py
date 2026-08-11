@@ -268,7 +268,6 @@ INTEGRATION_SUPPORT_OWNERS = {
     "tests/support/hosted_mcp_registration_server.rs": (
         "tests/integration/hosted_mcp_registration.rs"
     ),
-    "tests/support/trace_llm.rs": "tests/integration/prompt_prefix_stability.rs",
 }
 INTEGRATION_SNAPSHOT_PREFIX_OWNERS = {
     "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
@@ -825,6 +824,13 @@ def build_plan(
             root_partitions.add(0)
             reasons.append(
                 "shared root-test support changed; PR runs a representative partition"
+            )
+            continue
+        if path == "tests/support/trace_llm.rs":
+            integration_lanes.add(0)
+            root_partitions.add(0)
+            reasons.append(
+                "shared scripted-provider support changed; PR runs representative lanes"
             )
             continue
         if path in integration_inventory:
