@@ -396,43 +396,15 @@ impl MemoryService for NativeMemoryService {
         Ok(rank_and_truncate(results, request.max_snippets))
     }
 
-    async fn read_curated(
+    async fn read_document(
         &self,
         invocation: MemoryInvocation,
-        request: MemoryServiceContextRequest,
-    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
-        // Always-on lane: the user's standing `MEMORY.md`, returned with NO
-        // retrieval query so a fact saved in an earlier conversation reaches a
-        // later one whose opening message shares none of its vocabulary
-        // (#7185). `request.query` is deliberately ignored.
-        if request.max_snippets == 0 || memory_context_disabled(request.context_profile_id.as_str())
-        {
-            return Ok(Vec::new());
-        }
-        let (scope, context) = self.scoped_context(&invocation)?;
-        let path = document_path(&scope, MEMORY_PATH)?;
-        // No curated document is a normal state for a user who has never saved
-        // anything — an empty lane, never an error.
-        let Some(bytes) = self
-            .backend
-            .read_document(&context, &path)
-            .await
-            .map_err(MemoryServiceError::operation_from)?
-        else {
-            return Ok(Vec::new());
-        };
-        let text = String::from_utf8(bytes).map_err(MemoryServiceError::operation_from)?;
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(vec![MemoryServiceContextSnippet {
-            tenant_id: path.tenant_id().to_string(),
-            user_id: path.user_id().to_string(),
-            agent_id: path.agent_id().map(ToString::to_string),
-            project_id: path.project_id().map(ToString::to_string),
-            relative_path: path.relative_path().to_string(),
-            text,
-        }])
+        request: MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
+        // The same document read this provider already serves as the
+        // `ironclaw.memory.read` tool — one implementation, two callers (the
+        // model through the tool handler, the host through the trait).
+        self.read(invocation, request).await
     }
 
     async fn record_interaction(

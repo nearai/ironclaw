@@ -13,10 +13,9 @@ service = "mem0_memory_provider"
 # adapter; the compose-time [memory] binding selects exactly one provider
 # (native by default, mem0 when explicitly bound + configured). The lifecycle
 # set is honest: mem0 implements the long-term retrieval lane and profile
-# reads. It has no thread partitioning (no short-term lane), no curated
-# standing document (no `read_curated` lane), and does not record
-# interactions, so those hooks are not declared and the host never calls
-# them.
+# reads. It has no thread partitioning (no short-term lane) and does not
+# record interactions, so those hooks are not declared and the host never
+# calls them.
 [memory]
 lifecycle = ["read_long_term", "profile_read"]
 

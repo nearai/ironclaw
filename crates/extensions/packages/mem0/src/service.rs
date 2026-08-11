@@ -421,6 +421,22 @@ impl MemoryService for Mem0MemoryService {
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
+    /// The same document read this provider already serves as the
+    /// `ironclaw.memory.read` tool — one implementation, two callers.
+    ///
+    /// MAPPING GAP (inherited from [`Mem0MemoryService::read`]): mem0 is not
+    /// path-addressable, so a "document" is the concatenation of the memories
+    /// tagged with the requested path, and a path matching no memory is an
+    /// `Input` error rather than empty content. A host caller reading an
+    /// optional document treats that as "absent", per the trait contract.
+    async fn read_document(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
+        self.read(invocation, request).await
+    }
+
     /// Long-term retrieval lane, the only lane mem0 declares: its namespace
     /// partition is tenant/user/agent/project with no thread axis, so there is
     /// no distinct short-term (active-thread) lane to serve. `read_short_term`

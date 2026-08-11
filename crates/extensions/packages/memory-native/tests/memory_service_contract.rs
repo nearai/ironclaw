@@ -1239,12 +1239,19 @@ ironclaw_memory::memory_service_contract_full!(
 // ---------------------------------------------------------------------------
 // The always-on curated lane (#7185)
 // ---------------------------------------------------------------------------
+// The lane itself is host-composed (`ironclaw_host_runtime::memory_context`):
+// there is no provider "curated" hook, just the ordinary document read this
+// provider already serves as the `ironclaw.memory.read` tool. What the provider
+// owes the lane is pinned here — that `read_document` reaches the standing
+// `MEMORY.md` the model was told to write to, reports absence the way the host
+// reads as "absent", and stays scoped to the invocation user.
 
-/// `read_curated` returns the user's standing `MEMORY.md` with NO retrieval
-/// query involved — the whole point of the lane, since the search lanes only
-/// fire when the current message shares vocabulary with the stored fact.
+/// The document the always-on lane reads is the one the memory protocol tells
+/// the model to write: the reserved `memory` write target and the lane's
+/// `MEMORY.md` read path must name the SAME document, or a guided save is
+/// never recalled.
 #[tokio::test]
-async fn native_read_curated_returns_the_standing_memory_document() {
+async fn native_guided_memory_write_is_readable_as_the_standing_document() {
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
     let invocation = invocation();
     service
@@ -1264,46 +1271,43 @@ async fn native_read_curated_returns_the_standing_memory_document() {
         .await
         .expect("curated write");
 
-    let snippets = service
-        .read_curated(
+    let document = service
+        .read_document(
             invocation,
-            MemoryServiceContextRequest {
-                // Deliberately unrelated to the stored fact: the curated lane
-                // must not consult the query at all.
-                query: "what time does the ferry leave".to_string(),
-                max_snippets: 10,
-                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
             },
         )
         .await
-        .expect("curated lane read");
+        .expect("the standing document must be readable");
 
-    assert_eq!(snippets.len(), 1);
-    assert_eq!(snippets[0].relative_path, "MEMORY.md");
-    assert!(snippets[0].text.contains("the user prefers metric units"));
-    assert_eq!(snippets[0].tenant_id, "tenant-native-memory");
-    assert_eq!(snippets[0].user_id, "user-native-memory");
+    assert_eq!(document.path, "MEMORY.md");
+    assert!(document.content.contains("the user prefers metric units"));
 }
 
-/// A user who has never saved anything has no `MEMORY.md`. That is a normal
-/// state: an empty lane, not an error the host would have to swallow.
+/// A user who has never saved anything has no `MEMORY.md`. The provider reports
+/// that as `Input` — the kind the host's curated lane normalizes to an empty
+/// lane WITHOUT logging, since absence is a normal state rather than a fault.
 #[tokio::test]
-async fn native_read_curated_without_a_document_is_empty_not_an_error() {
+async fn native_absent_standing_document_reports_input_not_operation() {
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
 
-    let snippets = service
-        .read_curated(
+    let error = service
+        .read_document(
             invocation(),
-            MemoryServiceContextRequest {
-                query: "anything".to_string(),
-                max_snippets: 10,
-                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
             },
         )
         .await
-        .expect("an absent curated document must not be an error");
+        .expect_err("an absent document is reported, not invented");
 
-    assert!(snippets.is_empty());
+    assert_eq!(
+        error.kind(),
+        MemoryServiceErrorKind::Input,
+        "the host distinguishes absent (Input) from a backend failure, and only \
+         logs the latter"
+    );
 }
 
 /// The memory protocol tells the model to save each durable fact as its own
@@ -1337,21 +1341,18 @@ async fn native_consecutive_curated_appends_stay_separate_facts() {
             .expect("curated append");
     }
 
-    let snippets = service
-        .read_curated(
+    let document = service
+        .read_document(
             invocation,
-            MemoryServiceContextRequest {
-                query: "unrelated".to_string(),
-                max_snippets: 10,
-                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
             },
         )
         .await
-        .expect("curated lane read");
+        .expect("standing document read");
 
-    assert_eq!(snippets.len(), 1, "one standing document");
-    let facts: Vec<&str> = snippets[0]
-        .text
+    let facts: Vec<&str> = document
+        .content
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -1363,48 +1364,11 @@ async fn native_consecutive_curated_appends_stay_separate_facts() {
     );
 }
 
-/// Defense in depth alongside the host gate: a memory-disabled context profile
-/// reads nothing, even on the always-on lane.
+/// The standing document is scoped like every other memory read: another user's
+/// `MEMORY.md` is not reachable from this user's invocation. This is what makes
+/// the always-on lane safe to run for every user without a per-user gate.
 #[tokio::test]
-async fn native_read_curated_respects_the_disabled_context_profile() {
-    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
-    let invocation = invocation();
-    service
-        .write(
-            invocation.clone(),
-            MemoryServiceWriteRequest {
-                target: "memory".to_string(),
-                content: "must not surface".to_string(),
-                append: false,
-                old_string: None,
-                new_string: None,
-                replace_all: false,
-                metadata: None,
-                timezone: None,
-            },
-        )
-        .await
-        .expect("curated write");
-
-    let snippets = service
-        .read_curated(
-            invocation,
-            MemoryServiceContextRequest {
-                query: "anything".to_string(),
-                max_snippets: 10,
-                context_profile_id: MemoryContextProfileId::new("memory_disabled").unwrap(),
-            },
-        )
-        .await
-        .expect("disabled profile must not error");
-
-    assert!(snippets.is_empty());
-}
-
-/// The curated document is scoped like every other memory read: another user's
-/// `MEMORY.md` is not reachable from this user's invocation.
-#[tokio::test]
-async fn native_read_curated_is_scoped_to_the_invocation_user() {
+async fn native_standing_document_is_scoped_to_the_invocation_user() {
     let filesystem = Arc::new(InMemoryBackend::new());
     let service = NativeMemoryService::from_filesystem(filesystem, None);
     let owner = invocation();
@@ -1427,20 +1391,15 @@ async fn native_read_curated_is_scoped_to_the_invocation_user() {
 
     let mut other = invocation();
     other.scope.user_id = UserId::new("user-native-memory-other").unwrap();
-    let snippets = service
-        .read_curated(
+    let error = service
+        .read_document(
             other,
-            MemoryServiceContextRequest {
-                query: "anything".to_string(),
-                max_snippets: 10,
-                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
             },
         )
         .await
-        .expect("other-user curated read");
+        .expect_err("another user's standing document must not be readable");
 
-    assert!(
-        snippets.is_empty(),
-        "another user's standing document must not be readable"
-    );
+    assert_eq!(error.kind(), MemoryServiceErrorKind::Input);
 }

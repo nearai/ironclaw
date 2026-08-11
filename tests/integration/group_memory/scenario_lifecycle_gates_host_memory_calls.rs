@@ -5,6 +5,11 @@
 //! (`ironclaw_composition::memory_lifecycle_consumers`, the derivation
 //! `build_reborn_runtime` wires).
 //!
+//! The counterpart is pinned here too: `read_document` is NOT a lifecycle hook,
+//! so the host-composed always-on curated lane reads the standing document even
+//! under an empty declaration. Gating it would put a user's standing facts
+//! behind a manifest opt-in, which is the failure #7185 exists to fix.
+//!
 //! Builds its own groups (not the shared `builtin_tools` group): the memory
 //! provider + declared lifecycle are per-group construction inputs.
 
@@ -16,8 +21,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
-    MemoryServiceError, MemoryServiceProfileReadResponse, MemoryServiceRecordRequest,
-    MemoryServiceRecordResponse,
+    MemoryServiceError, MemoryServiceProfileReadResponse, MemoryServiceReadRequest,
+    MemoryServiceReadResponse, MemoryServiceRecordRequest, MemoryServiceRecordResponse,
 };
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -29,9 +34,12 @@ use super::reborn_support::reply::RebornScriptedReply;
 struct RecordingLifecycleMemoryService {
     long_term_reads: AtomicUsize,
     short_term_reads: AtomicUsize,
-    curated_reads: AtomicUsize,
     interaction_records: AtomicUsize,
     profile_reads: AtomicUsize,
+    /// NOT a lifecycle hook: the ordinary document read the host composes the
+    /// always-on curated lane out of. Counted separately because it is
+    /// deliberately NOT gated by `[memory].lifecycle` — see Arm 1.
+    document_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -54,13 +62,15 @@ impl MemoryService for RecordingLifecycleMemoryService {
         Ok(Vec::new())
     }
 
-    async fn read_curated(
+    async fn read_document(
         &self,
         _invocation: MemoryInvocation,
-        _request: MemoryServiceContextRequest,
-    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
-        self.curated_reads.fetch_add(1, Ordering::SeqCst);
-        Ok(Vec::new())
+        request: MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
+        self.document_reads.fetch_add(1, Ordering::SeqCst);
+        // Absent, the way both bundled providers report a path naming nothing.
+        let _ = request;
+        Err(MemoryServiceError::input())
     }
 
     async fn record_interaction(
@@ -116,7 +126,6 @@ pub async fn run() -> HarnessResult<()> {
     while waited < Duration::from_secs(1) {
         let fired = silent.long_term_reads.load(Ordering::SeqCst)
             + silent.short_term_reads.load(Ordering::SeqCst)
-            + silent.curated_reads.load(Ordering::SeqCst)
             + silent.interaction_records.load(Ordering::SeqCst)
             + silent.profile_reads.load(Ordering::SeqCst);
         if fired > 0 {
@@ -136,11 +145,6 @@ pub async fn run() -> HarnessResult<()> {
         true,
     )?;
     expect_count(
-        "empty lifecycle / read_curated",
-        silent.curated_reads.load(Ordering::SeqCst),
-        true,
-    )?;
-    expect_count(
         "empty lifecycle / record_interaction",
         silent.interaction_records.load(Ordering::SeqCst),
         true,
@@ -149,6 +153,15 @@ pub async fn run() -> HarnessResult<()> {
         "empty lifecycle / profile_read",
         silent.profile_reads.load(Ordering::SeqCst),
         true,
+    )?;
+    // …but the always-on curated lane is NOT a lifecycle hook. It is composed
+    // host-side out of the ordinary document read, so it runs against any bound
+    // provider without a declaration — the whole point of #7185 is that a user's
+    // standing facts do not depend on a manifest opting in.
+    expect_count(
+        "empty lifecycle / read_document (host-composed curated lane)",
+        silent.document_reads.load(Ordering::SeqCst),
+        false,
     )?;
 
     // ── Arm 2: the full declaration — every hook fires through the same
@@ -189,11 +202,6 @@ pub async fn run() -> HarnessResult<()> {
     expect_count(
         "full lifecycle / read_short_term",
         observed.short_term_reads.load(Ordering::SeqCst),
-        false,
-    )?;
-    expect_count(
-        "full lifecycle / read_curated",
-        observed.curated_reads.load(Ordering::SeqCst),
         false,
     )?;
     expect_count(

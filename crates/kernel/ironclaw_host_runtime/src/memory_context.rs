@@ -3,9 +3,9 @@
 //! This adapter bridges the memory service into the agent loop context
 //! pipeline. It derives the host-resolved memory invocation scope from the
 //! request's [`TurnScope`] and [`TurnActor`], queries the provider's declared
-//! retrieval lanes (the query-driven `read_short_term` / `read_long_term`, plus
-//! the always-on `read_curated` standing-document lane) with the same
-//! invocation, and owns the ENTIRE prompt-safety pipeline for whatever comes
+//! query-driven retrieval lanes (`read_short_term` / `read_long_term`) and
+//! composes the always-on curated lane itself out of an ordinary document read,
+//! all with the same invocation, and owns the ENTIRE prompt-safety pipeline for whatever comes
 //! back: the [`ExpectedScope`] cross-scope drop filter, control-stripping +
 //! truncation + the untrusted-memory envelope, the per-snippet and aggregate
 //! model-visible byte budgets, the loop prompt-content denylist, and
@@ -31,7 +31,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
-    memory_context_disabled,
+    MemoryServiceReadRequest, MemoryServiceReadResponse, memory_context_disabled,
 };
 use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_with_limit};
 
@@ -78,6 +78,15 @@ const CURATED_TRUNCATION_MARKER: &str = " (truncated)";
 /// the control-character filter during sanitization, running two facts
 /// together, so lines are joined with a visible separator instead.
 const CURATED_LINE_SEPARATOR: &str = "; ";
+
+/// The standing document the always-on lane reads on every run.
+///
+/// The host names the document because the LANE is host-composed: there is no
+/// provider-supplied "curated context" hook to defer to, just the ordinary
+/// document read every document-backed provider already serves. This is the
+/// same path the memory protocol tells the model to write to (native's reserved
+/// `memory` write target resolves here).
+const CURATED_MEMORY_DOCUMENT: &str = "MEMORY.md";
 
 /// Production adapter that loads memory snippets through IronClaw memory.
 pub struct ProductionMemoryPromptContextService {
@@ -128,14 +137,6 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         // degrades to empty in `admit_lane`.
         let query_long = self.lifecycle.declares(MemoryLifecycleHook::ReadLongTerm);
         let query_short = self.lifecycle.declares(MemoryLifecycleHook::ReadShortTerm);
-        // The curated lane is query-INDEPENDENT: it is read on every run so a
-        // fact saved in an earlier conversation still reaches a later one whose
-        // opening message shares none of its vocabulary (#7185). It is gated by
-        // the same manifest-declaration rule as the search lanes.
-        let query_curated = self.lifecycle.declares(MemoryLifecycleHook::ReadCurated);
-        if !query_long && !query_short && !query_curated {
-            return Ok(Vec::new());
-        }
         let invocation = invocation_for_context_request(&request);
         let expected = ExpectedScope::from_scope(&invocation.scope);
         let lane_request = MemoryServiceContextRequest {
@@ -166,17 +167,20 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
                     None
                 }
             },
-            async {
-                if query_curated {
-                    Some(
-                        self.memory_service
-                            .read_curated(invocation.clone(), lane_request.clone())
-                            .await,
-                    )
-                } else {
-                    None
-                }
-            },
+            // The always-on curated lane, composed HERE rather than delegated to
+            // a provider hook: it is query-INDEPENDENT (read every run so a fact
+            // saved in an earlier conversation still reaches a later one whose
+            // opening message shares none of its vocabulary — #7185), so there
+            // is nothing provider-specific to decide. Reading the standing
+            // document is the ordinary document read every document-backed
+            // provider already serves, so this needs no new provider contract
+            // and no manifest declaration.
+            self.memory_service.read_document(
+                invocation.clone(),
+                MemoryServiceReadRequest {
+                    path: CURATED_MEMORY_DOCUMENT.to_string(),
+                },
+            ),
         );
         let short_term = short_term
             .map(|lane| admit_lane(&expected, lane, request.max_snippets, "short_term"))
@@ -184,9 +188,11 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         let long_term = long_term
             .map(|lane| admit_lane(&expected, lane, request.max_snippets, "long_term"))
             .unwrap_or_default();
-        let curated = curated
-            .map(|lane| admit_curated_lane(&expected, lane, request.max_snippets))
-            .unwrap_or_default();
+        let curated = admit_curated_lane(
+            &expected,
+            curated_documents(&invocation, curated),
+            request.max_snippets,
+        );
 
         // Lane priority: the always-on curated document first (it is the one
         // lane that does not depend on the current message matching anything),
@@ -258,9 +264,56 @@ fn admit_lane(
     }
 }
 
+/// Turn the always-on document read into the raw lane [`admit_curated_lane`]
+/// consumes, normalizing "no such document" into an EMPTY lane.
+///
+/// Absence is the NORMAL state — a user who has never saved anything — and both
+/// bundled providers report it as [`MemoryServiceErrorKind::Input`] (native: no
+/// document at the path; mem0: no memory tagged with it). Debug-logging that on
+/// every run would make a normal state read as a fault, so only the unexpected
+/// kinds are logged: `Operation` (a backend failure) and `Unavailable` (a
+/// provider with no document store at all, which is why `read_document`'s trait
+/// default fails closed rather than reporting an empty document).
+///
+/// The snippet carries the HOST's invocation scope, because the host chose both
+/// the scope and the path: the provider resolved the document under that same
+/// scope, so there is no provider-supplied scope claim to disagree with. The
+/// downstream [`ExpectedScope`] filter therefore cannot fire for this lane
+/// today; it is left in the path as a structural invariant, so a future curated
+/// source that DOES carry its own scope is filtered like any other.
+fn curated_documents(
+    invocation: &MemoryInvocation,
+    read: Result<MemoryServiceReadResponse, MemoryServiceError>,
+) -> Vec<MemoryServiceContextSnippet> {
+    let response = match read {
+        Ok(response) => response,
+        Err(error) if error.kind() == MemoryServiceErrorKind::Input => return Vec::new(),
+        Err(error) => {
+            tracing::debug!(
+                lane = "curated",
+                kind = ?error.kind(),
+                "curated memory document read failed; degrading lane to empty"
+            );
+            return Vec::new();
+        }
+    };
+    if response.content.trim().is_empty() {
+        return Vec::new();
+    }
+    let scope = &invocation.scope;
+    vec![MemoryServiceContextSnippet {
+        tenant_id: scope.tenant_id.as_str().to_string(),
+        user_id: scope.user_id.as_str().to_string(),
+        agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
+        project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
+        relative_path: response.path,
+        text: response.content,
+    }]
+}
+
 /// Host admission for the always-on curated lane.
 ///
-/// Same scope/sanitize/degrade contract as [`admit_lane`], plus the split that
+/// Same scope/sanitize contract as [`admit_lane`], plus the split that
 /// makes a whole standing document admissible: the raw document is cut on line
 /// boundaries into per-snippet-sized chunks, so each chunk carries its own
 /// untrusted envelope and passes the same prompt denylist a search hit does —
@@ -269,20 +322,9 @@ fn admit_lane(
 /// dropped on its own; the remaining facts still reach the model.
 fn admit_curated_lane(
     expected: &ExpectedScope,
-    lane: Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError>,
+    raw: Vec<MemoryServiceContextSnippet>,
     max_snippets: usize,
 ) -> Vec<MemoryServiceContextSnippet> {
-    let raw = match lane {
-        Ok(raw) => raw,
-        Err(error) => {
-            tracing::debug!(
-                lane = "curated",
-                kind = ?error.kind(),
-                "memory context lane retrieval failed; degrading lane to empty"
-            );
-            return Vec::new();
-        }
-    };
     // `MEMORY.md` is user-controlled content re-read on every run, so the
     // admission budget bounds the WORK, not just the output: stop splitting at
     // `budget + 1` chunks. The one extra chunk is what proves there was more
@@ -588,6 +630,76 @@ mod tests {
             agent_id: None,
             project_id: None,
         }
+    }
+
+    /// The curated lane keeps the cross-scope drop filter even though the host
+    /// stamps its own invocation scope onto the document it read, so no
+    /// provider response can currently reach it out of scope. Pinned directly
+    /// at the seam: if a future curated source ever carries its own scope, a
+    /// foreign document is dropped before it is chunked, not after.
+    #[test]
+    fn admit_curated_lane_drops_a_foreign_scoped_document() {
+        let foreign = MemoryServiceContextSnippet {
+            relative_path: "MEMORY.md".to_string(),
+            ..scoped_snippet("tenant-a", "user-other", "another user's standing fact")
+        };
+        assert!(
+            admit_curated_lane(&expected("tenant-a", "user-x"), vec![foreign], 10).is_empty(),
+            "another user's standing document must never be admitted"
+        );
+    }
+
+    /// The absent case the always-on lane depends on: both bundled providers
+    /// report "no such document" as `Input`, and the host must read that as an
+    /// empty lane rather than a failure — otherwise every run for a user who
+    /// has saved nothing would log a fault.
+    #[test]
+    fn curated_documents_treats_absence_as_an_empty_lane() {
+        let invocation = MemoryInvocation {
+            scope: ResourceScope::system(),
+            correlation_id: CorrelationId::new(),
+        };
+        assert!(curated_documents(&invocation, Err(MemoryServiceError::input())).is_empty());
+        assert!(curated_documents(&invocation, Err(MemoryServiceError::unavailable())).is_empty());
+        assert!(
+            curated_documents(
+                &invocation,
+                Ok(MemoryServiceReadResponse {
+                    path: "MEMORY.md".to_string(),
+                    content: "   \n\n ".to_string(),
+                    word_count: 0,
+                }),
+            )
+            .is_empty(),
+            "a blank document is the same non-event as an absent one"
+        );
+    }
+
+    /// A present document is stamped with the HOST's invocation scope — the
+    /// scope it issued the read under — so the model-visible reference cannot
+    /// be forged by a provider echoing back a different one.
+    #[test]
+    fn curated_documents_stamps_the_invocation_scope() {
+        let invocation = MemoryInvocation {
+            scope: ResourceScope::system(),
+            correlation_id: CorrelationId::new(),
+        };
+        let documents = curated_documents(
+            &invocation,
+            Ok(MemoryServiceReadResponse {
+                path: "MEMORY.md".to_string(),
+                content: "the user prefers metric units".to_string(),
+                word_count: 5,
+            }),
+        );
+        assert_eq!(documents.len(), 1);
+        assert_eq!(
+            documents[0].tenant_id,
+            invocation.scope.tenant_id.as_str(),
+            "the snippet carries the scope the host read under"
+        );
+        assert_eq!(documents[0].user_id, invocation.scope.user_id.as_str());
+        assert_eq!(documents[0].relative_path, "MEMORY.md");
     }
 
     // --- sanitize_snippet_text: control-strip + truncate + untrusted envelope ---

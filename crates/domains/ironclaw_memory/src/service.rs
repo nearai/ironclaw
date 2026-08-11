@@ -558,6 +558,11 @@ pub struct MemoryServiceRecordResponse {
 /// providers declare whatever tools they want and back them with their own
 /// handler; nothing in the memory contract enumerates tool ids.
 ///
+/// [`read_document`](MemoryService::read_document) is the one method here that
+/// is NOT a lifecycle hook: it is the trait-level projection of the ordinary
+/// document-read op every document-backed provider already serves, callable
+/// without a manifest declaration.
+///
 /// Every default fails closed (`unavailable`), except `record_interaction`,
 /// whose no-op default reports `recorded: false`.
 ///
@@ -616,33 +621,24 @@ pub trait MemoryService: Send + Sync {
         Err(MemoryServiceError::unavailable())
     }
 
-    /// Always-on curated lane (retrieve-before-run): the user's standing
-    /// memory document(s), returned on EVERY run without a retrieval match.
+    /// Read one memory document by path.
     ///
-    /// This lane exists because the search lanes are query-driven: a fact the
-    /// user stated in an earlier conversation is only recalled when the
-    /// current message happens to share vocabulary with it, so a conversation
-    /// that opens on an unrelated topic sees nothing (#7185). A provider
-    /// implements this by returning its curated standing document(s) — for the
-    /// native backend, `MEMORY.md` — and returns an EMPTY vector when no such
-    /// document exists (absence is a normal state, not a failure).
+    /// The trait-level projection of the `memory.document.read.v1` operation
+    /// both bundled providers already serve as the model-facing
+    /// `ironclaw.memory.read` tool — the general document-read op, not a
+    /// lane-specific hook. It is deliberately NOT a `[memory].lifecycle` entry:
+    /// the host may call it against any bound provider without a manifest
+    /// declaration, the same way the tool surface does.
     ///
-    /// `request.query` is meaningless here and providers must ignore it;
-    /// `max_snippets` and `context_profile_id` carry the same meaning as in the
-    /// search lanes. Same raw-return contract as
-    /// [`read_long_term`](MemoryService::read_long_term): the host owns scope
-    /// filtering, sanitization, the untrusted envelope, and every model-visible
-    /// budget, and gives this lane its own sub-budget so it cannot starve — or
-    /// be starved by — the search lanes.
-    ///
-    /// The host calls this only when the bound provider's manifest declares the
-    /// `read_curated` lifecycle hook, so a provider with no curated-document
-    /// concept is never opted in.
-    async fn read_curated(
+    /// A path naming no document is reported as
+    /// [`MemoryServiceErrorKind::Input`] — the behavior both bundled providers
+    /// already have — so a caller reading an OPTIONAL document must treat
+    /// `Input` as "absent", not as a failure.
+    async fn read_document(
         &self,
         invocation: MemoryInvocation,
-        request: MemoryServiceContextRequest,
-    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        request: MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
         let _ = (invocation, request);
         Err(MemoryServiceError::unavailable())
     }
@@ -887,15 +883,29 @@ mod tests {
             .await
             .expect_err("default read_short_term must fail closed");
         assert_eq!(short.kind(), MemoryServiceErrorKind::Unavailable);
+    }
 
-        // The always-on curated lane fails closed the same way, so a provider
-        // that declares `read_curated` without implementing it degrades to an
-        // empty lane at the host instead of silently inventing content.
-        let curated = provider
-            .read_curated(invocation(), request())
+    /// `read_document` is not manifest-gated — the host may call it against any
+    /// bound provider — so its default must fail closed rather than report an
+    /// empty document. A provider with no document store therefore degrades the
+    /// host's always-on curated lane to empty instead of the host mistaking
+    /// "provider cannot read documents" for "the user has saved nothing".
+    #[tokio::test]
+    async fn read_document_default_fails_closed_as_unavailable() {
+        let provider = NonRecordingProvider;
+        let error = provider
+            .read_document(
+                MemoryInvocation {
+                    scope: ResourceScope::system(),
+                    correlation_id: CorrelationId::new(),
+                },
+                MemoryServiceReadRequest {
+                    path: "MEMORY.md".to_string(),
+                },
+            )
             .await
-            .expect_err("default read_curated must fail closed");
-        assert_eq!(curated.kind(), MemoryServiceErrorKind::Unavailable);
+            .expect_err("default read_document must fail closed");
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Unavailable);
     }
 
     /// The default `record_interaction` is a host-driven no-op: it must NOT error

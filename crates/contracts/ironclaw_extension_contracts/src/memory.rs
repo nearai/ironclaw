@@ -30,8 +30,6 @@ pub const MEMORY_TOOL_ID_NAMESPACE: &str = "ironclaw.memory";
 /// - `read_long_term` / `read_short_term` — the two retrieve-before-run
 ///   context lanes (general durable memory vs. the active thread's scratch),
 ///   each queried independently once per run.
-/// - `read_curated` — the always-on curated-document lane: the user's standing
-///   memory document, returned every run without a retrieval query.
 /// - `record_interaction` — the after-turn transcript record seam, called
 ///   after every `Completed` run.
 /// - `profile_read` — the loop-start user-profile document read.
@@ -42,9 +40,6 @@ pub enum MemoryLifecycleHook {
     ReadLongTerm,
     /// Retrieve-before-run: the active thread's short-term scratch lane.
     ReadShortTerm,
-    /// Retrieve-before-run: the always-on curated memory document(s), returned
-    /// unconditionally rather than by search match.
-    ReadCurated,
     /// After-turn interaction recording.
     RecordInteraction,
     /// Loop-start user-profile document read.
@@ -57,17 +52,15 @@ impl MemoryLifecycleHook {
         match self {
             Self::ReadLongTerm => "read_long_term",
             Self::ReadShortTerm => "read_short_term",
-            Self::ReadCurated => "read_curated",
             Self::RecordInteraction => "record_interaction",
             Self::ProfileRead => "profile_read",
         }
     }
 
     /// Every hook in the vocabulary, in wire order.
-    pub const ALL: [MemoryLifecycleHook; 5] = [
+    pub const ALL: [MemoryLifecycleHook; 4] = [
         Self::ReadLongTerm,
         Self::ReadShortTerm,
-        Self::ReadCurated,
         Self::RecordInteraction,
         Self::ProfileRead,
     ];
@@ -107,7 +100,6 @@ mod tests {
         for (hook, token) in [
             (MemoryLifecycleHook::ReadLongTerm, "read_long_term"),
             (MemoryLifecycleHook::ReadShortTerm, "read_short_term"),
-            (MemoryLifecycleHook::ReadCurated, "read_curated"),
             (MemoryLifecycleHook::RecordInteraction, "record_interaction"),
             (MemoryLifecycleHook::ProfileRead, "profile_read"),
         ] {
@@ -142,7 +134,6 @@ mod tests {
         assert!(descriptor.declares(MemoryLifecycleHook::ReadLongTerm));
         assert!(descriptor.declares(MemoryLifecycleHook::ProfileRead));
         assert!(!descriptor.declares(MemoryLifecycleHook::ReadShortTerm));
-        assert!(!descriptor.declares(MemoryLifecycleHook::ReadCurated));
         assert!(!descriptor.declares(MemoryLifecycleHook::RecordInteraction));
     }
 
