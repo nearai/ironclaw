@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_processes::{
-    GetProcessCheckpointRequest, ProcessCheckpointId, ProcessCheckpointPayload,
-    ProcessCheckpointPort, ProcessCheckpointRecord, ProcessCheckpointRef,
+    GetProcessCheckpointRequest, ProcessCheckpointId, ProcessCheckpointKind,
+    ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRecord, ProcessCheckpointRef,
     RecordProcessCheckpointRequest,
 };
 use serde::Deserialize;
@@ -51,6 +51,7 @@ impl LoopCheckpointStore for ProcessLoopCheckpointStore {
                     })?,
                 created_at: chrono::Utc::now(),
                 link_to_process: request.kind != LoopCheckpointKind::Final,
+                kind: process_checkpoint_kind(request.kind),
                 metadata: json!({
                     "turn_id": request.turn_id,
                     "schema_id": request.schema_id,
@@ -90,6 +91,18 @@ impl LoopCheckpointStore for ProcessLoopCheckpointStore {
             record,
         )
         .map(Some)
+    }
+}
+
+/// Project a loop checkpoint boundary onto the process-lifecycle kind the
+/// journal records. `Final` has no process-level kind — it is terminal evidence,
+/// never a continuation point, and never links to the process.
+pub(super) fn process_checkpoint_kind(kind: LoopCheckpointKind) -> Option<ProcessCheckpointKind> {
+    match kind {
+        LoopCheckpointKind::BeforeModel => Some(ProcessCheckpointKind::BeforeModel),
+        LoopCheckpointKind::BeforeSideEffect => Some(ProcessCheckpointKind::BeforeSideEffect),
+        LoopCheckpointKind::BeforeBlock => Some(ProcessCheckpointKind::BeforeBlock),
+        LoopCheckpointKind::Final => None,
     }
 }
 

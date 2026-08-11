@@ -167,7 +167,13 @@ observed_date = "2026-08-07"
 # implement-issue-6896-fix: #7131's run-failure settlement observer adds its
 # production wiring and inline regression coverage to the current main tree.
 # Measured with --print; set to current rather than hidden in tolerance.
-loc_ceiling = 41582
+# Re-seeded 41582 -> 41810 on 2026-08-11 for #7471's merged tree. The dedicated
+# process-journal PostgreSQL pool adds service-graph assembly needed to keep
+# lease heartbeats independent of data-plane saturation; concurrent mainline
+# composition growth consumed the prior tolerance before this branch merged.
+# Measured by the Fast deterministic checks gate on the GitHub merge commit and
+# recorded explicitly rather than weakening or bypassing the absolute bound.
+loc_ceiling = 41810
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -178,8 +184,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41582
-loc_observed_date = "2026-08-10"
+loc_observed = 41810
+loc_observed_date = "2026-08-11"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

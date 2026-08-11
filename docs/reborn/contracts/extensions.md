@@ -549,8 +549,9 @@ Rules:
 - `runtime_credentials` declares host-owned credential injection metadata for
   runtime HTTP egress. Each entry names a runtime credential slot handle,
   material source (`secret_handle` by default, or `product_auth_account` with a
-  provider id), HTTPS-only audience `NetworkTargetPattern`, injection target
-  (`header` or `query_param`), and optional `required` flag. The field is only
+  provider id), HTTPS-only audience `NetworkTargetPattern`, a validated
+  `RuntimeCredentialTarget` (including host-composed `basic` authorization),
+  and optional `required` flag. The field is only
   valid when the capability declares `use_secret`; duplicate handles within one
   capability are invalid. The manifest never contains raw secret material.
 - every capability must provide `input_schema_ref` and `output_schema_ref`;

@@ -641,8 +641,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // message. Contract vocabulary only — vendor reaction rendering (Slack
         // reactions.add/remove, Telegram setMessageReaction) lives in the channel
         // packages and the reaction lifecycle in the delivery observer. Count
-        // read from this test's failure message.
-        ("ironclaw_extension_contracts", 7_885),
+        // read from this test's failure message. 7_885 -> 7_892 after merging
+        // #7076's Basic credential target declaration and validator vocabulary;
+        // composition and injection remain in ironclaw_host_runtime.
+        ("ironclaw_extension_contracts", 7_892),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -671,10 +673,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        // 18_974 -> 19_043 (2026-08-11, #7509): `ModelResultPreview` now redacts
-        // credential-keyed values inside nested and line-numbered JSON before
-        // marker masking can destroy the key/value relationship.
-        ("ironclaw_host_api", 19_043),
+        // 18_974 -> 18_994 (#7076 takeover): the
+        // `RuntimeCredentialTarget::Basic` declaration, username validation,
+        // and wire-contract vocabulary; RFC 7617 composition remains in
+        // ironclaw_host_runtime. 18_994 -> 19_063 (2026-08-11, #7509 plus
+        // #7484's merged host-context contract):
+        // `ModelResultPreview` now redacts credential-keyed values inside
+        // nested and line-numbered JSON before marker masking can destroy the
+        // key/value relationship; `main` adds the bounded context-window
+        // watermark DTO. Count read from this test's own failure message.
+        ("ironclaw_host_api", 19_063),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -730,10 +738,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_495 ceiling (2026-08-10, prompt recovery hardening):
-        // production prompt validation now checks structural limits and
-        // control characters only; decoded Basic-auth samples remain test-only.
-        // Count read from this test's own failure message.
+        // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
+        // truncation-watermark DTO carried across the existing context and
+        // prompt contracts. Window selection and task-pinning behavior remain
+        // in ironclaw_threads and ironclaw_loop_host. The 13_495 ceiling also
+        // covers #7509 prompt recovery hardening: production prompt validation
+        // checks structural limits and control characters only; decoded
+        // Basic-auth samples remain test-only. Count read from this test's own
+        // failure message.
         ("ironclaw_loop_contracts", 13_495),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,

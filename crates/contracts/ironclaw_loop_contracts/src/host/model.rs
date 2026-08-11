@@ -123,6 +123,8 @@ pub struct LoopPromptBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_window_truncation: Option<crate::host::context::LoopContextWindowTruncation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
     pub identity_message_count: u32,
@@ -410,6 +412,7 @@ mod tests {
             messages: Vec::new(),
             surface_version: None,
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

@@ -93,8 +93,8 @@ use ironclaw_turn_runner::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
 use ironclaw_turn_runner::runtime::{
-    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    ProcessRuntimeSystem, build_default_planned_runtime,
+    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeConfigError,
+    DefaultPlannedRuntimeParts, ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_turn_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -508,6 +508,8 @@ pub enum RebornRuntimeError {
     InvalidArgument { reason: String },
     #[error("malformed runtime configuration: {reason}")]
     MalformedConfig { reason: String },
+    #[error("malformed planned-runtime configuration: {0}")]
+    PlannedRuntimeConfig(#[from] DefaultPlannedRuntimeConfigError),
     #[error("llm provider construction failed: {0}")]
     LlmProvider(String),
     #[error("turn-runner worker is no longer running")]
@@ -3633,7 +3635,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // Resolve the disclosure mode once so the runtime config and the system-prompt
     // disclosure-protocol injection agree on a single value.
     let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
-    let default_runtime_config = DefaultPlannedRuntimeConfig::default();
+    let default_runtime_config = DefaultPlannedRuntimeConfig::try_from_env()?;
     // Resolve the bound memory provider once (issue #3537): the
     // profile source, prompt-context lane, and after-turn writer all fan out from
     // this single resolution, so they agree on the bound provider (native, or
@@ -3776,6 +3778,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
+            tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
@@ -3809,7 +3812,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     DefaultSystemPromptIdentitySource::try_new(
                         standalone_storage_root,
                         default_system_prompt_path,
-                        resolved_tool_disclosure.is_bridged(),
+                        resolved_tool_disclosure.is_enabled(),
                         bool_env_flag("BENCHMARKING_MODE"),
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {

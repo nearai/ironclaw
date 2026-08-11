@@ -197,6 +197,30 @@ where
     Ok(())
 }
 
+/// A root filesystem the process journal writes through, over its own backend
+/// handle.
+///
+/// The journal's heartbeat is the liveness signal a run's lease depends on.
+/// While it shared one connection pool with event-store, trigger, and
+/// result-read traffic, a busy turn could starve its own heartbeat until the
+/// lease expired underneath it — the run then failed `lease_expired` while it
+/// was still healthy. Giving the journal its own backend handle means a
+/// heartbeat never queues behind data-plane work.
+///
+/// The mount set is exactly [`mount_database_roots`]', so the journal resolves
+/// the same virtual paths to the same rows the shared filesystem would have
+/// written. Only the connection it travels over differs.
+pub(crate) fn process_journal_root_filesystem<F>(
+    backend: Arc<F>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let mut root = CompositeRootFilesystem::new();
+    mount_database_roots(&mut root, backend)?;
+    Ok(Arc::new(root))
+}
+
 pub(crate) fn mount_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,

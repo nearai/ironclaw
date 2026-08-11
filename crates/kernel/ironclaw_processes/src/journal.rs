@@ -48,6 +48,75 @@ impl ProcessCheckpointRef {
     }
 }
 
+/// Where in its work a process was standing when it recorded a checkpoint, in
+/// the only terms the journal needs: does resuming from here replay an external
+/// side effect?
+///
+/// This is the process-lifecycle projection of the loop-tier checkpoint
+/// vocabulary. It deliberately drops `Final` — a terminal-evidence checkpoint is
+/// never a continuation point and never links to a process — so the mapping is
+/// subtractive and stays manual at the projection that owns it
+/// (`ironclaw_turns::process_projection::loop_checkpoint`). The journal cannot
+/// read the loop vocabulary directly: lease recovery sweeps process rows without
+/// loading checkpoint rows, so the kind has to live on the process snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessCheckpointKind {
+    /// Taken before a model call. Resuming re-issues the model call and replays
+    /// no external effect.
+    BeforeModel,
+    /// Taken before a capability side effect. Resuming re-executes that effect,
+    /// so recovery must never requeue from here.
+    BeforeSideEffect,
+    /// Taken before waiting on a gate. Resuming re-enters the wait and replays
+    /// no external effect.
+    BeforeBlock,
+}
+
+impl ProcessCheckpointKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeModel => "before_model",
+            Self::BeforeSideEffect => "before_side_effect",
+            Self::BeforeBlock => "before_block",
+        }
+    }
+
+    /// Parse a wire value, returning `None` for anything this build does not
+    /// recognize. Callers treat an unrecognized kind as side-effecting.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "before_model" => Some(Self::BeforeModel),
+            "before_side_effect" => Some(Self::BeforeSideEffect),
+            "before_block" => Some(Self::BeforeBlock),
+            _ => None,
+        }
+    }
+
+    /// Whether resuming a process from this checkpoint would re-execute an
+    /// external side effect. Fail-closed: only the two kinds proven safe answer
+    /// `false`.
+    pub fn replays_side_effect(self) -> bool {
+        match self {
+            Self::BeforeModel | Self::BeforeBlock => false,
+            Self::BeforeSideEffect => true,
+        }
+    }
+}
+
+/// Read an optional checkpoint kind, degrading an unrecognized wire value to
+/// `None` instead of failing the whole snapshot. `None` means "unknown kind",
+/// which recovery treats as side-effecting.
+fn deserialize_lenient_checkpoint_kind<'de, D>(
+    deserializer: D,
+) -> Result<Option<ProcessCheckpointKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.as_deref().and_then(ProcessCheckpointKind::from_wire))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProcessCheckpointId(String);
@@ -364,6 +433,15 @@ pub struct JournaledProcessSnapshot {
     pub suspension: Option<ProcessSuspension>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<ProcessCheckpointRef>,
+    /// Kind of the checkpoint `checkpoint_ref` names, when known. Absent for
+    /// journals written before the kind was recorded and for kinds this build
+    /// does not recognize; recovery treats both as side-effecting.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_checkpoint_kind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub checkpoint_kind: Option<ProcessCheckpointKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_ref: Option<ProcessInputRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -720,6 +798,16 @@ pub struct RecordProcessCheckpointRequest {
     /// continuation points, so their writers set this to `false`.
     #[serde(default = "default_true")]
     pub link_to_process: bool,
+    /// Kind of this checkpoint, carried onto the process snapshot when
+    /// `link_to_process` is set so lease recovery can tell a safe resume point
+    /// from a side-effecting one without reading checkpoint rows. `None` reads
+    /// as "unknown", which recovery treats as side-effecting.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_checkpoint_kind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kind: Option<ProcessCheckpointKind>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -1225,6 +1313,71 @@ mod tests {
         }
     }
 
+    /// A snapshot written by a build that knows more checkpoint kinds than this
+    /// one must still load. The unknown kind degrades to `None` — "unknown
+    /// kind" — which lease recovery already treats as side-effecting, so an
+    /// older host fails closed instead of failing the whole read.
+    #[test]
+    fn an_unrecognized_or_absent_checkpoint_kind_degrades_to_none() {
+        let snapshot = JournaledProcessSnapshot {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::Internal,
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant-lenient").expect("tenant"),
+                user_id: UserId::new("user-lenient").expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+            },
+            status: ProcessLifecycleStatus::Running,
+            suspension: None,
+            checkpoint_ref: Some(ProcessCheckpointRef::from_trusted("checkpoint:lenient")),
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            input_ref: None,
+            failure: None,
+            journal_cursor: ProcessJournalCursor(1),
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: chrono::Utc::now(),
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: Value::Null,
+        };
+        let mut encoded =
+            serde_json::to_value(&snapshot).expect("serialize journaled process snapshot");
+        let object = encoded.as_object_mut().expect("snapshot object");
+
+        assert_eq!(
+            object.get("checkpoint_kind").and_then(Value::as_str),
+            Some("before_model"),
+            "a known kind must round-trip on the wire"
+        );
+
+        object.insert(
+            "checkpoint_kind".to_string(),
+            Value::String("before_tool_disclosure".to_string()),
+        );
+        let unknown: JournaledProcessSnapshot = serde_json::from_value(encoded.clone())
+            .expect("an unrecognized checkpoint kind must not fail the whole snapshot");
+        assert_eq!(unknown.checkpoint_kind, None);
+        assert_eq!(
+            unknown.checkpoint_ref, snapshot.checkpoint_ref,
+            "the rest of the snapshot must survive the degraded field"
+        );
+
+        encoded
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("checkpoint_kind");
+        let absent: JournaledProcessSnapshot =
+            serde_json::from_value(encoded).expect("a snapshot written before the kind existed");
+        assert_eq!(absent.checkpoint_kind, None);
+    }
+
     #[test]
     fn opaque_refs_reject_empty_oversized_and_control_values() {
         assert!(ProcessCheckpointRef::new("").is_err());
@@ -1233,5 +1386,69 @@ mod tests {
 
         let checkpoint = ProcessCheckpointRef::new("checkpoint:ok").expect("checkpoint");
         assert_eq!(checkpoint.as_str(), "checkpoint:ok");
+    }
+
+    /// The wire boundary lease recovery depends on: a persisted snapshot whose
+    /// checkpoint kind an older or newer build does not recognize must degrade
+    /// to `None` ("unknown kind") instead of failing the whole row, and a row
+    /// with the field absent must read the same way. Recovery treats both as
+    /// side-effecting (`state_tests.rs` pins the `None` → terminal `Failed`
+    /// branch), so the lenient deserializer is what keeps old journals safe on
+    /// this build and this build's journals safe on the next.
+    #[test]
+    fn unknown_and_absent_checkpoint_kind_wire_values_degrade_to_none() {
+        #[derive(Deserialize)]
+        struct SnapshotProbe {
+            #[serde(
+                default,
+                deserialize_with = "deserialize_lenient_checkpoint_kind",
+                skip_serializing_if = "Option::is_none"
+            )]
+            checkpoint_kind: Option<ProcessCheckpointKind>,
+        }
+
+        let unknown: SnapshotProbe = serde_json::from_value(
+            serde_json::json!({ "checkpoint_kind": "before_tool_disclosure" }),
+        )
+        .expect("unknown wire kind must deserialize leniently");
+        assert_eq!(
+            unknown.checkpoint_kind, None,
+            "an unrecognized wire kind must read as unknown, not fail the snapshot"
+        );
+
+        let absent: SnapshotProbe =
+            serde_json::from_value(serde_json::json!({})).expect("absent field must deserialize");
+        assert_eq!(
+            absent.checkpoint_kind, None,
+            "a snapshot written before kinds existed must read as unknown"
+        );
+
+        for (wire, expected) in [
+            ("before_model", ProcessCheckpointKind::BeforeModel),
+            (
+                "before_side_effect",
+                ProcessCheckpointKind::BeforeSideEffect,
+            ),
+            ("before_block", ProcessCheckpointKind::BeforeBlock),
+        ] {
+            let known: SnapshotProbe = serde_json::from_value(serde_json::json!({
+                "checkpoint_kind": wire,
+            }))
+            .expect("known wire kinds must deserialize");
+            assert_eq!(known.checkpoint_kind, Some(expected));
+        }
+
+        // The degraded values take the fail-closed recovery branch: anything
+        // that is not BeforeModel/BeforeBlock replays a side effect.
+        assert!(ProcessCheckpointKind::from_wire("before_tool_disclosure").is_none());
+        assert!(
+            ProcessCheckpointKind::from_wire("before_tool_disclosure")
+                .unwrap_or(ProcessCheckpointKind::BeforeSideEffect)
+                .replays_side_effect()
+        );
+        assert!(
+            None::<ProcessCheckpointKind>.is_none_or(ProcessCheckpointKind::replays_side_effect),
+            "an absent kind must recover like a side-effecting checkpoint"
+        );
     }
 }

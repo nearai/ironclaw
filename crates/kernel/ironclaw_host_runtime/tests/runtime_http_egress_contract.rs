@@ -199,6 +199,271 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 }
 
 #[tokio::test]
+async fn host_http_egress_composes_and_redacts_rfc7617_basic_credentials() {
+    let encoded = "d2F6dWgtd3VpOnMzY3IzdA==";
+    let authorization = format!("Basic {encoded}");
+    let percent_encoded_authorization = "Basic%20d2F6dWgtd3VpOnMzY3IzdA%3D%3D";
+    let reflected_credentials = format!("{authorization} {percent_encoded_authorization}");
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: reflected_credentials.as_bytes().to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: reflected_credentials.len() as u64,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "s3cr3t");
+    let service = services.host_http_egress(network);
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Basic {
+                    username: "wazuh-wui".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect("basic credential should be injected through host egress");
+
+    assert_eq!(response.body, b"[REDACTED] [REDACTED]");
+    assert!(response.redaction_applied);
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let injected_authorization = requests[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name == "Authorization")
+        .expect("Authorization header is present");
+    // base64("wazuh-wui:s3cr3t")
+    assert_eq!(injected_authorization.1, authorization);
+    assert!(!injected_authorization.1.contains("s3cr3t"));
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_invalid_basic_username_and_secret() {
+    for (username, secret) in [
+        ("", "valid-secret"),
+        ("user:name", "valid-secret"),
+        ("user\nname", "valid-secret"),
+        ("api-user", "bad\nsecret"),
+    ] {
+        let network = RecordingNetwork::ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: Vec::new(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 0,
+                resolved_ip: None,
+            },
+        });
+        let network_recorder = network.requests.clone();
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let services = test_obligation_services();
+        stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+        stage_secret_sync(&services, &scope, &capability_id, &handle, secret);
+        let service = services.host_http_egress(network);
+
+        let error = service
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope,
+                capability_id: capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: "https://api.example.test/v1/run".to_string(),
+                headers: vec![],
+                body: Vec::new(),
+                network_policy: sample_policy(),
+                credential_injections: vec![RuntimeCredentialInjection {
+                    handle,
+                    source: RuntimeCredentialSource::StagedObligation { capability_id },
+                    target: RuntimeCredentialTarget::Basic {
+                        username: username.to_string(),
+                    },
+                    required: true,
+                }],
+                response_body_limit: Some(4096),
+                save_body_to: None,
+                timeout_ms: None,
+            })
+            .await
+            .expect_err("invalid Basic credentials must fail before dispatch");
+
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "invalid Basic credentials reached the network for username {username:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_duplicate_authorization_credential_injections() {
+    // Two credential injections that would both emit an `Authorization`-shaped
+    // header (a Header target plus a Basic target) must not both land on the
+    // wire: a proxy or origin may select either field, so the request could
+    // run under a different identity than the credential the caller approved.
+    // The request policy gate only sees caller-supplied headers, so this
+    // collision is enforceable only at the injection boundary.
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: Vec::new(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 0,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let basic_handle = SecretHandle::new("basic-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "s3cr3t");
+    stage_secret_sync(&services, &scope, &capability_id, &basic_handle, "s3cr3t");
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![
+                RuntimeCredentialInjection {
+                    handle,
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                },
+                RuntimeCredentialInjection {
+                    handle: basic_handle,
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Basic {
+                        username: "api-user".to_string(),
+                    },
+                    required: true,
+                },
+            ],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("duplicate Authorization credential injections must fail before dispatch");
+
+    assert!(
+        matches!(error, RuntimeHttpEgressError::Credential { .. }),
+        "collision must surface as a credential error: {error:?}"
+    );
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_caller_supplied_authorization_header_with_basic_injection() {
+    // A caller-supplied `Authorization` (any casing) next to a Basic injection
+    // is stopped before dispatch by the request policy gate (which rejects
+    // sensitive runtime-supplied headers) — never two colliding fields on the
+    // wire.
+    for existing_name in ["Authorization", "authorization", "AUTHORIZATION"] {
+        let network = RecordingNetwork::ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: Vec::new(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 0,
+                resolved_ip: None,
+            },
+        });
+        let network_recorder = network.requests.clone();
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let services = test_obligation_services();
+        stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+        stage_secret_sync(&services, &scope, &capability_id, &handle, "s3cr3t");
+        let service = services.host_http_egress(network);
+
+        let error = service
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope,
+                capability_id: capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: "https://api.example.test/v1/run".to_string(),
+                headers: vec![(existing_name.to_string(), "Bearer caller-token".to_string())],
+                body: b"hello".to_vec(),
+                network_policy: sample_policy(),
+                credential_injections: vec![RuntimeCredentialInjection {
+                    handle,
+                    source: RuntimeCredentialSource::StagedObligation { capability_id },
+                    target: RuntimeCredentialTarget::Basic {
+                        username: "api-user".to_string(),
+                    },
+                    required: true,
+                }],
+                response_body_limit: Some(4096),
+                save_body_to: None,
+                timeout_ms: None,
+            })
+            .await
+            .expect_err("caller-supplied Authorization must fail before dispatch");
+
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "colliding request reached the network for header {existing_name:?}"
+        );
+        assert!(
+            error.to_string().contains("sensitive_header"),
+            "the policy gate must reject the caller-supplied sensitive header for {existing_name:?}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn host_http_egress_consumes_staged_obligation_secret_once() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
