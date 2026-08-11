@@ -968,7 +968,7 @@ async fn memory_disabled_profile_does_not_read_the_curated_lane() {
 /// declared search lanes are unaffected. Binding such a backend changes
 /// nothing about the rest of the turn.
 #[tokio::test]
-async fn provider_without_a_document_store_degrades_the_curated_lane() {
+async fn provider_without_document_read_support_degrades_the_curated_lane() {
     let memory_service = Arc::new(MockMemoryService::with_document(
         LaneBehavior::Snippets(Vec::new()),
         LaneBehavior::Snippets(vec![raw_snippet("notes/long-term.md", "long term note")]),
