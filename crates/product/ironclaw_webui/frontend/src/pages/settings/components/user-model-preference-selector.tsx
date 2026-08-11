@@ -31,7 +31,7 @@ export function UserModelPreferenceSelector() {
 
   return (
     <Card padding="none" className="p-4 sm:p-5">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("llm.modelPreference")}
@@ -40,7 +40,7 @@ export function UserModelPreferenceSelector() {
             {t("llm.modelPreferenceDesc")}
           </p>
         </div>
-        <div className="w-full min-w-0 sm:w-72 sm:max-w-full">
+        <div className="w-full min-w-0 xl:ml-auto xl:w-72 xl:max-w-full xl:flex-none">
           <SelectMenu
             data-testid="settings-model-selector"
             value={model || ""}

@@ -30,6 +30,14 @@ function findComponentNode(root, component) {
   return found;
 }
 
+function collectTemplateText(root) {
+  const text = [];
+  visit(root, (node) => {
+    if (Array.isArray(node.strings)) text.push(...node.strings);
+  });
+  return text.join("");
+}
+
 function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
@@ -72,6 +80,14 @@ test("model preference selector contains long model names inside its card", () =
   const rendered = exports.UserModelPreferenceSelector();
   const selectNode = findComponentNode(rendered, SelectMenu);
   assert.ok(selectNode, "expected model selector");
+
+  const markup = collectTemplateText(rendered);
+  assert.match(markup, /flex flex-col gap-4 xl:flex-row/);
+  assert.doesNotMatch(markup, /\bsm:flex-row\b/);
+  assert.match(
+    markup,
+    /w-full min-w-0 xl:ml-auto xl:w-72 xl:max-w-full xl:flex-none/
+  );
 
   const props = componentProps(selectNode, SelectMenu);
   assert.match(props.className, /\bw-full\b/);
