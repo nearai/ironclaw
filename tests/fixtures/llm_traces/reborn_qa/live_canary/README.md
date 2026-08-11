@@ -6,13 +6,20 @@ executed against commit `c918d91943a84071726924b4e3e9a47d33d8f695`.
 
 The catalog contains 47 live-QA cases:
 
-- 27 cases reached the model and retain an active case-named trace in this
+- 17 cases reached the model and retain an active case-named trace in this
   directory.
 - 15 cases reached the model but their exact harvested traces invoke the
   retired `builtin.extension_activate` lifecycle tool. Their recorded
   user/model/tool steps are preserved unmodified under
   `quarantined_retired_activation/` as historical provenance and are not active
   model/tool-choice contracts.
+- 10 cases (`qa_10a` through `qa_10i`, including both `qa_10g` variants)
+  reached the model but their exact harvested traces invoke a `slack.*` tool
+  with a pre-canonicalization argument shape (`channel`, `thread_ts`,
+  `user_id`, `types`, or `count`/`sort`) retired by the standardized messaging
+  framework's closed Slack input schemas. Their recorded user/model/tool steps
+  are preserved unmodified under `quarantined_stale_slack_canonicalization/`
+  as historical provenance and are not active model/tool-choice contracts.
 - Five Slack connect/preflight cases did not invoke the model and therefore
   cannot produce an LLM trace: `qa_3a_slack_connect`, `qa_5a_slack_connect`,
   `qa_7a_slack_product_channel_connect`, `qa_8a_slack_connect`, and

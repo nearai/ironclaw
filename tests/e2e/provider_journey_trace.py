@@ -227,6 +227,8 @@ def _normalize_slack_arguments(
             arguments = call["arguments"]
             if "channel" in arguments:
                 arguments["channel"] = channel_id
+            if "conversation" in arguments:
+                arguments["conversation"] = channel_id
             if "user_id" in arguments:
                 arguments["user_id"] = slack_state["reviewer_id"]
             if "thread_ts" in arguments:

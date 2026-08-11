@@ -1,15 +1,15 @@
 ---
 paths:
-  - "crates/ironclaw_network/**"
-  - "crates/ironclaw_secrets/**"
-  - "crates/ironclaw_safety/**"
-  - "crates/ironclaw_host_runtime/**"
-  - "crates/ironclaw_processes/**"
-  - "crates/ironclaw_process_sandbox/**"
-  - "crates/ironclaw_wasm/**"
-  - "crates/ironclaw_mcp/**"
-  - "crates/ironclaw_webui/**"
-  - "crates/ironclaw_prompt_envelope/**"
+  - "crates/substrates/ironclaw_network/**"
+  - "crates/substrates/ironclaw_secrets/**"
+  - "crates/substrates/ironclaw_safety/**"
+  - "crates/kernel/ironclaw_host_runtime/**"
+  - "crates/kernel/ironclaw_processes/**"
+  - "crates/lanes/ironclaw_sandbox/**"
+  - "crates/lanes/ironclaw_wasm/**"
+  - "crates/lanes/ironclaw_mcp/**"
+  - "crates/product/ironclaw_webui/**"
+  - "crates/contracts/ironclaw_prompt_envelope/**"
 ---
 # Reborn safety and sandbox rules
 
@@ -55,7 +55,7 @@ sensitive by default. Apply the owning Reborn redaction obligation before
 logging, durable event append, projection, SSE/WebSocket delivery, model-visible
 results, or user-visible errors. Never add an unredacted observability path in
 parallel with the mediated host result. Re-verify the active redaction boundary
-with `rg -n "redact_output|redaction|sanitize" crates/ironclaw_host_runtime crates/ironclaw_events crates/ironclaw_event_streams`.
+with `rg -n "redact_output|redaction|sanitize" crates/kernel/ironclaw_host_runtime crates/events/ironclaw_event_log crates/events/ironclaw_event_streams`.
 
 Ingress review checklist:
 
@@ -112,7 +112,7 @@ and the owning host-runtime/process-sandbox crates.
   filesystem as containment for a subprocess.
 - **The only real containment for an OS process is the sandbox it runs in.** Any
   deployment that authenticates more than one user MUST route process spawns through
-  the sandboxed port (`TenantSandboxProcessPort`, backed by `ironclaw_process_sandbox`)
+  the sandboxed port (`TenantSandboxProcessPort`, backed by `ironclaw_sandbox`)
   whose mount is derived from the turn scope — never through the unsandboxed
   `HostProcessPort` (renamed from `LocalHostProcessPort`, §4.4 Bucket 2 — `Host`
   names the boundary: a process run directly on the host). `HostProcessPort` /
@@ -132,4 +132,4 @@ Any change touching process ports, the planner's process/filesystem backend rule
 or the composition-profile → `(DeploymentMode, RuntimeProfile)` mapping requires a
 **two-user cross-tenant escape test** driven through the caller: user B runs a shell
 command and the test asserts it cannot read user A's files. Re-verify the current
-wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_reborn_composition crates/ironclaw_runtime_policy`.
+wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/kernel/ironclaw_host_runtime crates/app/ironclaw_composition crates/kernel/ironclaw_runtime_policy`.

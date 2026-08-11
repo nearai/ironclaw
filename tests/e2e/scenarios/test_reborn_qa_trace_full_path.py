@@ -8,6 +8,7 @@ the recorded model's final wording.
 
 import asyncio
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -669,9 +670,32 @@ async def test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_wo
                 await resettable_emulate_provider_world.reset(reset_services)
 
 
+def _provider_operation_cases_for_shard():
+    shard = os.environ.get("IRONCLAW_PROVIDER_OPERATION_SHARD")
+    if shard is None:
+        return PROVIDER_OPERATION_CASES
+
+    try:
+        index_text, total_text = shard.split("/", 1)
+        index, total = int(index_text), int(total_text)
+    except ValueError as error:
+        raise ValueError(
+            "IRONCLAW_PROVIDER_OPERATION_SHARD must use INDEX/TOTAL"
+        ) from error
+    if total < 1 or index < 0 or index >= total:
+        raise ValueError(
+            "IRONCLAW_PROVIDER_OPERATION_SHARD requires 0 <= INDEX < TOTAL"
+        )
+    return [
+        case
+        for position, case in enumerate(PROVIDER_OPERATION_CASES)
+        if position % total == index
+    ]
+
+
 @pytest.mark.parametrize(
     "operation_case",
-    PROVIDER_OPERATION_CASES,
+    _provider_operation_cases_for_shard(),
     ids=lambda case: case.case_id,
 )
 async def test_provider_operation_case_executes_with_provider_readback(

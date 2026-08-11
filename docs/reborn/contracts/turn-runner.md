@@ -60,7 +60,7 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 
 The canonical caller regression is
 `turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/ironclaw_runner/tests/loop_driver_host.rs`, also mapped into
+in `crates/loop/ironclaw_turn_runner/tests/loop_driver_host.rs`, also mapped into
 `scripts/reborn-e2e-rust.sh architecture`.
 
 ---

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
-use ironclaw_product::ResolvedBinding;
+use ironclaw_product_contracts::binding::ResolvedBinding;
 use ironclaw_product_contracts::surface::{ProductSurface, ProductSurfaceCaller};
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
@@ -17,17 +17,12 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 /// Build the `ProductSurfaceCaller` resolving to the SAME
-/// `TurnScope`/`ThreadScope` owner a harness turn ran under.
-/// `subject_user_id` is the execution-scope user; falls back to
-/// `actor_user_id` for legacy bindings without one.
+/// `TurnScope`/`ThreadScope` owner a harness turn ran under — the actor:
+/// a run acts as the user who invoked it, on every route kind.
 pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> ProductSurfaceCaller {
-    let user_id = binding
-        .subject_user_id
-        .clone()
-        .unwrap_or_else(|| binding.actor_user_id.clone());
     ProductSurfaceCaller::new(
         binding.tenant_id.clone(),
-        user_id,
+        binding.actor_user_id.clone(),
         binding.agent_id.clone(),
         binding.project_id.clone(),
     )

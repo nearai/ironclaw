@@ -1,0 +1,55 @@
+---
+title: "Overview"
+description: "可安装工具和技能的官方目录"
+---
+
+IronHub 是 IronClaw 的工具和技能目录，托管在 [hub.ironclaw.com](https://hub.ironclaw.com)。每个条目都经过密码签名——IronClaw 在安装前会验证签名，确保你清楚知道安装的内容及其发布者。
+
+<CardGroup cols={2}>
+  <Card title="市场" icon="store" href="https://hub.ironclaw.com/marketplace">
+    浏览可用的工具和技能目录。
+  </Card>
+
+  <Card title="用例" icon="lightbulb" href="https://hub.ironclaw.com/usecases">
+    看看别人在用 IronClaw 扩展做什么。
+  </Card>
+</CardGroup>
+
+---
+
+## 目录内容
+
+IronHub 分发两种类型的包：
+
+| 类型             | 内容                                   | 获得的功能                                  |
+|------------------|----------------------------------------|---------------------------------------------|
+| Extension（工具）| WASM 二进制 + capability manifest（TOML）| 代理可在运行时调用的新工具                   |
+| Skill（技能）    | SKILL.md                               | 代理按需加载的提示指令                       |
+
+---
+
+## 来源分级
+
+每个目录条目都带有来源标签，说明其审核情况：
+
+| 等级             | 描述                                                                                                                               |
+|------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| **Official**     | 由 IronClaw 团队发布和维护。                                                                                                       |
+| **Trusted**      | 经 IronClaw 团队审核，确认安全性和正确性。                                                                                          |
+| **Verified**     | 发布者身份已确认，但包未经审计。                                                                                                    |
+| **Private**      | 限定于特定组织或团队——不公开列出。                                                                                                 |
+| **New**          | 社区提交，尚未审核。安装需运营商明确确认——代理无法自主安装此类包。                                                                   |
+
+---
+
+## 下一步
+
+<CardGroup cols={2}>
+  <Card title="安装工具与技能" icon="download" href="/hub/installing">
+    通过 CLI 或对话安装包。
+  </Card>
+
+  <Card title="贡献" icon="upload" href="/hub/contributing">
+    将你自己的工具或技能发布到 IronHub。
+  </Card>
+</CardGroup>

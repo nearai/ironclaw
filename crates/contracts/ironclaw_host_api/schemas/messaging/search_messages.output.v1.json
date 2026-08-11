@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging search_messages output",
+  "type": "object",
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["message_ref", "author", "text", "is_self"],
+        "properties": {
+          "message_ref": {
+            "type": "object",
+            "required": ["conversation", "message_id"],
+            "properties": {
+              "conversation": { "type": "string", "minLength": 1 },
+              "message_id": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "author": {
+            "type": "object",
+            "required": ["user_ref"],
+            "properties": {
+              "user_ref": { "type": "string", "minLength": 1 },
+              "display_name": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "text": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time", "description": "RFC3339" },
+          "is_self": { "type": "boolean" },
+          "thread": {
+            "type": "object",
+            "required": ["thread"],
+            "properties": {
+              "thread": { "type": "string", "minLength": 1 },
+              "reply_count": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          },
+          "edited": { "type": "boolean" },
+          "vendor": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "next_cursor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque pagination cursor; pass as cursor on the next call to continue."
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total match count, when the vendor reports one."
+    },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

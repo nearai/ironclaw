@@ -1,0 +1,14 @@
+[package]
+name = "ironclaw_prompt_envelope"
+version = "0.1.0"
+edition = "2024"
+description = "Shared envelope helper that wraps untrusted prompt content with a closed-vocabulary trust boundary and rejects instruction-hijack markers."
+publish = false
+
+[package.metadata.ironclaw]
+layer = "contracts"
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]

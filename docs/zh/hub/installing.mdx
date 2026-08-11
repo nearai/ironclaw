@@ -1,0 +1,104 @@
+---
+title: "Installing skills & tools"
+description: "从 IronHub 目录安装技能和工具"
+---
+
+IronHub 中的包可以通过 CLI 安装，也可以在对话中让代理安装。
+
+---
+
+## CLI
+
+### 搜索
+
+按关键词过滤目录：
+
+```bash
+ironclaw ironhub search github
+```
+
+### 列表
+
+浏览所有条目，可按类型过滤：
+
+```bash
+# 所有条目
+ironclaw ironhub list
+
+# 仅工具
+ironclaw ironhub list --kind tool
+
+# 仅技能
+ironclaw ironhub list --kind skill
+```
+
+### 查看条目
+
+```bash
+ironclaw ironhub info <name> --kind tool
+ironclaw ironhub info <name> --kind skill
+```
+
+打印条目的来源、版本和 SHA-256 构件摘要。在安装时可使用摘要锁定精确版本。
+
+### 安装
+
+```bash
+ironclaw ironhub install <name> --kind tool
+ironclaw ironhub install <name> --kind skill
+```
+
+<Note>
+社区条目（来源为 `New`）需要运营商明确确认。代理无法自主安装它们。通过 `--acknowledge-unverified` 确认。
+</Note>
+
+#### 锁定版本或摘要
+
+默认情况下，IronClaw 安装当前清单中的版本。如需指定特定版本或摘要：
+
+```bash
+ironclaw ironhub install <name> --kind tool --expected-version "1.2.3"
+ironclaw ironhub install <name> --kind skill --expected-artifact-digest "sha256:abc123..."
+```
+
+#### 强制重新安装
+
+```bash
+ironclaw ironhub install <name> --kind tool --force
+```
+
+---
+
+## 通过对话安装
+
+让代理搜索 IronHub、查看条目或安装包。它将获取目录、展示匹配结果，并在安装任何内容之前征求你的批准。
+
+<Note>
+在对话中批准无法安装社区条目（来源为 `New`）。模型侧的安装路径不会设置门控所需的确认标志，因此无论你如何回答，安装都会被拒绝。此类包请改用 CLI 并加上 `--acknowledge-unverified`。
+</Note>
+
+---
+
+## 安装位置
+
+| 包      | 目标位置                                          |
+|---------|---------------------------------------------------|
+| Skills  | `~/.ironclaw/installed_skills/<name>/`            |
+| Tools   | 安装后立即作为代理工具激活                        |
+
+---
+
+## 信任与内容可见性
+
+从 IronHub 安装的包具有 **Installed**（已安装）信任级别——模型仅看到技能描述，不会注入完整的提示内容，且代理无法自激活。直接放置于技能目录中的技能具有 **Trusted**（受信任）信任级别——完整提示内容被加载，代理可以自主激活。
+
+| 来源                                            | 信任     | 内容可见性                       | 模型自激活 |
+|-------------------------------------------------|----------|----------------------------------|------------|
+| `~/.ironclaw/skills/` 或工作区 `skills/`         | Trusted  | 完整提示内容可用                  | 是         |
+| IronHub 安装                                     | Installed| 仅描述 — 不注入完整内容           | 否         |
+
+如果你完全信任某个 IronHub 技能，可以在审查后将移至 `~/.ironclaw/skills/`。
+
+<Warning>
+切勿将未经审查的技能移至受信任目录。`~/.ironclaw/skills/` 中的技能与你拥有相同的执行能力。
+</Warning>

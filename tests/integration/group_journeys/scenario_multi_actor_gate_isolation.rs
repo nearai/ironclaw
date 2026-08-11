@@ -11,9 +11,10 @@
 //!
 //! Complementary to (not a duplicate of): `reborn_group_approvals`'s
 //! `concurrent_dual_gate_resume` (SAME actor, two threads parked simultaneously)
-//! and `reborn_group_multiuser`'s `two_actors_own_threads` (distinct actors, NO
-//! gate). This is distinct-actor × gate-resolution-binding — the axis neither
-//! covers.
+//! and `reborn_group_multiuser`'s `shared_route_refuses_direct_reclassification`
+//! (a Shared-route conversation runs as its pinger and refuses Direct
+//! re-classification, NO gate). This is distinct-actor ×
+//! gate-resolution-binding — the axis neither covers.
 
 use super::reborn_support::builder::RebornIntegrationHarness;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -59,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Non-vacuity: the two threads must resolve genuinely DISTINCT owners, else
     // this degrades to the single-actor case already covered elsewhere.
-    if a.binding.subject_user_id == b.binding.subject_user_id {
+    if a.binding.actor_user_id == b.binding.actor_user_id {
         return Err("with_actor_id seam no-op: both threads resolved the same owner".into());
     }
 
@@ -69,16 +70,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // scope is set OFF. Disable both explicitly BEFORE any turn so BOTH actors
     // raise a real `BlockedApproval` gate under their own owner — the state whose
     // per-actor binding this scenario pins.
-    let owner_a = a
-        .binding
-        .subject_user_id
-        .as_ref()
-        .ok_or("actor A binding has no subject user id")?;
-    let owner_b = b
-        .binding
-        .subject_user_id
-        .as_ref()
-        .ok_or("actor B binding has no subject user id")?;
+    let owner_a = &a.binding.actor_user_id;
+    let owner_b = &b.binding.actor_user_id;
     g.disable_auto_approve_for_owner(owner_a).await?;
     g.disable_auto_approve_for_owner(owner_b).await?;
 

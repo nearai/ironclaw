@@ -60,8 +60,8 @@ PATH_ATTR_PATTERN = re.compile(
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
 # The scope anchor is the shipping package's *name*, not its directory. The
-# package is `ironclaw` whether its manifest sits at crates/ironclaw_reborn_cli/
-# (today) or at crates/app/ironclaw_cli/ (the target layout, which keeps the
+# package is `ironclaw` wherever its manifest sits (crates/app/ironclaw_cli/
+# since the WS7 family move, which keeps the
 # package name and only renames the directory — PROPOSAL §5.1). Keying on the
 # path meant a move turned the whole gate into a crash or, worse, a shrunken
 # scan. See docs/reborn/target-architecture/CHECKLIST.md WS10.
@@ -556,7 +556,7 @@ def is_test_only_path(path: str) -> bool:
     ``src/**/test_support.rs`` is the repo-wide convention for a
     ``#[cfg(feature = "test-support")] pub mod test_support;`` module
     (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
-    ``ironclaw_product``, ``ironclaw_reborn_composition``). The
+    ``ironclaw_assistant``, ``ironclaw_composition``). The
     ``test-support`` feature is enabled
     only via ``[dev-dependencies]``, so these modules ship zero bytes in
     production binaries — the same "never compiled in production" rationale that
@@ -952,7 +952,7 @@ def compare_reborn_baseline(
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
-    output = run_git("diff", "--name-only", f"{base}...{head}", "--", "src", "crates")
+    output = run_git("diff", "--name-only", "-M", f"{base}...{head}", "--", "src", "crates")
     files = []
     for line in output.splitlines():
         if line.endswith(".rs") and (line.startswith("src/") or line.startswith("crates/")):
@@ -961,39 +961,77 @@ def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
     return files
 
 
-def added_lines_for_file(base: str, head: str, path: pathlib.Path) -> set[int]:
-    diff = run_git("diff", "--unified=0", f"{base}...{head}", "--", str(path))
-    added: set[int] = set()
+def added_lines_by_file(base: str, head: str) -> dict[str, set[int]]:
+    """Added line numbers per changed file, computed once, RENAME-AWARE.
+
+    `-M` is what makes this correct for a move: without it, a relocated file
+    has no pre-image on its new path, so every one of its lines reads as added
+    and a pure `git mv` of a file carrying justified `unreachable!()` calls
+    fails the delta scan wholesale. With `-M`, a 100%-similar rename yields a
+    rename header and no `+` lines at all (measured on the WS2 package
+    colocation: 1,754 spurious added lines for
+    `memory-native/src/repo/filesystem.rs` before, 0 after), while a
+    rename-with-edits still reports exactly the lines that actually changed.
+    That is the property this scan wants — "did THIS change introduce a panic",
+    not "did this change touch a line near one".
+
+    One `git diff` for the whole range rather than one per file: pairing a
+    rename needs both sides in the same invocation, which a per-file pathspec
+    on the destination cannot provide.
+    """
+
+    diff = run_git(
+        "diff", "--unified=0", "-M", f"{base}...{head}", "--", "src", "crates"
+    )
+    return parse_added_lines(diff)
+
+
+def parse_added_lines(diff: str) -> dict[str, set[int]]:
+    """Parse `git diff --unified=0` output into per-file added line numbers."""
+
+    per_file: dict[str, set[int]] = {}
+    current: set[int] | None = None
     current_line = 0
 
     for line in diff.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:]
+            if target == "/dev/null":
+                current = None
+            else:
+                name = target[2:] if target.startswith("b/") else target
+                current = per_file.setdefault(name, set())
+            continue
+        if line.startswith("--- ") or line.startswith("diff --git "):
+            continue
+        if current is None:
+            continue
         if line.startswith("@@"):
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if not match:
                 continue
             current_line = int(match.group(1))
             continue
-        if line.startswith("+++ ") or line.startswith("--- "):
-            continue
         if line.startswith("+"):
-            added.add(current_line)
+            current.add(current_line)
             current_line += 1
         elif line.startswith("-"):
             continue
         else:
             current_line += 1
 
-    return added
+    return per_file
 
 
 def collect_violations(base: str, head: str) -> list[tuple[str, int, str]]:
     violations: list[tuple[str, int, str]] = []
     scanner = RustScanner()
 
+    added_by_file = added_lines_by_file(base, head)
     for path in changed_rust_files(base, head):
         if not path.exists():
             continue
-        added_lines = added_lines_for_file(base, head, path)
+        added_lines = added_by_file.get(path.as_posix(), set())
         if not added_lines:
             continue
 
@@ -1175,9 +1213,14 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(is_test_only_path("crates/foo/src/nested/tests.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/auth_test.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/auth_tests.rs"))
+        # A real repository path, because this branch of `is_test_only_path`
+        # READS the file to confirm the `#[cfg(test)] mod` declaration. It
+        # therefore has to name where the crate actually sits — the family
+        # directory (PROPOSAL §5) — or the assertion silently measures a
+        # missing file.
         self.assertTrue(
             is_test_only_path(
-                "crates/ironclaw_processes/src/journal_store/state_tests.rs"
+                "crates/kernel/ironclaw_processes/src/journal_store/state_tests.rs"
             )
         )
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
@@ -1186,7 +1229,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
         # gated, ships zero bytes in production. Exempt by exact filename only.
         self.assertTrue(
-            is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
+            is_test_only_path("crates/app/ironclaw_composition/src/test_support.rs")
         )
         # Directory-module form: src/test_support/**.rs is also exempt, so
         # growing a test_support module never needs another change here.
@@ -1205,7 +1248,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # is not the blessed feature-gated module either.
         self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
         self.assertFalse(
-            is_test_only_path("crates/ironclaw_memory_native/src/contract_tests.rs")
+            is_test_only_path("crates/extensions/packages/memory-native/src/contract_tests.rs")
         )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
@@ -1435,6 +1478,60 @@ class CheckNoPanicsTests(unittest.TestCase):
             self.assertNotIn(shared, tests)
             self.assertNotIn(child, tests)
 
+    def test_pure_rename_contributes_no_added_lines(self) -> None:
+        """A relocated file must not read as wholly new.
+
+        Regression for the WS2 package colocation: without `-M` the diff has no
+        pre-image on the destination path, so every line of a moved file counts
+        as added and a `git mv` of a file carrying justified `unreachable!()`
+        calls fails the delta scan wholesale. `git diff -M` emits a rename
+        header and no `+` lines for a 100%-similar rename, which is what this
+        parser must reflect.
+        """
+
+        rename_only = (
+            "diff --git a/crates/old/src/lib.rs b/crates/new/src/lib.rs\n"
+            "similarity index 100%\n"
+            "rename from crates/old/src/lib.rs\n"
+            "rename to crates/new/src/lib.rs\n"
+        )
+        self.assertEqual(parse_added_lines(rename_only), {})
+
+    def test_rename_with_edits_reports_only_the_edited_lines(self) -> None:
+        rename_with_edit = (
+            "diff --git a/crates/old/src/lib.rs b/crates/new/src/lib.rs\n"
+            "similarity index 98%\n"
+            "rename from crates/old/src/lib.rs\n"
+            "rename to crates/new/src/lib.rs\n"
+            "--- a/crates/old/src/lib.rs\n"
+            "+++ b/crates/new/src/lib.rs\n"
+            "@@ -7,0 +8,2 @@\n"
+            "+    let x = value.unwrap();\n"
+            "+    let y = other.expect(\"boom\");\n"
+        )
+        self.assertEqual(
+            parse_added_lines(rename_with_edit),
+            {"crates/new/src/lib.rs": {8, 9}},
+        )
+
+    def test_created_file_reports_every_line_and_deletion_reports_none(self) -> None:
+        created = (
+            "diff --git a/crates/new/src/added.rs b/crates/new/src/added.rs\n"
+            "--- /dev/null\n"
+            "+++ b/crates/new/src/added.rs\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+fn a() {}\n"
+            "+fn b() {}\n"
+            "diff --git a/crates/old/src/gone.rs b/crates/old/src/gone.rs\n"
+            "--- a/crates/old/src/gone.rs\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-fn a() {}\n"
+            "-fn b() {}\n"
+        )
+        parsed = parse_added_lines(created)
+        self.assertEqual(parsed, {"crates/new/src/added.rs": {1, 2}})
+
     def test_baseline_comparison_rejects_new_and_stale_entries(self) -> None:
         fingerprint = 'fn invariant :: unreachable!("static invariant")'
         approved = collections.Counter(
@@ -1592,7 +1689,7 @@ class CheckNoPanicsTests(unittest.TestCase):
     def _shipping_metadata(
         normal_dependency_dir: str = "crates/normal_dependency",
         members: tuple[str, ...] | None = None,
-        shipping_dir: str = "crates/ironclaw_reborn_cli",
+        shipping_dir: str = "crates/app/ironclaw_cli",
     ) -> dict:
         shipping_id = "shipping"
         normal_id = "normal"
@@ -1662,8 +1759,8 @@ class CheckNoPanicsTests(unittest.TestCase):
             roots,
             sorted(
                 [
-                    (REPO_ROOT / "crates/ironclaw_reborn_cli/src/lib.rs").resolve(),
-                    (REPO_ROOT / "crates/ironclaw_reborn_cli/src/main.rs").resolve(),
+                    (REPO_ROOT / "crates/app/ironclaw_cli/src/lib.rs").resolve(),
+                    (REPO_ROOT / "crates/app/ironclaw_cli/src/main.rs").resolve(),
                     (REPO_ROOT / "crates/normal_dependency/src/lib.rs").resolve(),
                     (REPO_ROOT / "crates/normal_dependency/src/main.rs").resolve(),
                 ]
@@ -1679,26 +1776,26 @@ class CheckNoPanicsTests(unittest.TestCase):
         """
         roots = shipping_reborn_source_roots(
             self._shipping_metadata(
-                normal_dependency_dir="crates/substrates/ironclaw_events"
+                normal_dependency_dir="crates/substrates/ironclaw_event_log"
             )
         )
 
         self.assertIn(
-            (REPO_ROOT / "crates/substrates/ironclaw_events/src/lib.rs").resolve(),
+            (REPO_ROOT / "crates/substrates/ironclaw_event_log/src/lib.rs").resolve(),
             roots,
         )
 
     def test_shipping_package_is_found_by_name_after_a_directory_rename(self) -> None:
-        """The scope anchor survives `crates/ironclaw_reborn_cli` -> `crates/app/ironclaw_cli`.
+        """The scope anchor survives `crates/app/ironclaw_cli` -> `crates/app/ironclaw_cli`.
 
         The package keeps its name (`ironclaw`) across that rename, so resolving
         by name keeps the whole gate pointed at the right dependency closure.
         """
         roots = shipping_reborn_source_roots(
-            self._shipping_metadata(shipping_dir="crates/app/ironclaw_cli")
+            self._shipping_metadata(shipping_dir="crates/ironclaw_cli")
         )
 
-        self.assertIn((REPO_ROOT / "crates/app/ironclaw_cli/src/main.rs").resolve(), roots)
+        self.assertIn((REPO_ROOT / "crates/ironclaw_cli/src/main.rs").resolve(), roots)
 
     def test_shipping_crate_outside_the_crate_tree_fails_closed(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "not under"):

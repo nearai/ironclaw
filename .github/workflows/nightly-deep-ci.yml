@@ -3,7 +3,7 @@ name: Nightly Deep CI
 # The v1 legacy monolith (src/) and its deep suites (the former
 # .github/workflows/test.yml and .github/workflows/e2e.yml) were deleted
 # under Tier B ("Clean up old architecture" roadmap;
-# docs/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
+# docs/internal/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
 # Reborn suites remain, reused below.
 #
 # Cross-cutting platform and compatibility coverage is reused from
@@ -67,12 +67,17 @@ jobs:
     # (65 of 74 retained runs are startup_failures) because of stacked
     # violations of exactly these rules:
     # 1. The called workflow's coverage-report job declares job-level
-    #    `pull-requests: write`; the caller must grant it.
+    #    `pull-requests: write` and `actions: read`; the caller must grant
+    #    both. The `actions: read` scope arrived with #7018's changed-line
+    #    coverage gate (it fetches the base commit's merged-lcov artifact) and
+    #    is the exact omission that turned every nightly run from 2026-08-03
+    #    onward into a zero-job startup_failure.
     # 2. reborn-tests.yml references secrets.SCCACHE_*; the caller must pass
     #    secrets (`secrets: inherit`).
     permissions:
       contents: read
       pull-requests: write
+      actions: read
     secrets: inherit
     with:
       ref: ${{ github.sha }}
@@ -116,10 +121,21 @@ jobs:
         # Targets the dispatch routing logic itself. Keep this pointed at a file
         # with real mutable statements — a pure `pub use` re-export file yields
         # zero mutants and makes this step silently vacuous.
-        run: >-
-          scripts/mutation-audit.sh
-          -p ironclaw_capabilities
-          crates/ironclaw_capabilities/src/dispatch.rs
+        #
+        # The crate directory is resolved through the shared inventory
+        # (scripts/ci/crate-dir.sh) rather than the flat `crates/
+        # ironclaw_capabilities` literal, so this step needs no edit when the
+        # crate moves into a family directory (PROPOSAL §5) — a stale literal
+        # here used to be a SILENT failure: cargo-mutants would match zero
+        # mutants under a path that no longer exists and report a clean run
+        # over code it never read. `set -e` aborts here if resolution itself
+        # fails; scripts/mutation-audit.sh's own file-existence guard is the
+        # second layer, catching dispatch.rs being renamed within a crate that
+        # still resolves.
+        run: |
+          set -euo pipefail
+          capabilities_dir="$(bash scripts/ci/crate-dir.sh ironclaw_capabilities)"
+          scripts/mutation-audit.sh -p ironclaw_capabilities "${capabilities_dir}/src/dispatch.rs"
       - name: Upload mutation triage queue
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

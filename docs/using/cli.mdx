@@ -55,9 +55,9 @@ ironclaw config set google.client_id <your-client-id>
 
 `config list` and `config get` read every key. `config set` is narrower: it accepts only
 `<provider>.api_key`, `google.client_id`, `google.client_secret`, `google.redirect_uri`,
-`slack.enabled`, and `webui.token --rotate`, routing each to the configuration file, the
-encrypted secret store, or the web token file. Everything else is edited in `config.toml`
-directly.
+and `webui.token --rotate`, routing each to the configuration file, the encrypted secret
+store, or the web token file. Other supported settings are edited in `config.toml`
+directly; retired keys such as `slack.enabled` are refused with migration guidance.
 
 `config set` does not restart the running instance — it prints `to apply: ironclaw service
 restart`. See [Configuration](/capabilities/configuration).

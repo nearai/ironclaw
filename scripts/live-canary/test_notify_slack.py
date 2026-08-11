@@ -314,6 +314,15 @@ class RebornQaSlackReportTests(unittest.TestCase):
                                 "details": {
                                     "case": "qa_2a_gmail_connect",
                                     "gate": "requires live Google browser consent state",
+                                    "metrics": {
+                                        "model_call_count": 2,
+                                        "tool_call_count": 3,
+                                        "input_tokens": 1000,
+                                        "output_tokens": 200,
+                                        "cache_read_tokens": 400,
+                                        "uncached_input_tokens": 600,
+                                        "cost_usd": "0.0123",
+                                    },
                                 },
                             },
                             {
@@ -376,6 +385,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.reborn_qa_cases[0].rows, ("2A",))
         self.assertEqual(report.reborn_qa_cases[0].feature, "Gmail connection flow")
         self.assertEqual(report.reborn_qa_cases[0].message, "")
+        self.assertEqual(report.reborn_qa_cases[0].model_call_count, 2)
+        self.assertEqual(report.reborn_qa_cases[0].tool_call_count, 3)
+        self.assertEqual(report.reborn_qa_cases[0].input_tokens, 1000)
+        self.assertEqual(report.reborn_qa_cases[0].output_tokens, 200)
+        self.assertEqual(report.reborn_qa_cases[0].cache_read_tokens, 400)
+        self.assertEqual(report.reborn_qa_cases[0].uncached_input_tokens, 600)
+        self.assertEqual(report.reborn_qa_cases[0].cost_usd, "0.0123")
         self.assertEqual(len(report.reborn_qa_cases[0].tool_calls), 1)
         self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].name, "gmail.list_messages")
         self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].args_hash, "1234567890123")
@@ -753,7 +769,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         qa_text = qa_sections[0]
         self.assertIn("1/3 passed", qa_text)
         self.assertIn("\n*Cases:*", qa_text)
-        self.assertIn("\n*Tools:*", qa_text)
+        self.assertIn("\n*Tools observed:*", qa_text)
         self.assertNotIn("\n*Tool I/O digests:*", qa_text)
         self.assertIn("`2A` Gmail connection flow", qa_text)
         self.assertIn("`2D` Calendar prep assistant using Google Docs and live news", qa_text)
@@ -775,7 +791,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
             qa_text,
         )
         self.assertNotIn("*Debug `2A`", qa_text)
-        self.assertIn("*Tools:* 2 calls across 2 tools", qa_text)
+        self.assertIn("*Tools observed:* 2 tools", qa_text)
         self.assertNotIn("in#1234567890", qa_text)
         self.assertNotIn("out#9876543210", qa_text)
 
@@ -839,6 +855,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     feature="Gmail connection flow",
                     success=True,
                     latency_ms=1200,
+                    model_call_count=2,
+                    tool_call_count=3,
+                    input_tokens=1000,
+                    output_tokens=200,
+                    cache_read_tokens=400,
+                    uncached_input_tokens=600,
+                    cost_usd="0.0123",
                 ),
                 notify.RebornQaCaseReport(
                     rows=("2D",),
@@ -876,10 +899,63 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertNotIn("mainsha", body)
         self.assertIn("| `reborn-webui-v2-live-qa` | `reborn-webui-v2` |", body)
         self.assertIn("#### QA 2: 1/2 passed", body)
+        self.assertIn(
+            "*Usage:* 2 model calls (1/2 cases) · 3 tool calls (1/2 cases) · "
+            "1,000 input tokens (1/2 cases) · 200 output tokens (1/2 cases) · "
+            "400 cache-read (1/2 cases) · 600 uncached input (1/2 cases) · "
+            "$0.0123 (1/2 cases)",
+            body,
+        )
         self.assertIn(":white_check_mark: `2A` Gmail connection flow", body)
+        self.assertIn(
+            "2 model calls · 3 tool calls · 1,000 input tokens · "
+            "400 cache-read · 600 uncached input · 200 output tokens · $0.0123",
+            body,
+        )
         self.assertIn(":x: `2D` Calendar prep assistant", body)
         self.assertIn("Failure: requires live Google runtime access", body)
         self.assertIn("[GitHub run artifacts]", body)
+
+    def test_reborn_metric_summary_aggregates_available_case_scalars(self):
+        cases = [
+            notify.RebornQaCaseReport(
+                rows=("2A",),
+                case="a",
+                feature="a",
+                success=True,
+                model_call_count=2,
+                tool_call_count=3,
+                input_tokens=1000,
+                output_tokens=200,
+                cache_read_tokens=400,
+                uncached_input_tokens=600,
+                cost_usd="0.0123",
+            ),
+            notify.RebornQaCaseReport(
+                rows=("2B",),
+                case="b",
+                feature="b",
+                success=True,
+                model_call_count=1,
+                tool_call_count=0,
+                input_tokens=500,
+                output_tokens=100,
+                cache_read_tokens=None,
+                uncached_input_tokens=None,
+                cost_usd=None,
+            ),
+        ]
+
+        summary = notify._format_reborn_metric_summary(cases)
+
+        self.assertEqual(len(summary), 1)
+        self.assertIn("3 model calls", summary[0])
+        self.assertIn("3 tool calls", summary[0])
+        self.assertIn("1,500 input tokens", summary[0])
+        self.assertIn("300 output tokens", summary[0])
+        self.assertIn("400 cache-read (1/2 cases)", summary[0])
+        self.assertIn("600 uncached input (1/2 cases)", summary[0])
+        self.assertIn("$0.0123 (1/2 cases)", summary[0])
 
     def test_github_comment_body_includes_junit_fallback_for_failed_lane(self):
         report = notify.LaneReport(

@@ -17,11 +17,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_assistant::{
+    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
+};
+use ironclaw_event_log::InMemoryDurableEventLog;
 use ironclaw_event_projections::{
     EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
     ProjectionSnapshot, ReplayEventProjectionService,
 };
-use ironclaw_events::InMemoryDurableEventLog;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::turn::{
     IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
@@ -40,35 +44,34 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
-    JsonSpawnSubagentInputCodec,
+    JsonSpawnSubagentInputCodec, RejectingInputEnqueue, ToolDisclosureMode,
 };
 use ironclaw_network::NetworkHttpRequest;
-use ironclaw_product::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
-use ironclaw_product::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
 };
-use ironclaw_runner::subagent::{
+use ironclaw_threads::{
+    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
+    ThreadMessageRecord, ThreadScope,
+};
+use ironclaw_turn_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
 };
-use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
-use ironclaw_runner::{
+use ironclaw_turn_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
+use ironclaw_turn_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink},
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
         RebornRuntimeLoopComposition, build_default_planned_runtime,
     },
-};
-use ironclaw_threads::{
-    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
-    ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -323,16 +326,16 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         // The production capability port resolves the dispatch scope
-        // owner-first from the turn's real binding subject (this harness
+        // owner-first from the turn's real binding actor (this harness
         // submits as the fixed `"alice"` actor, not the profile's default
         // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
         // setting must be seeded under that SAME resolved subject or the
         // gate never raises -- mirrors
         // `with_host_runtime_extension_lifecycle_capabilities`.
-        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        let actor_user = Self::resolve_default_binding_actor_user(conversation_id).await?;
         let host_runtime = Arc::new(
             crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
-                subject_user.as_str(),
+                actor_user.as_str(),
             )?
             .build()
             .await?,
@@ -430,7 +433,7 @@ impl RebornBinaryE2EHarness {
         // resolves to — extension_remove reads ownership under that actor, so a
         // fixed profile user makes install-then-remove see "never installed".
         // Mirrors `build_group_capability_with_base` in the group harness.
-        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        let actor_user = Self::resolve_default_binding_actor_user(conversation_id).await?;
         // Google-OAuth-CONFIGURED variant deliberately, matching the Slack
         // treatment in `harness/mod.rs`: this tier never represents a
         // provider-unconfigured instance. The base profile already seeds a
@@ -451,7 +454,7 @@ impl RebornBinaryE2EHarness {
         // (non-configured) profile via `group_constructors.rs`.
         let host_runtime = Arc::new(
             crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user(
-                subject_user.as_str(),
+                actor_user.as_str(),
             )?
             .build()
             .await?,
@@ -465,15 +468,15 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    /// Resolve the `(tenant, subject-user)` a default `submit_text` call
+    /// Resolve the `(tenant, actor-user)` a default `submit_text` call
     /// (actor `"alice"`, adapter `"reborn-test"`, installation `"install-1"`)
     /// will bind to for `conversation_id`, WITHOUT depending on the harness
     /// under construction. Deterministic and side-effect-free from the
     /// caller's perspective (its own throwaway `filesystem_temp` product
-    /// harness/backend): direct-chat routes set `subject_user_id` to the
-    /// resolved actor (`ResolvedBinding` doc comment), so this reproduces
-    /// exactly what the real turn's binding resolves to later.
-    async fn resolve_default_binding_subject_user(
+    /// harness/backend): a run acts as the user who invoked it, so the
+    /// binding's actor is exactly what the real turn's binding resolves to
+    /// later.
+    async fn resolve_default_binding_actor_user(
         conversation_id: &str,
     ) -> HarnessResult<ironclaw_host_api::ids::UserId> {
         let ingress = RebornTestIngress::new("reborn-test", "install-1")?;
@@ -490,7 +493,7 @@ impl RebornBinaryE2EHarness {
             .binding_service()?
             .resolve_binding(binding_request)
             .await?;
-        Ok(binding.subject_user_id.unwrap_or(binding.actor_user_id))
+        Ok(binding.actor_user_id)
     }
 
     pub async fn with_host_runtime_skill_management_capabilities(
@@ -760,7 +763,7 @@ impl RebornBinaryE2EHarness {
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
         let thread_harness = if let Some(storage) = shared_storage.as_ref() {
             RebornThreadHarness::filesystem_shared_backend(
@@ -796,7 +799,7 @@ impl RebornBinaryE2EHarness {
             Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
         let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
-            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_events::DurableEventLog>,
+            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_event_log::DurableEventLog>,
             DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)?,
         ));
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
@@ -842,6 +845,9 @@ impl RebornBinaryE2EHarness {
             // minutes of backoff. Mirrors the integration group harness's
             // IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS=1 pin.
             planned_model_availability_retry_attempts: std::num::NonZeroU32::new(1),
+            // Scripted replay steps assert exact flat tool surfaces. Keep that
+            // test contract explicit instead of inheriting production's mode.
+            tool_disclosure: ToolDisclosureMode::Off,
             ..DefaultPlannedRuntimeConfig::default()
         };
         if exposes_spawn_subagent {
@@ -856,7 +862,9 @@ impl RebornBinaryE2EHarness {
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
                 Arc::clone(&await_edge_store)
-                    as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                    as Arc<
+                        dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore,
+                    >,
                 thread_scope.clone(),
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
@@ -878,7 +886,7 @@ impl RebornBinaryE2EHarness {
             subagent_await_edge_settler: await_edge_resolver
                 as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
-                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
@@ -890,6 +898,7 @@ impl RebornBinaryE2EHarness {
             cancellation_factory: None,
             skill_context_source: None,
             input_queue: None,
+            input_queue_reconcile: None,
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),
             memory_context_service: None,
@@ -902,6 +911,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: Some(Arc::new(
                 ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
             )
@@ -909,12 +919,13 @@ impl RebornBinaryE2EHarness {
             gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;
-        let binding_service: Arc<dyn ConversationBindingService> =
+        let binding_service: Arc<dyn ProductBindingResolver> =
             Arc::new(product_harness.binding_service()?);
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             composition.coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
         let workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
@@ -1043,12 +1054,14 @@ impl RebornBinaryE2EHarness {
             .resolve_binding(binding_request)
             .await?;
         let thread_scope = thread_scope_from_binding_with_route_kind(&binding, route_kind)?;
+        // Owner == actor under ephemeral-per-ping: the run's thread scope is
+        // the acting user (the pinger). Mirrors production scope derivation.
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
         let ack = self.workflow.submit_inbound(envelope).await?;
@@ -1590,7 +1603,10 @@ fn thread_scope_from_binding_with_route_kind(
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        // The run's thread scope is the acting user (the pinger); owner ==
+        // actor under ephemeral-per-ping. Mirrors production
+        // `run_delivery::thread_scope_from_binding`.
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })
 }
@@ -1619,6 +1635,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelRespons
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         effective_fallback_index: Some(0),
+        diagnostic_effective_model: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)

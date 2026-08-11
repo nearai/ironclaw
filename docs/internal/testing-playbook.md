@@ -208,7 +208,7 @@ tiers ran. Name the tiers actually exercised in the pull request test card.
 ### Unit or crate contract
 
 Example:
-[`crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs`](../../crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs)
+[`crates/product/ironclaw_webui/tests/webui_v2_descriptors_contract.rs`](../../crates/product/ironclaw_webui/tests/webui_v2_descriptors_contract.rs)
 
 This contract locks the declared WebChat v2 route surface, including method,
 path, authentication, body limit, rate limit, CORS, audit class, and allowed
@@ -360,9 +360,12 @@ The merged Reborn LCOV report enforces three complementary ratchets:
   baseline (which supersedes the historical 80.81% floor);
 - critical production crates have percentage and covered-line floors in
   [`tests/integration/coverage-floor.toml`](../../tests/integration/coverage-floor.toml);
-- added, instrumentable production lines and branch arms must be covered. The
-  denominator comes from the pull-request diff intersected with LLVM `DA` and
-  `BRDA` records, not from a hand-maintained file list.
+- added, instrumentable production code must meet the original committed 90%
+  changed-line floor. Changed-branch coverage is still required in LCOV and
+  reported for review, but has no universal percentage floor. The denominator
+  comes from the pull-request diff intersected with LLVM `DA` and `BRDA`
+  records, not from a hand-maintained file list. Missing production coverage
+  and changed files with no measured instrumented lines remain hard failures.
 
 Changed-code exemptions live in
 [`tests/integration/changed-coverage-exemptions.toml`](../../tests/integration/changed-coverage-exemptions.toml).
@@ -404,21 +407,21 @@ pytest scenarios/test_reborn_webui_v2_smoke.py
 ### Database or runtime integration
 
 Example:
-[`crates/ironclaw_hooks/tests/parity_matrix.rs`](../../crates/ironclaw_hooks/tests/parity_matrix.rs)
+[`crates/loop/ironclaw_hooks/tests/parity_matrix.rs`](../../crates/loop/ironclaw_hooks/tests/parity_matrix.rs)
 
 This is the right shape when multiple backends must implement the same
 behavioral contract. Production-facing persistence behavior should cover both
 libSQL and PostgreSQL unless the owning contract explicitly says otherwise.
 
 Prefer the owning crate's `tests/` directory for one storage or runtime
-contract. Use an existing feature-gated root integration suite when behavior
-crosses composition layers.
+contract. Use an existing feature-gated crate suite when behavior crosses
+composition layers.
 
 Never silently return from a test because Docker or PostgreSQL is missing. Use
 documented feature gates or a loud, explicit opt-out.
 
 ```bash
-cargo test --features integration
+cargo test -p <owning-crate> --features integration   # e.g. -p ironclaw_hooks; the workspace-root `integration` feature is empty
 ```
 
 ### Live canary
@@ -509,7 +512,7 @@ layer is omitted, explain why in one sentence.
 - Assert an observable outcome, not only `Completed` status or a mock call
   count.
 - Run the narrowest test during development, then expand based on risk.
-- Add `cargo test -p ironclaw_architecture` when dependency or ownership edges
+- Add `cargo test -p ironclaw_architecture_tests` when dependency or ownership edges
   change.
 - Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
   behavior changes.
@@ -540,7 +543,7 @@ shipped manifests rather than a hand-maintained list:
 | read | A `ProviderOperationCase` with `outcome_class = "success"` **and** one with `outcome_class = "empty"`. |
 
 The read/write split comes from each tool's `effects` in
-`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`
+`crates/extensions/packages/*/manifest.toml`
 (`external_write`), so shipping a new tool classifies it automatically.
 
 **A harvested tool-call name is not evidence for a write.** A recorded model

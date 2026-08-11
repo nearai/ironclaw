@@ -238,8 +238,8 @@ def tier2(commits: list[dict], now: datetime) -> dict:
 V1_SRC = "src"
 CRATES_SRC = "crates"
 
-COMPOSITION_CRATE = "ironclaw_reborn_composition"
-ARCHITECTURE_CRATE = "ironclaw_architecture"
+COMPOSITION_CRATE = "ironclaw_composition"
+ARCHITECTURE_CRATE = "ironclaw_architecture_tests"
 
 # Tier 3's crate-shaped probes resolve their paths through the crate tree
 # instead of hardcoding `crates/<crate>/src` and `crates/*/src`. Those globs

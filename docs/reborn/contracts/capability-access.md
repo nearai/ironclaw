@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_authorization`
+**Crate:** `crates/kernel/ironclaw_authorization`
 **Depends on:** `docs/reborn/contracts/host-api.md`
 
 ---
@@ -133,7 +133,7 @@ CapabilityHost::spawn_json(...)
 
 Authorization denial happens before runtime dispatch, process creation, and resource reservation.
 
-The dispatcher remains policy/approval-unaware: it receives a sealed `Authorized` witness from `CapabilityHost` or another kernel-minted continuation, consumes that authorization state, and rejects expired witnesses fail-closed as `AuthorizationExpired` (`crates/ironclaw_host_api/src/authorized.rs`, `crates/ironclaw_capabilities/src/dispatch.rs`). The witness carries the invocation, runtime lane, prepared mounts, resource reservation, and deadline; callers do not provide those as witness-free dispatch fields.
+The dispatcher remains policy/approval-unaware: it receives a sealed `Authorized` witness from `CapabilityHost` or another kernel-minted continuation, consumes that authorization state, and rejects expired witnesses fail-closed as `AuthorizationExpired` (`crates/contracts/ironclaw_host_api/src/authorized.rs`, `crates/kernel/ironclaw_capabilities/src/dispatch.rs`). The witness carries the invocation, runtime lane, prepared mounts, resource reservation, and deadline; callers do not provide those as witness-free dispatch fields.
 
 ---
 

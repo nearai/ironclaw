@@ -37,7 +37,6 @@ Run commands from the repository root.
 - `public-smoke`
 - `persona-rotating`
 - `private-oauth`
-- `provider-matrix`
 - `release-public-full`
 - `upgrade-canary`
 
@@ -64,16 +63,6 @@ Run the public live smoke lane:
 
 ```bash
 LANE=public-smoke scripts/live-canary/run.sh
-```
-
-Run the provider matrix lane:
-
-```bash
-LANE=provider-matrix \
-PROVIDER=openai-compatible \
-PROVIDER_TEST_TARGET=e2e_live_mission \
-SCENARIO=mission_daily_news_digest_with_followup \
-scripts/live-canary/run.sh
 ```
 
 Run the auth smoke lane:
@@ -125,6 +114,14 @@ verify external deliveries, assert exactly-once behavior, or guard
 security-sensitive output declare `retry_policy: "never"` in
 `case-manifest.json`, so a retry cannot duplicate a side effect or mask a
 deterministic failure.
+
+Model-driving cases also publish privacy-safe scalar `details.metrics` in
+`results.json`: model/tool call counts, input/output/cache-read/uncached-input
+tokens, and USD cost when provider pricing is available. Counts come from the
+complete per-case LLM trace before that raw trace is excluded from uploaded
+artifacts; prompt, response, tool argument, and tool output content are never
+copied into the metrics. Legacy or interrupted traces report unavailable cache
+or cost values as `null` rather than zero.
 
 Use CI-style browser installation for auth browser lanes:
 

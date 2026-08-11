@@ -6,24 +6,31 @@
 //! [`TrustedInboundContext`] via
 //! [`ProductInboundEnvelope::from_trusted_parse`] — the same path the
 //! production `ChannelAdapter` ingress bridge takes
-//! (`ironclaw_reborn_composition::extension_host::extension_ingress`).
+//! (`ironclaw_composition::extension_host::extension_ingress`).
 //!
 //! Ported in P7b (DEL-5): the retired `ProductAdapter` trait's `parse_inbound`
 //! used to produce the parsed value here. The harness never needed the trait —
 //! only the LIVE envelope it wrapped — so the parsed inbound is now built
 //! directly. Coverage that exercised the retired trait's own `parse_inbound` /
 //! `render_outbound` moved to the `ChannelAdapter` conformance suite
-//! (`ironclaw_product::test_support::run_channel_adapter_conformance`);
+//! (`ironclaw_assistant::test_support::run_channel_adapter_conformance`);
 //! see that PR's DEL-5 notes.
 
 use chrono::Utc;
-use ironclaw_product::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProjectionCursor,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId,
+};
+use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload,
+    ProjectionSubscriptionPayload, TrustedInboundContext, UserMessagePayload,
+};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
 
 /// Builds verified inbound envelopes for the integration harness.
 ///
@@ -121,6 +128,26 @@ impl RebornTestIngress {
             Vec::new(),
             trigger,
         )?);
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
+    }
+
+    /// [`Self::verified_text_envelope_with_trigger`] carrying host-fetched
+    /// channel conversation history (`UserMessagePayload::channel_context`) —
+    /// the shape channel ingress hydration produces for a shared-channel ping.
+    pub fn verified_text_envelope_with_channel_context(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        text: &str,
+        trigger: ProductTriggerReason,
+        channel_context: &str,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let payload = ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(text.to_string(), Vec::new(), trigger)?
+                .with_channel_context(Some(channel_context.to_string())),
+        );
         let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
         self.envelope_from_parsed(user_id, parsed)
     }

@@ -11,7 +11,7 @@ use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
     host_runtime_storage_roots, workspace_mounts,
 };
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_host_api::{
     capability::EffectKind,
     ids::{CapabilityId, ExtensionId, UserId},

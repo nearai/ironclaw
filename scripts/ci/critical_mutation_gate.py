@@ -14,16 +14,74 @@ import sys
 import tempfile
 import tomllib
 
+# Manifest paths used to resolve a crate are keyed on the crate's *name*, never
+# on `crates/<name>/`: the target-architecture restructure moves crates into
+# family directories (`crates/<family>/ironclaw_*`, PROPOSAL §5), and both the
+# old `^crates/ironclaw_[^/]+/src/.+\.rs$` path regex and the old
+# `crates/{package}/` watch-path root stop matching the day that lands. This
+# gate then raises `GateError` on every entry and blocks CI — loudly, unlike the
+# silent members of its family, but blocking all the same.
+# See docs/reborn/target-architecture/CHECKLIST.md WS10 and #6963.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+from crate_tree import (  # noqa: E402
+    CrateTreeError,
+    crate_directories,
+    owning_crate_directory,
+)
+
 MANIFEST_PATH = "tests/integration/critical-mutation-functions.toml"
 GATE_PATH = "scripts/ci/critical_mutation_gate.py"
 SELF_TEST_PATH = "scripts/ci/test-critical-mutation-gate.sh"
-PRODUCTION_PATH = re.compile(r"^crates/ironclaw_[^/]+/src/.+\.rs$")
 PACKAGE = re.compile(r"^ironclaw_[a-z0-9_]+$")
 FUNCTION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class GateError(RuntimeError):
     pass
+
+
+def crate_directories_by_name(repo_root: pathlib.Path) -> dict[str, list[str]]:
+    """Crate directories grouped by crate name, walked once per gate run.
+
+    Discovery failure is a gate failure: an inventory this gate cannot build is
+    never "no invariants to check".
+    """
+
+    try:
+        directories = crate_directories(repo_root)
+    except CrateTreeError as error:
+        raise GateError(f"crate discovery failed: {error}") from error
+    grouped: dict[str, list[str]] = collections.defaultdict(list)
+    for directory in directories:
+        grouped[directory.rsplit("/", 1)[-1]].append(directory)
+    return grouped
+
+
+def package_directory(
+    grouped: dict[str, list[str]], package: str, index: int
+) -> str:
+    """Resolve a manifest `package` to the one crate directory that holds it."""
+
+    matches = grouped.get(package, [])
+    if len(matches) != 1:
+        raise GateError(
+            f"invariant #{index + 1} names package {package!r}, which resolves to "
+            f"{len(matches)} crate director(ies) under crates/: {matches}. A named "
+            "critical invariant cannot be measured against a crate that was renamed, "
+            "deleted, or duplicated — repoint the entry rather than letting the gate "
+            "resolve it to nothing."
+        )
+    return matches[0]
+
+
+def is_inside(path: str, root: str) -> bool:
+    """True when repo-relative `path` sits under `root` without escaping it."""
+
+    return (
+        path.startswith(f"{root}/")
+        and "\\" not in path
+        and ".." not in pathlib.PurePosixPath(path).parts
+    )
 
 
 def run(command: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]:
@@ -54,6 +112,7 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> list[dict[str,
     seen_domains: set[str] = set()
     seen_functions: set[tuple[str, str]] = set()
     validated: list[dict[str, object]] = []
+    crates_by_name = crate_directories_by_name(repo_root)
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or not required <= set(entry) or set(entry) - allowed:
             actual = sorted(entry) if isinstance(entry, dict) else type(entry).__name__
@@ -68,7 +127,22 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> list[dict[str,
         seen_domains.add(entry["domain"])
         if not PACKAGE.fullmatch(entry["package"]):
             raise GateError(f"invalid package in invariant #{index + 1}: {entry['package']}")
-        if not PRODUCTION_PATH.fullmatch(entry["path"]):
+        package_root = package_directory(crates_by_name, entry["package"], index)
+        # The path must be a production source *of the package it names*. The
+        # old regex only checked the shape, so a path pointing into a different
+        # crate than `package` validated and was then handed to
+        # `cargo mutants -p <package> -f <path>`.
+        source_path = entry["path"]
+        if not is_inside(source_path, f"{package_root}/src") or not source_path.endswith(
+            ".rs"
+        ):
+            owner = owning_crate_directory(source_path, repo_root)
+            if owner is not None and owner != package_root:
+                raise GateError(
+                    f"invariant #{index + 1} path {entry['path']} belongs to crate "
+                    f"{owner}, not to its declared package {entry['package']} "
+                    f"({package_root})"
+                )
             raise GateError(f"invalid production path in invariant #{index + 1}: {entry['path']}")
         if not (repo_root / entry["path"]).is_file():
             raise GateError(f"stale critical invariant path: {entry['path']}")
@@ -86,16 +160,11 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> list[dict[str,
             raise GateError(f"invariant #{index + 1} watch_paths must be non-empty strings")
         if len(set(watch_paths)) != len(watch_paths):
             raise GateError(f"invariant #{index + 1} watch_paths contains duplicates")
-        package_root = f"crates/{entry['package']}/"
         for watch_path in watch_paths:
-            if (
-                not watch_path.startswith(package_root)
-                or "\\" in watch_path
-                or ".." in pathlib.PurePosixPath(watch_path).parts
-            ):
+            if not is_inside(watch_path, package_root):
                 raise GateError(
                     f"invariant #{index + 1} watch path must stay inside "
-                    f"{package_root}: {watch_path}"
+                    f"{package_root}/: {watch_path}"
                 )
             if not (repo_root / watch_path).is_file():
                 raise GateError(f"stale critical invariant watch path: {watch_path}")

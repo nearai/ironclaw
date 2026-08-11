@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging get_user_info output",
+  "type": "object",
+  "required": ["user_ref"],
+  "properties": {
+    "user_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque user id from this extension's people operations; never derived from a conversation id."
+    },
+    "display_name": { "type": "string" },
+    "real_name": { "type": "string" },
+    "status_text": { "type": "string" },
+    "status_emoji": { "type": "string" },
+    "timezone": { "type": "string", "description": "IANA timezone name" },
+    "title": { "type": "string" },
+    "is_bot": { "type": "boolean" },
+    "presence": {
+      "type": "string",
+      "enum": ["active", "away", "unknown"],
+      "description": "get_presence folds into this field; unknown when the vendor does not expose presence."
+    },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

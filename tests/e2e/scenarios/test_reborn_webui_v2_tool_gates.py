@@ -10,21 +10,27 @@ Tracks nearai/ironclaw#4633.
 
 import asyncio
 import json
+import re
 import uuid
 from urllib.parse import quote
 
 import httpx
 import pytest
+from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
+    DEFAULT_PROFILE,
+    YOLO_PROFILE,
     client_action_id,
+    close_reborn_server,
     create_thread,
+    enable_reborn_global_auto_approve,
     fetch_timeline,
+    reborn_v2_browser,
     reborn_bearer_headers,
-    reborn_v2_server,  # noqa: F401 - imported fixture
-    reborn_v2_yolo_server,  # noqa: F401 - imported fixture
     send_message,
+    start_reborn_webui_v2_server,
     wait_for_assistant_message,
 )
 
@@ -89,7 +95,18 @@ async def _assert_sse_redacted_until(
         _assert_text_redacted(secret, line, source="post-submit SSE frame")
 
 
-async def _fetch_run_artifact(
+class _ArtifactNotReady(Exception):
+    """Transient 404 from the run artifact endpoint.
+
+    After a gate resolution resumes a run, the terminal turn record and its
+    projection can lag the artifact read by a short window. The polling
+    helper `_wait_for_run_artifact_status` treats this 404 as retryable
+    rather than fatal so a briefly-missing history projection is not
+    mistaken for a permanent authorization or routing failure.
+    """
+
+
+async def _try_fetch_run_artifact(
     client: httpx.AsyncClient,
     base_url: str,
     thread_id: str,
@@ -99,6 +116,8 @@ async def _fetch_run_artifact(
         f"{base_url}/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact",
         timeout=15,
     )
+    if response.status_code == 404:
+        raise _ArtifactNotReady(response.text)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -114,18 +133,31 @@ async def _wait_for_run_artifact_status(
 ) -> dict:
     deadline = asyncio.get_running_loop().time() + timeout
     last_artifact = None
+    last_not_ready: str | None = None
     while asyncio.get_running_loop().time() < deadline:
-        last_artifact = await _fetch_run_artifact(
-            client,
-            base_url,
-            thread_id,
-            run_id,
-        )
+        try:
+            last_artifact = await _try_fetch_run_artifact(
+                client,
+                base_url,
+                thread_id,
+                run_id,
+            )
+        except _ArtifactNotReady as error:
+            # The projection may briefly miss the resumed run's terminal
+            # records; keep polling until they land or the deadline elapses.
+            # Retain the latest transient 404 detail so a later non-terminal
+            # 200 followed by a timeout still surfaces the earlier miss in
+            # the failure message instead of reporting transient_404=None.
+            last_not_ready = str(error)
+            await asyncio.sleep(0.25)
+            continue
         if last_artifact.get("run", {}).get("status") == expected_status:
             return last_artifact
         await asyncio.sleep(0.25)
     raise AssertionError(
-        f"Run artifact did not reach {expected_status}; last={last_artifact}"
+        f"Run artifact did not reach {expected_status}; "
+        f"last={last_artifact}; "
+        f"transient_404={last_not_ready}"
     )
 
 
@@ -249,17 +281,58 @@ def _tool_result_references(timeline: dict) -> list[dict]:
     ]
 
 
+@pytest.fixture(scope="module")
+async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start the default profile with QA-only run artifacts enabled."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-tool-gates-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=DEFAULT_PROFILE,
+        log_prefix="reborn-v2-tool-gates",
+        extra_env={"IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT": "true"},
+    )
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_yolo_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Start the yolo profile with QA-only run artifacts enabled."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-tool-gates-yolo-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=YOLO_PROFILE,
+        log_prefix="reborn-v2-tool-gates-yolo",
+        extra_env={"IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT": "true"},
+    )
+    try:
+        await enable_reborn_global_auto_approve(base_url)
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
 async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     reborn_v2_yolo_server,
+    reborn_v2_browser,
 ):
     marker = f"tool-turn-{uuid.uuid4().hex[:8]}"
+    oversized_output = f"{marker}-" + ("x" * (50 * 1024 + 512))
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, reborn_v2_yolo_server)
-        await send_message(
+        submitted = await send_message(
             client,
             reborn_v2_yolo_server,
             thread_id,
-            f"reborn builtin echo {marker}",
+            f"reborn builtin echo {oversized_output}",
         )
         assistant = await wait_for_assistant_message(
             client,
@@ -269,6 +342,9 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
         )
         timeline = await fetch_timeline(client, reborn_v2_yolo_server, thread_id)
 
+    run_id = assistant.get("turn_run_id") or submitted.get("run_id")
+    assert run_id, (assistant, submitted)
+
     references = _tool_result_references(timeline)
     assert references, timeline
     assert any(reference.get("tool_result_ref") for reference in references), references
@@ -276,6 +352,39 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     assistant_content = assistant.get("content")
     assert isinstance(assistant_content, str), assistant
     assert assistant_content.strip(), assistant
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_yolo_server}/chat/{thread_id}"
+            f"?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        tool_entry = page.locator("[data-activity-kind='tool_completed']").first
+        await expect(tool_entry).to_be_visible(timeout=30000)
+        await tool_entry.get_by_role("button", name="Show details").click()
+        detail = tool_entry.locator("[data-testid^='inspector-tool-detail-']")
+        await expect(detail).to_be_visible(timeout=15000)
+        await expect(detail).to_contain_text("builtin.echo")
+        # The finite status set is localized, not the raw wire value.
+        await expect(detail).to_contain_text("Succeeded")
+        arguments = detail.get_by_text("Arguments", exact=True).locator("..").locator("pre")
+        await expect(arguments).to_contain_text(marker)
+        await expect(detail.get_by_text("Duration:")).to_have_count(1)
+        await expect(detail.get_by_text("Output size:")).to_have_count(1)
+        await expect(
+            detail.get_by_text(
+                re.compile(r"Output · truncated from 5[1-9],[0-9]{3} bytes")
+            )
+        ).to_be_visible()
+        output = detail.locator("pre").nth(1)
+        retained_bytes = await output.evaluate(
+            "element => new TextEncoder().encode(element.textContent || '').length"
+        )
+        assert retained_bytes <= 50 * 1024
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
@@ -570,3 +679,73 @@ async def test_reborn_v2_manual_token_auth_gate_resolves_and_resumes(
     assert isinstance(artifact.get("logs", {}).get("entries"), list), artifact
     _assert_text_redacted(raw_token, json.dumps(timeline), source="timeline")
     _assert_text_redacted(raw_token, json.dumps(artifact), source="run artifact")
+
+
+class _MockArtifactResponse:
+    """Minimal stand-in for `httpx.Response` used by `_try_fetch_run_artifact`."""
+
+    def __init__(self, status_code: int, json_payload: dict | None = None, text: str = ""):
+        self.status_code = status_code
+        self._json = json_payload
+        self.text = text
+
+    def json(self) -> dict:
+        if self._json is None:
+            raise ValueError("no json payload")
+        return self._json
+
+
+class _ScriptedArtifactClient:
+    """Async client that replays a scripted sequence of artifact responses.
+
+    Each entry is either an `int` status code (with empty text) or a
+    `(status_code, json_payload_or_none, text)` tuple. The client records
+    every call so the regression test can assert polling behavior.
+    """
+
+    def __init__(self, script: list):
+        self._script = list(script)
+        self.calls = 0
+
+    async def get(self, _url: str, timeout: float = 15) -> _MockArtifactResponse:
+        if not self._script:
+            raise AssertionError("scripted client exhausted")
+        entry = self._script.pop(0)
+        self.calls += 1
+        if isinstance(entry, int):
+            return _MockArtifactResponse(entry, text=f"status {entry}")
+        status_code, payload, text = entry
+        return _MockArtifactResponse(status_code, payload, text)
+
+
+async def test_wait_for_run_artifact_status_preserves_transient_404_through_timeout() -> None:
+    """A 404 followed by a non-terminal 200 must still surface the 404 on timeout.
+
+    Regression for the polling helper: previously a non-terminal 200 cleared
+    `last_not_ready`, so a later timeout reported `transient_404=None` and hid
+    the earlier miss. The sequence here is 404 -> non-terminal 200 -> timeout,
+    which must raise an `AssertionError` whose message still includes the 404
+    detail.
+    """
+    script = [
+        404,
+        (200, {"run": {"status": "Running"}}, ""),
+        (200, {"run": {"status": "Running"}}, ""),
+    ]
+    client = _ScriptedArtifactClient(script)
+    with pytest.raises(AssertionError) as exc_info:
+        await _wait_for_run_artifact_status(
+            client,  # type: ignore[arg-type]
+            "http://server",
+            "thread-1",
+            "run-1",
+            "Completed",
+            timeout=0.6,
+        )
+    message = str(exc_info.value)
+    assert "transient_404=status 404" in message, message
+    assert "Run artifact did not reach Completed" in message, message
+    # The non-terminal 200 response must be reflected as the last artifact,
+    # proving the helper continued polling past the 404 instead of exiting
+    # on the first transient miss.
+    assert "'status': 'Running'" in message, message

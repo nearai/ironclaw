@@ -36,10 +36,9 @@ account guide rather than introducing another bespoke runner layout.
 | Lane | Scope | Runner | Trigger | Blocking |
 | --- | --- | --- | --- | --- |
 | `deterministic-replay` | Retired under Tier B — its `tests/e2e_live*.rs` fixtures and the `test.yml` workflow were deleted with the v1 monolith. Reborn recorded-fixture replay is the `Reborn QA recorded fixtures` gate in `reborn-tests.yml`. (Live-canary lane rewire tracked in #6369.) | — | — | — |
-| `public-smoke` | Real LLM plus public tools such as `zizmor_scan` and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
+| `public-smoke` | Real LLM plus public tools and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `persona-rotating` | Real LLM multi-turn persona workflow, one persona per day | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |
-| `provider-matrix` | Same live behavior against multiple provider adapters | GitHub-hosted | Weekly and manual | Opens issue on scheduled failure |
 | `release-public-full` | Full public live suite for release candidates | GitHub-hosted | Manual | Release checklist gate |
 | `upgrade-canary` | Previous release DB opened by current checkout | GitHub-hosted | Manual | Release checklist gate |
 | `auth-smoke` | Fresh-machine mock-backed auth smoke: hosted OAuth, MCP OAuth, and multi-user MCP isolation | GitHub-hosted | Hourly and manual | No |
@@ -89,13 +88,9 @@ Current provider material includes:
 
 ### Reborn WebUI v2 Slack lane
 
-The Reborn WebUI v2 live QA runner must not write legacy `[slack]` setup fields
-into `config.toml`. The generated Reborn config only enables Slack:
-
-```toml
-[slack]
-enabled = true
-```
+The Reborn WebUI v2 live QA runner does not write the retired `[slack]`
+configuration section. Slack cases are gated on the required live credentials
+below and their `auth.test` preflight.
 
 Bot installation setup is applied headlessly after `ironclaw serve`
 boots by saving the manifest-declared `extension.slack` group through the
@@ -168,6 +163,25 @@ Run selected auth provider cases only:
 LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
 LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
 ```
+
+## Slack Delivery Verification (two-lane model)
+
+Since the explicit channel delivery tool landed (#7157), a triggered fire's
+result is never pushed by the completion driver: the fire itself calls
+`builtin.outbound_deliver`, and the background-run notifier's
+`triggered-run-delivery` record describes notice delivery only — `skipped`
+is the healthy record for a cleanly completed fire. The
+`reborn-webui-v2-live-qa` delivery cases therefore verify:
+
+- the durable `outbound/deliveries/` model-delivery record for the exact
+  fire run (`status == "delivered"`, target = the expected DM), and
+- the delivery marker in an independent Slack `conversations.history`
+  read-back (bot-authored, exactly once for one-shot routines).
+
+Only `failed`/`denied` notifier records fail a delivery case. Case prompts
+bind the marker to the **delivered Slack message** (the fire composes the
+message separately from its final answer, so a final-answer-only phrasing
+produces marker-less deliveries).
 
 ## Artifact Policy
 

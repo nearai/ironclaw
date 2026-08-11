@@ -2,7 +2,7 @@
 //! declare is NEVER called across a full real turn — no retrieval query, no
 //! after-turn record, no profile read — while a full declaration drives every
 //! hook through the SAME production consumers
-//! (`ironclaw_reborn_composition::memory_lifecycle_consumers`, the derivation
+//! (`ironclaw_composition::memory_lifecycle_consumers`, the derivation
 //! `build_reborn_runtime` wires).
 //!
 //! Builds its own groups (not the shared `builtin_tools` group): the memory
