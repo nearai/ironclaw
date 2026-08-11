@@ -1537,3 +1537,94 @@ async fn native_oversized_standing_document_is_capped_and_marked_truncated() {
         "a clipped document must say so"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The memory guidance this package ships (#7185)
+// ---------------------------------------------------------------------------
+// The guidance is this package's, so its content is pinned here rather than in
+// the host that appends it. Nothing else tells the model that persistent
+// memory exists, when a stated preference is worth saving, or how to phrase one
+// — and every failure mode below is invisible to the compiler.
+
+/// The load-bearing names: the exact tool ids the guidance instructs the model
+/// to call (a renamed tool leaves the instruction pointing at nothing), the
+/// curated `memory` target and the append mode the standing-document prefix
+/// reads back, and the never-save carve-out for secrets.
+///
+/// Both write modes are named on purpose. The save path is the append mode, so
+/// a forget instruction that does not say otherwise is read as "append the
+/// correction" — which leaves the entry the user asked to drop in the document,
+/// and the standing-document prefix then re-injects both.
+#[test]
+fn memory_guidance_names_the_save_path_and_its_limits() {
+    for expected in [
+        "ironclaw.memory.write",
+        "ironclaw.memory.search",
+        "`memory`",
+        "append: true",
+        "append: false",
+        "across conversations",
+        "Never save secrets",
+    ] {
+        assert!(
+            ironclaw_memory_native::MEMORY_GUIDANCE.contains(expected),
+            "memory guidance must mention {expected:?}"
+        );
+    }
+}
+
+/// Field-proven doctrine the guidance has to carry, each pinned because
+/// dropping it degrades recall quality in a way no compiler catches:
+///
+/// - **Declarative form.** A memory saved as an imperative ("Always respond
+///   concisely") is re-read as a standing directive on every later turn — and
+///   the standing-document prefix re-injects it every turn — so it can override
+///   what the user is asking for now. The worked example pair is the part
+///   models actually copy, so pin both halves.
+/// - **Staleness skip-list.** Task progress, session outcomes, and short-lived
+///   artifacts (PR numbers, commit SHAs) crowd out durable facts and go wrong
+///   within days.
+/// - **Priority framing.** Tells the model which memory is worth the write when
+///   it has to choose.
+#[test]
+fn memory_guidance_carries_the_write_quality_doctrine() {
+    for (doctrine, expected) in [
+        ("declarative-form rule", "declarative fact"),
+        (
+            "declarative example (good)",
+            "User prefers concise responses",
+        ),
+        ("declarative example (bad)", "Always respond concisely"),
+        ("staleness skip-list", "task progress"),
+        ("staleness skip-list", "commit SHAs"),
+        ("staleness horizon", "stale within a week"),
+        ("priority framing", "repeat or correct themselves"),
+    ] {
+        assert!(
+            ironclaw_memory_native::MEMORY_GUIDANCE.contains(expected),
+            "memory guidance lost its {doctrine}: expected {expected:?}"
+        );
+    }
+}
+
+/// Appended to every prompt on every turn while this provider is bound, so it
+/// has to stay worth that. Guidance that grows unchecked is how a system prompt
+/// quietly becomes the dominant cost of a cheap turn. It also has to open with
+/// a heading, because the host concatenates it after the user's own file and it
+/// must read as its own section rather than running into the previous
+/// paragraph.
+#[test]
+fn memory_guidance_is_a_compact_self_contained_section() {
+    let guidance = ironclaw_memory_native::MEMORY_GUIDANCE;
+    assert!(
+        guidance.starts_with('#'),
+        "guidance is appended as its own section and must open with a markdown heading; \
+         starts with {:?}",
+        guidance.chars().take(16).collect::<String>()
+    );
+    let lines = guidance.lines().count();
+    assert!(
+        lines <= 18,
+        "guidance is appended to every turn's prompt and must stay compact; {lines} lines"
+    );
+}

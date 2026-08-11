@@ -680,9 +680,12 @@ mod tests {
             "the unbound prompt must not name a memory tool the model cannot call"
         );
         // The bound arm guards the assertions above against passing vacuously
-        // (e.g. if the asset stopped being appended at all).
-        assert!(bound_content.contains("## Persistent Memory"));
-        assert!(bound_content.contains("ironclaw.memory.write"));
+        // (e.g. if the guidance stopped being appended at all). Asserted
+        // against the fixture, not against any provider's wording: what
+        // composition owes is "append what the bound provider declared", and
+        // the native text's own content is pinned where it lives
+        // (`memory_native_extension` + the memory-native package tests).
+        assert!(bound_content.contains(PROVIDER_GUIDANCE));
         // Everything else about the prompt is identical: gating adds a section,
         // it does not rewrite the rest.
         assert!(bound_content.starts_with(unbound_content.trim_end()));
@@ -788,17 +791,14 @@ mod tests {
             content.content.contains("## Self-Knowledge"),
             "self-knowledge guidance must be appended even when SYSTEM.md omits it"
         );
-        // Same reasoning for the persistent-memory protocol (#7185): without it
-        // the model is never told to save durable user facts, so nothing ever
-        // reaches the next conversation. It must survive a SYSTEM.md that
-        // predates the guidance, and must not be baked into the user's file.
+        // Same reasoning for the bound provider's memory guidance (#7185):
+        // without it the model is never told to save durable user facts, so
+        // nothing ever reaches the next conversation. It must survive a
+        // SYSTEM.md that predates the guidance, and must not be baked into the
+        // user's file.
         assert!(
-            content.content.contains("## Persistent Memory"),
-            "memory protocol must be appended even when SYSTEM.md omits it"
-        );
-        assert!(
-            content.content.contains("ironclaw.memory.write"),
-            "memory protocol must name the tool that saves a durable fact"
+            content.content.contains(PROVIDER_GUIDANCE),
+            "provider guidance must be appended even when SYSTEM.md omits it"
         );
         assert!(
             content
