@@ -70,11 +70,13 @@ sees one consistent contract:
 > IronClaw workspace where users save and manage files; files do not
 > automatically appear in both locations.
 
-The text lives in a prompt file owned by composition and is loaded with
-`include_str!()`. A provider-neutral helper may append supplied shell guidance
-while preserving descriptor/manifest parity; lower runtime crates do not name
-Railway. Local Docker and other `UserSandbox` consumers continue to receive
-only the generic guidance.
+The text lives in a prompt file owned by `ironclaw_sandbox`, the crate that
+owns the Railway command transport, and is exported as inert guidance data.
+Composition owns only profile-based selection of that data; it must not ship or
+embed prompt content. A provider-neutral `ironclaw_host_runtime` helper appends
+supplied shell guidance while preserving descriptor/manifest parity, so the
+kernel does not name Railway. Local Docker and other `UserSandbox` consumers
+continue to receive only the generic guidance.
 
 ## Failure behavior
 
