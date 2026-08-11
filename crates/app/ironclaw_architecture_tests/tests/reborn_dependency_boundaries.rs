@@ -671,7 +671,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        ("ironclaw_host_api", 18_974),
+        // 18_974 -> 19_043 (2026-08-11, #7509): `ModelResultPreview` now redacts
+        // credential-keyed values inside nested and line-numbered JSON before
+        // marker masking can destroy the key/value relationship.
+        ("ironclaw_host_api", 19_043),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
