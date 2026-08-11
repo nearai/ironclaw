@@ -8,4 +8,4 @@ Write every memory as a declarative fact about the user or their world, never as
 
 Do not save task progress, session outcomes, completed-work logs, temporary TODO state, or artifacts like PR numbers, issue numbers, and commit SHAs. If a fact will be stale within a week or two, it does not belong in persistent memory. Never save secrets, credentials, or tokens.
 
-Search or read your memory before writing, and update the existing entry instead of adding a near-duplicate. An explicit request to remember or to forget something wins over these rules: to forget, rewrite the memory document with `ironclaw.memory.write` so the entry is actually gone, rather than only saying you have forgotten it.
+Search or read your memory before writing, and update the existing entry instead of adding a near-duplicate. An explicit request to remember or to forget something wins over these rules: to forget, rewrite the memory document with `ironclaw.memory.write` and `append: false` — appending a correction leaves the original entry in place, and the surfaced memory block then carries both — rather than only saying you have forgotten it.

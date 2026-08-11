@@ -141,6 +141,11 @@ mod tests {
     /// names (a renamed tool would leave the instruction pointing at nothing),
     /// the curated `memory` target plus append mode the always-on prompt lane
     /// reads back, and the never-save carve-out for secrets.
+    ///
+    /// Both write modes are pinned by name. The save path is the append mode,
+    /// so a forget instruction that does not say otherwise is read as "append
+    /// the correction" — which leaves the entry the user asked to drop in the
+    /// document, and the always-on lane then re-injects both.
     #[test]
     fn memory_protocol_names_the_save_path_and_its_limits() {
         for expected in [
@@ -148,6 +153,7 @@ mod tests {
             "ironclaw.memory.search",
             "`memory`",
             "append: true",
+            "append: false",
             "across conversations",
             "Never save secrets",
         ] {
