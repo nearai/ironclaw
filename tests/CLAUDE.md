@@ -47,7 +47,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Area | Group | Flat int | Binary/QA | Python E2E |
 |---|---|---|---|---|
 | Approvals & permission gates | 10 | ✓ | ✓ | ✓ |
-| Auth / credentials / OAuth | 6 | 7 | ✓ | ✓ (heaviest) |
+| Auth / credentials / OAuth | 7 | 7 | ✓ | ✓ (heaviest) |
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 5 | 3 | ✓ | ✓ |
 | Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
@@ -62,13 +62,13 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **54** group scenarios · **55** flat integration bins (49 in
+Totals: **55** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions).
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (54)
+## 3. Group scenarios — `tests/integration/group_*/` (55)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -143,7 +143,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 |---|---|
 | List, install, and remove a skill, with each step visible from a different conversation | `scenario_install_list_remove.rs` |
 
-### 3.7 Linked accounts (device link) — `group_device_link/` (3)
+### 3.7 Linked accounts (device link) — `group_device_link/` (4)
 
 Telegram's **linked-account** surfaces: the real bundled manifest (channel +
 `method = "device_link"` auth + fifteen `standard_op` tools), its
@@ -158,6 +158,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 | Configure the deployment, install Telegram, link their own account, have the assistant read it through a real tool call — and lose that tool the moment the link is revoked | `scenario_link_call_unlink.rs` |
 | Link their own Telegram account without inheriting (or leaking) someone else's — a second person's call acts as themselves | `scenario_actor_isolation.rs` |
 | Have a revoked link park the run on a connect prompt instead of failing silently, then re-link and have the parked call run for real | `scenario_revoked_session_reauth.rs` |
+| Link their account through the real multi-step handshake — scan, wait, type the account password — and have the resulting credential be theirs alone, durable, and immediately usable by the assistant | `scenario_handshake_mints_and_serves.rs` (drives the production `DeviceLinkFlowDriver`: start → poll → submit → completed, asserts the minted account's §4.5 ownership pin and that custody actually persisted, then proves a linked tool call resolves to that account) |
 
 ### 3.8 Triggers & automations — `group_triggers/` (10)
 
@@ -485,8 +486,8 @@ verify it.
 |---|---|
 | **Proactive / background execution** has no Reborn scenario at any tier | The v1 heartbeat loop has no Reborn equivalent yet — issue #6369. Nothing in §3–§6 drives it. |
 | **Skills** have only one group scenario (`install_list_remove`) | No group-tier coverage of skill activation under a gate, install failure/denial, or trusted-vs-installed tool attenuation. Attenuation rules are in `.claude/rules/skills.md`. |
-| **Telegram's device-link handshake itself** has no scenario at any Rust tier | `group_device_link/` (§3.7) now covers the linked-account lifecycle — configure, install/activate, link, dispatch, unlink, re-link, per-actor isolation. What it does **not** cover is the multi-step handshake (`begin -> poll -> submit_input -> completed`) through the product-auth step machine, because that path has no production wiring to drive: composition constructs no `DeviceLinkFlowDriver`/`SnapshotDeviceLinkDriver`, `ironclaw_extension_host::generic_host` hands every deployment `LinkedSessionStore::unavailable()` (no `LinkedSessionMaterialStore` implementation exists), and the extension host's `DeviceLinkDriver` impl reports `account: None` on completion, which the auth driver fail-closes. Each is a TODO(design) in the source. Crate-tier coverage exists on both halves (`ironclaw_auth`'s `product_auth/device_link/driver/tests.rs`, `ironclaw_extension_host`'s `device_link_driver/tests.rs`); Telegram's *bot* pairing remains Python-tier only. |
-| **A failed linked session must not reconnect until `link_revision` changes** | Unimplemented and therefore untestable at any tier: the pool's revision key and the custody revision gate exist, but nothing records a session-level failure or gates reconnection on it, and no deployment wires linked-session custody at all (see the row above). |
+| **Telegram's device-link handshake against real MTProto** is untested at every tier | The handshake *through production wiring* is now covered — `group_device_link/scenario_handshake_mints_and_serves.rs` drives composition's `DeviceLinkFlowDriver` from start to a minted, ownership-pinned credential account and a linked tool call that resolves to it. What no Rust tier can reach is the **vendor** half: the shipped adapter speaks MTProto over a socket with no injectable seam, so QR acceptance, datacenter migration, 2FA, and flood-wait behaviour are exercised only by a scripted adapter. Closing this needs the gated live-smoke protocol (a real account and a human scanning a code), which no PR provisions. |
+| **A failed linked session must not reconnect until `link_revision` changes** | Still unimplemented and therefore untestable at any tier: the pool's revision key and the custody revision gate both exist and are now wired in every deployment, but nothing records a session-level *failure* or refuses reconnection until the revision moves. There is no production behavior to assert. |
 | **Memory deletion / retention** is uncovered | `group_memory/` covers write, read, search, tree, and binding gating — nothing covers removal, eviction, or the "LLM data is never deleted" invariant from the root `CLAUDE.md`. |
 | **Cross-actor isolation for triggers and extensions** is thin at group tier | `group_multiuser/` covers threads, memory, auto-approve and turn state. Extensions get one `with_actor_id` scenario; triggers get none. |
 | **Attachments** have no group scenario | Covered flat (`attach.rs`) and in the browser (`test_reborn_webui_v2_legacy_attachments.py`), but not cross-thread/cross-actor. |

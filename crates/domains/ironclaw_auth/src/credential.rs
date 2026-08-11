@@ -730,6 +730,161 @@ pub trait CredentialAccountService: Send + Sync {
             operation: "bump_link_revision",
         })
     }
+
+    /// Complete one device link: mint (or reuse) the linked-device credential
+    /// account, advance its `link_revision`, and store the session material —
+    /// in that order, so a completion is never reported before custody is
+    /// durable (PROPOSAL §4.3: store → mint → report; the caller reports).
+    ///
+    /// The one place the completion policy lives, deliberately a provided
+    /// method built from the trait's own operations so every implementation
+    /// behaves identically:
+    ///
+    /// - **Reuse before create.** A non-revoked linked-device account for the
+    ///   same `(scope, provider, owner_extension)` is re-linked rather than
+    ///   duplicated — its revision bumps, which is what evicts every live
+    ///   handle bound to the old one. A **revoked** account is never reused:
+    ///   its status machine is terminal, so a fresh account is minted.
+    /// - **Ownership is pinned at the constructor** —
+    ///   [`NewCredentialAccount::for_linked_device`] — and enforced again by
+    ///   [`CredentialAccountService::bump_link_revision`].
+    /// - **The blob write is load-then-CAS, never absent-only.** A crashed
+    ///   prior link may have left an orphan blob; relinking overwrites it.
+    ///   When the orphan cannot even be loaded, the write still learns the
+    ///   current version from the conflict outcome and retries exactly once —
+    ///   so a corrupt orphan cannot brick relinking, and a genuine concurrent
+    ///   writer still wins.
+    async fn complete_linked_device_link(
+        &self,
+        request: LinkedDeviceLinkCompletion,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let reusable = self
+            .list_accounts(CredentialAccountListRequest {
+                scope: request.scope.clone(),
+                provider: request.provider.clone(),
+                requester_extension: Some(request.owner_extension.clone()),
+                cursor: None,
+                limit: CredentialAccountListRequest::MAX_LIMIT,
+            })
+            .await?
+            .accounts
+            .into_iter()
+            .find(|account| {
+                account.ownership == CredentialOwnership::ExtensionOwned
+                    && account.owner_extension.as_ref() == Some(&request.owner_extension)
+                    && account.granted_extensions.is_empty()
+                    && account.status != CredentialAccountStatus::Revoked
+            });
+        let account = match reusable {
+            Some(projection) => self
+                .get_account(CredentialAccountLookupRequest {
+                    scope: request.scope.clone(),
+                    account_id: projection.id,
+                    requester_extension: Some(request.owner_extension.clone()),
+                })
+                .await?
+                .ok_or(AuthProductError::CredentialMissing)?,
+            None => {
+                self.create_account(NewCredentialAccount::for_linked_device(
+                    request.scope.clone(),
+                    request.provider.clone(),
+                    request.label.clone(),
+                    request.owner_extension.clone(),
+                    linked_session_secret_handle()?,
+                ))
+                .await?
+            }
+        };
+        let account = self.bump_link_revision(&request.scope, account.id).await?;
+        let account = if account.status == CredentialAccountStatus::Configured {
+            account
+        } else {
+            self.update_status(
+                &request.scope,
+                account.id,
+                CredentialAccountStatus::Configured,
+            )
+            .await?
+        };
+
+        let target = OpaqueMaterialRequest {
+            scope: request.scope.clone(),
+            account_id: account.id,
+            requester_extension: Some(request.owner_extension.clone()),
+            link_revision: account.link_revision,
+        };
+        // Load-then-CAS: learn the stored version (an orphan blob from a
+        // crashed link is legal here), then overwrite it. A load failure does
+        // not abort the relink — the conflict path below still learns the
+        // current version.
+        let expected = match self.load_opaque_material(target.clone()).await {
+            Ok(Some(snapshot)) => snapshot.version,
+            Ok(None) => LinkedSessionVersion::absent(),
+            Err(_) => LinkedSessionVersion::absent(),
+        };
+        let material = SessionBytes::new(request.material.expose().to_vec())
+            .map_err(|_| AuthProductError::invalid_request("session material violates bounds"))?;
+        let outcome = self
+            .store_opaque_material(OpaqueMaterialWrite {
+                target: target.clone(),
+                expected,
+                material,
+            })
+            .await?;
+        match outcome {
+            OpaqueMaterialWriteOutcome::Stored { .. } => Ok(account),
+            OpaqueMaterialWriteOutcome::Conflict { current } => {
+                // One retry against the version the conflict reported — the
+                // corrupt-orphan case. A second conflict is a genuine
+                // concurrent writer and the caller must not blind-write over
+                // it.
+                let material =
+                    SessionBytes::new(request.material.expose().to_vec()).map_err(|_| {
+                        AuthProductError::invalid_request("session material violates bounds")
+                    })?;
+                match self
+                    .store_opaque_material(OpaqueMaterialWrite {
+                        target,
+                        expected: current,
+                        material,
+                    })
+                    .await?
+                {
+                    OpaqueMaterialWriteOutcome::Stored { .. } => Ok(account),
+                    OpaqueMaterialWriteOutcome::Conflict { .. } => {
+                        Err(AuthProductError::BackendConflict)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Everything a completed device link resolves to before the account exists.
+///
+/// `material` is the session credential the vendor handshake produced —
+/// opaque bytes this crate stores and never reads.
+#[derive(Debug)]
+pub struct LinkedDeviceLinkCompletion {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub owner_extension: ExtensionId,
+    pub label: CredentialAccountLabel,
+    pub material: SessionBytes,
+}
+
+/// Mint the secret handle one linked-device account's session blob lives
+/// under. Fresh per account — the association travels on the account record
+/// (`access_secret`), which is also what cleanup purges by, so the name only
+/// has to be unique and shaped like a handle.
+fn linked_session_secret_handle() -> Result<SecretHandle, AuthProductError> {
+    SecretHandle::new(format!(
+        "product-auth-linked-session-{}",
+        uuid::Uuid::new_v4()
+    ))
+    .map_err(|error| {
+        AuthProductError::invalid_request(format!("linked-session handle invalid: {error}"))
+    })
 }
 
 /// Stable credential-account owner fields used by read models that need to
@@ -1228,6 +1383,13 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
         account_id: CredentialAccountId,
     ) -> Result<CredentialAccount, AuthProductError> {
         self.accounts.bump_link_revision(scope, account_id).await
+    }
+
+    async fn complete_linked_device_link(
+        &self,
+        request: LinkedDeviceLinkCompletion,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.accounts.complete_linked_device_link(request).await
     }
 }
 

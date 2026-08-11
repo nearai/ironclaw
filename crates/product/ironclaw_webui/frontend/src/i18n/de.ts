@@ -1679,6 +1679,8 @@ registerPack("de", {
   "deviceLink.passwordLabel": "Kontopasswort",
   "deviceLink.submit": "Weiter",
   "deviceLink.linked": "{name}-Konto verknüpft",
+  "deviceLink.confirmDeviceAccount": "Verknüpft als {account}",
+  "deviceLink.confirmDevice": "Öffne jetzt {name} → Einstellungen → Geräte und prüfe, dass genau ein neues IronClaw-Gerät hinzugekommen ist, gerade eben. Wenn du mehr als eines siehst oder eines, das du nicht erwartet hast, widerrufe es dort und trenne die Verknüpfung hier.",
   "deviceLink.revokeHint": "IronClaw erscheint jetzt als Gerät in {name}. Wenn du dort ein unbekanntes Gerät siehst, widerrufe es.",
   "deviceLink.startAgain": "Neu starten",
   "deviceLink.cannotRetry": "Dieses {name}-Konto kann nicht verknüpft werden.",

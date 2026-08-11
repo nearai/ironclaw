@@ -24,7 +24,7 @@ use ironclaw_extension_contracts::auth_prompt::{
     AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, DeviceLinkPromptView,
     PairingPromptView,
 };
-use ironclaw_extension_contracts::device_link::DeviceLinkStep;
+use ironclaw_extension_contracts::device_link::{DeviceLinkMode, DeviceLinkStep};
 use ironclaw_host_api::product_adapter_error::{ProductAdapterError, RedactedString};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
@@ -352,7 +352,11 @@ impl AuthChallengeProvider for RebornProductAuthServices {
             let Some(challenge) = flow.challenge.as_ref() else {
                 return Ok(None);
             };
-            return Ok(Some(auth_challenge_to_view(challenge, &flow.provider)));
+            return Ok(Some(auth_challenge_to_view(
+                challenge,
+                &flow.provider,
+                Some(&flow.id),
+            )));
         }
         let flow = source
             .flow_for_turn_gate(TurnGateAuthFlowQuery {
@@ -377,7 +381,11 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         let Some(challenge) = flow.challenge.as_ref() else {
             return Ok(None);
         };
-        Ok(Some(auth_challenge_to_view(challenge, &flow.provider)))
+        Ok(Some(auth_challenge_to_view(
+            challenge,
+            &flow.provider,
+            Some(&flow.id),
+        )))
     }
 }
 
@@ -398,6 +406,7 @@ impl BlockedAuthFlowCanceller for RebornProductAuthServices {
 fn auth_challenge_to_view(
     challenge: &AuthChallenge,
     provider: &AuthProviderId,
+    flow_id: Option<&crate::AuthFlowId>,
 ) -> AuthChallengeView {
     match challenge {
         AuthChallenge::OAuthUrl {
@@ -429,6 +438,7 @@ fn auth_challenge_to_view(
         },
         AuthChallenge::DeviceLinkStep {
             display_name,
+            mode,
             step,
             revision,
             expires_at,
@@ -443,9 +453,11 @@ fn auth_challenge_to_view(
             device_link: Some(device_link_prompt_view(
                 provider,
                 display_name,
+                *mode,
                 step,
                 *revision,
                 *expires_at,
+                flow_id,
             )),
         },
         AuthChallenge::AccountSelectionRequired { .. }
@@ -481,9 +493,11 @@ fn completed_account_label(step: &DeviceLinkStep) -> Option<CredentialAccountLab
 fn device_link_prompt_view(
     provider: &AuthProviderId,
     display_name: &str,
+    mode: DeviceLinkMode,
     step: &DeviceLinkStep,
     revision: u64,
     expires_at: chrono::DateTime<chrono::Utc>,
+    flow_id: Option<&crate::AuthFlowId>,
 ) -> DeviceLinkPromptView {
     let mut view = DeviceLinkPromptView {
         provider: provider.as_str().to_string(),
@@ -498,6 +512,20 @@ fn device_link_prompt_view(
         poll_interval_ms: DEVICE_LINK_POLL_INTERVAL_MILLIS,
         retry_after_ms: None,
         error_code: None,
+        // §8.12's additive frame fields. Each is carried rather than derived
+        // because every consumer-side derivation is a guess: a card that
+        // cannot name its flow starts a second one, and a card that guesses
+        // `input_kind` renders a cloud password in plain text.
+        flow_id: flow_id.map(|id| id.to_string()),
+        input_kind: match step {
+            DeviceLinkStep::InputRequired { kind, .. } => Some(*kind),
+            _ => None,
+        },
+        mode: Some(mode),
+        restartable: match step {
+            DeviceLinkStep::Failed { restartable, .. } => Some(*restartable),
+            _ => None,
+        },
     };
     match step {
         DeviceLinkStep::Display { payload, .. } => {
@@ -519,8 +547,12 @@ fn device_link_prompt_view(
             vendor_user_ref, ..
         } => {
             // Showing the resolved identity is the ONLY control that makes a
-            // substituted login visible (PROPOSAL §3.2) — never drop it.
+            // substituted login visible (PROPOSAL §3.2) — never drop it. It
+            // also rides `code`, the frame's one already-validated
+            // short-string slot, so a card can render it as the thing the
+            // user checks rather than having to parse it back out of prose.
             view.instructions = format!("Linked to {display_name} as {vendor_user_ref}.");
+            view.code = Some(vendor_user_ref.clone());
         }
         DeviceLinkStep::Failed { code, restartable } => {
             view.instructions = if *restartable {
@@ -532,6 +564,35 @@ fn device_link_prompt_view(
         }
     }
     view
+}
+
+/// The device-link frame one durable flow record projects to, or `None` when
+/// the record is not a device-link flow.
+///
+/// The projection lives here rather than in the transport for the reason every
+/// other prompt view does: the auth domain owns what a challenge means, and a
+/// route that re-derived the frame would drift from the gate card that renders
+/// the same flow.
+pub fn device_link_view_for_flow(flow: &crate::AuthFlowRecord) -> Option<DeviceLinkPromptView> {
+    match flow.challenge.as_ref()? {
+        AuthChallenge::DeviceLinkStep {
+            display_name,
+            mode,
+            step,
+            revision,
+            expires_at,
+            ..
+        } => Some(device_link_prompt_view(
+            &flow.provider,
+            display_name,
+            *mode,
+            step,
+            *revision,
+            *expires_at,
+            Some(&flow.id),
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

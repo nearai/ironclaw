@@ -428,6 +428,65 @@ test("DeviceLinkPanel stops polling on every terminal step", async () => {
   }
 });
 
+test("DeviceLinkPanel renders the ADR's device-confirmation control on completion", async () => {
+  const harness = createHarness({
+    startResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
+    pollResponses: [
+      response(
+        wireFrame({
+          step: DEVICE_LINK_STEPS.completed,
+          revision: 9,
+          // The projector carries the resolved `vendor_user_ref` here: it is
+          // the frame's one already-validated short-string slot, so the card
+          // can render the identity the user checks rather than parsing it
+          // back out of prose.
+          code: "+15550000000",
+        }),
+      ),
+    ],
+  });
+
+  await harness.mount();
+  await harness.fireTimers(3000);
+  const text = stringify(harness.render());
+
+  // The whole point of the control (ADR "The one control that is possible"):
+  // a user cannot check that the code they scanned came from IronClaw, but
+  // they CAN check that exactly one new device appeared, just now.
+  assert.ok(
+    text.includes("device-link-confirm-device"),
+    "a completed link must ask the user to confirm the device count",
+  );
+  assert.ok(
+    text.includes("device-link-account"),
+    "the resolved account must be shown, or there is nothing to check against",
+  );
+  assert.ok(
+    text.includes("deviceLink.revokeHint"),
+    "the revoke path must stay on screen beside the confirmation ask",
+  );
+
+  // …and the account line is genuinely driven by the resolved identity: a
+  // completion that carried none must not render an empty "Linked as" claim.
+  const withoutAccount = createHarness({
+    startResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
+    pollResponses: [
+      response(wireFrame({ step: DEVICE_LINK_STEPS.completed, revision: 9 })),
+    ],
+  });
+  await withoutAccount.mount();
+  await withoutAccount.fireTimers(3000);
+  const bare = stringify(withoutAccount.render());
+  assert.ok(
+    bare.includes("device-link-confirm-device"),
+    "the confirmation ask does not depend on the account line",
+  );
+  assert.ok(
+    !bare.includes("device-link-account"),
+    "no resolved account means no account line",
+  );
+});
+
 test("DeviceLinkPanel offers 'start again' on a restartable failure and refuses to on a terminal one", async () => {
   const restartable = createHarness({
     startResponses: [

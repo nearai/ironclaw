@@ -478,6 +478,10 @@ async fn harness(options: HarnessOptions) -> Harness {
             reserved_ingress_routes: options.reserved_routes,
             hook_deadline: Duration::from_secs(5),
             linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(
+                ironclaw_extension_host::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await,
     );
@@ -1696,6 +1700,10 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
             reserved_ingress_routes: Default::default(),
             hook_deadline: Duration::from_secs(5),
             linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(
+                ironclaw_extension_host::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await,
     );

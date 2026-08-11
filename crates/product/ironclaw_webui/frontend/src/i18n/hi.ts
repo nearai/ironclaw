@@ -1679,6 +1679,8 @@ registerPack("hi", {
   "deviceLink.passwordLabel": "खाते का पासवर्ड",
   "deviceLink.submit": "जारी रखें",
   "deviceLink.linked": "{name} खाता लिंक हो गया",
+  "deviceLink.confirmDeviceAccount": "{account} के रूप में लिंक किया गया",
+  "deviceLink.confirmDevice": "अब {name} → सेटिंग्स → डिवाइसेस खोलें और जाँचें कि अभी-अभी ठीक एक नया IronClaw डिवाइस जुड़ा है। यदि एक से अधिक दिखें, या कोई अप्रत्याशित दिखे, तो उसे वहीं रद्द करें और यहाँ अनलिंक करें।",
   "deviceLink.revokeHint": "IronClaw अब {name} में एक डिवाइस के रूप में दिखता है। कोई अनजान डिवाइस दिखे तो उसे वहीं से हटाएँ।",
   "deviceLink.startAgain": "फिर से शुरू करें",
   "deviceLink.cannotRetry": "यह {name} खाता लिंक नहीं किया जा सकता।",

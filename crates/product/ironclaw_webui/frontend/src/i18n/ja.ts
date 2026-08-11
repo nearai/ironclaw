@@ -1679,6 +1679,8 @@ registerPack("ja", {
   "deviceLink.passwordLabel": "アカウントのパスワード",
   "deviceLink.submit": "続ける",
   "deviceLink.linked": "{name} アカウントを連携しました",
+  "deviceLink.confirmDeviceAccount": "{account} としてリンク済み",
+  "deviceLink.confirmDevice": "次に {name} の「設定 → デバイス」を開き、たった今、新しい IronClaw デバイスがちょうど 1 つだけ追加されたことを確認してください。2 つ以上ある場合や心当たりのないものがある場合は、そこで失効させ、ここでリンクを解除してください。",
   "deviceLink.revokeHint": "IronClaw は {name} のデバイス一覧に表示されます。見覚えのないデバイスがあれば、そこで解除してください。",
   "deviceLink.startAgain": "やり直す",
   "deviceLink.cannotRetry": "この {name} アカウントは連携できません。",

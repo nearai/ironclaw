@@ -657,7 +657,22 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `device_link/tests.rs` and `linked_session/tests.rs` siblings, which
         // `production_rust_files` excludes — the same split #7157 made for
         // `runtime_context`. Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 9_359),
+        //
+        // 9_359 -> 9_422 (2026-08-10, implementation pass): §8.12's four
+        // additive `DeviceLinkPromptView` fields (`flow_id`, `input_kind`,
+        // `mode`, `restartable` — each carried rather than derived, because
+        // every consumer-side derivation is a guess: a card that cannot name
+        // its flow starts a second one, and one that guesses `input_kind`
+        // renders a cloud password in plain text), plus the
+        // `LinkedAccountResolver` port and its error, which moved here from
+        // the telegram package. That move is the point: PROPOSAL §5.1 requires
+        // the tool half's containment to be rooted in a HOST-minted grant, and
+        // a port the package declared could only ever have been satisfied by
+        // the package. Declaration only — the resolver is implemented in
+        // `ironclaw_extension_host` over the same credential-account selection
+        // every runtime injection uses. Count read from this test's own
+        // failure message.
+        ("ironclaw_extension_contracts", 9_422),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

@@ -102,10 +102,12 @@ fn an_unpaginated_listing_refuses_a_cursor_rather_than_ignoring_it() {
 /// hides the connect affordance.
 #[test]
 fn account_resolution_failures_project_to_distinct_outcomes() {
-    let not_linked = ToolError::from(LinkedAccountResolutionError::NotLinked);
+    use ironclaw_extension_contracts::linked_session::LinkedAccountResolutionError;
+
+    let not_linked = resolution_error(LinkedAccountResolutionError::NotLinked);
     assert!(matches!(not_linked, ToolError::AuthRequired { .. }));
 
-    let unavailable = ToolError::from(LinkedAccountResolutionError::Unavailable);
+    let unavailable = resolution_error(LinkedAccountResolutionError::Unavailable);
     assert!(summary(&unavailable).contains(StandardMessagingErrorCode::VendorError.as_str()));
 }
 

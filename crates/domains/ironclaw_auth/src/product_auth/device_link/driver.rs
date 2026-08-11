@@ -691,9 +691,9 @@ fn binding_for(flow: &AuthFlowRecord) -> Result<DeviceLinkBinding, AuthProductEr
     Ok(DeviceLinkBinding {
         provider: flow.provider.clone(),
         extension_id,
-        // The owner of the durable flow record, never a value a card or an
-        // adapter supplied.
-        user_id: flow.scope.resource.user_id.clone(),
+        // The durable flow record's own scope, never a value a card or an
+        // adapter supplied. Completion mints the credential account under it.
+        scope: flow.scope.clone(),
     })
 }
 

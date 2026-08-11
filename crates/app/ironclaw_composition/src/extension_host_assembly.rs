@@ -44,6 +44,11 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    /// Linked-account custody over the auth domain's credential service, and
+    /// the per-extension resolver factory built beside it. `None` composes
+    /// fail-closed custody (a deployment without product auth).
+    pub(crate) linked_sessions: Option<Arc<ironclaw_extension_host::LinkedSessionStore>>,
+    pub(crate) linked_accounts: Option<Arc<dyn ironclaw_extension_host::LinkedAccountResolution>>,
 }
 
 pub(crate) struct BackendExtensionHostAssembly {
@@ -74,6 +79,8 @@ pub(crate) async fn build_backend_extension_host(
         deployment_channels,
         filesystem,
         outbound_state,
+        linked_sessions,
+        linked_accounts,
     } = input;
 
     let channel_egress_credentials = Arc::new(
@@ -124,6 +131,9 @@ pub(crate) async fn build_backend_extension_host(
                 std::time::Duration::from_secs(30),
             ),
             channel_egress_transport: channel_egress_transport.clone(),
+            linked_sessions,
+            linked_accounts,
+            admin_secrets: Some(Arc::clone(&admin_configuration_resolver)),
         },
     )
     .await;

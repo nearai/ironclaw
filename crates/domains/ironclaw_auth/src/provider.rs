@@ -229,15 +229,24 @@ impl fmt::Display for DeviceLinkVendorUserRef {
 
 /// Who a device-link call acts for.
 ///
-/// The `user_id` is the flow's owner, taken from the durable flow scope — not
-/// from anything a card or an adapter supplied. The driver implementation
-/// scopes custody from this triple, which is why it travels as one value
-/// rather than three loose arguments.
+/// `scope` is the durable flow's own product scope — not anything a card or
+/// an adapter supplied. It rides the binding because the driver
+/// implementation must mint the credential account at completion, and
+/// synthesizing an [`AuthProductScope`] from a bare user id would be
+/// re-deriving security-relevant scope, which this repo bans. The flow's
+/// owner is `scope.resource.user_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceLinkBinding {
     pub provider: AuthProviderId,
     pub extension_id: ExtensionId,
-    pub user_id: UserId,
+    pub scope: AuthProductScope,
+}
+
+impl DeviceLinkBinding {
+    /// The flow's owner.
+    pub fn user_id(&self) -> &UserId {
+        &self.scope.resource.user_id
+    }
 }
 
 /// Start a link on the chosen path.

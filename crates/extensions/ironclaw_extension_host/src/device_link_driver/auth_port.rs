@@ -8,8 +8,10 @@
 //!
 //! It calls the parent's `*_at` entry points rather than the public inherent
 //! methods on purpose: those flatten "nothing is bound" into the contracts
-//! error vocabulary, and this port has a dedicated, non-restartable variant for
-//! exactly that case.
+//! error vocabulary (and drop the minted account), and this port has a
+//! dedicated, non-restartable variant for exactly that case — and must carry
+//! the account a completion minted, which is what lets the auth-side driver
+//! report `Completed` at all.
 
 use std::time::Instant;
 
@@ -20,12 +22,10 @@ use ironclaw_auth::{
     DeviceLinkSubmitRequest, LinkedDeviceRevokeError, LinkedDeviceRevokeRequest,
     LinkedDeviceRevoker,
 };
-use ironclaw_extension_contracts::device_link::{
-    DeviceLinkError, DeviceLinkFlowId, DeviceLinkStep,
-};
+use ironclaw_extension_contracts::device_link::{DeviceLinkError, DeviceLinkFlowId};
 use ironclaw_extension_contracts::linked_session::{LinkedAccountGrant, LinkedAccountRef};
 
-use super::{DeviceLinkRequest, DriverFailure, SnapshotDeviceLinkDriver};
+use super::{DeviceLinkRequest, DriverFailure, SettledDeviceLinkStep, SnapshotDeviceLinkDriver};
 
 #[async_trait]
 impl DeviceLinkDriver for SnapshotDeviceLinkDriver {
@@ -34,11 +34,11 @@ impl DeviceLinkDriver for SnapshotDeviceLinkDriver {
         request: DeviceLinkBeginRequest,
     ) -> Result<DeviceLinkStepOutcome, DeviceLinkDriverError> {
         let driver_request = host_request(&request.flow_id, &request.binding)?;
-        let step = self
+        let settled = self
             .begin_at(&driver_request, request.mode, Instant::now())
             .await
             .map_err(|failure| driver_error(&request.binding, failure))?;
-        Ok(outcome(step))
+        Ok(outcome(settled))
     }
 
     async fn poll(
@@ -46,11 +46,11 @@ impl DeviceLinkDriver for SnapshotDeviceLinkDriver {
         request: DeviceLinkPollRequest,
     ) -> Result<DeviceLinkStepOutcome, DeviceLinkDriverError> {
         let driver_request = host_request(&request.flow_id, &request.binding)?;
-        let step = self
+        let settled = self
             .poll_at(&driver_request, Instant::now())
             .await
             .map_err(|failure| driver_error(&request.binding, failure))?;
-        Ok(outcome(step))
+        Ok(outcome(settled))
     }
 
     async fn submit(
@@ -58,11 +58,11 @@ impl DeviceLinkDriver for SnapshotDeviceLinkDriver {
         request: DeviceLinkSubmitRequest,
     ) -> Result<DeviceLinkStepOutcome, DeviceLinkDriverError> {
         let driver_request = host_request(&request.flow_id, &request.binding)?;
-        let step = self
+        let settled = self
             .submit_input_at(&driver_request, request.input, Instant::now())
             .await
             .map_err(|failure| driver_error(&request.binding, failure))?;
-        Ok(outcome(step))
+        Ok(outcome(settled))
     }
 
     async fn cancel(&self, request: DeviceLinkCancelRequest) -> Result<(), DeviceLinkDriverError> {
@@ -116,17 +116,36 @@ impl LinkedDeviceRevoker for SnapshotDeviceLinkDriver {
             tracing::debug!(%error, "credential account id does not form a linked-account ref");
             LinkedDeviceRevokeError::Unavailable
         })?;
+        // Teach custody where the account's material lives before the adapter
+        // loads the session it must log out of — a revoke may run in a fresh
+        // process that never resolved this account.
+        self.sessions().register_account(
+            request.extension_id.clone(),
+            account.clone(),
+            request.scope.clone(),
+            request.account_id,
+        );
         let driver_request = DeviceLinkRequest {
             flow_id,
-            extension_id: request.extension_id,
+            extension_id: request.extension_id.clone(),
             // The owner of the durable credential record, never a value an
             // adapter or a card supplied.
-            user_id: request.scope.resource.user_id.clone(),
-            account: Some(LinkedAccountGrant::new(account, request.link_revision)),
+            scope: request.scope.clone(),
+            account: Some(LinkedAccountGrant::new(
+                account.clone(),
+                request.link_revision,
+            )),
         };
-        self.revoke_link(&driver_request)
+        let outcome = self
+            .revoke_link(&driver_request)
             .await
-            .map_err(revoke_error)
+            .map_err(revoke_error);
+        // The ref's coordinates die with the revoke either way: on success the
+        // account is about to be unbound; on failure the cleanup quarantines
+        // and the next attempt re-registers.
+        self.sessions()
+            .unregister_account(&request.extension_id, &account);
+        outcome
     }
 }
 
@@ -163,24 +182,19 @@ fn host_request(
     Ok(DeviceLinkRequest {
         flow_id,
         extension_id: binding.extension_id.clone(),
-        user_id: binding.user_id.clone(),
+        scope: binding.scope.clone(),
         account: None,
     })
 }
 
-/// Wrap a step as the port's outcome.
-///
-/// TODO(design): a `Completed` step must carry the minted credential account,
-/// and this crate cannot mint one — see the module header of the parent. Until
-/// that is reconciled, a completion reports `account: None`, which the
-/// auth-side driver terminalizes rather than announcing a link it cannot back.
-/// When the minting seam lands it must build the account through
-/// `ironclaw_auth::NewCredentialAccount::for_linked_device`, which is where the
-/// §4.5 ownership pin lives.
-fn outcome(step: DeviceLinkStep) -> DeviceLinkStepOutcome {
+/// Wrap a settled step as the port's outcome. The account is present exactly
+/// when the step is `Completed` — the engine's settle path minted it before
+/// the flow was forgotten, which is what lets the auth-side driver report a
+/// completion it can back with a credential.
+fn outcome(settled: SettledDeviceLinkStep) -> DeviceLinkStepOutcome {
     DeviceLinkStepOutcome {
-        step,
-        account: None,
+        step: settled.step,
+        account: settled.account,
     }
 }
 

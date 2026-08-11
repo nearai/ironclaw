@@ -160,6 +160,38 @@ pub trait LinkedDeviceRevoker: Send + Sync {
     ) -> Result<(), LinkedDeviceRevokeError>;
 }
 
+/// A revoker slot filled after construction.
+///
+/// The vendor half of a device link is the extension host's snapshot driver,
+/// and the extension host is composed *after* the auth service bundle — so the
+/// cleanup chain is built over this slot and composition fills it the moment
+/// the driver exists. Unfilled it fails closed: the decorator quarantines
+/// `RevokeFailed` rather than silently skipping the vendor logout.
+#[derive(Default)]
+pub struct DeferredLinkedDeviceRevoker {
+    inner: std::sync::OnceLock<Arc<dyn LinkedDeviceRevoker>>,
+}
+
+impl DeferredLinkedDeviceRevoker {
+    /// Bind the real revoker. First fill wins; a second is ignored.
+    pub fn fill(&self, revoker: Arc<dyn LinkedDeviceRevoker>) {
+        let _ = self.inner.set(revoker);
+    }
+}
+
+#[async_trait]
+impl LinkedDeviceRevoker for DeferredLinkedDeviceRevoker {
+    async fn revoke_linked_device(
+        &self,
+        request: LinkedDeviceRevokeRequest,
+    ) -> Result<(), LinkedDeviceRevokeError> {
+        match self.inner.get() {
+            Some(revoker) => revoker.revoke_linked_device(request).await,
+            None => Err(LinkedDeviceRevokeError::Unavailable),
+        }
+    }
+}
+
 /// Cleanup decorator that logs a linked device out **before** the credential it
 /// hangs off is unbound.
 ///
@@ -207,10 +239,23 @@ impl LinkedDeviceCleanupService {
         &self,
         request: &SecretCleanupRequest,
     ) -> Result<Vec<LinkedDeviceRevokeRequest>, AuthProductError> {
-        Ok(self
+        let accounts = match self
             .accounts
             .accounts_for_owner(&request.scope.to_credential_owner())
-            .await?
+            .await
+        {
+            Ok(accounts) => accounts,
+            // A bundle whose account read model is not wired cannot hold a
+            // linked device — the mint runs through the same credential
+            // service — so there is nothing here to revoke and cleanup
+            // proceeds. Any OTHER read failure is fatal on purpose: skipping
+            // a vendor logout because a backend blipped would leave a live
+            // device authorization nobody can see, which is the exact failure
+            // this decorator exists to prevent.
+            Err(AuthProductError::UnsupportedOperation { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        Ok(accounts
             .into_iter()
             .filter(|account| {
                 account.is_linked_device()
@@ -599,5 +644,85 @@ mod tests {
         let seen = revoker.seen();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].account_id, mine.id);
+    }
+
+    /// Read-model doubles for the two shapes of "we could not enumerate
+    /// accounts". The distinction is security-relevant, so it is pinned rather
+    /// than left to whichever error a future read model happens to return.
+    struct UnwiredAccounts;
+
+    #[async_trait]
+    impl CredentialAccountRecordSource for UnwiredAccounts {
+        async fn accounts_for_owner(
+            &self,
+            _scope: &AuthProductScope,
+        ) -> Result<Vec<crate::CredentialAccount>, AuthProductError> {
+            Err(AuthProductError::UnsupportedOperation {
+                operation: "accounts_for_owner",
+            })
+        }
+    }
+
+    struct FailingAccounts;
+
+    #[async_trait]
+    impl CredentialAccountRecordSource for FailingAccounts {
+        async fn accounts_for_owner(
+            &self,
+            _scope: &AuthProductScope,
+        ) -> Result<Vec<crate::CredentialAccount>, AuthProductError> {
+            Err(AuthProductError::BackendUnavailable)
+        }
+    }
+
+    /// A bundle with **no** account read model has no linked device to log
+    /// out — the mint runs through the same credential service — so cleanup
+    /// proceeds. A read model that genuinely **failed** is the opposite: we
+    /// cannot tell whether a live device authorization exists, and unbinding
+    /// anyway would strand one where nobody can see it. Failing closed there
+    /// is the whole point of the decorator.
+    #[tokio::test]
+    async fn an_unwired_account_read_model_is_not_a_failed_one() {
+        let scope = owner_scope("alice");
+        let journal = Arc::new(CleanupJournal::default());
+        let revoker = Arc::new(RecordingRevoker::new(Arc::clone(&journal)));
+
+        let unwired = LinkedDeviceCleanupService::new(
+            Arc::new(UnwiredAccounts),
+            Arc::clone(&revoker) as Arc<dyn LinkedDeviceRevoker>,
+            Arc::new(RecordingUnbind::new(Arc::clone(&journal))),
+        );
+        unwired
+            .cleanup_for_lifecycle(cleanup_request(
+                scope.clone(),
+                "ext-a",
+                SecretCleanupAction::Uninstall,
+            ))
+            .await
+            .expect("an unwired read model must not break cleanup");
+        assert_eq!(
+            journal.steps(),
+            vec![CleanupStep::Unbound],
+            "the inner cleanup still runs, and no vendor logout is fabricated"
+        );
+        assert!(revoker.seen().is_empty());
+
+        let failing = LinkedDeviceCleanupService::new(
+            Arc::new(FailingAccounts),
+            Arc::clone(&revoker) as Arc<dyn LinkedDeviceRevoker>,
+            Arc::new(RecordingUnbind::new(Arc::clone(&journal))),
+        );
+        let error = failing
+            .cleanup_for_lifecycle(cleanup_request(
+                scope,
+                "ext-a",
+                SecretCleanupAction::Uninstall,
+            ))
+            .await
+            .expect_err("a failed read model must not silently skip the logout");
+        assert!(
+            matches!(error, AuthProductError::BackendUnavailable),
+            "unexpected error: {error:?}"
+        );
     }
 }

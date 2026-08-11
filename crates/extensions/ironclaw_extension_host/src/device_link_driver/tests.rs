@@ -4,26 +4,30 @@
 //! `check_binding` → published snapshot — so the resolution leg is the
 //! production one rather than a hand-built snapshot. What is faked is the
 //! vendor (a scripted [`FakeDeviceLinkAdapter`] that answers instantly and
-//! limits nothing) and the credential domain (a recording material seam), which
-//! is exactly the pair the host is supposed to be defending against.
+//! limits nothing) and the credential domain (the in-memory auth fake plus a
+//! recording material seam), which is exactly the pair the host is supposed to
+//! be defending against.
 
 use std::sync::atomic::AtomicUsize;
 
+use ironclaw_auth::{
+    CredentialAccountRecordSource, CredentialAccountService, InMemoryAuthProductServices,
+};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::device_link::{
     DeviceLinkDisplayKind, DeviceLinkPayload, MAX_DEVICE_LINK_IDENTIFIER_BYTES,
 };
-use ironclaw_extension_contracts::linked_session::LinkedSessionVersion;
+use ironclaw_extension_contracts::linked_session::{LinkedSessionSnapshot, LinkedSessionVersion};
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
+use ironclaw_host_api::ids::InvocationId;
+use ironclaw_host_api::resource::ResourceScope;
 use secrecy::SecretString;
 
 use super::*;
 use crate::entrypoint::ExtensionBindings;
 use crate::lifecycle::{ExtensionHost, ExtensionHostDeps};
-use crate::linked_session_custody::{
-    LinkedSessionKey, LinkedSessionMaterialStore, StoredLinkedSession,
-};
+use crate::linked_session_custody::{LinkedSessionMaterialKey, LinkedSessionMaterialStore};
 use crate::store::{
     InstallationRecord, InstallationRecordStore, RehydratedInstallationRecordStore,
 };
@@ -36,16 +40,18 @@ const EXTENSION: &str = "acme-link";
 const USER: &str = "user-1";
 const FLOW: &str = "flow-1";
 
-/// A material seam that answers "this account exists, nothing stored yet" for
-/// every key and records what it was asked about. Named away from
-/// `InMemory*Store` on purpose (the extensions family bans that name in `src/`).
+/// A material seam that answers "nothing stored yet" for every key and records
+/// what it was asked about. Named away from `InMemory*Store` on purpose (the
+/// extensions family bans that name in `src/`). Provisional (revision-0)
+/// custody never reaches it — the store parks those in process memory — so a
+/// key recorded here is always a durable-custody access.
 #[derive(Default)]
 struct RecordingMaterial {
-    keys: Mutex<Vec<LinkedSessionKey>>,
+    keys: Mutex<Vec<LinkedSessionMaterialKey>>,
 }
 
 impl RecordingMaterial {
-    fn keys(&self) -> Vec<LinkedSessionKey> {
+    fn keys(&self) -> Vec<LinkedSessionMaterialKey> {
         self.keys.lock().expect("recorded keys").clone()
     }
 }
@@ -54,27 +60,25 @@ impl RecordingMaterial {
 impl LinkedSessionMaterialStore for RecordingMaterial {
     async fn load(
         &self,
-        key: &LinkedSessionKey,
+        key: &LinkedSessionMaterialKey,
     ) -> Result<
-        Option<StoredLinkedSession>,
+        Option<LinkedSessionSnapshot>,
         ironclaw_extension_contracts::linked_session::LinkedSessionError,
     > {
         self.keys.lock().expect("recorded keys").push(key.clone());
-        Ok(Some(StoredLinkedSession {
-            link_revision: PENDING_LINK_REVISION,
-            snapshot: None,
-        }))
+        Ok(None)
     }
 
     async fn replace(
         &self,
-        _key: &LinkedSessionKey,
+        key: &LinkedSessionMaterialKey,
         _expected: LinkedSessionVersion,
         _blob: ironclaw_extension_contracts::linked_session::SessionBytes,
     ) -> Result<
         LinkedSessionVersion,
         ironclaw_extension_contracts::linked_session::LinkedSessionError,
     > {
+        self.keys.lock().expect("recorded keys").push(key.clone());
         LinkedSessionVersion::new("v1").map_err(|_| {
             ironclaw_extension_contracts::linked_session::LinkedSessionError::Unavailable {
                 reason: "test version token",
@@ -88,6 +92,7 @@ struct Harness {
     driver: SnapshotDeviceLinkDriver,
     adapter: Arc<FakeDeviceLinkAdapter>,
     material: Arc<RecordingMaterial>,
+    accounts: Arc<InMemoryAuthProductServices>,
 }
 
 async fn harness(limits: DeviceLinkLimits) -> Harness {
@@ -127,6 +132,10 @@ async fn harness_with(
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
         linked_sessions: LinkedSessionStore::unavailable(),
+        linked_accounts: Arc::new(
+            crate::linked_account_resolution::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     })
     .await;
     host.install(InstallationRecord {
@@ -144,21 +153,36 @@ async fn harness_with(
     let material = Arc::new(RecordingMaterial::default());
     let sessions =
         LinkedSessionStore::new(Arc::clone(&material) as Arc<dyn LinkedSessionMaterialStore>);
-    let driver = SnapshotDeviceLinkDriver::new(host.snapshot_watch(), sessions, limits)
-        .expect("valid limits");
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let driver = SnapshotDeviceLinkDriver::new(
+        host.snapshot_watch(),
+        sessions,
+        limits,
+        Arc::clone(&accounts) as Arc<dyn ironclaw_auth::CredentialAccountService>,
+    )
+    .expect("valid limits");
     Harness {
         _host: host,
         driver,
         adapter,
         material,
+        accounts,
     }
+}
+
+fn product_scope(user: &str) -> ironclaw_auth::AuthProductScope {
+    ironclaw_auth::AuthProductScope::new(
+        ResourceScope::local_default(UserId::new(user).expect("user id"), InvocationId::new())
+            .expect("resource scope"),
+        ironclaw_auth::AuthSurface::Web,
+    )
 }
 
 fn request(flow: &str) -> DeviceLinkRequest {
     DeviceLinkRequest {
         flow_id: DeviceLinkFlowId::new(flow).expect("flow id"),
         extension_id: ExtensionId::new(EXTENSION).expect("extension id"),
-        user_id: UserId::new(USER).expect("user id"),
+        scope: product_scope(USER),
         account: None,
     }
 }
@@ -168,6 +192,13 @@ fn display(expires_in: Duration) -> DeviceLinkStep {
         kind: DeviceLinkDisplayKind::QrCode,
         payload: DeviceLinkPayload::new("tg://login?token=abc").expect("payload"),
         expires_in,
+    }
+}
+
+fn completed() -> DeviceLinkStep {
+    DeviceLinkStep::Completed {
+        account_label: "Linked personal account".to_string(),
+        vendor_user_ref: "+15550000000".to_string(),
     }
 }
 
@@ -194,7 +225,7 @@ async fn begin_hands_the_adapter_a_context_scoped_to_this_flow() {
     );
     assert_eq!(call.flow_id, request.flow_id);
     assert_eq!(call.extension_id, request.extension_id);
-    assert_eq!(call.user_id, request.user_id);
+    assert_eq!(&call.user_id, request.user_id());
     assert!(
         call.account.is_none(),
         "no credential account exists until custody is durable"
@@ -203,14 +234,10 @@ async fn begin_hands_the_adapter_a_context_scoped_to_this_flow() {
         call.session_loaded,
         "the adapter receives a usable custody handle"
     );
-
-    let keys = h.material.keys();
-    assert_eq!(keys.len(), 1, "one handle, one key");
-    assert_eq!(keys[0].extension().as_str(), EXTENSION);
-    assert_eq!(
-        keys[0].account().as_str(),
-        format!("{PENDING_ACCOUNT_PREFIX}{FLOW}"),
-        "the pre-mint handle is scoped to this flow's provisional account"
+    assert!(
+        h.material.keys().is_empty(),
+        "a pre-mint handle parks in the provisional space and never reaches \
+         the durable material seam"
     );
 }
 
@@ -225,7 +252,7 @@ async fn an_extension_that_binds_no_adapter_has_no_driver() {
     let request = DeviceLinkRequest {
         flow_id: DeviceLinkFlowId::new(FLOW).expect("flow id"),
         extension_id: ExtensionId::new("acme-chat").expect("extension id"),
-        user_id: UserId::new(USER).expect("user id"),
+        scope: product_scope(USER),
         account: None,
     };
 
@@ -278,6 +305,100 @@ async fn a_second_begin_does_not_re_invoke_a_transition_that_already_ran() {
 }
 
 // -------------------------------------------------------------------------
+// Completion mints the credential account
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_completion_mints_a_pinned_account_and_reports_it() {
+    let h = harness_with(
+        DeviceLinkLimits::default(),
+        FakeDeviceLinkAdapter::scripted([completed()]),
+        true,
+    )
+    .await;
+    let request = request(FLOW);
+
+    let settled = h
+        .driver
+        .begin_at(&request, DeviceLinkMode::Default, Instant::now())
+        .await
+        .expect("completion settles");
+
+    assert!(matches!(settled.step, DeviceLinkStep::Completed { .. }));
+    let minted = settled
+        .account
+        .expect("a completed step carries the minted account");
+    assert_eq!(minted.link_revision, 1, "a first link is revision 1");
+    assert_eq!(minted.vendor_user_ref.as_str(), "+15550000000");
+
+    // The account is real, pinned, and the session blob is durable custody —
+    // store → mint → report held.
+    let accounts = h
+        .accounts
+        .accounts_for_owner(&request.scope)
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.len(), 1);
+    let account = &accounts[0];
+    assert_eq!(account.id, minted.account_id);
+    assert!(account.is_linked_device());
+    assert!(account.linked_device_ownership_is_pinned());
+    let stored = h
+        .accounts
+        .load_opaque_material(ironclaw_auth::OpaqueMaterialRequest {
+            scope: request.scope.clone(),
+            account_id: account.id,
+            requester_extension: Some(request.extension_id.clone()),
+            link_revision: 1,
+        })
+        .await
+        .expect("custody read")
+        .expect("the handshake blob is durable before completion is reported");
+    assert_eq!(stored.material.expose(), b"fake-linked-session");
+
+    // The flow is over: the provisional blob is discarded and the flow is
+    // forgotten, so a stale card cannot re-drive it.
+    assert_eq!(
+        h.driver
+            .poll(&request)
+            .await
+            .expect_err("a completed flow is forgotten"),
+        DeviceLinkError::UnknownFlow
+    );
+}
+
+#[tokio::test]
+async fn a_completion_without_stored_custody_fails_and_mints_nothing() {
+    let adapter = FakeDeviceLinkAdapter::scripted([completed()]);
+    *adapter
+        .skip_completion_persist
+        .lock()
+        .expect("persist flag") = true;
+    let h = harness_with(DeviceLinkLimits::default(), adapter, true).await;
+    let request = request(FLOW);
+
+    let error = h
+        .driver
+        .begin(&request, DeviceLinkMode::Default)
+        .await
+        .expect_err("a completion the custody store cannot back is refused");
+
+    assert!(
+        matches!(error, DeviceLinkError::Custody(_)),
+        "expected a custody failure, got {error:?}"
+    );
+    let accounts = h
+        .accounts
+        .accounts_for_owner(&request.scope)
+        .await
+        .expect("list accounts");
+    assert!(
+        accounts.is_empty(),
+        "a refused completion must not leave a minted account behind"
+    );
+}
+
+// -------------------------------------------------------------------------
 // Poll floor and TTLs
 // -------------------------------------------------------------------------
 
@@ -297,13 +418,13 @@ async fn a_poll_inside_the_floor_answers_without_calling_the_adapter() {
         .expect("first poll is admitted");
     let after_first = h.adapter.call_count();
 
-    let step = h
+    let settled = h
         .driver
         .poll_at(&request, start + Duration::from_millis(500))
         .await
         .expect("second poll");
 
-    match step {
+    match settled.step {
         DeviceLinkStep::AwaitingVendor { retry_in } => {
             assert!(retry_in <= limits.min_poll_interval && !retry_in.is_zero());
         }
@@ -348,14 +469,14 @@ async fn an_expired_flow_is_cancelled_before_it_is_reported() {
         .await
         .expect("begin");
 
-    let step = h
+    let settled = h
         .driver
         .poll_at(&request, start + limits.flow_ttl)
         .await
         .expect("expiry is a step, not an error");
 
     assert_eq!(
-        step,
+        settled.step,
         DeviceLinkStep::Failed {
             code: DeviceLinkErrorCode::Expired,
             restartable: true
@@ -369,13 +490,13 @@ async fn an_expired_flow_is_cancelled_before_it_is_reported() {
         "a vendor authorization must not outlive the flow that obtained it"
     );
     // The flow is gone, so the next call cannot resurrect it.
-    assert_eq!(
+    assert!(matches!(
         h.driver
             .poll_at(&request, start + limits.flow_ttl)
             .await
             .expect_err("reaped"),
         DriverFailure::Link(DeviceLinkError::UnknownFlow)
-    );
+    ));
 }
 
 #[tokio::test]
@@ -497,7 +618,7 @@ async fn begins_are_bounded_per_deployment() {
         .expect("first begin");
 
     let mut second = request("flow-b");
-    second.user_id = UserId::new("user-2").expect("second user");
+    second.scope = product_scope("user-2");
     let error = h
         .driver
         .begin(&second, DeviceLinkMode::Default)
@@ -691,7 +812,7 @@ fn the_three_clocks_must_agree() {
 mod auth_port {
     use ironclaw_auth::{
         AuthFlowId, AuthProviderId, DeviceLinkBeginRequest, DeviceLinkBinding, DeviceLinkDriver,
-        DeviceLinkDriverError,
+        DeviceLinkDriverError, DeviceLinkPollRequest,
     };
 
     use super::*;
@@ -700,7 +821,7 @@ mod auth_port {
         DeviceLinkBinding {
             provider: AuthProviderId::new("acme-link").expect("provider id"),
             extension_id: ExtensionId::new(extension).expect("extension id"),
-            user_id: UserId::new(USER).expect("user id"),
+            scope: product_scope(USER),
         }
     }
 
@@ -723,7 +844,42 @@ mod auth_port {
             outcome.step,
             DeviceLinkStep::AwaitingVendor { .. }
         ));
+        assert!(
+            outcome.account.is_none(),
+            "no account exists before completion"
+        );
         assert_eq!(h.adapter.call_count(), 1);
+    }
+
+    /// The port's completion carries the minted account — the fact that lets
+    /// the auth-side driver report `Completed` at all (its own contract
+    /// terminalizes a completion with `account: None`).
+    #[tokio::test]
+    async fn the_port_reports_a_completion_with_its_minted_account() {
+        let h = harness_with(
+            DeviceLinkLimits::default(),
+            FakeDeviceLinkAdapter::scripted([super::completed()]),
+            true,
+        )
+        .await;
+        let flow_id = AuthFlowId::new();
+
+        let outcome = DeviceLinkDriver::begin(
+            &h.driver,
+            DeviceLinkBeginRequest {
+                flow_id,
+                binding: binding(EXTENSION),
+                mode: DeviceLinkMode::Default,
+            },
+        )
+        .await
+        .expect("completion through the port");
+
+        assert!(matches!(outcome.step, DeviceLinkStep::Completed { .. }));
+        let account = outcome
+            .account
+            .expect("a completed outcome carries the minted account");
+        assert_eq!(account.link_revision, 1);
     }
 
     /// "What does it return when no binding exists" — the question PLAN PR 2
@@ -754,6 +910,42 @@ mod auth_port {
         );
         assert!(!error.restartable());
     }
+
+    /// A poll after the port reported completion answers `UnknownFlow` — the
+    /// auth driver reads a finished flow from its own record, never by
+    /// re-driving the vendor.
+    #[tokio::test]
+    async fn a_poll_after_completion_is_unknown_to_the_vendor_half() {
+        let h = harness_with(
+            DeviceLinkLimits::default(),
+            FakeDeviceLinkAdapter::scripted([super::completed()]),
+            true,
+        )
+        .await;
+        let flow_id = AuthFlowId::new();
+        DeviceLinkDriver::begin(
+            &h.driver,
+            DeviceLinkBeginRequest {
+                flow_id,
+                binding: binding(EXTENSION),
+                mode: DeviceLinkMode::Default,
+            },
+        )
+        .await
+        .expect("completion through the port");
+
+        let error = DeviceLinkDriver::poll(
+            &h.driver,
+            DeviceLinkPollRequest {
+                flow_id,
+                binding: binding(EXTENSION),
+            },
+        )
+        .await
+        .expect_err("the completed flow is forgotten");
+
+        assert!(matches!(error, DeviceLinkDriverError::UnknownFlow));
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -766,11 +958,9 @@ mod auth_port {
 /// and that nothing else is talked into logging a device out.
 mod linked_device_revoker {
     use ironclaw_auth::{
-        AuthProductScope, AuthSurface, CredentialAccountId, LinkedDeviceRevokeError,
-        LinkedDeviceRevokeRequest, LinkedDeviceRevoker,
+        CredentialAccountId, LinkedDeviceRevokeError, LinkedDeviceRevokeRequest,
+        LinkedDeviceRevoker,
     };
-    use ironclaw_host_api::ids::InvocationId;
-    use ironclaw_host_api::resource::ResourceScope;
 
     use super::*;
 
@@ -780,14 +970,7 @@ mod linked_device_revoker {
         link_revision: u64,
     ) -> LinkedDeviceRevokeRequest {
         LinkedDeviceRevokeRequest {
-            scope: AuthProductScope::new(
-                ResourceScope::local_default(
-                    UserId::new(USER).expect("user id"),
-                    InvocationId::new(),
-                )
-                .expect("resource scope"),
-                AuthSurface::Api,
-            ),
+            scope: product_scope(USER),
             extension_id: ExtensionId::new(extension).expect("extension id"),
             account_id,
             link_revision,
@@ -796,7 +979,8 @@ mod linked_device_revoker {
 
     /// The teardown reaches the bound adapter with a grant naming the real
     /// account at its current revision — never the pre-mint provisional ref a
-    /// link in progress uses.
+    /// link in progress uses — and the custody handle it opens addresses the
+    /// registered account coordinates.
     #[tokio::test]
     async fn revoking_a_linked_device_calls_the_adapter_scoped_to_that_account() {
         let h = harness(DeviceLinkLimits::default()).await;
@@ -819,19 +1003,12 @@ mod linked_device_revoker {
         assert_eq!(grant.link_revision(), 3);
 
         let keys = h.material.keys();
-        assert_eq!(keys.len(), 1, "one handle, one key");
-        assert_eq!(keys[0].extension().as_str(), EXTENSION);
+        assert_eq!(keys.len(), 1, "one handle, one durable-custody access");
+        assert_eq!(keys[0].requester_extension.as_str(), EXTENSION);
+        assert_eq!(keys[0].account_id, account_id);
         assert_eq!(
-            keys[0].account().as_str(),
-            account_id.to_string(),
-            "the custody handle addresses the minted account, not a pending link"
-        );
-        assert!(
-            !keys[0]
-                .account()
-                .as_str()
-                .starts_with(PENDING_ACCOUNT_PREFIX),
-            "a teardown must never open the provisional pre-mint handle"
+            keys[0].link_revision, 3,
+            "the custody access is pinned to the revision being revoked"
         );
     }
 

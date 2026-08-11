@@ -53,6 +53,10 @@ async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
         linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     let host = ExtensionHost::new(deps).await;
     Harness {
@@ -479,6 +483,10 @@ async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
         linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     let host = ExtensionHost::new(deps).await;
 

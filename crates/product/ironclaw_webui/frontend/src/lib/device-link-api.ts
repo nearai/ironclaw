@@ -15,36 +15,41 @@ import { channelSetupError } from "./channel-setup-api";
 //
 // Route shape, and why it is a mix.
 //
-// STATUS is genuinely shared: a device link IS an `AuthFlowRecord`, and
-// `flow_status(scope, flow_id)` fetches the record and returns its status with
-// no OAuth-specific logic. PROPOSAL §8.12 asks for "additive flow-status
-// fields" on exactly this response — so polling extends the existing route.
+// STATUS is genuinely shared and is a pure READ: a device link IS an
+// `AuthFlowRecord`, and the generic flow-status route fetches that record with
+// no OAuth-specific logic. PROPOSAL §8.12's additive fields ride exactly this
+// response, so a card that re-renders (a refresh, a second tab, a re-opened
+// settings pane) hydrates from it without disturbing the live link.
 // NAMING WART: that route is spelled `oauth/flow/...` for historical reasons
 // even though the object it serves is generic. Renaming it to
 // `/product-auth/flow/{flow_id}/status` (keeping the old spelling as an alias
 // for shipped OAuth clients) is the right follow-up; it is a route-descriptor
 // change, not part of this feature.
 //
-// START, INPUT and CANCEL are NOT shared, because the operations differ:
+// START, POLL, INPUT and CANCEL are NOT shared, because the operations differ
+// — every one of them makes a vendor-visible transition:
 //   - start takes a link MODE (QR vs phone); OAuth start builds an authorize URL.
+//   - poll ASKS THE VENDOR whether the code was accepted. An earlier revision of
+//     this file had the card poll the read-only status route instead; that
+//     cannot work. A device link only advances when the host re-exports the
+//     login token (PROPOSAL §4.2 — acceptance is poll-driven), nothing else
+//     drives it, and a card polling a pure read waits forever on a QR that was
+//     already scanned. The host's own poll floor keeps this cheap: a too-early
+//     poll is answered without the vendor being called at all.
 //   - input carries a typed kind (identifier | code | password) plus the step
 //     REVISION it was typed against; manual-token submit is "paste an API key".
 //   - cancel must ask the vendor to log the device out, or an accepted-but-
 //     abandoned link leaves an orphan authorization on the user's account
 //     (PROPOSAL §4.3). Nothing existing does that.
-//
-// TODO(backend): the three device-link routes below must be added to
-// `crates/product/ironclaw_webui/src/product_auth/mod.rs` and dispatched to
-// `DeviceLinkFlowDriver`. They are work this feature owes, NOT a dependency on
-// another branch — an earlier revision of this file claimed the latter.
 // The generic flow-status route (shared with OAuth — same record type).
 export function deviceLinkStatusPath(flowId) {
   return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status`;
 }
 
-// Device-link specific — see the header. Not yet mounted; TODO(backend).
+// Device-link specific — see the header.
 const DEVICE_LINK_BASE = "/api/reborn/product-auth/device-link";
 const START_PATH = `${DEVICE_LINK_BASE}/start`;
+const POLL_PATH = `${DEVICE_LINK_BASE}/poll`;
 const INPUT_PATH = `${DEVICE_LINK_BASE}/input`;
 const CANCEL_PATH = `${DEVICE_LINK_BASE}/cancel`;
 
@@ -81,9 +86,23 @@ export function startDeviceLink({
   });
 }
 
-// -> { flow_id, status, device_link }; a pure read, safe to call while the
-// card is awaiting user input.
+// -> { flow_id, status, device_link }
+//
+// Advances the link: the host asks the vendor whether the displayed code was
+// accepted. Safe to call while the card is awaiting user input — the adapter's
+// poll is contractually a pure read on that side, and the host serializes it
+// against a submission in flight.
 export function pollDeviceLink({ flowId, invocationId, signal } = {}) {
+  return apiFetch(POLL_PATH, {
+    method: "POST",
+    signal,
+    body: JSON.stringify({ flow_id: flowId, invocation_id: invocationId }),
+  });
+}
+
+// -> { flow_id, status, device_link }; a pure READ of the durable flow, for a
+// card that is re-rendering and wants to hydrate without advancing anything.
+export function readDeviceLinkFlow({ flowId, invocationId, signal } = {}) {
   const query = invocationId
     ? `?invocation_id=${encodeURIComponent(invocationId)}`
     : "";

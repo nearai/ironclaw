@@ -172,6 +172,30 @@ pub(super) fn compose_provider_client(
     )
 }
 
+/// The recipe resolver production auth composition uses: bundled recipes for
+/// built-in callers, the durable installed manifest for installed callers.
+/// Exposed for seams that need recipe resolution outside the engine itself —
+/// the device-link flow driver resolves the recipe's display name through it.
+pub(crate) fn compose_recipe_resolver(
+    first_party_bundles: &[ironclaw_extension_host::FirstPartyPackageBundle],
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
+) -> Result<Arc<dyn AuthRecipeResolver>, RebornBuildError> {
+    let static_recipes = Arc::new(StaticAuthRecipeResolver::new(
+        ironclaw_extension_host::AvailableExtensionCatalog::bundled_vendor_recipes(
+            first_party_bundles,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+        })?,
+    ));
+    Ok(Arc::new(CompositionAuthRecipeResolver {
+        static_recipes,
+        installed_recipes: ironclaw_extension_host::InstalledManifestAuthRecipeResolver::new(
+            installation_store,
+        ),
+    }))
+}
+
 /// Routes built-in callers to bundled recipes and installed callers to their
 /// own durable manifest. These paths must never fall back across the requester
 /// boundary: doing so would let an installed extension borrow another recipe.

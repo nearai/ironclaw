@@ -1677,6 +1677,8 @@ registerPack("zh-CN", {
   "deviceLink.passwordLabel": "账号密码",
   "deviceLink.submit": "继续",
   "deviceLink.linked": "已关联 {name} 账号",
+  "deviceLink.confirmDeviceAccount": "已关联为 {account}",
+  "deviceLink.confirmDevice": "现在打开 {name} → 设置 → 设备，确认刚刚只新增了一台 IronClaw 设备。如果看到多于一台，或有你并未预期的设备，请在那里吊销它并在此解除关联。",
   "deviceLink.revokeHint": "IronClaw 现在会显示在 {name} 的设备列表中。如果看到不认识的设备，请在那里撤销它。",
   "deviceLink.startAgain": "重新开始",
   "deviceLink.cannotRetry": "无法关联此 {name} 账号。",

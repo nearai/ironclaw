@@ -1679,6 +1679,8 @@ registerPack("fr", {
   "deviceLink.passwordLabel": "Mot de passe du compte",
   "deviceLink.submit": "Continuer",
   "deviceLink.linked": "Compte {name} associé",
+  "deviceLink.confirmDeviceAccount": "Associé en tant que {account}",
+  "deviceLink.confirmDevice": "Ouvrez maintenant {name} → Paramètres → Appareils et vérifiez qu’exactement un nouvel appareil IronClaw est apparu, à l’instant. Si vous en voyez plusieurs, ou un que vous n’attendiez pas, révoquez-le là-bas et dissociez ici.",
   "deviceLink.revokeHint": "IronClaw apparaît désormais comme un appareil dans {name}. Si vous voyez un appareil inconnu, révoquez-le depuis cette liste.",
   "deviceLink.startAgain": "Recommencer",
   "deviceLink.cannotRetry": "Ce compte {name} ne peut pas être associé.",

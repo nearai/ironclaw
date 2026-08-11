@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::linked_session::LinkedAccountResolver;
 use ironclaw_extension_contracts::tool_adapter::{
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
@@ -24,8 +25,7 @@ use ironclaw_host_api::messaging::{StandardMessagingErrorCode, StandardMessaging
 use serde_json::Value;
 
 use super::{
-    TOOL_CALL_TIMEOUT, mapping,
-    ops::{self, LinkedAccountResolver},
+    TOOL_CALL_TIMEOUT, mapping, ops,
     pool::{PooledSession, SessionPool},
 };
 
@@ -56,7 +56,11 @@ impl TelegramLinkedToolAdapter {
     /// call is exactly the axis PROPOSAL §3.3/§5.1 establish is not trustworthy
     /// for isolation.
     async fn session(&self, call: &ToolCall) -> Result<Arc<PooledSession>, ToolError> {
-        let grant = self.accounts.resolve(&call.scope).await?;
+        let grant = self
+            .accounts
+            .resolve(&call.scope)
+            .await
+            .map_err(ops::resolution_error)?;
         let session = self.pool.acquire(&grant).await?;
         Ok(session)
     }

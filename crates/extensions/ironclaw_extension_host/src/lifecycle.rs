@@ -81,6 +81,47 @@ pub struct ExtensionHostDeps {
     /// [`crate::LinkedSessionStore::unavailable`], which fails closed rather
     /// than handing out a handle that silently stores nothing.
     pub linked_sessions: Arc<LinkedSessionStore>,
+    /// Builds each extension's linked-account resolver at bind. A deployment
+    /// with no custody wired supplies
+    /// [`crate::UnavailableLinkedAccountResolution`], whose resolvers fail
+    /// closed.
+    pub linked_accounts: Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>,
+    /// Admin-configuration reads for load-time factory construction (the
+    /// device-link class needs its extension's secret fields in-process).
+    /// `None` composes the fail-closed source: every field reads unset.
+    pub admin_secrets: Option<Arc<crate::ChannelConfigService>>,
+}
+
+/// [`LoadTimeAdminSecrets`] pre-scoped to one loading extension: a factory
+/// cannot name another extension's fields through it, and read failures
+/// degrade to "unset" (the factory then constructs fail-closed adapters).
+struct ExtensionScopedAdminSecrets {
+    config: Arc<crate::ChannelConfigService>,
+    extension_id: ironclaw_host_api::ids::ExtensionId,
+}
+
+#[async_trait::async_trait]
+impl crate::loaders::LoadTimeAdminSecrets for ExtensionScopedAdminSecrets {
+    async fn secret(
+        &self,
+        handle: &ironclaw_host_api::ids::SecretHandle,
+    ) -> Option<secrecy::SecretString> {
+        use secrecy::ExposeSecret as _;
+        match self
+            .config
+            .secret_material(&self.extension_id, handle)
+            .await
+        {
+            Ok(Some(material)) => Some(secrecy::SecretString::from(
+                material.expose_secret().to_string(),
+            )),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(%error, "load-time admin secret read failed; treating as unset");
+                None
+            }
+        }
+    }
 }
 
 /// The generic extension lifecycle host.
@@ -345,6 +386,16 @@ impl ExtensionHost {
         &self,
         record: &InstallationRecord,
     ) -> Result<ActiveExtension, LifecycleError> {
+        let admin_secrets: Arc<dyn crate::loaders::LoadTimeAdminSecrets> = match (
+            &self.deps.admin_secrets,
+            ironclaw_host_api::ids::ExtensionId::new(&record.extension_id),
+        ) {
+            (Some(config), Ok(extension_id)) => Arc::new(ExtensionScopedAdminSecrets {
+                config: Arc::clone(config),
+                extension_id,
+            }),
+            _ => Arc::new(crate::loaders::UnavailableLoadTimeAdminSecrets),
+        };
         let loaded = self
             .deps
             .loader
@@ -352,6 +403,7 @@ impl ExtensionHost {
                 extension_id: record.extension_id.clone(),
                 installation_id: record.installation_id.clone(),
                 resolved: Arc::clone(&record.resolved),
+                admin_secrets,
             })
             .await?;
         // A discovery-owning loader publishes its effective contract; static
@@ -364,6 +416,7 @@ impl ExtensionHost {
             resolved: Arc::clone(&resolved),
             config: record.config.clone(),
             linked_sessions: self.deps.linked_sessions.custody_for(resolved.id.clone()),
+            linked_accounts: self.deps.linked_accounts.resolver_for(&resolved),
         })?;
         check_binding(&resolved, &bindings)?;
         for tool in &resolved.tools {

@@ -364,6 +364,29 @@ export function DeviceLinkPanel({
           <p data-testid="device-link-completed" className="text-sm text-[var(--v2-positive-text)]">
             ✅ {t("deviceLink.linked", { name })}
           </p>
+          {/*
+            The ADR's one compensating control, and it is DETECTION, not
+            prevention: IronClaw cannot verify that the code it displayed came
+            from a session it controls, so the resolved account plus a
+            count-the-devices check is what makes the crude substituted-login
+            variant visible. It does NOT catch a stolen key (the key IS the
+            device — no second entry appears) or a session that registered
+            under the name "IronClaw". The copy therefore asks the user to
+            check a specific, checkable fact and claims nothing beyond it.
+          */}
+          {frame.code
+            ? (
+                <p
+                  data-testid="device-link-account"
+                  className="text-xs leading-5 text-iron-300"
+                >
+                  {t("deviceLink.confirmDeviceAccount", { account: frame.code })}
+                </p>
+              )
+            : null}
+          <p data-testid="device-link-confirm-device" className="text-xs leading-5 text-iron-400">
+            {t("deviceLink.confirmDevice", { name })}
+          </p>
           <p className="text-xs leading-5 text-iron-400">
             {t("deviceLink.revokeHint", { name })}
           </p>

@@ -30,7 +30,9 @@ use ironclaw_host_api::ids::InvocationId;
 use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::turn::TurnRunId;
 
-use crate::device_link::{DeviceLinkErrorCode, DeviceLinkStepKind};
+use crate::device_link::{
+    DeviceLinkErrorCode, DeviceLinkInputKind, DeviceLinkMode, DeviceLinkStepKind,
+};
 
 /// Maximum byte length for a bounded identifier-shaped prompt field.
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
@@ -175,6 +177,23 @@ pub struct DeviceLinkPromptView {
     /// Why the last attempt failed, on a failed frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<DeviceLinkErrorCode>,
+    /// The durable flow this frame belongs to (§8.12). A card with no flow id
+    /// cannot poll or submit, so it starts a flow of its own instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    /// Which value an input step is asking for. Drives the masked-password
+    /// affordance — absent, a consumer falls back to a code-shaped field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_kind: Option<DeviceLinkInputKind>,
+    /// Which of the extension's declared paths the flow is on, so a card can
+    /// offer "use the other path instead".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<DeviceLinkMode>,
+    /// Whether a fresh `begin` could succeed after a failed frame. Mirrors
+    /// `DeviceLinkStep::Failed`'s own bit; absent, a consumer derives it from
+    /// `error_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restartable: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +450,11 @@ impl DeviceLinkPromptView {
             "device_link_prompt_secret_label",
             self.secret_label.as_deref(),
             PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_flow_id",
+            self.flow_id.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
         )
     }
 }
@@ -666,6 +690,10 @@ mod tests {
             poll_interval_ms: 3_000,
             retry_after_ms: None,
             error_code: None,
+            flow_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            input_kind: None,
+            mode: Some(DeviceLinkMode::Default),
+            restartable: None,
         }
     }
 
@@ -1087,6 +1115,10 @@ mod tests {
             poll_interval_ms: 3_000,
             retry_after_ms: Some(30_000),
             error_code: Some(DeviceLinkErrorCode::InvalidInput),
+            flow_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            input_kind: Some(DeviceLinkInputKind::Code),
+            mode: Some(DeviceLinkMode::Alternate),
+            restartable: Some(true),
         };
 
         let context = AuthPromptContextView::new(

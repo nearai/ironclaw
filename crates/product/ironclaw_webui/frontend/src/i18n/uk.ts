@@ -1679,6 +1679,8 @@ registerPack("uk", {
   "deviceLink.passwordLabel": "Пароль облікового запису",
   "deviceLink.submit": "Продовжити",
   "deviceLink.linked": "Обліковий запис {name} прив'язано",
+  "deviceLink.confirmDeviceAccount": "Підключено як {account}",
+  "deviceLink.confirmDevice": "Тепер відкрийте {name} → Налаштування → Пристрої і переконайтеся, що щойно з’явився рівно один новий пристрій IronClaw. Якщо бачите більше одного або той, якого не очікували, відкличте його там і від’єднайте тут.",
   "deviceLink.revokeHint": "IronClaw тепер відображається як пристрій у {name}. Якщо побачите незнайомий пристрій, відкличте його там.",
   "deviceLink.startAgain": "Почати спочатку",
   "deviceLink.cannotRetry": "Цей обліковий запис {name} не можна прив'язати.",

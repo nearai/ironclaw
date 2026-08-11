@@ -39,8 +39,15 @@ pub(crate) mod session_store;
 pub(crate) mod tools;
 pub(crate) mod transport;
 
-pub use login::TelegramDeviceLinkAdapter;
-pub use ops::{LinkedAccountResolutionError, LinkedAccountResolver};
+pub use login::{MtprotoAppIdentity, TelegramDeviceLinkAdapter};
+
+/// `[admin_configuration]` field handle carrying the operator's MTProto
+/// `api_id` (non-secret). `required = false`: a bot-only deployment keeps
+/// activating and the device-link flow fails closed instead.
+pub const TELEGRAM_API_ID_CONFIG: &str = "telegram_api_id";
+/// `[admin_configuration]` field handle carrying the operator's MTProto
+/// `api_hash` (`secret = true` — Telegram treats it as one).
+pub const TELEGRAM_API_HASH_HANDLE: &str = "telegram_api_hash";
 pub use pool::SessionPool;
 pub use tools::TelegramLinkedToolAdapter;
 

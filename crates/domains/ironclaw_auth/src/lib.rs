@@ -35,9 +35,10 @@ pub mod test_support;
 pub use account_state::{AuthAccountLastError, AuthAccountState, project_auth_account_state};
 pub use channel_connection::{ChannelAuthAccountState, ChannelConnectionService};
 pub use cleanup::{
-    CanceledCleanupFlow, LinkedDeviceCleanupService, LinkedDeviceRevokeError,
-    LinkedDeviceRevokeRequest, LinkedDeviceRevoker, SecretCleanupAction, SecretCleanupQuarantine,
-    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    CanceledCleanupFlow, DeferredLinkedDeviceRevoker, LinkedDeviceCleanupService,
+    LinkedDeviceRevokeError, LinkedDeviceRevokeRequest, LinkedDeviceRevoker, SecretCleanupAction,
+    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService,
 };
 // NOTE: `SessionBytes`, `LinkedSessionVersion` and `MAX_LINKED_SESSION_BYTES`
 // are DECLARED in `ironclaw_extension_contracts::linked_session` and are
@@ -53,9 +54,9 @@ pub use credential::{
     CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount, OpaqueMaterialRequest, OpaqueMaterialSnapshot,
-    OpaqueMaterialWrite, OpaqueMaterialWriteOutcome, ProviderBackedCredentialAccountService,
-    binding_scope_owns_account,
+    CredentialSetupService, LinkedDeviceLinkCompletion, NewCredentialAccount,
+    OpaqueMaterialRequest, OpaqueMaterialSnapshot, OpaqueMaterialWrite, OpaqueMaterialWriteOutcome,
+    ProviderBackedCredentialAccountService, binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
 pub use engine::admission::{

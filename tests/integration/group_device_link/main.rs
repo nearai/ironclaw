@@ -25,6 +25,7 @@ mod support;
 
 mod admin_config;
 mod scenario_actor_isolation;
+mod scenario_handshake_mints_and_serves;
 mod scenario_link_call_unlink;
 mod scenario_revoked_session_reauth;
 
@@ -43,6 +44,10 @@ async fn device_link_linked_account_group() {
         .expect("link -> linked tool call -> unlink");
 
     let mut report = ScenarioReport::new();
+    report.record(
+        "handshake_mints_and_serves",
+        scenario_handshake_mints_and_serves::run(&group, &handles).await,
+    );
     report.record(
         "actor_isolation",
         scenario_actor_isolation::run(&group, &handles).await,

@@ -883,6 +883,8 @@ async fn slack_test_extension_host_with_manifest_commands(
             reserved_ingress_routes: Default::default(),
             hook_deadline: Duration::from_secs(5),
             linked_sessions: crate::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(crate::UnavailableLinkedAccountResolution),
+            admin_secrets: None,
         })
         .await,
     );

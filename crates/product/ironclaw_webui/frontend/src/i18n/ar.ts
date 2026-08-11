@@ -1679,6 +1679,8 @@ registerPack("ar", {
   "deviceLink.passwordLabel": "كلمة مرور الحساب",
   "deviceLink.submit": "متابعة",
   "deviceLink.linked": "تم ربط حساب {name}",
+  "deviceLink.confirmDeviceAccount": "مرتبط باسم {account}",
+  "deviceLink.confirmDevice": "افتح الآن {name} ← الإعدادات ← الأجهزة وتحقّق من ظهور جهاز IronClaw جديد واحد فقط، قبل قليل. إن رأيت أكثر من واحد، أو جهازًا لم تتوقعه، فألغِ تفويضه هناك وافصل الارتباط هنا.",
   "deviceLink.revokeHint": "يظهر IronClaw الآن كجهاز في {name}. إذا رأيت جهازًا لا تعرفه، فقم بإلغائه من هناك.",
   "deviceLink.startAgain": "ابدأ من جديد",
   "deviceLink.cannotRetry": "لا يمكن ربط حساب {name} هذا.",

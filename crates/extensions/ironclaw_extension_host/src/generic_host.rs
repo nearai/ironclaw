@@ -70,6 +70,17 @@ pub struct GenericExtensionHostParams {
     pub governor: Arc<dyn ResourceGovernor>,
     pub assembly: ExtensionHostAssemblyConfig,
     pub channel_egress_transport: Option<Arc<dyn crate::egress::ChannelEgressTransport>>,
+    /// Linked-account custody, when the deployment wires it (the
+    /// credential-service-backed store). `None` composes the fail-closed
+    /// store: an extension can hold a handle and is told custody is
+    /// unavailable — the only honest answer where no material store exists.
+    pub linked_sessions: Option<Arc<LinkedSessionStore>>,
+    /// The per-extension linked-account resolver factory, when custody is
+    /// wired. `None` composes resolvers that answer `Unavailable`.
+    pub linked_accounts: Option<Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>>,
+    /// Admin-configuration reads for load-time factory construction. `None`
+    /// composes the fail-closed source.
+    pub admin_secrets: Option<Arc<crate::ChannelConfigService>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,6 +192,9 @@ pub async fn build_generic_extension_host(
         governor,
         assembly,
         channel_egress_transport,
+        linked_sessions,
+        linked_accounts,
+        admin_secrets,
     } = params;
     let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
         .into_iter()
@@ -212,14 +226,15 @@ pub async fn build_generic_extension_host(
             reserved_capability_ids: assembly.reserved_capability_ids,
             reserved_ingress_routes: assembly.reserved_ingress_routes,
             hook_deadline: assembly.hook_deadline,
-            // TODO(design): composition wires the credential-service-backed
-            // custody store (PLAN PR 5, "composition wiring"). Until it does,
-            // every deployment gets the fail-closed store: an extension can
-            // hold a handle and will be told custody is unavailable, which is
-            // the only honest answer while no linked-account material store
-            // exists. Silently handing out a handle that stores nothing would
-            // be the alternative, and that loses a session key.
-            linked_sessions: LinkedSessionStore::unavailable(),
+            // Composition wires the credential-service-backed custody store;
+            // a deployment without one gets the fail-closed store — an
+            // extension can hold a handle and is told custody is unavailable,
+            // which is the only honest answer where no material store exists.
+            linked_sessions: linked_sessions.unwrap_or_else(LinkedSessionStore::unavailable),
+            linked_accounts: linked_accounts.unwrap_or_else(|| {
+                Arc::new(crate::linked_account_resolution::UnavailableLinkedAccountResolution)
+            }),
+            admin_secrets,
         })
         .await,
     );
@@ -358,7 +373,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
             &ctx.resolved.runtime
             && let Some(factory) = self.factories.get(service)
         {
-            let entrypoint = factory.load(ctx)?;
+            let entrypoint = factory.load(ctx).await?;
             return Ok(LoadedExtension::new(Box::new(SettlingEntrypoint {
                 inner: entrypoint,
                 governor: Arc::clone(&self.governor),
@@ -815,12 +830,13 @@ input_schema_ref = "schemas/echo.input.json"
     /// first_party loader branch, no runtime lane required.
     struct FixtureNativeFactory;
 
+    #[async_trait]
     impl NativeExtensionFactory for FixtureNativeFactory {
         fn service(&self) -> &str {
             FIXTURE_SERVICE
         }
 
-        fn load(
+        async fn load(
             &self,
             _ctx: &LoadContext,
         ) -> Result<Box<dyn crate::ExtensionEntrypoint>, BindError> {
@@ -915,6 +931,7 @@ input_schema_ref = "schemas/echo.input.json"
             extension_id: id.to_string(),
             installation_id: id.to_string(),
             resolved: Arc::new(record.resolved().clone()),
+            admin_secrets: Arc::new(crate::loaders::UnavailableLoadTimeAdminSecrets),
         }
     }
 
@@ -1041,6 +1058,9 @@ input_schema_ref = "schemas/echo.input.json"
                 Duration::from_secs(30),
             ),
             channel_egress_transport: None,
+            linked_sessions: None,
+            linked_accounts: None,
+            admin_secrets: None,
         })
         .await;
 

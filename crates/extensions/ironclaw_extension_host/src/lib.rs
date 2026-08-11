@@ -63,6 +63,7 @@ pub mod install_policy;
 pub mod lifecycle;
 pub mod lifecycle_restore;
 pub mod lifecycle_vocabulary;
+pub mod linked_account_resolution;
 pub mod linked_session_custody;
 pub mod loaders;
 pub mod mcp;
@@ -213,11 +214,18 @@ pub use lifecycle_restore::{
     restore_extension_lifecycle_state,
 };
 pub use lifecycle_vocabulary::ActiveExtensionCapability;
+pub use linked_account_resolution::{
+    CredentialLinkedAccountResolution, LinkedAccountResolution, UnavailableLinkedAccountResolution,
+};
 pub use linked_session_custody::{
-    LinkedSessionKey, LinkedSessionMaterialStore, LinkedSessionStore, StoredLinkedSession,
+    CredentialServiceLinkedSessionMaterial, LinkedSessionKey, LinkedSessionMaterialKey,
+    LinkedSessionMaterialStore, LinkedSessionStore, UnavailableLinkedAccountResolver,
     UnavailableLinkedSessionMaterial,
 };
-pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
+pub use loaders::{
+    ExtensionLoader, LoadContext, LoadTimeAdminSecrets, LoadedExtension, NativeExtensionFactory,
+    UnavailableLoadTimeAdminSecrets,
+};
 pub use mcp::{RegistryMcpEgressPlanner, hosted_http_mcp_runtime};
 pub use mcp_catalog_safety::{
     McpCatalogAdmission, McpCatalogAdmissionPolicy, McpCatalogField, McpCatalogFinding,

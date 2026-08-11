@@ -44,24 +44,18 @@
 //! extension credential cleanup), and the inherent methods are what makes the
 //! engine testable without constructing auth flow records.
 //!
-//! # TODO(design): completion cannot mint a credential account here
+//! # Completion mints the credential account here
 //!
-//! `DeviceLinkStepOutcome` requires `account: Some(..)` on a `Completed` step,
-//! and minting one needs an `AuthProductScope` plus `CredentialAccountService`.
-//! **The port's request types carry no scope** — `DeviceLinkBinding` is
-//! `(provider, extension_id, user_id)` — and synthesizing one from a bare user
-//! id would be re-deriving security-relevant scope, which this repo bans
-//! outright. So this implementation reports a completed step with
-//! `account: None`, which the auth-side driver treats as a contract violation
-//! and terminalizes. That is a **fail-closed hole, not a working path**: no
-//! link can complete until either the port carries the flow's scope or the
-//! minting seam lands host-side. Reconcile before PR 5's risk gate.
-//!
-//! Whichever side ends up making the call, the account it mints must be built
-//! by `ironclaw_auth::NewCredentialAccount::for_linked_device` — the ownership
-//! pin of PROPOSAL §4.5 lives in that constructor, and
-//! `CredentialAccountService::bump_link_revision` refuses any account that does
-//! not carry it, so a hand-rolled literal cannot complete a link.
+//! `DeviceLinkStepOutcome` requires `account: Some(..)` on a `Completed`
+//! step. The flow's `AuthProductScope` rides `DeviceLinkBinding` (and this
+//! module's own `DeviceLinkRequest`) from the durable flow record, so the
+//! settle path can hand the provisional session blob to the auth domain's one
+//! completion operation, `CredentialAccountService::complete_linked_device_link`
+//! — which owns the create-or-reuse policy, the §4.5 ownership pin (enforced
+//! again by `bump_link_revision`, so a hand-rolled literal cannot complete a
+//! link), and the load-then-CAS blob write. The mint runs strictly before the
+//! flow is forgotten, because forgetting discards the provisional blob the
+//! mint reads.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -84,15 +78,13 @@ use crate::linked_session_custody::LinkedSessionStore;
 
 /// Account-ref prefix for a link that has no credential account yet.
 ///
-/// Custody is durable *before* the account is minted (PROPOSAL §4.3:
+/// The blob is stored *before* the account is minted (PROPOSAL §4.3:
 /// "store blob → mint account → report completed"), so the adapter needs a
-/// scoped handle during the handshake. The host mints this provisional ref from
-/// the flow id so the blob has a home.
-///
-/// TODO(design): the credential account minted at completion **must adopt this
-/// exact ref**, or the blob written during the handshake is orphaned and the
-/// first post-link call rehydrates nothing. That adoption is auth-side (PR 2)
-/// and is not expressible here; the two halves have to agree on this string.
+/// scoped handle during the handshake. The host mints this provisional ref
+/// from the flow id; the completion mint reads the blob back through the same
+/// ref ([`provisional_account_ref`] is the single source of the string) and
+/// stores it durably under the minted account before the flow — and with it
+/// the provisional blob — is forgotten.
 const PENDING_ACCOUNT_PREFIX: &str = "pending-link.";
 
 /// The revision a provisional (pre-mint) grant carries. A real account starts
@@ -176,14 +168,33 @@ impl DeviceLinkLimits {
 }
 
 /// One call into the driver: which flow, whose, and against which account.
+///
+/// `scope` is the durable flow's own product scope, carried whole because the
+/// completion mint needs it — synthesizing one from a bare user id would be
+/// re-deriving security-relevant scope. The flow's owner is
+/// `scope.resource.user_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceLinkRequest {
     pub flow_id: DeviceLinkFlowId,
     pub extension_id: ExtensionId,
-    pub user_id: UserId,
+    pub scope: ironclaw_auth::AuthProductScope,
     /// The established account, when one exists. `None` during a link that has
     /// not completed — there is no credential account until custody is durable.
     pub account: Option<LinkedAccountGrant>,
+}
+
+impl DeviceLinkRequest {
+    fn user_id(&self) -> &UserId {
+        &self.scope.resource.user_id
+    }
+}
+
+/// A settled transition: the bounded step, plus the credential account the
+/// completion minted (present exactly when `step` is `Completed`).
+#[derive(Debug)]
+pub struct SettledDeviceLinkStep {
+    pub step: DeviceLinkStep,
+    pub account: Option<ironclaw_auth::DeviceLinkLinkedAccount>,
 }
 
 /// Resolves device-link adapters from the published snapshot and drives them
@@ -193,6 +204,11 @@ pub struct SnapshotDeviceLinkDriver {
     sessions: Arc<LinkedSessionStore>,
     limits: DeviceLinkLimits,
     state: Mutex<DriverState>,
+    /// The auth domain's credential service, for the completion mint: a
+    /// `Completed` step must be backed by a minted account before it is
+    /// reported, and `complete_linked_device_link` is the one place that
+    /// policy lives (the §4.5 ownership pin is inside it).
+    accounts: Arc<dyn ironclaw_auth::CredentialAccountService>,
 }
 
 impl SnapshotDeviceLinkDriver {
@@ -200,6 +216,7 @@ impl SnapshotDeviceLinkDriver {
         snapshots: SnapshotWatch,
         sessions: Arc<LinkedSessionStore>,
         limits: DeviceLinkLimits,
+        accounts: Arc<dyn ironclaw_auth::CredentialAccountService>,
     ) -> Result<Self, DeviceLinkLimitsError> {
         limits.validate()?;
         Ok(Self {
@@ -207,11 +224,18 @@ impl SnapshotDeviceLinkDriver {
             sessions,
             limits,
             state: Mutex::new(DriverState::default()),
+            accounts,
         })
     }
 
     pub fn limits(&self) -> DeviceLinkLimits {
         self.limits
+    }
+
+    /// The custody store this driver parks provisional blobs in and registers
+    /// minted accounts with. For the sibling auth-port module only.
+    pub(crate) fn sessions(&self) -> &Arc<LinkedSessionStore> {
+        &self.sessions
     }
 
     /// Start a link on the chosen path.
@@ -222,6 +246,7 @@ impl SnapshotDeviceLinkDriver {
     ) -> Result<DeviceLinkStep, DeviceLinkError> {
         self.begin_at(request, mode, Instant::now())
             .await
+            .map(|settled| settled.step)
             .map_err(DriverFailure::into_link_error)
     }
 
@@ -232,6 +257,7 @@ impl SnapshotDeviceLinkDriver {
     ) -> Result<DeviceLinkStep, DeviceLinkError> {
         self.poll_at(request, Instant::now())
             .await
+            .map(|settled| settled.step)
             .map_err(DriverFailure::into_link_error)
     }
 
@@ -243,6 +269,7 @@ impl SnapshotDeviceLinkDriver {
     ) -> Result<DeviceLinkStep, DeviceLinkError> {
         self.submit_input_at(request, input, Instant::now())
             .await
+            .map(|settled| settled.step)
             .map_err(DriverFailure::into_link_error)
     }
 
@@ -279,7 +306,7 @@ impl SnapshotDeviceLinkDriver {
             .into());
         }
         let resolved = self.resolve(&request.extension_id)?;
-        self.forget(&request.flow_id);
+        self.forget(&request.extension_id, &request.flow_id);
         let grant = self.custody_grant(request)?;
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
@@ -288,7 +315,7 @@ impl SnapshotDeviceLinkDriver {
 
     async fn cancel_link(&self, request: &DeviceLinkRequest) -> Result<(), DriverFailure> {
         let resolved = self.resolve(&request.extension_id)?;
-        self.forget(&request.flow_id);
+        self.forget(&request.extension_id, &request.flow_id);
         let grant = self.custody_grant(request)?;
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
@@ -300,7 +327,7 @@ impl SnapshotDeviceLinkDriver {
         request: &DeviceLinkRequest,
         mode: DeviceLinkMode,
         now: Instant,
-    ) -> Result<DeviceLinkStep, DriverFailure> {
+    ) -> Result<SettledDeviceLinkStep, DriverFailure> {
         let resolved = self.resolve(&request.extension_id)?;
         // The recipe, not the adapter, says which paths exist. Checking here
         // means an extension that declares no fallback cannot be talked into
@@ -316,14 +343,14 @@ impl SnapshotDeviceLinkDriver {
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
         let outcome = resolved.adapter.begin(&context, mode).await;
-        self.settle(request, outcome, now)
+        self.settle(request, outcome, now).await
     }
 
     async fn poll_at(
         &self,
         request: &DeviceLinkRequest,
         now: Instant,
-    ) -> Result<DeviceLinkStep, DriverFailure> {
+    ) -> Result<SettledDeviceLinkStep, DriverFailure> {
         let resolved = self.resolve(&request.extension_id)?;
         match self.admit_poll(&request.flow_id, now) {
             PollAdmission::Unknown => Err(DeviceLinkError::UnknownFlow.into()),
@@ -331,17 +358,23 @@ impl SnapshotDeviceLinkDriver {
             // reported, so a vendor-side authorization cannot outlive it.
             PollAdmission::Expired => {
                 self.cancel_flow(request, &resolved).await;
-                Ok(expired_step())
+                Ok(SettledDeviceLinkStep {
+                    step: expired_step(),
+                    account: None,
+                })
             }
             // The adapter is not called at all: a hot-looping card must not be
             // able to turn into vendor traffic.
-            PollAdmission::TooSoon { retry_in } => Ok(DeviceLinkStep::AwaitingVendor { retry_in }),
+            PollAdmission::TooSoon { retry_in } => Ok(SettledDeviceLinkStep {
+                step: DeviceLinkStep::AwaitingVendor { retry_in },
+                account: None,
+            }),
             PollAdmission::Admitted => {
                 let grant = self.custody_grant(request)?;
                 let session = self.sessions.open(&request.extension_id, &grant);
                 let context = self.context(request, &resolved, session.as_ref());
                 let outcome = resolved.adapter.poll(&context).await;
-                self.settle(request, outcome, now)
+                self.settle(request, outcome, now).await
             }
         }
     }
@@ -351,14 +384,17 @@ impl SnapshotDeviceLinkDriver {
         request: &DeviceLinkRequest,
         input: DeviceLinkInput,
         now: Instant,
-    ) -> Result<DeviceLinkStep, DriverFailure> {
+    ) -> Result<SettledDeviceLinkStep, DriverFailure> {
         // Bound the paste before anything vendor-shaped sees it.
         input.validate()?;
         let resolved = self.resolve(&request.extension_id)?;
         match self.admit_input(request, &input, now)? {
             InputAdmission::Expired => {
                 self.cancel_flow(request, &resolved).await;
-                return Ok(expired_step());
+                return Ok(SettledDeviceLinkStep {
+                    step: expired_step(),
+                    account: None,
+                });
             }
             InputAdmission::Admitted => {}
         }
@@ -367,7 +403,7 @@ impl SnapshotDeviceLinkDriver {
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
         let outcome = resolved.adapter.submit_input(&context, input).await;
-        self.settle(request, outcome, now)
+        self.settle(request, outcome, now).await
     }
 
     /// Resolve the bound adapter for an extension from the published snapshot.
@@ -399,7 +435,7 @@ impl SnapshotDeviceLinkDriver {
         DeviceLinkContext {
             flow_id: &request.flow_id,
             extension_id: &request.extension_id,
-            user_id: &request.user_id,
+            user_id: request.user_id(),
             config: resolved.config.as_ref(),
             session,
             account: request.account.as_ref(),
@@ -414,15 +450,12 @@ impl SnapshotDeviceLinkDriver {
         if let Some(grant) = &request.account {
             return Ok(grant.clone());
         }
-        let provisional = format!("{PENDING_ACCOUNT_PREFIX}{}", request.flow_id);
-        match LinkedAccountRef::new(provisional) {
-            Ok(account) => Ok(LinkedAccountGrant::new(account, PENDING_LINK_REVISION)),
-            Err(error) => {
+        match provisional_account_ref(&request.flow_id) {
+            Some(account) => Ok(LinkedAccountGrant::new(account, PENDING_LINK_REVISION)),
+            None => {
                 // `DeviceLinkFlowId` already rejects whitespace, control bytes,
                 // and anything over 128 bytes, so this is unreachable in
-                // practice; log the bound cause rather than dropping it, since
-                // the typed error can only carry fixed text.
-                debug!(%error, "device-link provisional account ref rejected");
+                // practice.
                 Err(DeviceLinkError::Internal {
                     reason: "device-link flow id does not form a valid account ref",
                 })
@@ -430,33 +463,166 @@ impl SnapshotDeviceLinkDriver {
         }
     }
 
-    /// Record an adapter outcome: bound its display text, clamp its clocks, and
-    /// drop the flow once it stops advancing.
-    fn settle(
+    /// Record an adapter outcome: bound its display text, clamp its clocks,
+    /// mint the credential account behind a completion, and drop the flow once
+    /// it stops advancing.
+    async fn settle(
         &self,
         request: &DeviceLinkRequest,
         outcome: Result<DeviceLinkStep, DeviceLinkError>,
         now: Instant,
-    ) -> Result<DeviceLinkStep, DriverFailure> {
+    ) -> Result<SettledDeviceLinkStep, DriverFailure> {
         let step = match outcome {
             Ok(step) => step,
             Err(error) => {
                 // A failed transition ends the flow here, so a later call
                 // cannot re-invoke a vendor step that already ran.
-                self.forget(&request.flow_id);
+                self.forget(&request.extension_id, &request.flow_id);
                 return Err(error.into());
             }
         };
         if let Err(error) = step.validate() {
-            self.forget(&request.flow_id);
+            self.forget(&request.extension_id, &request.flow_id);
             return Err(error.into());
         }
         let remaining = self.remaining(&request.flow_id, now);
         let step = self.clamp(step, remaining);
+        let account = if matches!(step, DeviceLinkStep::Completed { .. }) {
+            // Mint BEFORE forgetting: `forget` discards the provisional blob
+            // the mint reads. A completion the mint cannot back is reported as
+            // a custody failure, never as a completion.
+            match self.mint_completed_account(request, &step).await {
+                Ok(account) => Some(account),
+                Err(failure) => {
+                    self.forget(&request.extension_id, &request.flow_id);
+                    return Err(failure);
+                }
+            }
+        } else {
+            None
+        };
         if step.is_terminal() {
-            self.forget(&request.flow_id);
+            self.forget(&request.extension_id, &request.flow_id);
         }
-        Ok(step)
+        Ok(SettledDeviceLinkStep { step, account })
+    }
+
+    /// The completion mint: read the provisional blob the adapter stored
+    /// during the handshake, hand it to the auth domain's one completion
+    /// operation (which owns the create-or-reuse policy, the ownership pin,
+    /// and the load-then-CAS blob write), and teach custody where the minted
+    /// account's material lives.
+    async fn mint_completed_account(
+        &self,
+        request: &DeviceLinkRequest,
+        step: &DeviceLinkStep,
+    ) -> Result<ironclaw_auth::DeviceLinkLinkedAccount, DriverFailure> {
+        let DeviceLinkStep::Completed {
+            account_label,
+            vendor_user_ref,
+        } = step
+        else {
+            return Err(DeviceLinkError::Internal {
+                reason: "device-link mint requires a completed step",
+            }
+            .into());
+        };
+        let provisional = provisional_account_ref(&request.flow_id).ok_or_else(|| {
+            DriverFailure::from(DeviceLinkError::Internal {
+                reason: "device-link flow id does not form a valid account ref",
+            })
+        })?;
+        let Some(blob) = self
+            .sessions
+            .provisional_blob(&request.extension_id, &provisional)
+        else {
+            // The adapter reported completion without ever storing a session.
+            // Nothing can serve the link; refusing here is what keeps the
+            // store-blob → mint → report ordering honest.
+            debug!("device-link completion arrived with no provisional session blob");
+            return Err(DeviceLinkError::Custody(
+                ironclaw_extension_contracts::linked_session::LinkedSessionError::Unavailable {
+                    reason: "device-link completion stored no session material",
+                },
+            )
+            .into());
+        };
+        let vendor_user_ref = ironclaw_auth::DeviceLinkVendorUserRef::new(vendor_user_ref.clone())
+            .map_err(|error| {
+                debug!(%error, "device-link vendor user ref failed validation");
+                DriverFailure::from(DeviceLinkError::InvalidStep {
+                    reason: "completed step carries an invalid vendor user ref",
+                })
+            })?;
+        let provider = self.device_link_provider(&request.extension_id)?;
+        let account = self
+            .accounts
+            .complete_linked_device_link(ironclaw_auth::LinkedDeviceLinkCompletion {
+                scope: request.scope.clone(),
+                provider,
+                owner_extension: request.extension_id.clone(),
+                label: linked_account_label(account_label)?,
+                material: blob,
+            })
+            .await
+            .map_err(|error| {
+                debug!(error = %error, "device-link completion mint failed");
+                DriverFailure::from(DeviceLinkError::Custody(
+                    ironclaw_extension_contracts::linked_session::LinkedSessionError::Unavailable {
+                        reason: "device-link credential account could not be minted",
+                    },
+                ))
+            })?;
+        let account_ref = LinkedAccountRef::new(account.id.to_string()).map_err(|error| {
+            debug!(%error, "minted account id does not form a linked-account ref");
+            DriverFailure::from(DeviceLinkError::Internal {
+                reason: "minted credential account id does not form an account ref",
+            })
+        })?;
+        self.sessions.register_account(
+            request.extension_id.clone(),
+            account_ref,
+            account.scope.clone(),
+            account.id,
+        );
+        Ok(ironclaw_auth::DeviceLinkLinkedAccount {
+            account_id: account.id,
+            label: account.label.clone(),
+            vendor_user_ref,
+            link_revision: account.link_revision,
+        })
+    }
+
+    /// The vendor id behind the extension's device-link auth surface, as an
+    /// auth provider id. Read from the resolved manifest — never a name in
+    /// host code.
+    fn device_link_provider(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<ironclaw_auth::AuthProviderId, DriverFailure> {
+        let snapshot = self.snapshots.current();
+        let binding = snapshot
+            .resolve_device_link(extension_id)
+            .ok_or(DriverFailure::NoBinding)?;
+        let vendor = binding.declaration.auth.iter().find_map(|surface| {
+            matches!(
+                surface.recipe,
+                Some(ironclaw_extension_contracts::recipe::VendorAuthRecipe::DeviceLink(_))
+            )
+            .then(|| surface.vendor.clone())
+        });
+        let Some(vendor) = vendor else {
+            return Err(DeviceLinkError::Internal {
+                reason: "bound device-link adapter has no declared device-link recipe",
+            }
+            .into());
+        };
+        ironclaw_auth::AuthProviderId::new(vendor.as_str()).map_err(|error| {
+            debug!(%error, "device-link vendor id does not form an auth provider id");
+            DriverFailure::from(DeviceLinkError::Internal {
+                reason: "device-link vendor id does not form an auth provider id",
+            })
+        })
     }
 
     /// Clamp adapter-declared durations into the host's clocks. A vendor cannot
@@ -481,7 +647,7 @@ impl SnapshotDeviceLinkDriver {
 
     /// Cancel one flow's vendor-side state, best effort, and forget it.
     async fn cancel_flow(&self, request: &DeviceLinkRequest, resolved: &ResolvedDeviceLink) {
-        self.forget(&request.flow_id);
+        self.forget(&request.extension_id, &request.flow_id);
         let Ok(grant) = self.custody_grant(request) else {
             return;
         };
@@ -510,7 +676,7 @@ impl SnapshotDeviceLinkDriver {
                         id.clone(),
                         ExpiredFlow {
                             extension_id: flow.extension.clone(),
-                            user_id: flow.user.clone(),
+                            scope: flow.scope.clone(),
                         },
                     )
                 })
@@ -527,7 +693,7 @@ impl SnapshotDeviceLinkDriver {
             let request = DeviceLinkRequest {
                 flow_id,
                 extension_id: flow.extension_id,
-                user_id: flow.user_id,
+                scope: flow.scope,
                 account: None,
             };
             self.cancel_flow(&request, &resolved).await;
@@ -557,7 +723,7 @@ impl SnapshotDeviceLinkDriver {
         {
             return Err(rate_limited());
         }
-        let per_user = state.begins.entry(request.user_id.clone()).or_default();
+        let per_user = state.begins.entry(request.user_id().clone()).or_default();
         if !per_user.admit(now, window, self.limits.max_begins_per_user) {
             return Err(rate_limited());
         }
@@ -565,7 +731,7 @@ impl SnapshotDeviceLinkDriver {
             request.flow_id.clone(),
             FlowState {
                 extension: request.extension_id.clone(),
-                user: request.user_id.clone(),
+                scope: request.scope.clone(),
                 started_at: now,
                 last_poll_at: None,
                 secret_attempts: 0,
@@ -612,7 +778,7 @@ impl SnapshotDeviceLinkDriver {
                 let digest = identifier_digest(value);
                 let budget = state
                     .identifiers
-                    .entry(request.user_id.clone())
+                    .entry(request.user_id().clone())
                     .or_default();
                 if !budget.admit(
                     now,
@@ -647,8 +813,13 @@ impl SnapshotDeviceLinkDriver {
         }
     }
 
-    fn forget(&self, flow_id: &DeviceLinkFlowId) {
+    /// Drop a flow's driver state and its parked provisional blob. Runs after
+    /// the completion mint, which is the one reader of that blob.
+    fn forget(&self, extension: &ExtensionId, flow_id: &DeviceLinkFlowId) {
         self.lock().flows.remove(flow_id);
+        if let Some(provisional) = provisional_account_ref(flow_id) {
+            self.sessions.discard_provisional(extension, &provisional);
+        }
     }
 
     /// A poisoned map still holds the flows a running link depends on; keeping
@@ -703,7 +874,7 @@ struct ResolvedDeviceLink {
 
 struct ExpiredFlow {
     extension_id: ExtensionId,
-    user_id: UserId,
+    scope: ironclaw_auth::AuthProductScope,
 }
 
 enum PollAdmission {
@@ -728,7 +899,7 @@ struct DriverState {
 
 struct FlowState {
     extension: ExtensionId,
-    user: UserId,
+    scope: ironclaw_auth::AuthProductScope,
     started_at: Instant,
     last_poll_at: Option<Instant>,
     secret_attempts: u32,
@@ -793,6 +964,39 @@ fn identifier_digest(value: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     hasher.finalize().into()
+}
+
+/// The provisional custody ref a link-in-progress stores its blob under.
+///
+/// The completion mint reads the blob back through exactly this ref, so the
+/// two sites must agree on the string — which is why both call this one
+/// function.
+fn provisional_account_ref(flow_id: &DeviceLinkFlowId) -> Option<LinkedAccountRef> {
+    LinkedAccountRef::new(format!("{PENDING_ACCOUNT_PREFIX}{flow_id}")).ok()
+}
+
+/// Clamp an adapter-supplied account label into the credential-account label
+/// grammar (≤ 256 bytes, no control characters). The step validator already
+/// bounds it at 512 bytes; this walks char boundaries so a multi-byte
+/// character is never split, and falls back to fixed host text if nothing
+/// survives.
+fn linked_account_label(
+    value: &str,
+) -> Result<ironclaw_auth::CredentialAccountLabel, DeviceLinkError> {
+    const MAX_LABEL_BYTES: usize = 256;
+    let mut clamped = String::new();
+    for character in value.chars().filter(|c| !c.is_control()) {
+        if clamped.len() + character.len_utf8() > MAX_LABEL_BYTES {
+            break;
+        }
+        clamped.push(character);
+    }
+    let clamped = clamped.trim();
+    ironclaw_auth::CredentialAccountLabel::new(clamped)
+        .or_else(|_| ironclaw_auth::CredentialAccountLabel::new("Linked account"))
+        .map_err(|_| DeviceLinkError::Internal {
+            reason: "linked account label could not be formed",
+        })
 }
 
 /// The host has no error variant of its own on the closed contract enum, so a

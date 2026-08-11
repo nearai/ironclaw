@@ -1679,6 +1679,8 @@ registerPack("ko", {
   "deviceLink.passwordLabel": "계정 비밀번호",
   "deviceLink.submit": "계속",
   "deviceLink.linked": "{name} 계정이 연결되었습니다",
+  "deviceLink.confirmDeviceAccount": "{account}(으)로 연결됨",
+  "deviceLink.confirmDevice": "이제 {name} → 설정 → 기기를 열어 방금 새 IronClaw 기기가 정확히 하나만 추가되었는지 확인하세요. 둘 이상이거나 예상하지 못한 기기가 보이면 거기서 해지하고 여기서 연결을 해제하세요.",
   "deviceLink.revokeHint": "이제 IronClaw가 {name}의 기기 목록에 표시됩니다. 모르는 기기가 보이면 거기에서 해제하세요.",
   "deviceLink.startAgain": "다시 시작",
   "deviceLink.cannotRetry": "이 {name} 계정은 연결할 수 없습니다.",

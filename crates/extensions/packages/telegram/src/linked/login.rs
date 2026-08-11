@@ -82,10 +82,22 @@ const MAX_INPUT_ATTEMPTS: u8 = 5;
 /// How long an abort waits for `auth.logOut` before giving up on it.
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The operator's MTProto application identity, from `[admin_configuration]`
+/// (`telegram_api_id` / `telegram_api_hash`) — the *developer application's*
+/// credentials, not the user's. `api_hash` is declared `secret = true` because
+/// Telegram treats it as one.
+pub struct MtprotoAppIdentity {
+    pub api_id: i32,
+    pub api_hash: SecretString,
+}
+
 /// The vendor half of Telegram's device link.
 pub struct TelegramDeviceLinkAdapter {
-    api_id: i32,
-    api_hash: SecretString,
+    /// `None` when the deployment has not configured its MTProto identity —
+    /// both admin fields are `required = false` on purpose, so a bot-only
+    /// deployment keeps activating. Every link attempt then fails closed with
+    /// an explicit not-configured error instead of dialing anything.
+    identity: Option<MtprotoAppIdentity>,
     revoker: LinkedAccountRevoker,
     pending: PendingLinks,
 }
@@ -93,24 +105,32 @@ pub struct TelegramDeviceLinkAdapter {
 impl TelegramDeviceLinkAdapter {
     /// Build the adapter.
     ///
-    /// `api_id`/`api_hash` are the *developer application's* credentials from
-    /// `[admin_configuration]`, not the user's — `api_hash` is declared
-    /// `secret = true` because Telegram treats it as one. They arrive at
-    /// construction rather than through [`DeviceLinkContext::config`], which
-    /// carries non-secret values only.
+    /// The identity arrives at construction rather than through
+    /// [`DeviceLinkContext::config`], which carries non-secret values only —
+    /// the binary resolves `telegram_api_hash` at load time (the one I/O-legal
+    /// point) and an admin-configuration edit re-runs load via reactivation.
     ///
     /// The pool is borrowed to mint a **narrow** revoke handle; the adapter
     /// never holds the pool itself. It runs inside an auth flow with no
     /// capability authorization, no approval, and no origin gate, so a handle
     /// to every user's live authenticated client is exactly what it must not
     /// have (PROPOSAL §3.3).
-    pub fn new(api_id: i32, api_hash: SecretString, pool: &SessionPool) -> Self {
+    pub fn new(identity: Option<MtprotoAppIdentity>, pool: &SessionPool) -> Self {
         Self {
-            api_id,
-            api_hash,
+            identity,
             revoker: pool.revoker(),
             pending: PendingLinks::default(),
         }
+    }
+
+    /// The configured application identity, or the explicit not-configured
+    /// failure the manifest promises ("fails closed with an explicit error
+    /// rather than making every existing install invalid").
+    fn identity(&self) -> Result<&MtprotoAppIdentity, DeviceLinkError> {
+        self.identity.as_ref().ok_or(DeviceLinkError::Internal {
+            reason: "the deployment has not configured its MTProto application identity \
+                     (telegram_api_id / telegram_api_hash)",
+        })
     }
 
     /// Abort every parked link, logging out any that Telegram already
@@ -162,10 +182,11 @@ impl TelegramDeviceLinkAdapter {
         // Checked before the connection is built, so a pool at capacity does
         // not spawn a runner task only to abort it one line later. `insert`
         // re-checks under the lock; this is the cheap path, not the guarantee.
+        let identity = self.identity()?;
         self.pending.check_capacity(flow_id)?;
         let session = IronclawSession::in_memory();
         let link = Arc::new(PendingLink {
-            connection: MtprotoConnection::open(session, self.api_id),
+            connection: MtprotoConnection::open(session, identity.api_id),
             state: tokio::sync::Mutex::new(PendingState::default()),
             created_at: Instant::now(),
         });
@@ -180,9 +201,10 @@ impl TelegramDeviceLinkAdapter {
         link: &PendingLink,
         state: &mut PendingState,
     ) -> Result<DeviceLinkStep, DeviceLinkError> {
+        let identity = self.identity()?;
         let request = tl::functions::auth::ExportLoginToken {
-            api_id: self.api_id,
-            api_hash: self.api_hash.expose_secret().to_string(),
+            api_id: identity.api_id,
+            api_hash: identity.api_hash.expose_secret().to_string(),
             // Identical on every poll, by contract: a changed set mints a new
             // token and invalidates a scan already in progress.
             except_ids: Vec::new(),
@@ -389,7 +411,7 @@ impl TelegramDeviceLinkAdapter {
         let token = link
             .connection
             .client()
-            .request_login_code(&phone, self.api_hash.expose_secret())
+            .request_login_code(&phone, self.identity()?.api_hash.expose_secret())
             .await
             .map_err(invocation_error)?;
         state.phase = PendingPhase::AwaitingCode {

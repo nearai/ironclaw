@@ -778,12 +778,13 @@ struct AcmeFixtureFactory {
     fallback_egress: Arc<ScriptedVendorServer>,
 }
 
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
     fn service(&self) -> &str {
         ACME_FIXTURE_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<
@@ -1715,12 +1716,13 @@ pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
 
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for TelegramFixtureFactory {
     fn service(&self) -> &str {
         TELEGRAM_FIXTURE_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<

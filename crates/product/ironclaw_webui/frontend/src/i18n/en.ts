@@ -1619,6 +1619,8 @@ registerPack("en", {
   "deviceLink.passwordLabel": "Account password",
   "deviceLink.submit": "Continue",
   "deviceLink.linked": "{name} account linked",
+  "deviceLink.confirmDeviceAccount": "Linked as {account}",
+  "deviceLink.confirmDevice": "Now open {name} → Settings → Devices and check that exactly one new IronClaw device appeared, just now. If you see more than one, or one you did not expect, revoke it there and unlink here.",
   "deviceLink.revokeHint": "IronClaw now shows up as a device in {name}. If you ever see a device you do not recognize, revoke it there.",
   "deviceLink.startAgain": "Start again",
   "deviceLink.cannotRetry": "This {name} account cannot be linked.",

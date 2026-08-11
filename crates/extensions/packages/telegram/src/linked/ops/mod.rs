@@ -13,8 +13,8 @@
 //! deviation from the canonical description ("history excludes thread replies
 //! where available") is stated in the vendor addendum.
 
-use ironclaw_extension_contracts::{linked_session::LinkedAccountGrant, tool_adapter::ToolError};
-use ironclaw_host_api::{messaging::StandardMessagingErrorCode, resource::ResourceScope};
+use ironclaw_extension_contracts::tool_adapter::ToolError;
+use ironclaw_host_api::messaging::StandardMessagingErrorCode;
 use serde_json::Value;
 
 use super::{
@@ -28,53 +28,26 @@ pub(crate) mod people;
 pub(crate) mod reads;
 pub(crate) mod writes;
 
-/// How the tool half learns which linked account a call acts as.
-///
-/// TODO(design): this port exists because the tool ABI has no seam for a
-/// host-issued grant. PROPOSAL §5.1 settles that containment must be rooted in
-/// a `LinkedAccountGrant` the host mints — explicitly *not* in
-/// `ToolCall.scope.user_id`, which the same section establishes is not a
-/// trustworthy isolation axis — but §8.3 also freezes `ToolPorts` and
-/// `ToolCall` as unchanged, so no per-dispatch carrier exists. The resolution
-/// that keeps both constraints is a bind-time port, supplied by the host beside
-/// `LinkedSessionPortFactory` on `BindContext`: the host resolves the scope to
-/// a credential account and mints the grant, and this package never constructs
-/// one from a caller-supplied id.
-///
-/// Until the host supplies it, this trait is that seam's shape. It takes the
-/// scope and returns a grant precisely so the *resolution* stays host-side; an
-/// implementation in this package that read `scope.user_id` and minted its own
-/// grant would reintroduce the hazard the design refuses, and must not be
-/// written.
-#[async_trait::async_trait]
-pub trait LinkedAccountResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<LinkedAccountGrant, LinkedAccountResolutionError>;
-}
+// How the tool half learns which linked account a call acts as: the
+// host-implemented `LinkedAccountResolver` supplied at bind
+// (`ironclaw_extension_contracts::linked_session`), beside the custody
+// factory. PROPOSAL §5.1 settles that containment must be rooted in a
+// host-minted `LinkedAccountGrant` — explicitly *not* in
+// `ToolCall.scope.user_id` — and §8.3 freezes `ToolPorts`/`ToolCall`, so the
+// bind-time port is the one seam. An implementation in this package that read
+// `scope.user_id` and minted its own grant would reintroduce the hazard the
+// design refuses, and must not be written.
 
-/// Why an account could not be resolved.
-#[derive(Debug, thiserror::Error)]
-pub enum LinkedAccountResolutionError {
-    /// This caller has no linked Telegram account, or its credential was
-    /// revoked. The run parks on the connect gate.
-    #[error("no linked telegram account for this caller")]
-    NotLinked,
-    /// Resolution itself failed (custody unavailable, backend error). Not the
-    /// same as "not linked" — telling a user to re-link because a store was
-    /// briefly unavailable is a bad instruction.
-    #[error("the linked telegram account could not be resolved")]
-    Unavailable,
-}
-
-impl From<LinkedAccountResolutionError> for ToolError {
-    fn from(error: LinkedAccountResolutionError) -> Self {
-        match error {
-            LinkedAccountResolutionError::NotLinked => mapping::auth_required(),
-            LinkedAccountResolutionError::Unavailable => {
-                mapping::failed(StandardMessagingErrorCode::VendorError)
-            }
+/// Project a resolution failure onto the tool vocabulary (a `From` impl is
+/// unavailable here: both types are foreign).
+pub(crate) fn resolution_error(
+    error: ironclaw_extension_contracts::linked_session::LinkedAccountResolutionError,
+) -> ToolError {
+    use ironclaw_extension_contracts::linked_session::LinkedAccountResolutionError;
+    match error {
+        LinkedAccountResolutionError::NotLinked => mapping::auth_required(),
+        LinkedAccountResolutionError::Unavailable => {
+            mapping::failed(StandardMessagingErrorCode::VendorError)
         }
     }
 }

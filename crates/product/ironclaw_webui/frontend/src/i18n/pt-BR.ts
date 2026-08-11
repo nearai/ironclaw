@@ -1679,6 +1679,8 @@ registerPack("pt-BR", {
   "deviceLink.passwordLabel": "Senha da conta",
   "deviceLink.submit": "Continuar",
   "deviceLink.linked": "Conta do {name} vinculada",
+  "deviceLink.confirmDeviceAccount": "Vinculado como {account}",
+  "deviceLink.confirmDevice": "Agora abra {name} → Configurações → Dispositivos e confira que apareceu exatamente um novo dispositivo IronClaw, agora mesmo. Se vir mais de um, ou algum que não esperava, revogue-o lá e desvincule aqui.",
   "deviceLink.revokeHint": "O IronClaw agora aparece como um dispositivo no {name}. Se vir um dispositivo desconhecido, revogue-o por lá.",
   "deviceLink.startAgain": "Começar de novo",
   "deviceLink.cannotRetry": "Esta conta do {name} não pode ser vinculada.",

@@ -2157,6 +2157,147 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Drive one device link end to end through the **production** step
+    /// machine — the same `DeviceLinkFlowDriver` the WebUI routes dispatch to,
+    /// resolved off the composed product-auth bundle — and return the
+    /// credential account it minted.
+    ///
+    /// What is real here is everything except the vendor: composition's
+    /// driver, the auth-side revision compare-and-swap and TTLs, the extension
+    /// host's snapshot resolution and rate limits, provisional custody, the
+    /// completion mint with its ownership pin, and the durable blob write. The
+    /// vendor half is the harness's scripted adapter, because the real one
+    /// speaks MTProto over a socket with no injectable seam.
+    pub async fn link_device_through_product_auth(
+        &self,
+        provider: &str,
+        extension_id: &str,
+        password: &str,
+    ) -> HarnessResult<ironclaw_auth::CredentialAccount> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            _ => return Err("no host-runtime capability backend to drive a device link".into()),
+        };
+        let product_auth = harness.product_auth_for_test()?;
+        let driver = product_auth
+            .device_link_driver()
+            .ok_or("composition wired no device-link driver")?;
+        // Mirror production execution-user resolution (explicit owner → actor)
+        // exactly as `seed_capability_credential_account` does: the account
+        // must land under the same four scope fields dispatch-time credential
+        // selection matches on, or the linked tool parks on the auth gate
+        // forever against an account that plainly exists.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let resource = self.run_resource_scope_for_user(dispatch_user);
+        let scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &resource,
+            ironclaw_auth::AuthSurface::Api,
+        );
+
+        let record = driver
+            .start(ironclaw_auth::DeviceLinkStartRequest {
+                scope: scope.clone(),
+                provider: ironclaw_auth::AuthProviderId::new(provider)?,
+                extension_id: ironclaw_host_api::ids::ExtensionId::new(extension_id)?,
+                continuation: ironclaw_auth::AuthContinuationRef::SetupOnly,
+                mode: ironclaw_extension_contracts::device_link::DeviceLinkMode::Default,
+                resume: None,
+            })
+            .await
+            .map_err(|error| format!("device-link start failed: {error:?}"))?;
+        let flow_id = record.id;
+
+        // Poll until the vendor asks for a value, waiting out the back-off the
+        // frame itself asks for. That wait is not test politeness: the host
+        // enforces a poll floor and answers an early poll with
+        // `AwaitingVendor` *without calling the adapter at all*, so a tight
+        // loop here would spin forever against the rate limiter rather than
+        // advancing the link — exactly what a hot-looping card would do.
+        // Bounded: a link that never reaches an input step is a failure to
+        // report, not a loop to spin.
+        let mut record = record;
+        for _ in 0..8 {
+            if matches!(
+                record.device_link_step(),
+                Some(
+                    ironclaw_extension_contracts::device_link::DeviceLinkStep::InputRequired { .. }
+                )
+            ) {
+                break;
+            }
+            if let Some(
+                ironclaw_extension_contracts::device_link::DeviceLinkStep::AwaitingVendor {
+                    retry_in,
+                },
+            ) = record.device_link_step()
+            {
+                tokio::time::sleep(*retry_in).await;
+            }
+            record = driver
+                .poll(&scope, flow_id)
+                .await
+                .map_err(|error| format!("device-link poll failed: {error:?}"))?;
+        }
+        let Some(ironclaw_extension_contracts::device_link::DeviceLinkStep::InputRequired {
+            kind,
+            ..
+        }) = record.device_link_step().cloned()
+        else {
+            return Err(format!(
+                "device link never asked for input (last step: {:?})",
+                record.device_link_step()
+            )
+            .into());
+        };
+
+        let input = match kind {
+            ironclaw_extension_contracts::device_link::DeviceLinkInputKind::Password => {
+                ironclaw_extension_contracts::device_link::DeviceLinkInput::Password(
+                    secrecy::SecretString::from(password.to_string()),
+                )
+            }
+            ironclaw_extension_contracts::device_link::DeviceLinkInputKind::Code => {
+                ironclaw_extension_contracts::device_link::DeviceLinkInput::Code(
+                    secrecy::SecretString::from(password.to_string()),
+                )
+            }
+            ironclaw_extension_contracts::device_link::DeviceLinkInputKind::Identifier => {
+                ironclaw_extension_contracts::device_link::DeviceLinkInput::Identifier(
+                    password.to_string(),
+                )
+            }
+        };
+        let completed = driver
+            .submit_input(&scope, flow_id, record.step_revision(), input)
+            .await
+            .map_err(|error| format!("device-link submit failed: {error:?}"))?;
+        if completed.status != ironclaw_auth::AuthFlowStatus::Completed {
+            return Err(format!(
+                "device link did not complete: {:?} / {:?}",
+                completed.status,
+                completed.device_link_step()
+            )
+            .into());
+        }
+        let account_id = completed
+            .credential_account_id
+            .ok_or("a completed device link must carry the account it minted")?;
+        product_auth
+            .credential_account_service()
+            .get_account(ironclaw_auth::CredentialAccountLookupRequest {
+                scope,
+                account_id,
+                requester_extension: Some(ironclaw_host_api::ids::ExtensionId::new(extension_id)?),
+            })
+            .await
+            .map_err(|error| format!("minted account read-back failed: {error:?}"))?
+            .ok_or_else(|| "the minted credential account is missing on read-back".into())
+    }
+
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
     /// selection matches. Pass the run's resolved execution user (thread

@@ -490,6 +490,15 @@ impl HostRuntimeCapabilityHarness {
         .await
     }
 
+    /// The composed product-auth bundle — the same `Arc` production assembly
+    /// attached the device-link driver to, so an integration scenario drives
+    /// the real seam rather than a harness-built twin.
+    pub(crate) fn product_auth_for_test(&self) -> HarnessResult<Arc<RebornProductAuthServices>> {
+        self.product_auth.clone().ok_or_else(|| {
+            "harness missing local-dev product auth (not built via new_with_options)".into()
+        })
+    }
+
     /// [`Self::seed_credential_account_with_material`] with the token material
     /// chosen by the caller.
     ///

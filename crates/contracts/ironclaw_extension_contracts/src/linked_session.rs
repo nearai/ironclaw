@@ -311,5 +311,36 @@ pub trait LinkedSessionPortFactory: Send + Sync {
     fn open(&self, grant: &LinkedAccountGrant) -> Arc<dyn LinkedSessionPort>;
 }
 
+/// Why a caller's linked account could not be resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LinkedAccountResolutionError {
+    /// This caller has no linked account for the extension, or its credential
+    /// was revoked. The run parks on the connect gate.
+    #[error("no linked account for this caller")]
+    NotLinked,
+    /// Resolution itself failed (custody unavailable, backend error). Not the
+    /// same as "not linked" — telling a user to re-link because a store was
+    /// briefly unavailable is a bad instruction.
+    #[error("the linked account could not be resolved")]
+    Unavailable,
+}
+
+/// Resolve which linked account a tool call acts as.
+///
+/// Supplied by the host at bind, beside [`LinkedSessionPortFactory`], and for
+/// the same reason: the tool ABI (`ToolCall`, `ToolPorts`) is deliberately
+/// unchanged, so no per-dispatch carrier for a host-issued grant exists.
+/// The host resolves the call's scope to a credential account and mints the
+/// grant; **an adapter must never construct a grant from a caller-supplied
+/// id** — `scope.user_id` is exactly the axis the design refuses to trust for
+/// isolation, and an adapter-side resolver would root containment in it.
+#[async_trait]
+pub trait LinkedAccountResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+    ) -> Result<LinkedAccountGrant, LinkedAccountResolutionError>;
+}
+
 #[cfg(test)]
 mod tests;

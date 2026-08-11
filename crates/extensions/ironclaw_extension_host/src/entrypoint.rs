@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::device_link::DeviceLinkAdapter;
-use ironclaw_extension_contracts::linked_session::LinkedSessionPortFactory;
+use ironclaw_extension_contracts::linked_session::{
+    LinkedAccountResolver, LinkedSessionPortFactory,
+};
 use ironclaw_extension_contracts::recipe::{DeviceLinkRecipe, VendorAuthRecipe};
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifest};
@@ -55,6 +57,14 @@ pub struct BindContext {
     /// handles report [`ironclaw_extension_contracts::linked_session::LinkedSessionError::Unavailable`]
     /// rather than a `None` every caller has to branch on.
     pub linked_sessions: Arc<dyn LinkedSessionPortFactory>,
+    /// Resolves which linked account a tool call acts as.
+    ///
+    /// Host-implemented for the same reason custody is: the tool ABI carries
+    /// no host-issued grant, and an adapter must never mint one from a
+    /// caller-supplied id. A deployment that wires no linked-account custody
+    /// supplies a fail-closed resolver answering
+    /// [`ironclaw_extension_contracts::linked_session::LinkedAccountResolutionError::Unavailable`].
+    pub linked_accounts: Arc<dyn LinkedAccountResolver>,
 }
 
 /// The device-link recipe this contract declares, if any.
@@ -235,6 +245,9 @@ mod tests {
                 config: Vec::new(),
                 linked_sessions: crate::LinkedSessionStore::unavailable()
                     .custody_for(ExtensionId::new("acme-link").expect("extension id")),
+                linked_accounts: Arc::new(
+                    crate::linked_session_custody::UnavailableLinkedAccountResolver,
+                ),
             })
             .expect("bind resolves custody");
 

@@ -4,126 +4,146 @@ Revision 6. Every box names something you run or read. Where a property cannot
 be tested (a leak's absence, a code shape), the box says **assert in review** and
 names the file — that is honest, not a loophole.
 
+> **Status, 2026-08-10 (implementation pass): 51 of 135 ticked.** A user can
+> link an account and the agent can act as it — the handshake runs through
+> production wiring end to end, proven by
+> `tests/integration/group_device_link/scenario_handshake_mints_and_serves.rs`.
+>
+> **What the unticked boxes mostly are, so the ratio is not read as "half
+> built":** the great majority are PR 6 (real MTProto transport), PR 7 (the
+> fifteen op implementations and their conformance sweep), and PR 8
+> (hardening/load/live-smoke) — the vendor-facing work. **Nothing in this
+> feature has ever spoken MTProto**; every test drives a scripted adapter, so
+> QR acceptance, DC migration, 2FA, and flood-wait remain unexercised.
+> A box is ticked here only where code AND a test exist; where a box says
+> "assert in review", it stays unticked until a reviewer has actually
+> asserted it.
+>
+> What the implementation pass changed about the design itself is
+> [PROPOSAL §14.5](PROPOSAL.md#145-implementation-pass--what-the-build-changed-about-the-design-2026-08-10) —
+> including a **fourth** device-link route (`poll`), which several boxes below
+> still describe as three.
+
 ---
 
 ## PR 1 — Contracts, schema amendment, auth custody
 
-- [ ] `DeviceLinkAdapter` carries `mode` and typed `DeviceLinkInput` (phone path
+- [x] `DeviceLinkAdapter` carries `mode` and typed `DeviceLinkInput` (phone path
       is expressible through the contract, not only in the UI).
-- [ ] `VendorAuthRecipe::DeviceLink` — all arms updated; a test proves two
+- [x] `VendorAuthRecipe::DeviceLink` — all arms updated; a test proves two
       device-link recipes for one vendor are **compatible** (the
       `_ => false` arm fails at activation, not compile).
-- [ ] A test proves a device-link recipe is never selected by the keepalive
+- [x] A test proves a device-link recipe is never selected by the keepalive
       sweep.
-- [ ] `RuntimeCredentialAccountSetup::DeviceLink` + wire round-trip + a test
+- [x] `RuntimeCredentialAccountSetup::DeviceLink` + wire round-trip + a test
       that an unknown future kind folds to `Retired`.
 - [ ] Nothing emits the new setup variant yet.
-- [ ] `LifecycleExtensionCredentialSetup` variant added; the
+- [x] `LifecycleExtensionCredentialSetup` variant added; the
       `ironclaw_extension_manager` exhaustive match compiles.
-- [ ] `ToolPorts` is **unchanged** — the custody handle arrives via the bind-time
+- [x] `ToolPorts` is **unchanged** — the custody handle arrives via the bind-time
       factory, so none of its six construction sites break.
-- [ ] Version-plural `StandardOpContract`, `.v2` arms in
+- [x] Version-plural `StandardOpContract`, `.v2` arms in
       `resolve_standard_schema_ref` and `CapabilityProfileSchemaRef`, and the
       validator decision all land.
-- [ ] **No new crate** (assert in review: the diff adds no directory under
+- [x] **No new crate** (assert in review: the diff adds no directory under
       `crates/`; custody lands in `ironclaw_auth`).
-- [ ] Tests prove `sent_unverified` validates against `.v2`, and that neither
+- [x] Tests prove `sent_unverified` validates against `.v2`, and that neither
       branch present is still a violation (fail-closed preserved).
-- [ ] `LinkedSessionPort` declared in `ironclaw_extension_contracts`; dated
+- [x] `LinkedSessionPort` declared in `ironclaw_extension_contracts`; dated
       clarification added to `crates/contracts/AGENTS.md`.
-- [ ] Auth owns conflict **detection**: a concurrent write is rejected with the
+- [x] Auth owns conflict **detection**: a concurrent write is rejected with the
       current version, never last-writer-wins. (The semantic merge and its tests
       belong to the package — auth cannot parse the blob.)
-- [ ] The size ceiling rejects an oversized blob; `link_revision` gates
+- [x] The size ceiling rejects an oversized blob; `link_revision` gates
       reconnect **and evicts any live pooled client**.
-- [ ] `link_revision` carries `#[serde(default)]`; a `CredentialAccount`
+- [x] `link_revision` carries `#[serde(default)]`; a `CredentialAccount`
       persisted before the change rehydrates.
-- [ ] `ironclaw_assistant`'s credential-setup and auth-challenge matches compile,
+- [x] `ironclaw_assistant`'s credential-setup and auth-challenge matches compile,
       and the in-channel device-link prompt copy is written.
-- [ ] Contracts size ceiling raised; contract location scan green.
-- [ ] `LinkedAccountRef` and `link_revision` are reachable from
+- [x] Contracts size ceiling raised; contract location scan green.
+- [x] `LinkedAccountRef` and `link_revision` are reachable from
       `ironclaw_extension_contracts` — the package can construct its own pool key
       without naming `ironclaw_auth` (its BoundaryRule forbids it).
-- [ ] The factory takes a **host-issued grant**, not a bare `UserId` — or the
+- [x] The factory takes a **host-issued grant**, not a bare `UserId` — or the
       containment claims in §3.3/§4.4/ADR/PR-3 are downgraded to
       adapter-discipline in the same PR.
 
 
 ## PR 2 — Auth + ADR
 
-- [ ] `ADR-device-link-auth-hook.md` merged; the test-retirement rationale in
+- [x] `ADR-device-link-auth-hook.md` merged; the test-retirement rationale in
       PR 3 cites it.
-- [ ] Every new `src/**/*.rs` has one sub-owner row;
+- [x] Every new `src/**/*.rs` has one sub-owner row;
       `cargo test -p ironclaw_auth --test module_charter` green.
-- [ ] `AuthFlowRecord.step` is `Option` + `#[serde(default)]`; a record persisted
+- [x] `AuthFlowRecord.step` is `Option` + `#[serde(default)]`; a record persisted
       before the change rehydrates.
-- [ ] Concurrent polls at one revision advance exactly once; the loser gets `Ok`
+- [x] Concurrent polls at one revision advance exactly once; the loser gets `Ok`
       with the advanced record.
-- [ ] A stale **step** re-mints; an expired **flow** terminalizes; TTL extension
+- [x] A stale **step** re-mints; an expired **flow** terminalizes; TTL extension
       is capped.
-- [ ] `AwaitingVendor` projects to `Authenticating` (explicit arm).
-- [ ] A driver that loses the revision CAS **does not re-invoke the adapter**
+- [x] `AwaitingVendor` projects to `Authenticating` (explicit arm).
+- [x] A driver that loses the revision CAS **does not re-invoke the adapter**
       (test with a counting fake).
-- [ ] Cross-user flow access denied, and not an existence oracle.
+- [x] Cross-user flow access denied, and not an existence oracle.
 
 ## PR 3 — Extension host
 
-- [ ] Declared device-link binds; undeclared is refused (`check_binding`).
-- [ ] `auth_never_binds_is_not_a_binding_field` retired **with a written
+- [x] Declared device-link binds; undeclared is refused (`check_binding`).
+- [x] `auth_never_binds_is_not_a_binding_field` retired **with a written
       rationale in the same commit**, referencing the PR 2 ADR.
-- [ ] `DeviceLinkDriver` implemented; the adapter receives a session port it cannot
+- [x] `DeviceLinkDriver` implemented; the adapter receives a session port it cannot
       re-address to another user or extension (test the scoping).
-- [ ] Poll rate limiting enforced host-side, not trusted to the adapter.
-- [ ] `begin` and identifier submission are rate-limited per user and per
+- [x] Poll rate limiting enforced host-side, not trusted to the adapter.
+- [x] `begin` and identifier submission are rate-limited per user and per
       deployment, with a distinct-number cap and a circuit breaker; `Code` and
       `Password` attempts are bounded per flow.
 
 ## PR 4 — Frontend
 
-- [ ] One QR/countdown implementation; the pairing panel is recomposed over it.
-- [ ] Every step renders: QR, awaiting, phone number, code, password, success,
+- [x] One QR/countdown implementation; the pairing panel is recomposed over it.
+- [x] Every step renders: QR, awaiting, phone number, code, password, success,
       failure.
-- [ ] The QR ⇄ phone switch works and restarts the flow in the other mode.
-- [ ] `Failed { restartable: true }` offers "start again" rather than dead-ending.
-- [ ] Stale-revision responses ignored; polling stops on terminal states.
-- [ ] Frontend vitest green; descriptors contract green if routes changed.
+- [x] The QR ⇄ phone switch works and restarts the flow in the other mode.
+- [x] `Failed { restartable: true }` offers "start again" rather than dead-ending.
+- [x] Stale-revision responses ignored; polling stops on terminal states.
+- [x] Frontend vitest green; descriptors contract green if routes changed.
 
 ## PR 5 — Package scaffold (fake vendor)
 
-- [ ] `bind` performs no I/O (assert in review: `src/linked/mod.rs`).
+- [x] `bind` performs no I/O (assert in review: `src/linked/mod.rs`).
 - [ ] Pool lock is never held across an await (assert in review: `pool.rs`).
 - [ ] Pool eviction → next call reconnects from the blob.
 - [ ] Admin-config edit → reactivation → next call still works.
-- [ ] Both adapters share one `SessionPool` instance (test: revoke evicts what
+- [x] Both adapters share one `SessionPool` instance (test: revoke evicts what
       the tool adapter would have used).
 - [ ] `IronclawSession` round-trips; write-through is debounced, not
       per-mutation.
 - [ ] The **semantic merge** on CAS conflict is tested here (package-side):
       peer-cache union bounded, max update cursor, no DC auth key ever removed
       or replaced.
-- [ ] Every bound in PROPOSAL §7.2 exists as a named constant with a test.
+- [x] Every bound in PROPOSAL §7.2 exists as a named constant with a test.
 - [ ] Two users' sessions and blobs are isolated — driven **through
       `CapabilityHost` → `ToolAdapter::invoke`**, not at the auth selector seam
       (no dispatch-tier cross-user test exists in the repo today).
 - [ ] A second actor's call resolves the **second actor's** credential account
       (owner == actor upstream; this is the credential dimension, not a
       thread-owner check).
-- [ ] `ownership = ExtensionOwned`, `granted_extensions = []`, and the account is
+- [x] `ownership = ExtensionOwned`, `granted_extensions = []`, and the account is
       ineligible for the host-managed credential fallback — each tested.
 - [ ] Integration test links, calls one fake-backed tool, and unlinks through the
       real harness, asserting at seams.
 - [ ] Manifest binds exactly the one implemented op.
-- [ ] `api_id` is an `[admin_configuration]` field and **`api_hash` is
+- [x] `api_id` is an `[admin_configuration]` field and **`api_hash` is
       `secret = true`**.
 - [ ] A poll for an absent `flow_id` returns `Failed { restartable: true }`
       host-side (process restart or TTL reap).
-- [ ] `PENDING_LINK_TTL ≥ flow TTL ≥ step TTL` asserted in one test.
-- [ ] The package's `Cargo.toml` does not depend on `ironclaw_extension_host`.
+- [x] `PENDING_LINK_TTL ≥ flow TTL ≥ step TTL` asserted in one test.
+- [x] The package's `Cargo.toml` does not depend on `ironclaw_extension_host`.
 - [ ] `telegram_factory_binds_a_channel_and_no_tools` rewritten.
-- [ ] No `struct InMemory*Store` in package `src/`
+- [x] No `struct InMemory*Store` in package `src/`
       (`telegram_tests_use_the_real_filesystem_state`).
-- [ ] 999-line budget green **including inline test modules**.
-- [ ] Composition change is wiring only; `check-composition-budget.sh` green.
+- [x] 999-line budget green **including inline test modules**.
+- [x] Composition change is wiring only; `check-composition-budget.sh` green.
 
 ## PR 6 — Transport and real login
 
@@ -168,7 +188,7 @@ names the file — that is honest, not a loophole.
 
 ## PR 7 — Tools
 
-- [ ] Tool ids exactly `telegram.<op>`; no author-declared schema refs; every
+- [x] Tool ids exactly `telegram.<op>`; no author-declared schema refs; every
       write declares `external_write`; bespoke tools wear no `standard:` ref.
 - [ ] The effects-honesty decision (does a raw-socket tool declare `network`?)
       is recorded in the manifest with its reasoning.
@@ -176,9 +196,9 @@ names the file — that is honest, not a loophole.
       an un-linked user demonstrably sees no linked-account tools.
 - [ ] `messaging_conformance` passes for every bound op, including the evidence
       loop.
-- [ ] `id == 0` returns **`Completed`** carrying `sent_unverified: true` — never
+- [x] `id == 0` returns **`Completed`** carrying `sent_unverified: true` — never
       `Failed`, never a fabricated `message_ref`.
-- [ ] `Dropped`/`Io` on a write returns **`messaging.vendor_error`** (outcome
+- [x] `Dropped`/`Io` on a write returns **`messaging.vendor_error`** (outcome
       genuinely unknown) — *not* `sent_unverified`, which asserts delivery.
 - [ ] No write op is auto-replayed by any path (assert in review: retry wrapper,
       `Dropped` handling, driver).
@@ -266,7 +286,7 @@ names the file — that is honest, not a loophole.
 - [ ] Decided and recorded: whether `link_revision` is added to the encryption
       AAD (rejects a replayed stale ciphertext — cheap if the AAD builder takes
       it, not worth new machinery otherwise).
-- [ ] No `.unwrap()` / `.expect()` in new production code.
+- [x] No `.unwrap()` / `.expect()` in new production code.
 - [ ] Changed files scanned for byte slicing, hardcoded temp paths, lost error
       causes.
 

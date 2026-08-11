@@ -41,38 +41,33 @@
 //! `ironclaw_cli::runtime::native_extensions` must also take before the
 //! shipping binary can activate this package.
 //!
-//! # TODO(design): what this profile deliberately cannot reach
+//! # What this profile reaches, and what it deliberately does not
 //!
 //! The device-link **handshake** (`begin -> poll -> submit_input -> completed`)
-//! is not drivable from this tier, because no deployment assembles it. Four
-//! seams are missing, each already carrying its own `TODO(design)` in the
-//! source; a scenario added here before they land would be testing harness
-//! wiring rather than production behavior, which
-//! `.claude/rules/testing.md` forbids outright:
+//! IS drivable from this tier as of 2026-08-10, and
+//! `scenario_handshake_mints_and_serves` drives it. The four seams that used to
+//! make it unreachable have all landed: composition constructs the
+//! `DeviceLinkFlowDriver` and the extension host's `SnapshotDeviceLinkDriver`
+//! and attaches them to the product-auth bundle; custody resolves to the
+//! credential-service-backed store rather than `LinkedSessionStore::unavailable()`;
+//! completion mints the credential account through
+//! `CredentialAccountService::complete_linked_device_link` (ownership pinned
+//! there); and `LinkedAccountResolver` is implemented host-side, so the tool
+//! half resolves the caller to the account the handshake minted.
 //!
-//! 1. **No driver is constructed.** Neither `ironclaw_composition` nor
-//!    `ironclaw_cli` builds a `DeviceLinkFlowDriver` (auth) or a
-//!    `SnapshotDeviceLinkDriver` (extension host), so there is no production
-//!    entry point a card or a test could call.
-//! 2. **No custody is wired.** `ironclaw_extension_host::generic_host` hands
-//!    every deployment `LinkedSessionStore::unavailable()`, and no
-//!    `LinkedSessionMaterialStore` implementation exists outside test doubles —
-//!    so every session write fails closed. [`ScriptedDeviceLinkAdapter`]
-//!    records that outcome via `custody_outcomes()` rather than assuming a
-//!    persist succeeded.
-//! 3. **Completion cannot mint a credential account.** The extension host's
-//!    `DeviceLinkDriver` impl reports `account: None` even on a `Completed`
-//!    step, which the auth-side driver correctly terminalizes — so no link can
-//!    complete through the port today.
-//! 4. **The linked tools have no account resolver.** `LinkedAccountResolver`
-//!    (declared by the Telegram package) has zero implementations workspace-wide.
+//! Two things remain out of reach at every Rust tier, and no scenario here
+//! pretends otherwise:
 //!
-//! The related lifecycle rule "a failed session must not reconnect until
-//! `link_revision` changes" is likewise **unimplemented**: the pool keys on the
-//! revision and custody gates on it, but nothing records a session-level
-//! failure or refuses reconnection until the revision moves. There is no
-//! production behavior to assert, so no scenario here asserts one.
-//! Both are tracked as gap rows in `tests/CLAUDE.md` §7.
+//! 1. **Real MTProto.** The vendor half is scripted
+//!    ([`ScriptedDeviceLinkAdapter`] and [`LinkedAccountFixtureToolAdapter`])
+//!    because the shipped one speaks a binary protocol over a socket with no
+//!    injectable seam. QR acceptance, datacenter migration, 2FA and flood-wait
+//!    behaviour are therefore unexercised anywhere in CI.
+//! 2. **"A failed session must not reconnect until `link_revision` changes."**
+//!    The pool keys on the revision and custody gates on it, but nothing
+//!    records a session-level *failure* or refuses reconnection until the
+//!    revision moves — there is no production behavior to assert. Tracked as a
+//!    gap row in `tests/CLAUDE.md` §7.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -414,6 +409,10 @@ impl DeviceLinkAdapter for ScriptedDeviceLinkAdapter {
 #[derive(Default)]
 pub(crate) struct LinkedAccountFixtureToolAdapter {
     calls: Mutex<Vec<(String, String)>>,
+    /// The host-supplied bind-time resolver — the same seam the real
+    /// `TelegramLinkedToolAdapter` consumes. Filled at every `bind`.
+    resolver:
+        Mutex<Option<Arc<dyn ironclaw_extension_contracts::linked_session::LinkedAccountResolver>>>,
 }
 
 impl LinkedAccountFixtureToolAdapter {
@@ -424,6 +423,25 @@ impl LinkedAccountFixtureToolAdapter {
     /// `(capability_id, scope.user_id)` per invocation, in order.
     pub(crate) fn calls(&self) -> Vec<(String, String)> {
         self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn attach_resolver(
+        &self,
+        resolver: Arc<dyn ironclaw_extension_contracts::linked_session::LinkedAccountResolver>,
+    ) {
+        *self
+            .resolver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolver);
+    }
+
+    fn resolver(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_extension_contracts::linked_session::LinkedAccountResolver>> {
+        self.resolver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -454,8 +472,28 @@ impl ToolAdapter for LinkedAccountFixtureToolAdapter {
         else {
             return Err(undeclared(&capability_id));
         };
-        let output =
+        let mut output =
             canonical_output(op, &caller, &call.input).ok_or_else(|| undeclared(&capability_id))?;
+        // Resolve through the host's bind-time resolver — the production seam
+        // — and echo the grant so a scenario can assert the call acted as the
+        // MINTED account. Soft on purpose: scenarios that seed accounts
+        // through the manual-token path (no linked device) keep working, and
+        // the handshake scenario asserts the echo is present.
+        if let Some(resolver) = self.resolver()
+            && let Ok(grant) = resolver.resolve(&call.scope).await
+            && let Some(vendor) = output
+                .get_mut("vendor")
+                .and_then(|value| value.as_object_mut())
+        {
+            vendor.insert(
+                "linked_account_ref".to_string(),
+                serde_json::Value::String(grant.account().as_str().to_string()),
+            );
+            vendor.insert(
+                "link_revision".to_string(),
+                serde_json::Value::from(grant.link_revision()),
+            );
+        }
         let output_bytes = serde_json::to_vec(&output)
             .map(|bytes| bytes.len() as u64)
             .unwrap_or_default();
@@ -534,12 +572,13 @@ impl TelegramLinkedFixtureFactory {
     }
 }
 
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for TelegramLinkedFixtureFactory {
     fn service(&self) -> &str {
         LINKED_RUNTIME_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<
@@ -561,9 +600,10 @@ struct TelegramLinkedFixtureEntrypoint {
 impl ironclaw_extension_host::ExtensionEntrypoint for TelegramLinkedFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
+        self.tools.attach_resolver(Arc::clone(&ctx.linked_accounts));
         Ok(ironclaw_extension_host::ExtensionBindings {
             tools: Some(Arc::clone(&self.tools) as Arc<dyn ToolAdapter>),
             channel: Some(Arc::new(

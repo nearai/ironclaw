@@ -78,13 +78,14 @@ function boundedNumber(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
-// TODO(design): `input_kind`, `mode`, `restartable`, and `flow_id` are the
-// additive flow-status fields PROPOSAL §8.12 assigns to the WebUI backend half
-// of PR 4; `DeviceLinkPromptView` itself carries none of them. Until that route
-// lands, each is read when present and falls back below:
-//   - `input_kind` -> "code" (the only input every device link asks for; the
-//     masked-password affordance therefore needs the real field),
-//   - `mode` -> "default",
+// `input_kind`, `mode`, `restartable`, and `flow_id` are PROPOSAL §8.12's
+// additive frame fields. The backend now emits all four (`DeviceLinkPromptView`
+// carries them, projected from the durable flow record), so the fallbacks below
+// are DEFENSIVE ONLY — they keep a card rendering against an older server
+// rather than blanking:
+//   - `input_kind` -> "code" (the masked-password affordance needs the real
+//     field; falling back shows a visible input where a cloud password belongs),
+//   - `mode` -> "default" (the "use the other path" switch needs the real one),
 //   - `restartable` -> derived from `error_code`,
 //   - `flow_id` -> absent, and a card with no flow id cannot poll or submit,
 //     so it starts a flow of its own instead.

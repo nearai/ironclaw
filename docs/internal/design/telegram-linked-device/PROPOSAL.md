@@ -1,6 +1,6 @@
 # Telegram Linked Device — Proposal
 
-**Status:** Proposal, revision 6 — re-verified against `origin/main` @ `0f771d4915` (2026-08-10) — five-lens audit + security re-audit applied; **sign-off still withheld** (§14.3) · **Against:** `boom-python` @ 2026-08-07
+**Status:** Proposal, revision 6 — re-verified against `origin/main` @ `0f771d4915` (2026-08-10) — five-lens audit + security re-audit applied; **sign-off still withheld** (§14.3). Implementation pass landed 2026-08-10; what it changed about the design is §14.5 · **Against:** `boom-python` @ 2026-08-07
 Read [README.md](README.md) first. Review history in §14.
 
 ---
@@ -1354,6 +1354,37 @@ corrections:
 | `SecretBytes` / `PasswordToken` claims | Corrected (§4.3, §5.1) |
 | ADR 0001 not addressed | Disposition recorded (§9) |
 | Vendor claims unverifiable in-tree | **Resolved by source audit, not deferred** — see below |
+
+### 14.5 Implementation pass — what the build changed about the design (2026-08-10)
+
+The feature was carried from "green gates over a fail-closed skeleton" to a
+working link. Five things the implementation learned are design facts, not
+implementation detail, and are recorded here rather than left in code comments.
+
+| Finding | Correction |
+| --- | --- |
+| **A card cannot poll a device link through the generic flow-status route.** §8.12 and the frontend module both assumed STATUS was the poll. It cannot be: a link only advances when the host re-exports the login token (§4.2), nothing else drives that, and a card polling a pure read waits forever on a QR that was already scanned. Routing the advance through the shared `GET` would also have hidden a vendor call behind a descriptor declared read-shaped | **Four device-link routes, not three:** `start`, **`poll`**, `input`, `cancel` — every one a bounded, authenticated `POST`, because every one makes a vendor-visible transition. STATUS stays shared, stays a pure read, and carries the additive frame so a re-rendered card hydrates without disturbing a live link. `poll` carries the read-cadence rate cap (the 20/min mutation budget would throttle a ~3s poll into a stalled link); the host's own poll floor is the real bound |
+| **`DeviceLinkBinding` could not carry a completion.** The port passed `(provider, extension_id, user_id)`, and minting an account needs an `AuthProductScope` — which §8.4 correctly refused to synthesize from a bare user id | The binding carries the **flow's own `AuthProductScope`** (`user_id()` is an accessor over it). That is what let the completion mint land host-side, closing the `account: None` fail-closed hole without re-deriving security-relevant scope |
+| **`LinkedAccountResolver` was a package-declared port with no seam.** §5.1 required containment rooted in a host-minted grant; §8.3 froze `ToolPorts`/`ToolCall`, leaving nowhere to carry one | The port moved **into `ironclaw_extension_contracts`** beside `LinkedSessionPortFactory` and is supplied on `BindContext`, host-implemented over the same credential-account selection every runtime injection uses. The package now declares no resolver of its own — the shape §5.1 asked for, in the crate the boundary rule allows |
+| **The custody store needed a two-space split.** §4.3's "store blob → mint account → report completed" means a blob exists *before* any credential account does, and the material seam addresses accounts | `LinkedSessionStore` owns a **provisional space** (revision 0, bounded, in-process) for the handshake and a **durable space** (revision ≥ 1) behind the credential service, plus the ref→account directory that maps a host-issued `LinkedAccountRef` to the coordinates the auth domain needs. A process restart legitimately loses a provisional blob: the parked vendor connection died with it |
+| **`api_hash` cannot arrive through `BindContext`.** It is `secret = true`, and bind carries non-secret config only — but the adapter must hold it to speak the protocol | Resolved at **load**, the one I/O-legal point before bind, through a new pre-scoped `LoadTimeAdminSecrets` port on `LoadContext` (`NativeExtensionFactory::load` is now `async`). Unset — both MTProto fields are `required = false` — the adapter still binds and fails every link attempt closed with an explicit not-configured error, so a bot-only deployment keeps activating |
+
+Two smaller corrections, both surfaced by tests rather than review:
+
+- **A CAS loss is a 409, not a 503.** The stable `BackendConflict →
+  BackendUnavailable` projection would have told a card with a stale step
+  revision to retry the same request later; retrying a superseded revision can
+  never succeed. The route maps the typed domain error to `Conflict`.
+- **"No account read model wired" is not "the account read model failed."**
+  Linked-device cleanup needs that distinction: the first means there is no
+  device to log out, the second means we cannot tell — and unbinding anyway
+  would strand a live authorization. `UnsupportedCredentialAccountRecordSource`
+  now reports `UnsupportedOperation`; the projected wire code is unchanged.
+
+**Still not done, and not claimed:** nothing in this feature has ever spoken
+MTProto. Every test drives a scripted adapter. §14.3's withheld sign-off stands
+on its own terms — the compensation set for the auth hook is unchanged by any
+of the above.
 
 ### 14.4 Revision 6 — re-verified against a moved `main` (2026-08-10)
 

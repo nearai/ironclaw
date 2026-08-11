@@ -19,7 +19,9 @@ use ironclaw_extension_contracts::device_link::{
     DeviceLinkAdapter, DeviceLinkContext, DeviceLinkError, DeviceLinkFlowId, DeviceLinkInput,
     DeviceLinkInputKind, DeviceLinkMode, DeviceLinkStep,
 };
-use ironclaw_extension_contracts::linked_session::LinkedAccountGrant;
+use ironclaw_extension_contracts::linked_session::{
+    LinkedAccountGrant, LinkedSessionVersion, SessionBytes,
+};
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
@@ -501,6 +503,10 @@ pub struct FakeDeviceLinkAdapter {
     pub steps: Arc<Mutex<VecDeque<DeviceLinkStep>>>,
     /// When set, every call fails with this error instead.
     pub fail_with: Arc<Mutex<Option<DeviceLinkError>>>,
+    /// When set, a scripted `Completed` step is returned WITHOUT persisting a
+    /// session blob first — the adapter-contract violation the engine must
+    /// refuse (a completion the custody store cannot back).
+    pub skip_completion_persist: Arc<Mutex<bool>>,
 }
 
 impl FakeDeviceLinkAdapter {
@@ -510,6 +516,7 @@ impl FakeDeviceLinkAdapter {
             calls: Arc::new(Mutex::new(Vec::new())),
             steps: Arc::new(Mutex::new(steps.into_iter().collect())),
             fail_with: Arc::new(Mutex::new(None)),
+            skip_completion_persist: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -546,14 +553,35 @@ impl FakeDeviceLinkAdapter {
         {
             return Err(error);
         }
-        Ok(self
+        let step = self
             .steps
             .lock()
             .expect("fake device-link steps")
             .pop_front()
             .unwrap_or(DeviceLinkStep::AwaitingVendor {
                 retry_in: Duration::from_millis(1),
-            }))
+            });
+        // The adapter contract: custody is durable before completion is
+        // reported (store blob → mint → report). Mirror the real adapter by
+        // persisting through the pre-scoped handle before a `Completed` step —
+        // unless a test explicitly scripts the violation.
+        if matches!(step, DeviceLinkStep::Completed { .. })
+            && !*self
+                .skip_completion_persist
+                .lock()
+                .expect("fake device-link persist flag")
+        {
+            let expected = match ctx.session.load().await {
+                Ok(Some(snapshot)) => snapshot.version,
+                _ => LinkedSessionVersion::absent(),
+            };
+            let blob = SessionBytes::new(b"fake-linked-session".to_vec())
+                .expect("fixture blob satisfies bounds");
+            if let Err(error) = ctx.session.save(expected, blob).await {
+                return Err(DeviceLinkError::Custody(error));
+            }
+        }
+        Ok(step)
     }
 }
 
