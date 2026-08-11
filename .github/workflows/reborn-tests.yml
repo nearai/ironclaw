@@ -210,6 +210,9 @@ jobs:
       OPENAI_API_KEY: ""
       RUSTC_BOOTSTRAP: "1"
       RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
+      # Some composition tests build the full Reborn runtime on a libtest
+      # thread and need the same stack headroom as the root and group suites.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
@@ -1026,6 +1029,8 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      # Recorded replay builds the full Reborn runtime on a libtest thread.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
