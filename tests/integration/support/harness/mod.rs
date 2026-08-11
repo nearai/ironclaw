@@ -110,6 +110,41 @@ fn write_system_skill_fixture(
     Ok(())
 }
 
+/// Write a USER-scoped skill into the local-dev store, at the path the boot import migrates from.
+///
+/// Same layout `seed_user_skill_for_test` writes, extracted so it can run BEFORE the runtime is
+/// built. That ordering is the point: skills are read from the database tree, and the host-disk
+/// store is migrated into it at boot, so a user skill written afterwards is never seen by the run.
+fn write_user_skill_fixture(
+    storage_root: &std::path::Path,
+    tenant: &TenantId,
+    user: &ironclaw_host_api::ids::UserId,
+    name: &str,
+    description: &str,
+    prompt: &str,
+    installed: bool,
+) -> HarnessResult<()> {
+    let dir = storage_root
+        .join("tenants")
+        .join(tenant.as_str())
+        .join("users")
+        .join(user.as_str())
+        .join("skills")
+        .join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    if installed {
+        std::fs::write(
+            dir.join(".ironclaw-install.json"),
+            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -167,11 +202,18 @@ impl HarnessCapabilityMode {
                         trajectory_observer.clone(),
                     );
                 }
-                if harness
-                    .capability_ids
-                    .iter()
-                    .any(|id| id.as_str() == ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID)
-                    && harness.reborn_services_for_test().is_some()
+                // Every capability that looks up "the run this call belongs
+                // to" reads composition's ONE source-turn-state slot:
+                // `trigger_create` (source-conversation inheritance) and
+                // `outbound_deliver` (same-origin check). Repoint it at the
+                // group's store whenever either is on this profile's surface.
+                if harness.capability_ids.iter().any(|id| {
+                    matches!(
+                        id.as_str(),
+                        ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID
+                            | ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID
+                    )
+                }) && harness.reborn_services_for_test().is_some()
                 {
                     harness.install_trigger_source_processes_for_test(&process_system)?;
                 }
@@ -682,6 +724,8 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_credentials,
             skill_activation_tenant,
             system_skill_fixtures,
+            user_skill_fixtures,
+            skill_activation_user,
             outbound_target_service,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
@@ -691,11 +735,20 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
+            web_push_runtime_slot,
+            extra_first_party_bundles,
             recording_network_egress,
             google_oauth_backend_for_test,
+            sandboxed_shell,
             workspace_scoped_per_caller,
         } = options;
-        let root = Arc::new(tempfile::tempdir()?);
+        let root = Arc::new(if sandboxed_shell {
+            // macOS Docker VMs can bind-mount the checkout but not the default
+            // `/var/folders` tempfile root.
+            tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?
+        } else {
+            tempfile::tempdir()?
+        });
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
@@ -706,6 +759,25 @@ impl HostRuntimeCapabilityHarness {
                 &fixture.description,
                 &fixture.prompt,
             )?;
+        }
+        if !user_skill_fixtures.is_empty() {
+            let tenant = skill_activation_tenant
+                .as_ref()
+                .ok_or("user skill fixtures require with_skill_activation_tenant")?;
+            let user = skill_activation_user
+                .as_ref()
+                .ok_or("user skill fixtures require with_skill_activation_user")?;
+            for fixture in &user_skill_fixtures {
+                write_user_skill_fixture(
+                    &storage_root,
+                    tenant,
+                    user,
+                    &fixture.name,
+                    &fixture.description,
+                    &fixture.prompt,
+                    fixture.installed,
+                )?;
+            }
         }
         let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {
@@ -728,6 +800,17 @@ impl HostRuntimeCapabilityHarness {
                 },
             )?
             .with_local_runtime_confirmed_host_home_root(host_home_root)
+        } else if sandboxed_shell {
+            let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
+                storage_root.join("sandbox-workspaces"),
+            )
+            .await?;
+            ironclaw_composition::local_filesystem_build_input_with_profile(
+                ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                service_label,
+                storage_root,
+            )
+            .with_runtime_process_binding(user_sandbox)
         } else {
             ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
         };
@@ -738,6 +821,18 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_runtime_policy(runtime_policy);
         }
         input = input.with_bundled_first_party_for_test();
+        if !extra_first_party_bundles.is_empty() {
+            // Mirror the binary: inventory bundles first, binary-table
+            // extras (web-push) appended. `with_first_party_bundles`
+            // replaces, so rebuild the full list.
+            let mut bundles =
+                ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
+            bundles.extend(extra_first_party_bundles);
+            input = input.with_first_party_bundles(bundles);
+        }
+        if let Some(slot) = web_push_runtime_slot {
+            input = input.with_web_push_runtime_slot(slot);
+        }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
@@ -1404,8 +1499,9 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// C-SYNTH outbound: the injected service double, for read-back that a
-    /// `target_set` actually reached the service seam
-    /// (`recorded_set_target_ids`). `Some` only for `outbound_target_tools()`.
+    /// notification-channel set actually reached the service seam
+    /// (`recorded_notification_channel_ids`). `Some` only for
+    /// `outbound_target_tools()`.
     pub(crate) fn outbound_preferences_service_for_test(
         &self,
     ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesService>> {
@@ -1415,14 +1511,14 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// C-SYNTH outbound: persist a `Disabled` per-tool permission override for
-    /// `outbound_delivery_target_set` under `(tenant, user)`, driving the
+    /// `notification_channels_set` under `(tenant, user)`, driving the
     /// handler's settings decision to `Deny` → `Failed{policy_denied}`. The
     /// scope must be the run's EFFECTIVE dispatch user (the thread binding actor,
     /// `harness.binding.actor_user_id`) — the same `(tenant, user)`
     /// `StoreApprovalSettingsProvider::tool_override` reads it back under
     /// (`PersistentApprovalScope` = tenant+user, invocation-independent). `Some`
     /// only for `outbound_target_tools()`.
-    pub(crate) async fn disable_outbound_target_set_tool(
+    pub(crate) async fn disable_notification_channels_set_tool(
         &self,
         tenant_id: TenantId,
         user_id: UserId,
@@ -1445,7 +1541,7 @@ impl HostRuntimeCapabilityHarness {
             .set(ironclaw_approvals::CapabilityPermissionOverrideInput {
                 scope,
                 capability_id: CapabilityId::new(
-                    ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+                    ironclaw_composition::test_support::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
                 )?,
                 state: ironclaw_approvals::CapabilityPermissionOverride::Disabled,
                 updated_by: Principal::User(user_id),
@@ -1728,7 +1824,7 @@ impl HostRuntimeCapabilityHarness {
             .clone()
             .unwrap_or_else(|| Arc::new(super::doubles::UnavailableProjectService));
         // Wrapped in `RecordingApprovalRequestStore`: port-level synthetic
-        // capabilities (e.g. `outbound_delivery_target_set`) persist approval
+        // capabilities (e.g. `notification_channels_set`) persist approval
         // requests directly to this store rather than through the host
         // runtime, so `RecordingHostRuntime` never sees their scope — the
         // wrapper restores the `pending_approval_scopes` bookkeeping
@@ -1797,7 +1893,7 @@ impl HostRuntimeCapabilityHarness {
             Arc::clone(&parts.service)
                 as Arc<dyn ironclaw_assistant::OutboundPreferencesProductService>
         });
-        let outbound_delivery_target_set_requires_approval = self
+        let outbound_preference_write_requires_approval = self
             .outbound_target_tools
             .as_ref()
             .map(|parts| parts.requires_approval)
@@ -1863,12 +1959,11 @@ impl HostRuntimeCapabilityHarness {
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
         // builtin/extension grant otherwise). Excludes only capabilities still
-        // surfaced by wrapping the port directly; route-current deliberately
-        // remains a normal first-party capability and receives a real grant.
+        // surfaced by wrapping the port directly.
         let synthetic_capability_ids: std::collections::HashSet<&str> = [
             ironclaw_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
             ironclaw_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
-            ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+            ironclaw_composition::test_support::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
             ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
         ]
         .into_iter()
@@ -1956,7 +2051,7 @@ impl HostRuntimeCapabilityHarness {
                 ironclaw_composition::test_support::build_extension_management_for_test(services)
             }),
             outbound_preferences_service,
-            outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval,
             tool_permission_overrides,
             auto_approve_settings,
             persistent_approval_policies,

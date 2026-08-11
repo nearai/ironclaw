@@ -220,25 +220,20 @@ successful callback binds the Slack `authed_user.id` to the authenticated
 Reborn user through the host-owned identity binding store. Slack personal setup is OAuth-only; the old browser
 manual-code redeem route and Slack command flow are not mounted.
 
-When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
-`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and
-`GET|PUT /api/webchat/v2/channels/slack/allowed` plus
-`GET /api/webchat/v2/channels/slack/subjects` inside the same bearer auth
-layer. The low-level `routes` API accepts `channel_id` plus
-`subject_user_id`; the WebUI v2 channel picker uses the admin-managed
-`allowed` API, reads the `subjects` catalog for named routable team agents,
-and can save either legacy `channel_ids` or explicit per-channel
-`{ channel_id, subject_user_id }` assignments. Allowed-channel responses also
-include the backend-derived `subject_display_name` for each saved route so the
-browser does not derive team-agent labels from raw subject ids. Missing explicit subjects are
-deterministically assigned tenant-scoped Slack channel subjects, while existing
-generated/current route subjects may be preserved for their same channel.
-Tenant, adapter installation, and Slack team always come from host
-configuration. These routes write to Slack host state so runtime assignments
-are durable and are resolved before static TOML `channel_routes` fallback. In
-admin-managed host-beta mode, new shared Slack conversations without a dynamic
-or static channel route fail closed instead of falling back to the installation
-default subject.
+✎ 2026-08-07: a subsection here described
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes`,
+`GET|PUT /api/webchat/v2/channels/slack/allowed`, and
+`GET /api/webchat/v2/channels/slack/subjects` admin routes carrying
+`subject_user_id` assignments. Those routes were never shipped (zero
+occurrences in the webui source), and the per-channel subject concept is
+retired: a run acts as its invoker — a shared Slack conversation is one
+canonical thread its paired participants share, each message running as its
+sender, with no subject user to assign. Shared-channel admission is
+presence-based and needs no configuration: `ironclaw_extension_host`'s
+`PresenceSharedAdmission` admits exactly the conversations delivered through
+the channel's verified ingress for its own installation (the bot being in
+the channel is the admission), still consulted fail-closed through the
+`SharedConversationAdmission` port on resolve, lookup, and reset.
 
 ### Host-supplied public route mount (#4116 — SSO login surface)
 

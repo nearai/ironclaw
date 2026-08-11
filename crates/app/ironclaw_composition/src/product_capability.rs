@@ -750,7 +750,7 @@ mod tests {
         let scope = resource_scope();
         let descriptor = descriptor_with_id(SKILL_REMOVE_CAPABILITY_ID);
         let skill_mount_resolver = |scope: &ResourceScope| {
-            crate::runtime_mounts::scoped_skill_management_mount_view(scope)
+            crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
         };
         let lifecycle_mounts = MountView::default();
         let mounts = product_invocation_mounts(
@@ -763,7 +763,7 @@ mod tests {
 
         assert_eq!(
             mounts,
-            crate::runtime_mounts::scoped_skill_management_mount_view(&scope)
+            crate::runtime_mounts::db_backed_skill_management_mount_view(&scope)
                 .expect("expected skill mounts")
         );
     }

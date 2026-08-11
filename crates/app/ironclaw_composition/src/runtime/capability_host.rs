@@ -23,12 +23,17 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     HostRuntime, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
+#[cfg(test)]
+use ironclaw_loop_host::HostManagedToolResultDiagnosticCapture;
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ThreadScopeResolver, loop_driver_execution_extension_id,
+    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolDiagnosticEmitter,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ThreadScopeResolver, loop_driver_execution_extension_id,
 };
-use ironclaw_product_contracts::project_service::ProjectService;
+use ironclaw_product_contracts::{
+    inspector::TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, project_service::ProjectService,
+};
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -49,12 +54,13 @@ use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_require_approval};
 use crate::factory::RebornRuntimeStores;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
+use crate::runtime_mounts::{WorkspaceMountPolicy, db_backed_skill_management_mount_view};
 use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_assistant::projection::{
     CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore,
 };
 
+mod notification_channels_set;
 mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
@@ -62,12 +68,12 @@ mod shell_tests;
 #[cfg(test)]
 mod workspace_scoping_tests;
 
-#[cfg(test)]
-pub(crate) use crate::outbound::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(test)]
+pub(crate) use ironclaw_assistant::{
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+};
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
@@ -113,6 +119,7 @@ pub(super) fn capability_wiring(
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
@@ -133,7 +140,7 @@ pub(super) fn capability_wiring(
             auto_approve_settings,
             services.persistent_approval_policies.clone(),
         ));
-    let outbound_delivery_target_set_requires_approval = effects_require_approval(
+    let outbound_preference_write_requires_approval = effects_require_approval(
         services.runtime_policy.as_ref(),
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
@@ -154,6 +161,7 @@ pub(super) fn capability_wiring(
             Arc::clone(&display_previews),
             Arc::clone(&thread_service),
             fallback_user_id.clone(),
+            tool_diagnostic_sink,
         )
         .with_observer(capability_observer),
     );
@@ -196,7 +204,7 @@ pub(super) fn capability_wiring(
             thread_service,
             trajectory_observer,
             outbound_preferences_service,
-            outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval,
             approval_settings,
             approval_requests,
             capability_leases,
@@ -232,7 +240,7 @@ struct RefreshingLoopCapabilityPortFactory {
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    outbound_delivery_target_set_requires_approval: bool,
+    outbound_preference_write_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -246,6 +254,40 @@ struct RefreshingLoopCapabilityPortFactory {
     /// all runs in this runtime so a parked external-tool call and its later
     /// client-submitted output (across a pause/resume) hit the same store.
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
+}
+
+/// Make skill files readable by the ordinary filesystem tools, read-only.
+///
+/// Skill mounts went to the skill capabilities only, so a model reaching for
+/// `skills/<name>/SKILL.md` was told the path resolves in no available root. That is a parity gap,
+/// not just a bad message: in Claude Code a SKILL.md *is* a file, and skills reference siblings
+/// (`references/*.md`, `scripts/*.py`) progressive disclosure expects the agent to open.
+///
+/// Read-only and additive: writes stay with `skill_install`/`skill_update`, and existing aliases are
+/// left untouched, so this can never widen or downgrade a grant.
+fn with_read_only_skill_paths(
+    workspace_mounts: MountView,
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    let skill_reads = crate::runtime_mounts::db_backed_skill_context_mount_view(scope)?;
+    let mut mounts = workspace_mounts.mounts;
+    for grant in skill_reads.mounts {
+        if !mounts
+            .iter()
+            .any(|existing| existing.alias.as_str() == grant.alias.as_str())
+        {
+            mounts.push(grant);
+        }
+    }
+    MountView::new(mounts)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn with_read_only_skill_paths_for_test(
+    workspace_mounts: MountView,
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    with_read_only_skill_paths(workspace_mounts, scope)
 }
 
 #[async_trait::async_trait]
@@ -267,13 +309,17 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         surface_policy: Arc<CapabilitySurfacePolicy>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
-        let skill_mounts = scoped_skill_management_mount_view(&resource_scope)
+        // Database-backed, same tree the reader and Settings use. This port is where an agent's own
+        // `skill_install` lands, and it used to write host disk instead (nearai/ironclaw#7168).
+        let skill_mounts = db_backed_skill_management_mount_view(&resource_scope)
             .map_err(host_api_agent_loop_error)?;
         // Same scope the skill mounts key off, so a run's workspace grants and
         // its skill mounts can never resolve to different callers.
         let workspace_mounts = self
             .workspace_mounts
             .capability_grant_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
+        let workspace_mounts = with_read_only_skill_paths(workspace_mounts, &resource_scope)
             .map_err(host_api_agent_loop_error)?;
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
@@ -297,8 +343,8 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
             outbound_preferences_service: self.outbound_preferences_service.clone(),
-            outbound_delivery_target_set_requires_approval: self
-                .outbound_delivery_target_set_requires_approval,
+            outbound_preference_write_requires_approval: self
+                .outbound_preference_write_requires_approval,
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
@@ -335,6 +381,7 @@ struct StagedCapabilityIo {
     /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
     /// (the input resolver bypasses this IO for provider tool-call inputs).
     observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    tool_diagnostics: HostManagedToolDiagnosticEmitter,
 }
 
 #[derive(Clone)]
@@ -361,6 +408,7 @@ impl StagedCapabilityIo {
             display_previews,
             durable_previews: None,
             observer: None,
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::default(),
         }
     }
 
@@ -368,6 +416,7 @@ impl StagedCapabilityIo {
         display_previews: Arc<CapabilityDisplayPreviewStore>,
         thread_service: Arc<dyn SessionThreadService>,
         fallback_user_id: UserId,
+        tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     ) -> Self {
         Self {
             inputs: StdMutex::new(StagedValueStore::default()),
@@ -378,6 +427,7 @@ impl StagedCapabilityIo {
                 fallback_user_id,
             }),
             observer: None,
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::new(tool_diagnostic_sink),
         }
     }
 
@@ -598,6 +648,7 @@ pub(super) fn staged_capability_io_for_test(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service,
         fallback_user_id,
+        None,
     ));
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
@@ -618,6 +669,7 @@ pub(super) fn staged_capability_io_with_observer_for_test(
             Arc::new(CapabilityDisplayPreviewStore::default()),
             thread_service,
             fallback_user_id,
+            None,
         )
         .with_observer(
             observer.map(crate::observability::trajectory_observer::as_capability_observer),
@@ -775,6 +827,12 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
             tool_call.name.as_str(),
             &tool_call.arguments,
         );
+        self.tool_diagnostics.record_input(
+            run_context,
+            &input_ref,
+            tool_call.name.as_str(),
+            &tool_call.arguments,
+        );
         Ok(input_ref)
     }
 
@@ -792,6 +850,12 @@ impl LoopCapabilityInputResolver for StagedCapabilityIo {
         // provider tool name, so the title and per-tool summary are correct.
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
+            input_ref,
+            capability_id.as_str(),
+            &tool_call.arguments,
+        );
+        self.tool_diagnostics.record_input(
+            run_context,
             input_ref,
             capability_id.as_str(),
             &tool_call.arguments,
@@ -830,6 +894,9 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
         let preview = first_look_result_preview(&output_content);
+        let diagnostic_result = self
+            .tool_diagnostics
+            .prepare_result(&output_content, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
         // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
@@ -874,6 +941,13 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
+        self.tool_diagnostics.record_succeeded(
+            run_context,
+            invocation_id,
+            capability_id,
+            diagnostic_result,
+            output_bytes,
+        );
         let mut write_result =
             CapabilityWriteResult::from_output(result_ref, output_bytes, &output);
         write_result.model_observation = Some(result_reference_observation(
@@ -887,12 +961,14 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
 
     fn record_running_invocation(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+        self.tool_diagnostics
+            .record_started(run_context, invocation_id, input_ref);
     }
 
     async fn stage_capability_failure_preview(
@@ -908,6 +984,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             capability_id,
             summary,
         );
+        self.tool_diagnostics
+            .record_failed(run_context, invocation_id, capability_id, summary);
         // Persist the failure preview to the durable timeline (status Failed)
         // so the detail survives refresh/replay, mirroring the success path in
         // `write_capability_result`.
@@ -1098,18 +1176,16 @@ fn durable_result_scope_error() -> AgentLoopHostError {
     )
 }
 
+/// The scope a run's workspace grants and skill mounts key off. Delegates to
+/// the one contract derivation ([`LoopRunContext::acting_resource_scope`]): a
+/// run acts as its user, so its mounts resolve to the same identity as its
+/// gates, settings, and deliveries. Since the ephemeral-per-ping remodel a
+/// run's owner IS its actor, so there is a single identity to key off.
 pub(super) fn resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
 ) -> ResourceScope {
-    let mut scope = run_context.scope.to_resource_scope();
-    scope.user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
-    scope
+    run_context.acting_resource_scope(fallback_user_id)
 }
 
 /// Build the per-run [`ThreadScope`] for durable display-preview appends.
@@ -1156,12 +1232,9 @@ fn visible_capability_request(
     let extension_id = loop_driver_execution_extension_id(run_context)?;
     // Resolved BEFORE grant minting: extension grants are filtered per caller
     // (#5459 P1 — user-private installs mint grants only for their owner).
-    let user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
+    // The caller is the run user — one contract derivation for grants, mounts,
+    // and the gate dance alike (owner == actor, #7377).
+    let user_id = run_context.acting_user_id(fallback_user_id);
     let mut grants = inputs.policy.builtin_grants(
         &extension_id,
         inputs.workspace_mounts,

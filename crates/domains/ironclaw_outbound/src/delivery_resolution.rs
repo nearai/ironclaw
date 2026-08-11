@@ -1,4 +1,3 @@
-use crate::ids::{TriggerFireSlot, TriggerOriginRef};
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +15,7 @@ pub enum CommunicationDeliveryKind {
     DeliveryStatus,
     ApprovalPrompt,
     AuthPrompt,
+    ModelDelivery,
 }
 
 /// Narrow intent for explicitly requested outbound delivery.
@@ -118,6 +118,12 @@ pub enum RunNotificationEventKind {
     AuthRequired,
     RunBlocked,
     DeliveryStatus,
+    /// An explicit model-initiated delivery (`builtin.outbound_deliver`).
+    /// Behaves like `FinalReplyReady` everywhere the compiler forces a
+    /// choice (resolution/target planning), but keeps its own
+    /// `CommunicationDeliveryKind::ModelDelivery` so attempts stay
+    /// distinguishable in the durable audit trail and per-run accounting.
+    ModelDelivery,
 }
 
 impl RunNotificationEventKind {
@@ -128,6 +134,7 @@ impl RunNotificationEventKind {
             Self::ApprovalNeeded | Self::RunBlocked => CommunicationDeliveryKind::ApprovalPrompt,
             Self::AuthRequired => CommunicationDeliveryKind::AuthPrompt,
             Self::DeliveryStatus => CommunicationDeliveryKind::DeliveryStatus,
+            Self::ModelDelivery => CommunicationDeliveryKind::ModelDelivery,
         }
     }
 }
@@ -143,20 +150,12 @@ pub enum RunNotificationOrigin {
     RunScopedTarget {
         target: ReplyTargetBindingRef,
     },
-    Triggered {
-        trigger: TriggerCommunicationContext,
-    },
-    /// A triggered run whose creator selected a durable per-trigger target.
-    /// Ordinary notifications use this exact binding; authority-bearing
-    /// approval/auth prompts still resolve through the creator's dedicated
-    /// preference fields.
-    TriggeredWithTarget {
-        trigger: TriggerCommunicationContext,
+    /// A host-originated event with an explicitly owner-scoped destination.
+    /// Unlike `SystemEvent`, this is deliverable after the caller proves the
+    /// target through the ordinary reply-target authority chain.
+    SystemEventTarget {
+        reason: SystemEventReasonCode,
         target: ReplyTargetBindingRef,
-    },
-    TriggeredFromSourceRoute {
-        trigger: TriggerCommunicationContext,
-        source_route: SourceRouteContext,
     },
     SystemEvent {
         reason: SystemEventReasonCode,
@@ -167,24 +166,6 @@ pub enum RunNotificationOrigin {
 pub struct SourceRouteContext {
     /// Canonical outbound target binding for the source route.
     pub reply_target_binding_ref: ReplyTargetBindingRef,
-}
-
-/// Non-canonical trigger-origin reference used only inside outbound
-/// notification context.
-///
-/// The canonical trigger identity belongs in `ironclaw_triggers::TriggerId`
-/// in PR 9, once the trigger crate exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TriggerCommunicationContext {
-    pub trigger_origin_ref: TriggerOriginRef,
-    pub trigger_source_kind: TriggerSourceKind,
-    pub fire_slot: TriggerFireSlot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TriggerSourceKind {
-    Schedule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +184,12 @@ pub struct DeliveryTargetCapabilities {
     pub progress: bool,
     pub gate_prompts: bool,
     pub auth_prompts: bool,
+    /// This target receives blocked-automation notifications (approval-gate,
+    /// auth, and failure notices). Independent of `final_replies`: the web app
+    /// is a notification target but not a model/final-reply delivery target
+    /// (until it gains outbound thread creation).
+    #[serde(default)]
+    pub notifications: bool,
     pub modalities: Vec<CommunicationModality>,
 }
 
@@ -277,8 +264,7 @@ mod tests {
             modality: CommunicationModality::Text,
             intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                 event_kind: RunNotificationEventKind::RunBlocked,
-                origin: RunNotificationOrigin::TriggeredFromSourceRoute {
-                    trigger: trigger_context(),
+                origin: RunNotificationOrigin::LiveSourceRoute {
                     source_route: source_route_context(),
                 },
             }),
@@ -309,25 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn run_notification_origin_round_trips_triggered() {
-        assert_json_round_trip(RunNotificationOrigin::Triggered {
-            trigger: trigger_context(),
-        });
-    }
-
-    #[test]
-    fn run_notification_origin_round_trips_triggered_with_target() {
-        assert_json_round_trip(RunNotificationOrigin::TriggeredWithTarget {
-            trigger: trigger_context(),
-            target: ReplyTargetBindingRef::new("reply:trigger-target").expect("target"),
-        });
-    }
-
-    #[test]
-    fn run_notification_origin_round_trips_triggered_from_source_route() {
-        assert_json_round_trip(RunNotificationOrigin::TriggeredFromSourceRoute {
-            trigger: trigger_context(),
-            source_route: source_route_context(),
+    fn run_notification_origin_round_trips_targeted_system_event() {
+        assert_json_round_trip(RunNotificationOrigin::SystemEventTarget {
+            reason: SystemEventReasonCode::Trigger,
+            target: reply_ref("reply:trigger-failure"),
         });
     }
 
@@ -364,6 +335,10 @@ mod tests {
             RunNotificationEventKind::DeliveryStatus.delivery_kind(),
             CommunicationDeliveryKind::DeliveryStatus
         );
+        assert_eq!(
+            RunNotificationEventKind::ModelDelivery.delivery_kind(),
+            CommunicationDeliveryKind::ModelDelivery
+        );
     }
 
     #[test]
@@ -374,6 +349,7 @@ mod tests {
             CommunicationDeliveryKind::DeliveryStatus,
             CommunicationDeliveryKind::ApprovalPrompt,
             CommunicationDeliveryKind::AuthPrompt,
+            CommunicationDeliveryKind::ModelDelivery,
         ] {
             assert_json_round_trip(value);
         }
@@ -392,6 +368,7 @@ mod tests {
             RunNotificationEventKind::AuthRequired,
             RunNotificationEventKind::RunBlocked,
             RunNotificationEventKind::DeliveryStatus,
+            RunNotificationEventKind::ModelDelivery,
         ] {
             assert_json_round_trip(value);
         }
@@ -405,8 +382,6 @@ mod tests {
         ] {
             assert_json_round_trip(value);
         }
-
-        assert_json_round_trip(TriggerSourceKind::Schedule);
 
         for value in [
             SystemEventReasonCode::Generic,
@@ -451,6 +426,7 @@ mod tests {
             progress: true,
             gate_prompts: false,
             auth_prompts: true,
+            notifications: true,
             modalities: vec![CommunicationModality::Text, CommunicationModality::Mixed],
         };
 
@@ -468,7 +444,21 @@ mod tests {
         assert!(!capabilities.progress);
         assert!(!capabilities.gate_prompts);
         assert!(!capabilities.auth_prompts);
+        assert!(!capabilities.notifications);
         assert!(capabilities.modalities.is_empty());
+    }
+
+    #[test]
+    fn delivery_target_capabilities_deserialize_defaults_notifications_to_false() {
+        // A historical payload predating the `notifications` capability must
+        // deserialize with `notifications = false` via `#[serde(default)]`,
+        // never fail — preserving wire/persist compatibility.
+        let decoded: DeliveryTargetCapabilities = from_str(
+            r#"{"final_replies":true,"progress":false,"gate_prompts":true,"auth_prompts":true,"modalities":[]}"#,
+        )
+        .expect("deserialize legacy capabilities without notifications");
+        assert!(!decoded.notifications);
+        assert!(decoded.final_replies);
     }
 
     #[test]
@@ -501,15 +491,6 @@ mod tests {
     fn source_route_context() -> SourceRouteContext {
         SourceRouteContext {
             reply_target_binding_ref: reply_ref("reply:source-route"),
-        }
-    }
-
-    fn trigger_context() -> TriggerCommunicationContext {
-        TriggerCommunicationContext {
-            trigger_origin_ref: TriggerOriginRef::new("trigger:daily")
-                .expect("valid trigger origin ref"),
-            trigger_source_kind: TriggerSourceKind::Schedule,
-            fire_slot: TriggerFireSlot::new("2026-05-29T09:00:00Z").expect("valid fire slot"),
         }
     }
 

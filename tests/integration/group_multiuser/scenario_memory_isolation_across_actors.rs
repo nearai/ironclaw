@@ -62,7 +62,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
     // Non-vacuity: if `with_actor_id` regressed to a no-op, both actors would
     // share one owner and this scenario would degrade to the same-owner case.
-    if a.binding.subject_user_id == b.binding.subject_user_id {
+    if a.binding.actor_user_id == b.binding.actor_user_id {
         return Err("with_actor_id seam no-op: both actors resolved the same owner".into());
     }
     b.submit_turn("find the launch codename")

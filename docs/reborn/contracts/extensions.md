@@ -196,12 +196,20 @@ Rules:
 
 ## 4. Manifest schema
 
-Production manifests use `schema_version = "reborn.extension_manifest.v2"`.
-The older top-level `parameters_schema` manifest shape is no longer parsed on
-production discovery paths.
+Production manifests author `schema_version = "reborn.extension_manifest.v3"`
+(`crates/extensions/ironclaw_extension_registry/src/v3.rs`), which lowers into
+the v2 resolved model this contract describes. Already-installed v2 manifests
+still parse as the legacy compatibility format; the older top-level
+`parameters_schema` manifest shape is no longer parsed on production discovery
+paths. The v3 authoring surface (`[[tools]]`, `[channel]`, `[auth.<vendor>]`,
+`[mcp]`) is specified in `docs/reborn/extension-runtime/overview.md` §3;
+`origin_gate_matrix` is defined by `OriginGateMatrix` in
+`crates/contracts/ironclaw_host_api/src/capability.rs` and documented in
+`docs/extensions/building-a-tool.md`.
 
-Every manifest — host-bundled exactly as installed — declares its sections
-through `[[host_api]]` contracts; tools live under
+In the legacy v2 authoring format shown in the examples below — which no
+shipped package uses any more — a manifest declares its sections through
+`[[host_api]]` contracts; tools live under
 `[[host_api]] id = "ironclaw.capability_provider/v1"`. Top-level
 `[[capabilities]]` is rejected for every manifest source.
 
@@ -541,8 +549,9 @@ Rules:
 - `runtime_credentials` declares host-owned credential injection metadata for
   runtime HTTP egress. Each entry names a runtime credential slot handle,
   material source (`secret_handle` by default, or `product_auth_account` with a
-  provider id), HTTPS-only audience `NetworkTargetPattern`, injection target
-  (`header` or `query_param`), and optional `required` flag. The field is only
+  provider id), HTTPS-only audience `NetworkTargetPattern`, a validated
+  `RuntimeCredentialTarget` (including host-composed `basic` authorization),
+  and optional `required` flag. The field is only
   valid when the capability declares `use_secret`; duplicate handles within one
   capability are invalid. The manifest never contains raw secret material.
 - every capability must provide `input_schema_ref` and `output_schema_ref`;

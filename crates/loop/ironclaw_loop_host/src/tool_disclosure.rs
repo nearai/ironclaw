@@ -2,7 +2,7 @@
 //! Pure progressive tool-disclosure catalog and selector.
 //!
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::LazyLock,
 };
 
@@ -13,6 +13,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition};
 use serde_json::{Map, Value, json};
+
+use crate::ToolDisclosureMode;
+
+const EMPTY_CATALOG_DESCRIPTION: &str = include_str!("../prompts/tool_search_empty_catalog.md");
+const NAMESPACE_CATALOG_HEADER: &str = include_str!("../prompts/tool_search_namespace_header.md");
 
 /// Canonical core tool names from the progressive-disclosure policy.
 ///
@@ -55,6 +60,16 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     // a deferred/describe-first schema, so keep both always advertised.
     "trigger_list",
     "trigger_create",
+    // outbound delivery lane — core for the same reason the trigger lifecycle
+    // is: a routine's prompt must pin `builtin__outbound_deliver` steps against
+    // ids from `builtin__outbound_delivery_targets_list` at creation time, and
+    // the delivery guidance block renders only while BOTH tools are visible
+    // (`delivery_tools_visible` in the loop driver host). Deferring the pair on
+    // a wide catalog silently un-injects that steering, and creation turns were
+    // observed improvising act-as-user vendor send_message steps to reach the
+    // requester instead.
+    "outbound_deliver",
+    "outbound_delivery_targets_list",
     // skills + time
     "skill_list",
     "time",
@@ -102,6 +117,12 @@ pub(crate) struct CatalogEntry {
     tier: ToolTier,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamespaceCatalogSummary {
+    pub(crate) namespace: String,
+    pub(crate) tool_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PromotedSet {
     names: Vec<String>,
@@ -124,9 +145,9 @@ pub(crate) struct ActiveSet {
 impl CapabilityCatalog {
     pub(crate) fn new(
         definitions: &[ProviderToolDefinition],
-        profile_pins: &[String],
+        profile_pins: &[CapabilityId],
     ) -> CapabilityCatalog {
-        let pinned_names: HashSet<&str> = profile_pins.iter().map(String::as_str).collect();
+        let pinned_ids: HashSet<&CapabilityId> = profile_pins.iter().collect();
         let mut entries: Vec<CatalogEntry> = definitions
             .iter()
             .filter(|definition| {
@@ -136,7 +157,7 @@ impl CapabilityCatalog {
             .map(|definition| {
                 let est_schema_tokens = estimate_definition_tokens(definition);
                 let tier = if is_core_tool_definition(definition)
-                    || pinned_names.contains(definition.name.as_str())
+                    || pinned_ids.contains(&definition.capability_id)
                 {
                     ToolTier::Core
                 } else {
@@ -201,32 +222,9 @@ impl CapabilityCatalog {
         self.entries.iter().map(|entry| &entry.definition)
     }
 
-    /// Names of the discoverable (non-core) tools, for the always-on catalog index
-    /// carried in the `tool_search` description.
-    ///
-    /// Names only — NOT descriptions. The index is validated as a capability
-    /// safe-description (hard 4096-byte cap + a sensitive-content denylist), and
-    /// arbitrary tool descriptions both blow the byte budget and can carry
-    /// denylisted substrings (`/users/`, `token`, …) that fail the whole turn.
-    /// Tool names are self-descriptive (`google-calendar.list_events`) and the
-    /// model loads the real schema + description on demand via `tool_describe`.
-    ///
-    /// Core tools are omitted (already advertised with full schemas every turn).
-    /// The base catalog's discoverable TIER is fixed at construction (tier
-    /// never changes with promotion) and constant per `CapabilitySurfaceVersion`
-    /// — but the names *returned here* are additionally filtered by `policy`
-    /// (below), so the returned index is stable only for a given
-    /// `(CapabilitySurfaceVersion, effective policy)` pair, not for the
-    /// surface version alone. Sorted by name (the catalog is sorted).
-    ///
-    /// Narrowed by `policy`: this index is baked into the always-advertised
-    /// `tool_search` bridge description, which disclosure synthesizes outside
-    /// the inner `CapabilitySurfacePolicyFilter` (#5647) — so
-    /// without filtering here, a narrowed caller would read every discoverable
-    /// tool name in the system straight out of tool_search's own description,
-    /// bypassing the narrowing already applied to tool_search/tool_describe
-    /// results (#5712).
-    pub(crate) fn discoverable_tool_names(&self, policy: &CapabilitySurfacePolicy) -> Vec<String> {
+    /// Historical global provider-name order used by the benchmark's compact
+    /// and signatures control arms.
+    fn discoverable_tool_names(&self, policy: &CapabilitySurfacePolicy) -> Vec<String> {
         self.entries
             .iter()
             .filter(|entry| {
@@ -234,6 +232,33 @@ impl CapabilityCatalog {
                     && policy.permits_capability_id(&entry.definition.capability_id)
             })
             .map(|entry| entry.definition.name.to_string())
+            .collect()
+    }
+
+    /// Authorized discoverable tools grouped by model-facing semantic namespace.
+    /// Extension tools use their extension id; first-party tools use intent groups.
+    /// Core and pinned tools are omitted because their full definitions are already
+    /// directly visible. Both namespace and tool order are stable.
+    pub(crate) fn discoverable_namespaces(
+        &self,
+        policy: &CapabilitySurfacePolicy,
+    ) -> Vec<NamespaceCatalogSummary> {
+        let mut namespaces: BTreeMap<DiscoveryNamespace, Vec<String>> = BTreeMap::new();
+        for entry in self.entries.iter().filter(|entry| {
+            entry.tier == ToolTier::Discoverable
+                && policy.permits_capability_id(&entry.definition.capability_id)
+        }) {
+            namespaces
+                .entry(discovery_namespace(&entry.definition.capability_id))
+                .or_default()
+                .push(entry.definition.name.to_string());
+        }
+        namespaces
+            .into_iter()
+            .map(|(namespace, tool_names)| NamespaceCatalogSummary {
+                namespace: namespace.to_string(),
+                tool_names,
+            })
             .collect()
     }
 
@@ -282,6 +307,116 @@ impl CapabilityCatalog {
         }
         descriptors.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
         descriptors
+    }
+}
+
+/// Model-facing grouping for passive catalog discovery.
+///
+/// Extension-owned tools retain their stable extension id. First-party ids use
+/// intent-oriented groups because `builtin` and `ironclaw` describe ownership,
+/// not what the tools help the model accomplish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscoveryNamespace {
+    Agents,
+    Coding,
+    Data,
+    Extensions,
+    Memory,
+    Messaging,
+    Observability,
+    Scheduling,
+    Settings,
+    Skills,
+    System,
+    Web,
+    Extension(String),
+}
+
+impl DiscoveryNamespace {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Agents => "agents",
+            Self::Coding => "coding",
+            Self::Data => "data",
+            Self::Extensions => "extensions",
+            Self::Memory => "memory",
+            Self::Messaging => "messaging",
+            Self::Observability => "observability",
+            Self::Scheduling => "scheduling",
+            Self::Settings => "settings",
+            Self::Skills => "skills",
+            Self::System => "system",
+            Self::Web => "web",
+            Self::Extension(extension_id) => extension_id,
+        }
+    }
+}
+
+impl PartialOrd for DiscoveryNamespace {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DiscoveryNamespace {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl std::fmt::Display for DiscoveryNamespace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+fn discovery_namespace(capability_id: &CapabilityId) -> DiscoveryNamespace {
+    let raw = capability_id.as_str();
+    if let Some(local_id) = raw.strip_prefix("builtin.") {
+        return builtin_discovery_namespace(local_id);
+    }
+    if raw.starts_with("ironclaw.memory.") {
+        return DiscoveryNamespace::Memory;
+    }
+    if raw.starts_with("ironclaw.") {
+        return DiscoveryNamespace::System;
+    }
+    DiscoveryNamespace::Extension(
+        raw.split_once('.')
+            .map_or(raw, |(extension_id, _)| extension_id)
+            .to_string(),
+    )
+}
+
+fn builtin_discovery_namespace(local_id: &str) -> DiscoveryNamespace {
+    if matches!(
+        local_id,
+        "read_file" | "write_file" | "list_dir" | "glob" | "grep" | "apply_patch" | "shell"
+    ) {
+        DiscoveryNamespace::Coding
+    } else if local_id == "http" || local_id.starts_with("http.") {
+        DiscoveryNamespace::Web
+    } else if local_id.starts_with("extension_") || local_id.starts_with("ironhub_") {
+        DiscoveryNamespace::Extensions
+    } else if local_id.starts_with("skill_") {
+        DiscoveryNamespace::Skills
+    } else if local_id.starts_with("trigger_") {
+        DiscoveryNamespace::Scheduling
+    } else if local_id.starts_with("outbound_")
+        || local_id.starts_with("notification_")
+        || local_id == "attach_workspace_file_to_reply"
+    {
+        DiscoveryNamespace::Messaging
+    } else if local_id.starts_with("trace_commons.") {
+        DiscoveryNamespace::Observability
+    } else if local_id.starts_with("admin_") || local_id.starts_with("operator_config_") {
+        DiscoveryNamespace::Settings
+    } else if local_id == "spawn_subagent" {
+        DiscoveryNamespace::Agents
+    } else if local_id == "json" {
+        DiscoveryNamespace::Data
+    } else {
+        DiscoveryNamespace::System
     }
 }
 
@@ -491,9 +626,18 @@ fn bridge_tool_definitions_with_tokens() -> impl Iterator<Item = BridgeDefinitio
         .map(|(definition, est_schema_tokens)| (definition, *est_schema_tokens))
 }
 
+#[cfg(test)]
 fn advertised_bridge_tool_definitions(
     catalog: &CapabilityCatalog,
     policy: &CapabilitySurfacePolicy,
+) -> Vec<(ProviderToolDefinition, u32)> {
+    advertised_bridge_tool_definitions_for_mode(catalog, policy, ToolDisclosureMode::Bridged)
+}
+
+fn advertised_bridge_tool_definitions_for_mode(
+    catalog: &CapabilityCatalog,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
 ) -> Vec<(ProviderToolDefinition, u32)> {
     // Deferred surfaces advertise the complete protocol promised by the system
     // prompt. `tool_search` carries the catalog index; the other bridge
@@ -502,7 +646,8 @@ fn advertised_bridge_tool_definitions(
         .map(|(definition, est_schema_tokens)| {
             let mut advertised = definition.clone();
             let est_schema_tokens = if advertised.name.as_str() == TOOL_SEARCH_NAME {
-                advertised.description = catalog_index_tool_search_description(catalog, policy);
+                advertised.description =
+                    catalog_index_tool_search_description_for_mode(catalog, policy, mode);
                 estimate_definition_tokens(&advertised)
             } else {
                 est_schema_tokens
@@ -517,10 +662,9 @@ fn advertised_bridge_tool_definitions(
 /// A bare count ("N more tools available") leaves the model blind to *what*
 /// exists, so on a non-coding task with a coding-heavy core it never reaches for
 /// integrations it can't see — it just uses the advertised builtins and gives up.
-/// Listing every discoverable tool by name gives structural awareness (the model
-/// SEES `google-calendar.list_events` etc.) while the full JSON schemas stay
-/// deferred, preserving the token reduction. Narrowed by `policy` (see
-/// `CapabilityCatalog::discoverable_tool_names`), so this string is cache-stable
+/// Namespace counts give structural awareness while representative tool names
+/// consume the remaining bytes in fair rounds. Narrowed by `policy`, so this
+/// string is cache-stable
 /// per surface version *and* policy, not just per surface version.
 ///
 /// Hard constraint: this string is validated as a capability *safe-description*,
@@ -529,36 +673,106 @@ fn advertised_bridge_tool_definitions(
 /// tool descriptions, which both blow the budget and can carry denylisted
 /// substrings), and is byte-budgeted: if the catalog is large enough to overflow,
 /// the tail is summarized as "…and N more" and stays reachable via `query`.
+#[cfg(test)]
 fn catalog_index_tool_search_description(
     catalog: &CapabilityCatalog,
     policy: &CapabilitySurfacePolicy,
 ) -> String {
-    let names = catalog.discoverable_tool_names(policy);
-    if names.is_empty() {
-        return "Search additional tools that are loaded on demand. Returns up to `limit` matches with name and description. Follow with tool_describe to load a tool's full parameter schema, then tool_call to invoke it. Tools already listed are available and do not need to be searched."
-            .to_string();
+    catalog_index_tool_search_description_for_mode(catalog, policy, ToolDisclosureMode::Bridged)
+}
+
+fn catalog_index_tool_search_description_for_mode(
+    catalog: &CapabilityCatalog,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
+) -> String {
+    if !mode.includes_namespace_summaries() {
+        return alphabetical_catalog_index_description(catalog, policy, mode);
+    }
+    let namespaces = catalog.discoverable_namespaces(policy);
+    if namespaces.is_empty() {
+        return EMPTY_CATALOG_DESCRIPTION.trim_end().to_string();
     }
     // Stay well under MODEL_SAFE_SUMMARY_MAX_BYTES (4096); the reserve leaves room
     // for the "…and N more" note plus headroom so we never trip the cap.
     const BUDGET_BYTES: usize = 3800;
     const TAIL_NOTE_RESERVE: usize = 96;
-    let total = names.len();
-    let mut description = format!(
-        "These {total} tools are available on demand but are NOT shown with full schemas in your tool list. They are real and callable — never tell the user a capability is unavailable without checking this list first. To use one: call tool_describe(name) to load its parameter schema, then tool_call(name, arguments) with the argument object encoded as a JSON string (once you know a tool's name you may also call it directly). `query` fuzzy-searches this list when you want ranked matches instead of scanning it. On-demand tools:"
-    );
-    let mut shown = 0usize;
-    for name in &names {
-        if description.len() + "\n- ".len() + name.len() + TAIL_NOTE_RESERVE > BUDGET_BYTES {
-            break;
+    let total = namespaces
+        .iter()
+        .map(|summary| summary.tool_names.len())
+        .sum::<usize>();
+    let mut description = NAMESPACE_CATALOG_HEADER
+        .trim_end()
+        .replace("{{total_tools}}", &total.to_string())
+        .replace("{{namespace_count}}", &namespaces.len().to_string());
+    for summary in &namespaces {
+        let item = format!("\n- {} ({})", summary.namespace, summary.tool_names.len());
+        if description.len() + item.len() + TAIL_NOTE_RESERVE > BUDGET_BYTES {
+            description.push_str("\n- additional authorized namespaces exist; use tool_search");
+            return description;
         }
-        description.push_str("\n- ");
-        description.push_str(name);
-        shown += 1;
+        description.push_str(&item);
+    }
+
+    description.push_str("\nRepresentative tools (fair namespace rounds):");
+    let mut shown = 0usize;
+    let max_depth = namespaces
+        .iter()
+        .map(|summary| summary.tool_names.len())
+        .max()
+        .unwrap_or(0);
+    'rounds: for depth in 0..max_depth {
+        for summary in &namespaces {
+            let Some(name) = summary.tool_names.get(depth) else {
+                continue;
+            };
+            let item = format!("\n- {name}");
+            if description.len() + item.len() + TAIL_NOTE_RESERVE > BUDGET_BYTES {
+                break 'rounds;
+            }
+            description.push_str(&item);
+            shown = shown.saturating_add(1);
+        }
     }
     if shown < total {
         description.push_str(&format!(
-            "\n…and {} more — call tool_search(query=\"<service or action>\") to find them.",
-            total - shown
+            "\n…and {} more — use tool_search(query=\"<service or action>\").",
+            total.saturating_sub(shown)
+        ));
+    }
+    description
+}
+
+fn alphabetical_catalog_index_description(
+    catalog: &CapabilityCatalog,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
+) -> String {
+    const BUDGET_BYTES: usize = 3800;
+    const TAIL_NOTE_RESERVE: usize = 80;
+    let names = catalog.discoverable_tool_names(policy);
+    let workflow = if mode.includes_complete_signatures() {
+        "Search results may include complete schemas; use tool_describe when schema_complete=false."
+    } else {
+        "Use tool_describe after tool_search before invoking a result."
+    };
+    let mut description = format!(
+        "Search {} additional tools loaded on demand. {workflow} Available tools:",
+        names.len()
+    );
+    let mut shown = 0usize;
+    for name in &names {
+        let item = format!("\n- {name}");
+        if description.len() + item.len() + TAIL_NOTE_RESERVE > BUDGET_BYTES {
+            break;
+        }
+        description.push_str(&item);
+        shown = shown.saturating_add(1);
+    }
+    if shown < names.len() {
+        description.push_str(&format!(
+            "\n…and {} more — use tool_search.",
+            names.len().saturating_sub(shown)
         ));
     }
     description
@@ -583,11 +797,22 @@ pub fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
 ///
 /// TODO(next pass): if promoted tools are truncated by caps, start a deliberate
 /// prompt-surface epoch reset rather than silently carrying old prompt context.
+#[cfg(test)]
 pub(crate) fn select_active_set(
     catalog: &CapabilityCatalog,
     promoted: &PromotedSet,
     caps: DisclosureCaps,
     policy: &CapabilitySurfacePolicy,
+) -> ActiveSet {
+    select_active_set_for_mode(catalog, promoted, caps, policy, ToolDisclosureMode::Bridged)
+}
+
+pub(crate) fn select_active_set_for_mode(
+    catalog: &CapabilityCatalog,
+    promoted: &PromotedSet,
+    caps: DisclosureCaps,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
 ) -> ActiveSet {
     let effective_entries: Vec<&CatalogEntry> = catalog.effective_entries(policy).collect();
     let effective_schema_tokens = effective_entries.iter().fold(0_u32, |total, entry| {
@@ -623,7 +848,7 @@ pub(crate) fn select_active_set(
     let mut advertised_non_bridge_count = core_definitions.len();
 
     loop {
-        let bridge_definitions = advertised_bridge_tool_definitions(catalog, policy);
+        let bridge_definitions = advertised_bridge_tool_definitions_for_mode(catalog, policy, mode);
         let bridge_tokens = sum_definition_tokens(&bridge_definitions);
         let promoted_definitions = select_promoted_definitions(
             catalog,
@@ -842,7 +1067,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
 }
 
 fn estimate_definition_tokens(definition: &ProviderToolDefinition) -> u32 {
-    crate::context_shadow::estimate_tokens(&canonical_tool_schema_json(definition))
+    crate::estimate_tokens_from_chars(&canonical_tool_schema_json(definition)).saturating_as_u32()
 }
 
 fn canonical_tool_schema_json(definition: &ProviderToolDefinition) -> String {
@@ -938,6 +1163,11 @@ mod tests {
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),
             ("trigger_create", "builtin.trigger_create"),
+            ("outbound_deliver", "builtin.outbound_deliver"),
+            (
+                "outbound_delivery_targets_list",
+                "builtin.outbound_delivery_targets_list",
+            ),
             ("time", ironclaw_host_runtime::TIME_CAPABILITY_ID),
         ];
         let synthetic_or_extension_core_names = [
@@ -1173,7 +1403,8 @@ mod tests {
             ),
             fixture_tool("alpha_tool", "Alpha tool", small_no_arg_schema()),
         ];
-        let profile_pins = vec!["zeta_tool".to_string()];
+        let profile_pins =
+            vec![CapabilityId::new("fixture.zeta_tool").expect("valid pinned capability id")];
 
         let catalog = CapabilityCatalog::new(&definitions, &profile_pins);
 
@@ -1194,6 +1425,66 @@ mod tests {
         assert_eq!(
             catalog.entry_by_name("alpha_tool").map(|entry| entry.tier),
             Some(ToolTier::Discoverable)
+        );
+    }
+
+    #[test]
+    fn profile_pins_are_canonical_deduplicated_and_never_widen_policy() {
+        let definitions = vec![
+            fixture_tool("pinned_tool", "Pinned", large_nested_schema(0)),
+            fixture_tool("other_tool", "Other", large_nested_schema(1)),
+        ];
+        let pinned_id = CapabilityId::new("fixture.pinned_tool").expect("valid pinned id");
+        let unknown_id = CapabilityId::new("missing.unknown").expect("valid unknown id");
+        let catalog = CapabilityCatalog::new(
+            &definitions,
+            &[pinned_id.clone(), pinned_id.clone(), unknown_id],
+        );
+        let denied_policy =
+            CapabilitySurfacePolicy::allow_only([
+                CapabilityId::new("fixture.other_tool").expect("valid allowed id")
+            ]);
+
+        assert_eq!(
+            catalog.entry_by_name("pinned_tool").map(|entry| entry.tier),
+            Some(ToolTier::Core)
+        );
+        let denied_active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps {
+                max_tokens: 1,
+                max_tools: 0,
+                ctx_limit: None,
+            },
+            &denied_policy,
+        );
+        assert!(
+            denied_active
+                .definitions
+                .iter()
+                .all(|definition| definition.capability_id != pinned_id),
+            "a pin must not reintroduce a denied capability"
+        );
+
+        let allowed_active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps {
+                max_tokens: 1,
+                max_tools: 0,
+                ctx_limit: None,
+            },
+            &CapabilitySurfacePolicy::allow_all(),
+        );
+        assert_eq!(
+            allowed_active
+                .definitions
+                .iter()
+                .filter(|definition| definition.capability_id == pinned_id)
+                .count(),
+            1,
+            "a reviewed pin remains directly visible even when the ordinary active budget is full"
         );
     }
 
@@ -1794,12 +2085,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_description_indexes_discoverable_tools_by_name() {
+    fn tool_search_description_summarizes_namespace_and_representative_tool() {
         // Structural-awareness regression: a model handed a coding-heavy core on a
         // non-coding task never reaches for integrations it cannot see. The
-        // tool_search description must enumerate every discoverable tool by exact
-        // name so the model knows they exist and can tool_call them, rather than
-        // defaulting to the advertised builtins and giving up. Names only — the
+        // tool_search description must expose semantic namespace counts plus fair
+        // representative-name rounds within its fixed byte cap; it is not an
+        // exhaustive listing of every discoverable tool. This lets the model find
+        // integrations without defaulting to the advertised builtins and giving
+        // up. Names only — the
         // index is a capability safe-description and arbitrary tool descriptions
         // both blow its byte budget and can carry denylisted content.
         let definitions = vec![
@@ -1819,6 +2112,10 @@ mod tests {
             "discoverable tool must be named in the index, got: {description}"
         );
         assert!(
+            description.contains("fixture (1)"),
+            "authorized namespace count must be visible: {description}"
+        );
+        assert!(
             !description.contains("read_file"),
             "core tools ship full schemas already and must not be re-listed: {description}"
         );
@@ -1826,7 +2123,7 @@ mod tests {
 
     /// Companion to the #5712 result/describe narrowing regressions: the
     /// tool_search bridge's own advertised *description* is the always-on
-    /// catalog index, and it is built from this same `discoverable_tool_names`
+    /// catalog index, and it is built from this same namespace-summary
     /// path — so it must be narrowed by the caller's policy exactly like
     /// `tool_search` results and `tool_describe` already are. Without this, a
     /// narrowed profile reads every discoverable tool name straight out of
@@ -1893,9 +2190,160 @@ mod tests {
             description.len()
         );
         assert!(
-            description.contains("more — call tool_search"),
+            description.contains("more — use tool_search"),
             "an overflowing catalog must point the model at query for the tail: {description}"
         );
+    }
+
+    #[test]
+    fn namespace_preview_reports_namespace_cardinality_overflow_within_safe_cap() {
+        let definitions = (0..180)
+            .map(|index| {
+                let namespace = format!("namespace-{index:03}-{}", "x".repeat(40));
+                fixture_tool_with_capability_id(
+                    format!("{namespace}.action"),
+                    format!("{namespace}__action"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+
+        let description =
+            catalog_index_tool_search_description(&catalog, &CapabilitySurfacePolicy::allow_all());
+
+        assert!(description.len() <= 4096);
+        assert!(description.contains("additional authorized namespaces exist"));
+        assert!(!description.contains("Representative tools"));
+    }
+
+    #[test]
+    fn namespace_preview_is_stable_authorized_and_fair() {
+        let mut definitions = Vec::new();
+        for namespace in ["alpha", "beta", "zeta"] {
+            for index in 0..2 {
+                definitions.push(fixture_tool_with_capability_id(
+                    format!("{namespace}.action_{index}"),
+                    format!("{namespace}__action_{index}"),
+                ));
+            }
+        }
+        let denied_id = CapabilityId::new("beta.action_1").expect("valid denied id");
+        let policy = CapabilitySurfacePolicy::allow_all().deny_capability_ids([denied_id]);
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let description = catalog_index_tool_search_description(&catalog, &policy);
+
+        assert!(description.contains("alpha (2)"));
+        assert!(description.contains("beta (1)"));
+        assert!(description.contains("zeta (2)"));
+        assert!(!description.contains("beta__action_1"));
+        let first_round_end = description
+            .find("zeta__action_0")
+            .expect("zeta first round");
+        let second_round_start = description
+            .find("alpha__action_1")
+            .expect("alpha second round");
+        assert!(
+            first_round_end < second_round_start,
+            "every namespace must receive one representative before a second: {description}"
+        );
+
+        definitions.reverse();
+        let reordered = CapabilityCatalog::new(&definitions, &[]);
+        assert_eq!(
+            description,
+            catalog_index_tool_search_description(&reordered, &policy)
+        );
+    }
+
+    #[test]
+    fn namespace_preview_uses_semantic_first_party_groups_and_extension_fallbacks() {
+        let definitions = vec![
+            fixture_tool_with_capability_id("builtin.trigger_pause", "builtin__trigger_pause"),
+            fixture_tool_with_capability_id("builtin.skill_update", "builtin__skill_update"),
+            fixture_tool_with_capability_id(
+                "builtin.trace_commons.status",
+                "builtin__trace_commons__status",
+            ),
+            fixture_tool_with_capability_id(
+                "ironclaw.memory.profile_set",
+                "ironclaw__memory__profile_set",
+            ),
+            fixture_tool_with_capability_id("github.list_issues", "github__list_issues"),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let description =
+            catalog_index_tool_search_description(&catalog, &CapabilitySurfacePolicy::allow_all());
+
+        for expected in [
+            "github (1)",
+            "memory (1)",
+            "observability (1)",
+            "scheduling (1)",
+            "skills (1)",
+        ] {
+            assert!(
+                description.contains(expected),
+                "semantic namespace {expected:?} missing from {description}"
+            );
+        }
+        assert!(!description.contains("builtin ("), "{description}");
+        assert!(!description.contains("ironclaw ("), "{description}");
+    }
+
+    #[test]
+    fn benchmark_preview_arms_isolate_alphabetical_and_namespace_presentation() {
+        let definitions = vec![
+            fixture_tool_with_capability_id("zeta.action", "aaa_provider_name"),
+            fixture_tool_with_capability_id("alpha.action", "zzz_provider_name"),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let policy = CapabilitySurfacePolicy::allow_all();
+        let compact = catalog_index_tool_search_description_for_mode(
+            &catalog,
+            &policy,
+            ToolDisclosureMode::Compact,
+        );
+        let signatures = catalog_index_tool_search_description_for_mode(
+            &catalog,
+            &policy,
+            ToolDisclosureMode::Signatures,
+        );
+        let namespaces = catalog_index_tool_search_description_for_mode(
+            &catalog,
+            &policy,
+            ToolDisclosureMode::Namespaces,
+        );
+
+        assert!(compact.contains("Use tool_describe after tool_search"));
+        assert!(signatures.contains("schema_complete=false"));
+        assert!(!compact.contains("Namespaces:"));
+        assert!(namespaces.contains("Namespaces:"));
+        assert!(compact.find("aaa_provider_name") < compact.find("zzz_provider_name"));
+        assert!(namespaces.find("alpha (1)") < namespaces.find("zeta (1)"));
+    }
+
+    #[test]
+    fn benchmark_scale_preview_represents_all_twenty_namespaces() {
+        let definitions = (0..1_000)
+            .map(|index| {
+                let namespace = format!("service{:02}", index % 20);
+                fixture_tool_with_capability_id(
+                    format!("{namespace}.action_{index:04}"),
+                    format!("{namespace}__action_{index:04}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let description =
+            catalog_index_tool_search_description(&catalog, &CapabilitySurfacePolicy::allow_all());
+
+        for index in 0..20 {
+            assert!(
+                description.contains(&format!("service{index:02} (50)")),
+                "namespace {index} missing from {description}"
+            );
+        }
+        assert!(description.len() <= 4096);
     }
 
     #[test]
@@ -1948,6 +2396,37 @@ mod tests {
         );
     }
 
+    /// Hard schema-token reduction floor for the representative wide catalog,
+    /// as defined by the default-on rollout outcome (#6810). Dropping below
+    /// this means bridged disclosure no longer pays for its round trip.
+    const REPRESENTATIVE_REDUCTION_FLOOR_PCT: f64 = 50.0;
+
+    /// Recorded reduction for the representative catalog on `main`. Drift
+    /// history, so a future move is explained rather than rediscovered:
+    ///
+    /// - 93.3% (21,240 -> 1,427): first one-off measurement, when a deferred
+    ///   surface advertised only the bridge meta-tools.
+    /// - 83.7%: after the bridge grew (`tool_search`'s description became the
+    ///   always-on catalog index, plus `tool_describe`/`tool_call`) and the
+    ///   always-advertised Core tier was introduced.
+    /// - 82.9% (21,130 -> 3,618, 20 advertised): with 17 Core-tier
+    ///   loop primitives in this fixture always advertised alongside the three
+    ///   bridge tools.
+    ///
+    /// - 82.0% (21,355 -> 3,843, 22 advertised): current — core-set width
+    ///   plus fixture change: the outbound delivery pair
+    ///   (`outbound_deliver`, `outbound_delivery_targets_list`) became
+    ///   Core-tier so routine-delivery steering stays deterministic, and the
+    ///   fixture now models both (19 Core fixtures).
+    ///
+    /// Moving this constant is allowed, but the PR that moves it must say which
+    /// of core-set width, bridge-schema growth, or fixture change caused it.
+    const REPRESENTATIVE_REDUCTION_BASELINE_PCT: f64 = 82.0;
+
+    /// Band around the recorded baseline that counts as noise rather than
+    /// material drift.
+    const REPRESENTATIVE_REDUCTION_DRIFT_TOLERANCE_PCT: f64 = 2.0;
+
     #[test]
     fn benchmark_tool_disclosure_token_reduction() {
         let definitions = representative_tool_fixture();
@@ -1972,15 +2451,64 @@ mod tests {
             (reduction_abs as f64 / full_tokens as f64) * 100.0
         };
 
-        println!(
-            "\n| full_count | full_tokens | disclosed_count | disclosed_tokens | reduction_abs | reduction_pct |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| {full_count} | {full_tokens} | {disclosed_count} | {disclosed_tokens} | {reduction_abs} | {reduction_pct:.1}% |"
+        // Attribute the advertised cost so drift points at its cause instead of
+        // just moving a number.
+        // Classify by the catalog's own `ToolTier`, never by "not a bridge
+        // name": a promoted Discoverable definition also reaches the advertised
+        // surface, and charging it to Core would misdiagnose the drift it
+        // caused.
+        let mut bridge = (0_usize, 0_u32);
+        let mut core = (0_usize, 0_u32);
+        let mut discoverable = (0_usize, 0_u32);
+        for definition in &disclosed.definitions {
+            let tokens = estimate_definition_tokens(definition);
+            let bucket = if is_bridge_name(definition.name.as_str()) {
+                &mut bridge
+            } else {
+                match catalog
+                    .entry_by_name(definition.name.as_str())
+                    .map(|entry| entry.tier)
+                {
+                    Some(ToolTier::Core) => &mut core,
+                    Some(ToolTier::Discoverable) => &mut discoverable,
+                    None => panic!(
+                        "advertised definition {} is neither a bridge tool nor a catalog entry",
+                        definition.name
+                    ),
+                }
+            };
+            bucket.0 = bucket.0.saturating_add(1);
+            bucket.1 = bucket.1.saturating_add(tokens);
+        }
+        let breakdown = format!(
+            "measured={reduction_pct:.1}% (full={full_count} tools/{full_tokens} tokens, \
+             advertised={disclosed_count} tools/{disclosed_tokens} tokens; \
+             bridge={}/{} tokens, core={}/{} tokens, promoted_discoverable={}/{} tokens)",
+            bridge.0, bridge.1, core.0, core.1, discoverable.0, discoverable.1,
         );
 
-        assert_eq!(full_count, 91);
+        println!(
+            "\n| full_count | full_tokens | disclosed_count | disclosed_tokens | reduction_abs | reduction_pct |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| {full_count} | {full_tokens} | {disclosed_count} | {disclosed_tokens} | {reduction_abs} | {reduction_pct:.1}% |\n{breakdown}"
+        );
+
+        assert_eq!(full_count, 93);
         assert!(disclosed.deferred);
+        assert_eq!(
+            discoverable.0, 0,
+            "the benchmark promotes nothing, so a Discoverable tool on the advertised \
+             surface means the selection path changed: {breakdown}"
+        );
         assert!(
-            disclosed_tokens as f64 <= full_tokens as f64 * 0.5,
-            "disclosed={disclosed_tokens}, full={full_tokens}"
+            reduction_pct >= REPRESENTATIVE_REDUCTION_FLOOR_PCT,
+            "wide-catalog schema-token reduction fell below the {REPRESENTATIVE_REDUCTION_FLOOR_PCT}% floor (#6810): {breakdown}"
+        );
+        assert!(
+            (reduction_pct - REPRESENTATIVE_REDUCTION_BASELINE_PCT).abs()
+                <= REPRESENTATIVE_REDUCTION_DRIFT_TOLERANCE_PCT,
+            "wide-catalog schema-token reduction drifted more than \
+             {REPRESENTATIVE_REDUCTION_DRIFT_TOLERANCE_PCT} points from the recorded \
+             {REPRESENTATIVE_REDUCTION_BASELINE_PCT}% baseline: {breakdown}. Update \
+             REPRESENTATIVE_REDUCTION_BASELINE_PCT and explain the cause in the PR body."
         );
     }
 
@@ -2021,6 +2549,20 @@ mod tests {
             })
             .collect();
 
+        // The outbound delivery pair rides Core (always advertised) so the
+        // benchmark measures its standing disclosure cost: a bounded deliver
+        // call and a no-argument target lister.
+        definitions.push(fixture_tool(
+            "outbound_deliver",
+            "Deliver content to one connected channel destination from the assistant identity.",
+            medium_schema(17),
+        ));
+        definitions.push(fixture_tool(
+            "outbound_delivery_targets_list",
+            "List the caller's connected outbound delivery destinations.",
+            small_no_arg_schema(),
+        ));
+
         for index in 0..15 {
             definitions.push(fixture_tool(
                 format!("small_status_{index:02}"),
@@ -2049,7 +2591,7 @@ mod tests {
             ));
         }
 
-        assert_eq!(definitions.len(), 91);
+        assert_eq!(definitions.len(), 93);
         definitions
     }
 
@@ -2065,6 +2607,19 @@ mod tests {
             description: description.into(),
             description_trust: Default::default(),
             parameters,
+        }
+    }
+
+    fn fixture_tool_with_capability_id(
+        capability_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: CapabilityId::new(capability_id).expect("fixture capability id"),
+            name: ProviderToolName::new(name).expect("valid fixture tool name"),
+            description: "Fixture action".to_string(),
+            description_trust: Default::default(),
+            parameters: small_no_arg_schema(),
         }
     }
 

@@ -1628,6 +1628,17 @@ where
         if let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
+        // Channel-origin runs carry host-fetched conversation history on the
+        // persisted product context; the port renders it as one framed
+        // UNTRUSTED system-context block beside identity/skill context.
+        if let Some(channel_context) = run_context
+            .product_context
+            .as_ref()
+            .and_then(|product| product.channel_context.as_ref())
+        {
+            context_adapter =
+                context_adapter.with_channel_conversation_context(channel_context.clone());
+        }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This
@@ -1781,16 +1792,19 @@ where
                 return Err(error);
             }
         };
-        // The rendered guidance names BOTH the lister and the setter; require both
+        // The rendered guidance names BOTH the delivery tool and the lister; require both
         // capabilities to be visible before setting the flag, so we never prompt
-        // the model to call a tool that is not actually in the surface.
+        // the model to call a tool that is not actually in the surface. The pair is the
+        // delivery verb plus its address book: a lister with no way to deliver is not a
+        // delivery surface, and `builtin.notification_channels_set` is a settings tool
+        // that configures notice fan-out — it delivers nothing and does not qualify.
         let delivery_tools_visible = {
             let ids: std::collections::HashSet<&str> = visible_surface
                 .descriptors
                 .iter()
                 .map(|d| d.capability_id.as_str())
                 .collect();
-            ids.contains("builtin.outbound_delivery_target_set")
+            ids.contains("builtin.outbound_deliver")
                 && ids.contains("builtin.outbound_delivery_targets_list")
         };
         // Join the fetch started at loop entry and stamp the surface-derived
@@ -2614,9 +2628,11 @@ fn validate_thread_scope(
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is not part of the
     // on-disk thread path, so a wrong owner silently reads an empty subtree.
-    // Actor-fallback turns still require owner=actor. Explicit-owner turns
-    // intentionally allow actor/subject divergence for shared Slack/team
-    // routes, but the explicit subject must match the resolved thread owner.
+    // Explicit-owner turns (host/trigger creators, subagent parent→child
+    // propagation) must match the resolved thread owner; actor-fallback turns
+    // (multi-user WebChat) require owner==actor. Since the ephemeral-per-ping
+    // remodel owner IS the actor, so the actor-fallback check passes trivially
+    // and stays as a real scope-mismatch safety guard.
     if run_context.scope.has_explicit_thread_owner() {
         if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
             return Err(RebornLoopDriverHostError::ScopeMismatch {

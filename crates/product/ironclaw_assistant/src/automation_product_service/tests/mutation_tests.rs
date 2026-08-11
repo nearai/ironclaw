@@ -45,22 +45,25 @@ async fn pause_and_resume_update_scoped_trigger_state() {
         "paused automation must not be eligible to fire"
     );
 
+    let resume_started_at = now();
     let resumed = service
         .resume_automation(c, trigger_id.to_string())
         .await
         .expect("resume automation");
     assert!(resumed.updated);
-    assert_eq!(
-        resumed.automation.expect("resumed automation").state,
-        RebornAutomationState::Scheduled
+    let resumed = resumed.automation.expect("resumed automation");
+    assert_eq!(resumed.state, RebornAutomationState::Scheduled);
+    assert!(
+        resumed.next_run_at.expect("next run after resume") > resume_started_at,
+        "resume must skip recurring slots missed while paused"
     );
     assert_eq!(
         repo.list_due_triggers(now(), 10)
             .await
             .expect("list due after resume")
             .len(),
-        1,
-        "resumed automation should be eligible again when its next slot is due"
+        0,
+        "resumed automation must not replay a slot missed while paused"
     );
 }
 

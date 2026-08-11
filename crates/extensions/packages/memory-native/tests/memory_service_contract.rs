@@ -102,6 +102,39 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
 }
 
 #[tokio::test]
+async fn native_search_preserves_oversized_provider_result() {
+    const QUERY: &str = "needle";
+    const RESULT_BOUND: usize = 8 * 1024;
+    let position = RESULT_BOUND + 512;
+    let mut oversized = "a".repeat(position + QUERY.len() + RESULT_BOUND);
+    oversized.replace_range(position..position + QUERY.len(), QUERY);
+    let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
+        results: vec![search_result(
+            "tenant-native-memory",
+            "user-native-memory",
+            "oversized.md",
+            1.0,
+            &oversized,
+        )],
+        fail: false,
+    }));
+
+    let response = service
+        .search(
+            invocation(),
+            MemoryServiceSearchRequest {
+                query: QUERY.to_string(),
+                limit: 5,
+            },
+        )
+        .await
+        .expect("search through native memory service");
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].content, oversized);
+}
+
+#[tokio::test]
 async fn native_context_retrieve_filters_cross_scope_results_and_returns_raw_components() {
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![

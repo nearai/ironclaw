@@ -12,6 +12,10 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
+# ES256 signing for the RFC 8292 `vapid_authorization` egress credential
+# injection (Web Push). Already in the lockfile via jsonwebtoken's
+# aws_lc_rs backend; no new lockfile entry.
+aws-lc-rs = "1"
 base64 = "0.23.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"

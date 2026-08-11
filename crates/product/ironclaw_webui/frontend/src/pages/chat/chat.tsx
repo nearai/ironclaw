@@ -32,7 +32,8 @@ import { useInterfacePreferences } from "../../lib/interface-preferences";
 import {
   inspectorDebugEnabled,
   latestInspectorRunId,
-} from "./inspector/inspector-state";
+  persistInspectorDebugPreference,
+} from "./inspector/inspector-shell";
 
 let LazyInspectorPanel: React.LazyExoticComponent<
   React.ComponentType<{ threadId: string | null; runId: string | null }>
@@ -164,6 +165,9 @@ export function Chat({
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const activeRunId = activeRun?.runId || null;
   const inspectorEnabled = inspectorDebugEnabled(location.search);
+  React.useEffect(() => {
+    persistInspectorDebugPreference(location.search);
+  }, [location.search]);
   const inspectorRunId = React.useMemo(
     () => latestInspectorRunId(activeRun, messages),
     [activeRun, messages],

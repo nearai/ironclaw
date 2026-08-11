@@ -118,7 +118,23 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
 /// messaging framework, which landed through the queue's tolerance window;
 /// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_423;
+/// ✎ Re-recorded 40_423 → 40_692 on 2026-08-07 for #7157: the one-time
+/// stored-trigger delivery migration runs in boot sequencing, while the
+/// notification-channel capability split and delivery wiring preserve their
+/// mediated owners. Measured on the merged tree; the manifest ceiling and
+/// observed value move with this record so the increase is explicit.
+/// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
+/// delivery refactor with #7214's sandbox profile and binding assembly.
+/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
+/// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
+/// this ratchet fails when the two disagree.
+/// ✎ Union re-measured 41_509 → 41_582 on 2026-08-10 after merging main into
+/// implement-issue-6896-fix: #7131's run-failure settlement observer adds its
+/// production wiring and inline regression coverage to the current main tree.
+/// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
+/// manifest ceiling and observed value move with this record.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_582;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

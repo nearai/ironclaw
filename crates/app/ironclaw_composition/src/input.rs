@@ -11,7 +11,7 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
@@ -109,26 +109,26 @@ pub(crate) struct OAuthDcrCallbackConfig {
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
-    TenantSandbox {
-        process_port: Arc<TenantSandboxProcessPort>,
+    UserSandbox {
+        process_port: Arc<UserSandboxProcessPort>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebornRuntimeProcessBindingError {
-    MissingTenantSandboxProcessPort,
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    MissingUserSandboxProcessPort,
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
 impl std::fmt::Display for RebornRuntimeProcessBindingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingTenantSandboxProcessPort => formatter.write_str(
-                "production tenant-sandbox process backend requires a tenant sandbox process binding",
+            Self::MissingUserSandboxProcessPort => formatter.write_str(
+                "production user-sandbox process backend requires a user sandbox process binding",
             ),
-            Self::UnexpectedTenantSandboxProcessPort { process_backend } => write!(
+            Self::UnexpectedUserSandboxProcessPort { process_backend } => write!(
                 formatter,
-                "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+                "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
             ),
         }
     }
@@ -139,8 +139,8 @@ impl RebornRuntimeProcessBinding {
         Self::default()
     }
 
-    pub fn tenant_sandbox(process_port: Arc<TenantSandboxProcessPort>) -> Self {
-        Self::TenantSandbox { process_port }
+    pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
+        Self::UserSandbox { process_port }
     }
 
     pub(crate) fn validate_for_production_policy(
@@ -148,15 +148,14 @@ impl RebornRuntimeProcessBinding {
         runtime_policy: &EffectiveRuntimePolicy,
     ) -> Result<(), RebornRuntimeProcessBindingError> {
         match (runtime_policy.process_backend, self) {
-            (
-                ProcessBackendKind::TenantSandbox,
-                RebornRuntimeProcessBinding::TenantSandbox { .. },
-            ) => Ok(()),
-            (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
-                Err(RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort)
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::UserSandbox { .. }) => {
+                Ok(())
             }
-            (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => Err(
-                RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::None) => {
+                Err(RebornRuntimeProcessBindingError::MissingUserSandboxProcessPort)
+            }
+            (_, RebornRuntimeProcessBinding::UserSandbox { .. }) => Err(
+                RebornRuntimeProcessBindingError::UnexpectedUserSandboxProcessPort {
                     process_backend: runtime_policy.process_backend,
                 },
             ),
@@ -204,6 +203,16 @@ pub struct RebornHostBindings {
     /// channel host assembly consumes the extras. Composition never names a
     /// concrete extension crate.
     pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
+    /// The web-push channel's late-bound runtime slot (domain crate type, not
+    /// a concrete extension crate): the binary constructs the adapter around
+    /// it before storage exists; composition installs the subscription store
+    /// into it at assembly and seeds the VAPID credential.
+    pub(crate) web_push_runtime_slot: Option<ironclaw_web_push::WebPushRuntimeSlot>,
+    /// RFC 8292 `sub` contact URI used when composition seeds the VAPID
+    /// credential (`mailto:` or `https:`); `None` falls back to a stable
+    /// placeholder. The binary derives it from the deployment's public base
+    /// URL when one is configured.
+    pub(crate) web_push_vapid_subject: Option<String>,
     /// Binary-assembled first-party capability handler registrars (GSuite,
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
@@ -249,6 +258,13 @@ pub struct ChannelExtensionBinding {
     pub preference_target_codec: Option<
         std::sync::Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>,
     >,
+    /// An extension-owned outbound delivery-target catalog provider (e.g.
+    /// web-push's constant per-user "Web app" entry). Registered generically
+    /// into the outbound target registry under the extension id; most channel
+    /// extensions leave this `None` because the generic channel provider
+    /// derives their targets from provisioned records.
+    pub outbound_target_provider:
+        Option<std::sync::Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>>,
 }
 
 #[derive(Clone, Debug)]
@@ -799,6 +815,23 @@ impl RebornHostBindings {
         self
     }
 
+    /// Hand composition the web-push runtime slot the binary's channel
+    /// binding already holds, so assembly can install the subscription store
+    /// and seed the deployment's VAPID credential.
+    pub fn with_web_push_runtime_slot(
+        mut self,
+        slot: ironclaw_web_push::WebPushRuntimeSlot,
+    ) -> Self {
+        self.web_push_runtime_slot = Some(slot);
+        self
+    }
+
+    /// Operator contact URI for the seeded VAPID credential's `sub` claim.
+    pub fn with_web_push_vapid_subject(mut self, subject: String) -> Self {
+        self.web_push_vapid_subject = Some(subject);
+        self
+    }
+
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
@@ -932,6 +965,8 @@ impl RebornHostBindings {
             product_auth_ports: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
+            web_push_runtime_slot: None,
+            web_push_vapid_subject: None,
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
             memory_binding_policy: None,

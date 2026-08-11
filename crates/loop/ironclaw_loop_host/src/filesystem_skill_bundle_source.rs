@@ -13,7 +13,7 @@ use ironclaw_skills::{
 };
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::debug;
+use tracing::warn;
 
 use crate::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -21,7 +21,21 @@ use crate::{
 };
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
-const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 100;
+/// Per-root cap on how many skill bundles are enumerated.
+///
+/// Raised from 100 to 512. 100 was too low to be a runaway guard and low enough to
+/// silently amputate a real catalog: measured on a 227-skill root, this returned the
+/// first 100 bundles and skipped 127, so the skills in the tail were invisible to the
+/// selector, to the listing, and to the model — the same failure as never installing
+/// them. It is the *lower* of the two limits that used to truncate a large catalog, so
+/// raising the listing budget alone accomplished nothing; both had to move.
+///
+/// This cap protects against an unbounded directory walk, not against a large catalog.
+/// 512 keeps that protection (a bundle is a directory read plus a manifest parse, and
+/// the result is cached per root) while leaving real catalogs whole. Past it the answer
+/// is `skill_search` (#4428) rather than a bigger number, and the truncation is still
+/// warned and disclosed rather than silent.
+const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 512;
 /// One scoped filesystem root that can contain portable skill bundle folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemSkillBundleRoot {
@@ -244,25 +258,48 @@ where
             Err(error) => return Err(map_filesystem_error(error)),
         };
 
+        // Truncate at the cap and keep going, rather than failing the whole root.
+        //
+        // Returning `BundleScanLimitExceeded` here made ONE root over its limit remove every
+        // skill in that root from the model's view -- a catalog that grew past the cap lost
+        // all of its skills at once, with no signal to the model and only a propagated error
+        // to the operator. Partial discovery plus a warning is strictly better: the skills
+        // under the cap stay usable and the truncation is visible in the logs.
         let mut directory_entries = Vec::new();
+        let mut skipped_over_limit = 0usize;
         for entry in entries {
             if entry.file_type == FileType::Directory {
-                directory_entries.push(entry);
-                if directory_entries.len() > self.max_bundles_per_root {
-                    return Err(SkillBundleSourceError::BundleScanLimitExceeded);
+                if directory_entries.len() >= self.max_bundles_per_root {
+                    skipped_over_limit += 1;
+                    continue;
                 }
+                directory_entries.push(entry);
             }
+        }
+        if skipped_over_limit > 0 {
+            warn!(
+                source_kind = %root.source_kind(),
+                root = %root.root().as_str(),
+                limit = self.max_bundles_per_root,
+                skipped = skipped_over_limit,
+                "skill bundle root exceeds the per-root scan limit; \
+                 returning the first {} bundles and skipping the rest",
+                self.max_bundles_per_root,
+            );
         }
 
         let skill_md_file = SkillFilePath::skill_md();
         for entry in directory_entries {
             let bundle_id = match SkillBundleId::new(root.source_kind(), &entry.name) {
                 Ok(bundle_id) => bundle_id,
-                Err(_) => {
-                    debug!(
+                Err(error) => {
+                    // Was `debug!`, which in practice means invisible: a skill present on
+                    // disk simply never appeared and nothing said why.
+                    warn!(
                         bundle_name = %entry.name,
                         source_kind = %root.source_kind(),
-                        "skipping invalid skill bundle directory name"
+                        error = ?error,
+                        "skipping skill bundle: directory name is not a valid skill id"
                     );
                     continue;
                 }
@@ -274,10 +311,13 @@ where
             {
                 Ok(description) => description,
                 Err(error) if is_skippable_manifest_error(&error) => {
-                    debug!(
+                    // Also raised from `debug!`. This covers the common authoring mistake of a
+                    // directory name that disagrees with the manifest `name:` field, which
+                    // fails closed and otherwise looks identical to the skill not existing.
+                    warn!(
                         bundle_id = %bundle_id,
                         error = ?error,
-                        "skipping invalid skill bundle manifest"
+                        "skipping skill bundle: its manifest could not be validated"
                     );
                     continue;
                 }
@@ -424,7 +464,91 @@ where
         self.read_bounded(&scope, &scoped_path, self.max_bundle_file_bytes)
             .await
     }
+
+    async fn list_skill_bundle_files(
+        &self,
+        run_context: &LoopRunContext,
+        bundle_id: &SkillBundleId,
+    ) -> Result<Vec<SkillFilePath>, SkillBundleSourceError> {
+        let root = self
+            .roots
+            .iter()
+            .filter(|root| root_visible_for_run(root, run_context))
+            .find(|root| root.source_kind() == bundle_id.source_kind())
+            .ok_or(SkillBundleSourceError::BundleNotFound)?;
+        let scope = resource_scope_for_run(run_context);
+        let bundle_root = ScopedPath::new(format!(
+            "{}/{}",
+            root.root().as_str().trim_end_matches('/'),
+            bundle_id.name()
+        ))
+        .map_err(|_| SkillBundleSourceError::InvalidFilePath)?;
+
+        let mut files = Vec::new();
+        let mut pending = vec![(bundle_root.clone(), String::new())];
+        // Bounded on both axes. A bundle is authored by a model, so neither its file count nor its
+        // depth is trustworthy, and enumeration runs on the activation path of every turn.
+        let mut remaining = MAX_BUNDLE_FILES_LISTED;
+        let mut depth_budget = MAX_BUNDLE_DEPTH_LISTED;
+        while let Some((directory, prefix)) = pending.pop() {
+            if remaining == 0 {
+                break;
+            }
+            let entries = match self.filesystem.list_dir(&scope, &directory).await {
+                Ok(entries) => entries,
+                // A missing or unreadable subdirectory is not a reason to fail activation.
+                Err(error) if is_not_found(&error) => continue,
+                Err(error) => return Err(map_filesystem_error(error)),
+            };
+            for entry in entries {
+                if remaining == 0 {
+                    break;
+                }
+                let relative = if prefix.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{prefix}/{}", entry.name)
+                };
+                match entry.file_type {
+                    FileType::Directory if depth_budget > 0 => {
+                        let Ok(child) = ScopedPath::new(format!(
+                            "{}/{}",
+                            directory.as_str().trim_end_matches('/'),
+                            entry.name
+                        )) else {
+                            continue;
+                        };
+                        pending.push((child, relative));
+                    }
+                    FileType::Directory => {}
+                    _ => {
+                        // The manifest is already model context; a staged copy would be a second
+                        // source of truth that discovery never reads.
+                        if relative == SkillFilePath::skill_md().as_str() {
+                            continue;
+                        }
+                        // Host-written bookkeeping, not part of the authored bundle.
+                        if entry.name.starts_with('.') {
+                            continue;
+                        }
+                        if let Ok(path) = SkillFilePath::new(&relative) {
+                            files.push(path);
+                            remaining -= 1;
+                        }
+                    }
+                }
+            }
+            depth_budget = depth_budget.saturating_sub(1);
+        }
+        files.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(files)
+    }
 }
+
+/// Caps on bundle enumeration. A bundle is model-authored, so its shape is untrusted, and this runs
+/// on the activation path of every turn.
+const MAX_BUNDLE_FILES_LISTED: usize = 64;
+const MAX_BUNDLE_DEPTH_LISTED: usize = 4;
 
 fn resource_scope_for_run(run_context: &LoopRunContext) -> ResourceScope {
     let mut scope = run_context.scope.to_resource_scope();
@@ -1237,8 +1361,14 @@ mod tests {
         assert_eq!(error, SkillBundleSourceError::DuplicateSourceKind);
     }
 
+    /// Over the per-root cap, discovery returns the bundles that fit instead of failing.
+    ///
+    /// This previously asserted `BundleScanLimitExceeded`, i.e. that one root exceeding its
+    /// limit removed EVERY skill in that root from the model's view. A catalog that grew past
+    /// the cap lost all of its skills at once, with no signal to the model. Partial discovery
+    /// plus a warning keeps the skills under the cap usable.
     #[tokio::test]
-    async fn filesystem_source_enforces_bundle_scan_limit() {
+    async fn filesystem_source_returns_partial_results_over_the_scan_limit() {
         let (root, source) = mounted_source();
         let source = source.with_max_bundles_per_root(1);
         write_root(
@@ -1254,11 +1384,51 @@ mod tests {
         )
         .await;
 
-        let error = source
+        let descriptors = source
             .list_skill_bundles(&run_context().await)
             .await
-            .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::BundleScanLimitExceeded);
+            .expect("over the scan limit must degrade to partial results, not lose the root");
+        assert_eq!(
+            descriptors.len(),
+            1,
+            "the bundles that fit under the cap stay discoverable"
+        );
+    }
+
+    /// A real-sized catalog must enumerate WHOLE, at the default cap.
+    ///
+    /// The test above proves truncation degrades gracefully; it does not prove the default
+    /// cap is high enough to avoid truncating anything real, and that is the failure that
+    /// actually happened. At the previous default of 100 a 227-skill root returned its first
+    /// 100 bundles and skipped 127, so the tail was invisible to the selector, to the listing
+    /// and to the model — identical in effect to never installing those skills.
+    ///
+    /// It also hid the fix one layer above: raising the listing budget changed nothing while
+    /// this cap still amputated the catalog before the listing ever saw it. Two limits, and
+    /// only the lower one decides.
+    #[tokio::test]
+    async fn a_two_hundred_and_twenty_seven_skill_root_enumerates_whole() {
+        let (root, source) = mounted_source();
+        for i in 0..227 {
+            let name = format!("probe-{i:03}");
+            write_root(
+                &root,
+                &format!("/tenants/tenant-a/users/user-a/skills/{name}/SKILL.md"),
+                skill_md(&name, "A probe skill."),
+            )
+            .await;
+        }
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .expect("a 227-skill root must enumerate");
+        assert_eq!(
+            descriptors.len(),
+            227,
+            "the default per-root cap must not truncate a real catalog; a skill the selector \
+             never sees is one the model can never activate"
+        );
     }
 
     #[tokio::test]

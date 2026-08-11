@@ -461,6 +461,19 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
+        self
+    }
+
+    /// Exercise the production enum default without making the general
+    /// integration harness depend on ambient process configuration.
+    pub fn with_tool_disclosure_production_default(mut self) -> Self {
+        self.tool_disclosure = ToolDisclosureMode::default();
+        self
+    }
+
     /// Force `ToolDisclosureMode::Off` for this harness's underlying group,
     /// bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
     /// negative-control test's mode explicitly rather than relying on the
@@ -655,6 +668,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Route scripted `builtin.shell` calls through the real Docker-backed
+    /// sandbox profile. The calling test owns the Docker availability gate.
+    pub fn with_sandbox_shell_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::SandboxShellTools;
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
@@ -710,14 +730,7 @@ impl RebornIntegrationHarnessBuilder {
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
-        match self.tool_disclosure {
-            ToolDisclosureMode::Bridged => {
-                group_builder = group_builder.with_tool_disclosure_bridged();
-            }
-            ToolDisclosureMode::Off => {
-                group_builder = group_builder.with_tool_disclosure_off();
-            }
-        }
+        group_builder = group_builder.with_tool_disclosure_mode(self.tool_disclosure);
         if let Some(policy) = self.bridged_policy_override {
             group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
         }
@@ -2494,7 +2507,10 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        // The run's thread scope is the acting user (the pinger). Ephemeral
+        // per-ping threads are pinger-owned, so owner == actor; mirrors
+        // production `run_delivery::thread_scope_from_binding`.
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })
 }
@@ -2524,6 +2540,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_shell_rejects_scripted_process_overrides_during_build() {
+        let result = RebornIntegrationHarness::test_default()
+            .with_shell_timeout()
+            .with_sandbox_shell_tools()
+            .build()
+            .await;
+
+        let error = match result {
+            Ok(_) => panic!("sandbox shell accepted an unsupported process override"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("sandbox shell harness executes real containers")
+        );
     }
 }
 

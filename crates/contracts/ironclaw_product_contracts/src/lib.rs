@@ -60,11 +60,12 @@ pub mod product_wire;
 pub mod project_service;
 pub mod projection;
 pub mod prompt_source;
-pub mod subject_route;
+pub mod shared_admission;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod views;
+pub mod web_push;
 pub mod workspace_views;
 
 // There is deliberately no flat prelude and no cross-module re-export here.

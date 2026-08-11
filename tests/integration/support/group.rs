@@ -393,7 +393,7 @@ impl GroupCapability {
             Self::HostRuntime(harness) => harness
                 .reborn_services_for_test()
                 .and_then(|runtime| runtime.outbound_delivery_stores_for_test())
-                .map(|(_, _, _, reply_attachment_intents)| reply_attachment_intents)
+                .map(|(_, _, _, reply_attachment_intents, _)| reply_attachment_intents)
                 .unwrap_or_else(fresh_store),
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 fresh_store()
@@ -602,8 +602,17 @@ impl RebornIntegrationGroup {
             .ok_or("source delivery target requires composed Reborn runtime")?;
         let target_id = ironclaw_assistant::RebornOutboundDeliveryTargetId::new(target_id)?;
         let display_name = target_id.as_str().to_string();
+        // Registry-key the registration by the TARGET id (always unique per
+        // call), never by `provider_key`/channel: the registry's
+        // `providers.insert` silently REPLACES whatever already sits at a
+        // given key (`OutboundDeliveryTargetRegistrationOutcome::Replaced`),
+        // so two targets on the SAME channel (e.g. two Slack DMs) registered
+        // under the shared channel-named key would leave only the
+        // last-registered one resolvable — the first would look
+        // unregistered to the model that named it.
+        let registry_key = target_id.as_str().to_string();
         runtime.register_static_outbound_delivery_target_for_test(
-            provider_key,
+            registry_key,
             target_id,
             provider_key,
             display_name.as_str(),
@@ -770,7 +779,7 @@ impl RebornIntegrationGroup {
 /// group_constructors` declaration above), so the fields stay private and the
 /// per-capability preset constructors there — including their own
 /// `build_group_capability_with_base` helper, which calls
-/// `canonical_subject_user()` — take/return this type as the opaque handoff
+/// `canonical_actor_user()` — take/return this type as the opaque handoff
 /// between `build_base` and `into_group`; `build_base`/`into_group` themselves
 /// stay module-private too.
 struct GroupBaseData {
@@ -783,24 +792,21 @@ struct GroupBaseData {
     /// group-level `ThreadScope`. Every thread in a group shares `(tenant,
     /// agent, project)` — only `thread_id` varies, and `ThreadScope` has no
     /// `thread_id` field — so this binding is a valid stand-in for the whole
-    /// group. `group_constructors.rs` reads tenant/subject user off this
+    /// group. `group_constructors.rs` reads tenant/actor user off this
     /// field directly (module-private; it's a child module of `group`).
     canonical_binding: ResolvedBinding,
 }
 
 impl GroupBaseData {
-    /// The canonical binding's resolved subject user id — the hashed `UserId`
-    /// the actor `host-user` resolves to. `live_approvals` and `profile_tools`
-    /// both pin their capability harness's executor user to this so capability
-    /// dispatch shares the run's `(tenant, user)` with the turn-store /
-    /// evidence scope resolved from the SAME `canonical_binding` (see the
-    /// `canonical_binding` field docs above).
-    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
-        Ok(self
-            .canonical_binding
-            .subject_user_id
-            .clone()
-            .ok_or("canonical binding missing subject user id")?)
+    /// The canonical binding's actor user id — the hashed `UserId` the actor
+    /// `host-user` resolves to (a run acts as the user who invoked it).
+    /// `live_approvals` and `profile_tools` both pin their capability
+    /// harness's executor user to this so capability dispatch shares the
+    /// run's `(tenant, user)` with the turn-store / evidence scope resolved
+    /// from the SAME `canonical_binding` (see the `canonical_binding` field
+    /// docs above).
+    fn canonical_actor_user(&self) -> HarnessResult<UserId> {
+        Ok(self.canonical_binding.actor_user_id.clone())
     }
 }
 
@@ -908,7 +914,7 @@ impl RebornIntegrationGroupBuilder {
         // build the single shared turn store and evidence-port `ThreadScope`
         // before any per-thread binding exists. This is the SINGLE canonical
         // resolution for the group: `live_approvals` reuses
-        // `canonical_binding.subject_user_id` for its capability user rather than
+        // `canonical_binding.actor_user_id` for its capability user rather than
         // probing a second time, so turn-store scope and approval user can't
         // drift. The probe persists one deterministic, inert binding for
         // `conv-canonical-probe` (no thread submits turns against it); group
@@ -1013,7 +1019,7 @@ impl RebornIntegrationGroupBuilder {
         // disclosure's synthetic bridge surface, so this is production parity,
         // not a bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure == ToolDisclosureMode::Bridged {
+            if self.tool_disclosure.is_enabled() {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     policy: self
                         .narrowed_bridged_policy
@@ -1063,12 +1069,12 @@ impl RebornIntegrationGroupBuilder {
         // (a second, independent computation could silently drift from what
         // the sink actually observes if either recipe changes).
         let trace_capture = if self.trace_capture {
-            let subject_user = base.canonical_subject_user()?;
+            let actor_user = base.canonical_actor_user()?;
             let (sink, scope) =
                 ironclaw_composition::test_support::trace_capture_turn_event_sink_for_test(
                     group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
                     base.canonical_binding.tenant_id.as_str(),
-                    subject_user.as_str(),
+                    actor_user.as_str(),
                 );
             Some((sink, scope))
         } else {
@@ -1130,7 +1136,7 @@ impl RebornIntegrationGroupBuilder {
                 base.canonical_binding.agent_id.clone(),
                 base.canonical_binding.project_id.clone(),
                 base.canonical_binding.thread_id.clone(),
-                base.canonical_binding.subject_user_id.clone(),
+                Some(base.canonical_binding.actor_user_id.clone()),
             )
             .to_resource_scope(),
             Arc::clone(&runtime_thread_service),
@@ -1160,7 +1166,7 @@ impl RebornIntegrationGroupBuilder {
             );
             let account = ResourceAccount::user(
                 base.canonical_binding.tenant_id.clone(),
-                base.canonical_subject_user()?,
+                base.canonical_actor_user()?,
             );
             (Some(accountant), Some(governor), Some(account))
         } else {
@@ -1232,6 +1238,14 @@ impl RebornIntegrationGroupBuilder {
                 // Enabler (b): test groups are hermetically pinned and never
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
+                tool_disclosure_profile_pins: std::collections::HashMap::from([(
+                    ironclaw_loop_contracts::CapabilitySurfaceProfileId::new("interactive_tools")
+                        .expect("valid integration capability profile id"),
+                    vec![
+                        ironclaw_host_api::ids::CapabilityId::new("github.search_code")
+                            .expect("valid integration profile pin"),
+                    ],
+                )]),
                 // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
                 // production rides out provider outages for minutes (deep
                 // availability retries with long backoff), which would stall
@@ -1554,12 +1568,14 @@ impl<'g> RebornThreadBuilder<'g> {
             .resolve_binding(binding_request(&probe))
             .await?;
         let thread_scope = thread_scope_from_binding(&binding)?;
+        // The run is scoped to the acting user (the pinger); owner == actor
+        // under ephemeral-per-ping. Mirrors production scope derivation.
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            binding.subject_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
 
         // --- per-thread scripted gateway, registered before any submit ---------

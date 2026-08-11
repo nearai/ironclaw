@@ -18,6 +18,21 @@ export function fetchInspectorSnapshot({
   return apiFetch(runPath(threadId, runId), { signal });
 }
 
+export function fetchInspectorTool({
+  threadId,
+  runId,
+  activityId,
+  signal,
+}: {
+  threadId: string;
+  runId: string;
+  activityId: string;
+  signal?: AbortSignal;
+}): Promise<unknown> {
+  const path = `${runPath(threadId, runId)}/tools/${encodeURIComponent(activityId)}`;
+  return apiFetch(path, { signal });
+}
+
 export function inspectorEventStreamRequest({
   threadId,
   runId,

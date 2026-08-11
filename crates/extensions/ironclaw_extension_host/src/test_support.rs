@@ -92,6 +92,26 @@ client_credentials = { client_id_handle = "acme_tools_client_id" }
 access_token = "/access_token"
 "#;
 
+const OUTBOUND_ONLY_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-push"
+name = "Acme Push"
+version = "0.1.0"
+description = "fixture: outbound-only channel extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/acme_push.wasm"
+
+[channel]
+id = "notifications"
+display_name = "Acme push"
+inbound = false
+outbound = true
+conversation_model = "continuous"
+"#;
+
 const CHANNEL_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "acme-chat"
@@ -244,6 +264,12 @@ pub fn mcp_manifest() -> ResolvedExtensionManifest {
 /// A channel-only resolved manifest.
 pub fn channel_only_manifest() -> ResolvedExtensionManifest {
     resolve(CHANNEL_MANIFEST)
+}
+
+/// An outbound-only channel manifest (no ingress section) — the web-push
+/// deployment shape: nothing to mount, everything to deliver.
+pub fn outbound_only_channel_manifest() -> ResolvedExtensionManifest {
+    resolve(OUTBOUND_ONLY_CHANNEL_MANIFEST)
 }
 
 /// A tool + channel + auth resolved manifest.

@@ -118,6 +118,10 @@ It is the source of truth for fire eligibility.
 Pre-submit permanent failures are handled separately by the worker: `Once`
 triggers complete on failure so the one-shot slot is retired, while exhausted
 Cron triggers stay `Scheduled`/retryable for manual investigation or removal.
+After that state transition is durably visible, the settlement observer emits
+a typed failed-fire event. Composition may hand that event to the ordinary
+outbound notification policy, but the poller never sends a message itself and
+no synthetic run or thread-history row is created.
 
 Run threads for completed triggers remain accessible by design; their history is
 retained user data and must not become unreachable when the trigger transitions
@@ -402,7 +406,13 @@ and submit-result bookkeeping:
 - `ironclaw_triggers::ClearActiveFireRequest` plus
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
-  has observed a terminal turn outcome.
+  has observed a terminal turn outcome;
+- after an accepted run is durably cleared with `TriggerRunHistoryStatus::Error`,
+  `TriggerFireSettlementObserver::on_run_failure_settled` receives the exact
+  tenant, trigger, fire-slot, and run identities. Successful terminal runs and
+  clear races do not emit this failure settlement. The observer is an
+  automation-health signal only; it does not mint a replacement turn or bypass
+  the normal triggered-run delivery watcher.
 
 The poller treats per-record due-fire processing and active-run terminal lookup
 errors as structured tick report outcomes so one bad record does not block other
@@ -414,7 +424,9 @@ trigger turn is waiting for human interaction, the trigger remains active throug
 `active_run_ref` back-pressure. Later lifecycle/notification work must define
 durable gate expiry, stale gate rejection, reminder throttling, and user/admin
 notification paths without making the trigger poller deliver outbound messages
-directly.
+directly. A permanently failed pre-submit fire uses the same rule: notification
+starts only after durable failure settlement, carries a stable fire identity
+for idempotency, and records no `TurnRunId` because no run exists.
 
 ---
 
@@ -446,6 +458,10 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
+  Resuming a recurring trigger atomically rebases `next_run_at` to the first
+  future schedule slot, so slots elapsed during the pause are not replayed as
+  catch-up deliveries. A paused fire-once trigger retains its original slot
+  and remains eligible to fire exactly once when resumed.
 - Local-dev builds store trigger records in the local-dev libSQL database
   (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
   by production libSQL.
@@ -517,7 +533,12 @@ after completion. An omitted selection inherits the sealed source route; an
 explicit target is re-resolved at send time and fails closed if it is removed,
 unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
 persists the result without external egress. Trigger execution itself still
-does not choose, parse, or infer a destination.
+does not choose, parse, or infer a destination. (✎ 2026-08-08: the retired
+in-app "WebApp selection" sentence above describes the pre-#7157 stored-target
+model; under the shipped two-lane model the `web-push` catalog target is a
+real external destination — a routine that should notify the browser pins it
+in the prompt's delivery step like any channel target, and the
+notification-channel set fans gate/auth/failure notices to it when selected.)
 
 ---
 

@@ -29,9 +29,8 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
     HostRuntime, HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeProcessPort,
-    TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeProcessPort, UserSandboxProcessPort,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -1538,13 +1537,13 @@ async fn builtin_edit_tools_disable_post_edit_check_when_process_backend_is_none
 }
 
 #[tokio::test]
-async fn builtin_edit_tools_run_post_edit_check_in_tenant_sandbox_not_on_local_host() {
+async fn builtin_edit_tools_run_post_edit_check_in_user_sandbox_not_on_local_host() {
     // Regression (PR #5978 review): the edit plans declare no process effect, so
     // the default process port handed to them is the deployment-blind local host
     // port. Running the configured check through it would escape the sandbox onto
-    // the shared provider host under a tenant-sandbox policy. The resolver instead
+    // the shared provider host under a user-sandbox policy. The resolver instead
     // bundles the check with the port matching the plan's process backend, so
-    // under a tenant-sandbox policy the check runs ISOLATED in the tenant's own
+    // under a user-sandbox policy the check runs ISOLATED in the user's own
     // sandbox — never on the local host port.
     let temp = tempfile::tempdir().unwrap();
 
@@ -1554,11 +1553,11 @@ async fn builtin_edit_tools_run_post_edit_check_in_tenant_sandbox_not_on_local_h
     let runtime = runtime_with_post_edit_check_and_policy(
         filesystem,
         Arc::clone(&local_port),
-        Some(Arc::new(TenantSandboxProcessPort::new(
+        Some(Arc::new(UserSandboxProcessPort::new(
             Arc::clone(&sandbox_transport) as Arc<dyn SandboxCommandTransport>,
         ))),
         PostEditCheckConfig::new("cargo check", Duration::from_secs(30)),
-        tenant_sandbox_runtime_policy(),
+        user_sandbox_runtime_policy(),
     );
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
 
@@ -1580,7 +1579,7 @@ async fn builtin_edit_tools_run_post_edit_check_in_tenant_sandbox_not_on_local_h
             .as_str()
             .expect("the sandbox-run check surfaces its diagnostics as new_output"),
         "sandbox diagnostics",
-        "a tenant-sandbox policy runs the check ISOLATED in the tenant sandbox \
+        "a user-sandbox policy runs the check ISOLATED in the user sandbox \
          and surfaces its output to the model"
     );
     assert!(
@@ -1590,7 +1589,7 @@ async fn builtin_edit_tools_run_post_edit_check_in_tenant_sandbox_not_on_local_h
     assert_eq!(
         sandbox_transport.request_count(),
         1,
-        "the check runs through the tenant sandbox port, never the local host"
+        "the check runs through the user sandbox port, never the local host"
     );
     assert_eq!(
         completed.usage.process_count, 1,
@@ -1761,12 +1760,12 @@ where
 }
 
 /// Like `runtime_with_filesystem_process_port_and_post_edit_check`, but with
-/// an explicit runtime policy (and optionally a tenant sandbox process port)
+/// an explicit runtime policy (and optionally a user sandbox process port)
 /// so tests can pin how the process policy gates the post-edit check.
 fn runtime_with_post_edit_check_and_policy<F, P>(
     filesystem: F,
     process_port: Arc<P>,
-    tenant_sandbox_process_port: Option<Arc<TenantSandboxProcessPort>>,
+    user_sandbox_process_port: Option<Arc<UserSandboxProcessPort>>,
     post_edit_check: PostEditCheckConfig,
     policy: EffectiveRuntimePolicy,
 ) -> impl HostRuntime
@@ -1789,8 +1788,8 @@ where
     .with_post_edit_check(post_edit_check)
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()));
-    if let Some(tenant_sandbox_process_port) = tenant_sandbox_process_port {
-        services = services.with_tenant_sandbox_process_port(tenant_sandbox_process_port);
+    if let Some(user_sandbox_process_port) = user_sandbox_process_port {
+        services = services.with_user_sandbox_process_port(user_sandbox_process_port);
     }
     services.host_runtime_for_local_testing()
 }
@@ -1812,17 +1811,16 @@ fn process_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-/// HostedDev-shaped tenant policy with a tenant-sandbox process backend. The
-/// filesystem backend is ScopedVirtual (not the hosted TenantWorkspace)
-/// because the local invocation-services resolver under test can only serve
-/// mount-scoped filesystem plans; the axis under test is the process backend.
-fn tenant_sandbox_runtime_policy() -> EffectiveRuntimePolicy {
+/// HostedDev-shaped tenant policy with a user-sandbox process backend and the
+/// same tenant-workspace filesystem selection used by production hosted
+/// deployments.
+fn user_sandbox_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
-        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
@@ -1830,7 +1828,7 @@ fn tenant_sandbox_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-/// Sandbox transport double that counts requests; the tenant-sandbox test
+/// Sandbox transport double that counts requests; the user-sandbox test
 /// asserts the post-edit check runs through it (isolated in the tenant
 /// sandbox) rather than escaping onto the local host port.
 #[derive(Default)]
@@ -2177,4 +2175,83 @@ fn trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
+}
+
+/// `/` must mean the workspace in every coding tool, not fail with a blank path.
+///
+/// Observed repeatedly on live demo runs. An agent that globbed with a leading wildcard, or looked at
+/// the root to see what existed, got:
+///
+/// ```text
+/// path  is not under an available scoped root (available roots: skills, system skills,
+/// tenant-shared skills, workspace)
+/// ```
+///
+/// The offending path renders BLANK because the safe-summary encoder maps `/` to a space, so the
+/// message named nothing and the agent could only guess. `list_dir` had been special-cased; `glob`,
+/// `grep` and `read_file` had not. Table-driven so a tool cannot be fixed in isolation again.
+#[tokio::test]
+async fn coding_tools_treat_the_filesystem_root_as_the_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("marker.txt"), "found me").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    for (capability, input) in [
+        (GLOB_CAPABILITY_ID, json!({"path": "/", "pattern": "*.txt"})),
+        (GREP_CAPABILITY_ID, json!({"path": "/", "pattern": "found"})),
+        (LIST_DIR_CAPABILITY_ID, json!({"path": "/"})),
+    ] {
+        let outcome = invoke_with_context(
+            &runtime,
+            capability,
+            input.clone(),
+            execution_context_with_mounts(coding_capability_ids(), mounts.clone()),
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "{capability} must accept `/` as the workspace; got {outcome:?} for input {input}"
+        );
+    }
+}
+
+/// A path the tools resolve relative to the workspace stays resolvable when written and read back.
+///
+/// The write-then-read round trip is the invariant an agent depends on when it authors a script and
+/// then uses it, and it is the one that silently broke when `/workspace` meant two different
+/// directories to different tools.
+#[tokio::test]
+async fn a_relative_path_written_by_write_file_is_readable_by_read_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = || execution_context_with_mounts(coding_capability_ids(), mounts.clone());
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "scripts/egfr.py", "content": "print('staged')\n"}),
+        context(),
+    )
+    .await
+    .expect("a relative path must be writable");
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "scripts/egfr.py"}),
+        context(),
+    )
+    .await
+    .expect("the same relative path must be readable");
+
+    assert!(
+        read["content"]
+            .as_str()
+            .expect("read_file returns text")
+            .contains("staged"),
+        "write_file and read_file must resolve one relative path to one place; got {read:?}"
+    );
 }

@@ -21,6 +21,19 @@ const alignClasses = {
   right: "right-0",
 };
 
+const sizeClasses = {
+  md: {
+    root: "min-w-[9.5rem] text-ui",
+    button: "h-8 px-2.5",
+    option: "px-2.5 py-2",
+  },
+  sm: {
+    root: "min-w-[7.5rem] text-xs",
+    button: "h-8 px-2",
+    option: "px-2 py-1.5 text-xs",
+  },
+};
+
 function createSelectMenuId() {
   nextSelectMenuId += 1;
   return `v2-select-menu-${nextSelectMenuId}`;
@@ -144,6 +157,7 @@ function ToneDot({ tone }) {
 /**
  * @typedef {"neutral" | "positive" | "warning" | "danger" | "info" | "accent"} SelectMenuTone
  * @typedef {"left" | "right"} SelectMenuAlign
+ * @typedef {"md" | "sm"} SelectMenuSize
  * @typedef {{ value: string, label?: string, disabled?: boolean, tone?: SelectMenuTone }} SelectMenuOption
  */
 
@@ -167,12 +181,25 @@ export function SelectMenu({
   menuClassName = "",
   optionClassName = "",
   align = "right",
+  size = "md",
   placeholder = "",
+  searchable = false,
+  searchAriaLabel = "Search options",
+  searchPlaceholder = "Search options",
   ...rest
 }) {
   const [open, setOpen] = React.useState(false);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const visibleOptions = normalizedSearchQuery
+    ? options.filter((option) =>
+        [optionLabel(option), option.value].some((candidate) =>
+          String(candidate).toLowerCase().includes(normalizedSearchQuery)
+        )
+      )
+    : options;
   const [activeIndex, setActiveIndex] = React.useState(() =>
-    selectedOptionIndex(options, value)
+    selectedOptionIndex(visibleOptions, value)
   );
   const rootRef = React.useRef(null);
   const buttonRef = React.useRef(null);
@@ -187,18 +214,21 @@ export function SelectMenu({
   const selectedLabel = optionLabel(selectedOption, placeholder);
   const listboxId = `${idRef.current}-listbox`;
   const activeOptionId =
-    open && activeIndex >= 0 && activeIndex < options.length
+    open && activeIndex >= 0 && activeIndex < visibleOptions.length
       ? `${idRef.current}-option-${activeIndex}`
       : null;
   const effectiveAriaLabel = ariaLabel || ariaLabelProp;
   const effectiveAlign = normalizeAlign(align);
+  const effectiveSize = sizeClasses[size] || sizeClasses.md;
   const hasEnabledOption = firstEnabledIndex(options) >= 0;
   const interactionDisabled = disabled || !hasEnabledOption;
-  const optionsKey = optionsIdentity(options);
+  const optionsKey = optionsIdentity(visibleOptions);
   const rootPassthroughProps = safeRootProps(rest);
   const buttonListboxProps = {
     ...(open ? { "aria-controls": listboxId } : {}),
-    ...(activeOptionId ? { "aria-activedescendant": activeOptionId } : {}),
+    ...(activeOptionId && !searchable
+      ? { "aria-activedescendant": activeOptionId }
+      : {}),
   };
 
   const closeMenu = ({ restoreFocus = true } = {}) => {
@@ -217,8 +247,12 @@ export function SelectMenu({
   }
 
   React.useEffect(() => {
-    setActiveIndex(selectedOptionIndex(options, value));
-  }, [optionsKey, value]);
+    setActiveIndex(selectedOptionIndex(visibleOptions, value));
+  }, [optionsKey, value, normalizedSearchQuery]);
+
+  React.useEffect(() => {
+    if (!open && searchQuery) setSearchQuery("");
+  }, [open, searchQuery]);
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -241,7 +275,9 @@ export function SelectMenu({
 
   const openWithIndex = (index) => {
     if (interactionDisabled || index < 0) return;
-    setActiveIndex(index < options.length ? index : firstEnabledIndex(options));
+    setActiveIndex(
+      index < visibleOptions.length ? index : firstEnabledIndex(visibleOptions)
+    );
     setOpen(true);
   };
 
@@ -250,8 +286,10 @@ export function SelectMenu({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const baseIndex = open ? activeIndex : selectedIndex;
-      const nextIndex = nextEnabledIndex(options, baseIndex, direction);
+      const baseIndex = open
+        ? activeIndex
+        : selectedOptionIndex(visibleOptions, value);
+      const nextIndex = nextEnabledIndex(visibleOptions, baseIndex, direction);
       openWithIndex(nextIndex);
       return;
     }
@@ -259,7 +297,7 @@ export function SelectMenu({
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
       const direction = event.key === "Home" ? 1 : -1;
-      openWithIndex(edgeEnabledIndex(options, direction));
+      openWithIndex(edgeEnabledIndex(visibleOptions, direction));
       return;
     }
 
@@ -269,7 +307,7 @@ export function SelectMenu({
         openWithIndex(selectedIndex);
         return;
       }
-      chooseOption(options[activeIndex]);
+      chooseOption(visibleOptions[activeIndex]);
       return;
     }
 
@@ -285,14 +323,33 @@ export function SelectMenu({
     if (event.key === "Tab") closeMenu({ restoreFocus: false });
   };
 
+  const handleSearchKeyDown = (event) => {
+    if (
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp" ||
+      event.key === "Enter" ||
+      event.key === "Escape"
+    ) {
+      handleKeyDown(event);
+    }
+  };
+
+  const handleRootBlur = (event) => {
+    if (open && !event.currentTarget.contains(event.relatedTarget)) {
+      closeMenu({ restoreFocus: false });
+    }
+  };
+
   return (
     <div
       ref={rootRef}
       className={cn(
-        "relative inline-block min-w-[9.5rem] text-left font-sans text-ui",
+        "relative inline-block text-left font-sans",
+        effectiveSize.root,
         className
       )}
       {...rootPassthroughProps}
+      onBlur={handleRootBlur}
     >
       <button
         ref={buttonRef}
@@ -307,18 +364,19 @@ export function SelectMenu({
           !interactionDisabled &&
           setOpen((current) => {
             restoreFocusOnCloseRef.current = false;
-            if (!current) setActiveIndex(selectedIndex);
+            if (!current) setActiveIndex(selectedOptionIndex(visibleOptions, value));
             return !current;
           })}
         onKeyDown={handleKeyDown}
         className={cn(
-          "inline-flex h-8 w-full items-center justify-between gap-2 rounded-[8px] border",
-          "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5",
+          "inline-flex w-full items-center justify-between gap-2 rounded-[8px] border",
+          "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
           "text-[var(--v2-text-strong)] shadow-none transition-colors",
           "hover:bg-[var(--v2-surface-muted)]",
           "focus-visible:outline-none focus-visible:ring-2",
           "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
           "disabled:cursor-not-allowed disabled:opacity-60",
+          effectiveSize.button,
           buttonClassName
         )}
       >
@@ -337,8 +395,6 @@ export function SelectMenu({
 
       {open && (
         <div
-          id={listboxId}
-          role="listbox"
           className={cn(
             "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
             "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",
@@ -349,47 +405,73 @@ export function SelectMenu({
             menuClassName
           )}
         >
-          {options.map((option, index) => {
-            const isSelected = option.value === value;
-            const isActive = index === activeIndex;
-            return (
-              <button
-                key={option.value}
-                id={`${idRef.current}-option-${index}`}
-                type="button"
-                role="option"
-                aria-selected={isSelected ? "true" : "false"}
-                aria-disabled={option.disabled ? "true" : "false"}
-                disabled={option.disabled}
-                onMouseEnter={() => !option.disabled && setActiveIndex(index)}
-                onClick={() => chooseOption(option)}
-                className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
-                  "text-left text-[var(--v2-text)] transition-colors",
-                  "focus-visible:outline-none",
-                  "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
-                  "disabled:cursor-not-allowed disabled:opacity-50",
-                  isActive
-                    ? "bg-[var(--v2-surface-muted)] text-[var(--v2-text-strong)]"
-                    : isSelected
-                      ? "bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
-                      : "hover:bg-[var(--v2-surface-soft)]",
-                  optionClassName
-                )}
-              >
-                <span className="flex min-w-0 items-center gap-2">
-                  <ToneDot tone={option.tone} />
-                  <span className="truncate">{optionLabel(option)}</span>
-                </span>
-                {isSelected && (
-                  <Icon
-                    name="check"
-                    className="h-3.5 w-3.5 shrink-0 text-[var(--v2-accent-text)]"
-                  />
-                )}
-              </button>
-            );
-          })}
+          {searchable && (
+            <input
+              type="search"
+              role="combobox"
+              value={searchQuery}
+              aria-label={searchAriaLabel}
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls={listboxId}
+              aria-activedescendant={activeOptionId ?? undefined}
+              placeholder={searchPlaceholder}
+              autoFocus
+              onChange={(event) => setSearchQuery(event.currentTarget.value)}
+              onKeyDown={handleSearchKeyDown}
+              className={cn(
+                "sticky top-0 z-10 mb-1 h-9 w-full rounded-[7px] border px-2.5",
+                "border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)]",
+                "text-[var(--v2-text-strong)] placeholder:text-[var(--v2-text-faint)]",
+                "focus-visible:outline-none focus-visible:ring-2",
+                "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]"
+              )}
+            />
+          )}
+          <div id={listboxId} role="listbox">
+            {visibleOptions.map((option, index) => {
+              const isSelected = option.value === value;
+              const isActive = index === activeIndex;
+              return (
+                <button
+                  key={option.value}
+                  id={`${idRef.current}-option-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected ? "true" : "false"}
+                  aria-disabled={option.disabled ? "true" : "false"}
+                  disabled={option.disabled}
+                  onMouseEnter={() => !option.disabled && setActiveIndex(index)}
+                  onClick={() => chooseOption(option)}
+                  className={cn(
+                    "flex w-full items-center justify-between gap-3 rounded-[7px]",
+                    "text-left text-[var(--v2-text)] transition-colors",
+                    "focus-visible:outline-none",
+                    "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
+                    "disabled:cursor-not-allowed disabled:opacity-50",
+                    isActive
+                      ? "bg-[var(--v2-surface-muted)] text-[var(--v2-text-strong)]"
+                      : isSelected
+                        ? "bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                        : "hover:bg-[var(--v2-surface-soft)]",
+                    effectiveSize.option,
+                    optionClassName
+                  )}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <ToneDot tone={option.tone} />
+                    <span className="truncate">{optionLabel(option)}</span>
+                  </span>
+                  {isSelected && (
+                    <Icon
+                      name="check"
+                      className="h-3.5 w-3.5 shrink-0 text-[var(--v2-accent-text)]"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
