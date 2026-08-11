@@ -58,7 +58,6 @@ impl ModelInputRedaction {
 /// formats are handled by [`LeakDetector`]; the label-aware pass catches weak
 /// values that have no distinctive shape, such as `password: letmein`.
 pub fn redact_model_input_text(value: &str) -> ModelInputRedaction {
-    let (known_redacted, known_modified) = LEAK_DETECTOR.redact_all_secrets(value);
     let Ok(patterns) = LABELED_SECRET_PATTERNS.as_ref() else {
         // The expressions are compile-time literals, but a future edit can still
         // make one invalid. Fail closed at the model boundary without rejecting
@@ -68,9 +67,24 @@ pub fn redact_model_input_text(value: &str) -> ModelInputRedaction {
             redaction_count: 1,
         };
     };
-    let ranges = labeled_secret_ranges(&known_redacted, patterns);
-    let redaction_count = usize::from(known_modified).saturating_add(ranges.len());
-    let text = apply_redactions(&known_redacted, &ranges);
+    let labeled_ranges = labeled_secret_ranges(value, patterns);
+    let labeled_redacted = apply_redactions(value, &labeled_ranges);
+
+    // The shared detector's warn-only entropy heuristic deliberately flags
+    // standalone 64-character hex strings. That is useful at an exfiltration
+    // boundary, but too ambiguous for model input: ordinary SHA-256 fingerprints
+    // would be rewritten on every turn. Strong detector findings still redact,
+    // and a hex value after a credential label was already removed above.
+    let detector_ranges = LEAK_DETECTOR
+        .scan(&labeled_redacted)
+        .matches
+        .into_iter()
+        .filter(|finding| finding.pattern_name != "high_entropy_hex")
+        .map(|finding| finding.location)
+        .collect::<Vec<_>>();
+    let detector_ranges = merge_ranges(detector_ranges);
+    let redaction_count = labeled_ranges.len().saturating_add(detector_ranges.len());
+    let text = apply_redactions(&labeled_redacted, &detector_ranges);
     ModelInputRedaction {
         text,
         redaction_count,
@@ -177,6 +191,7 @@ mod tests {
             "The report documents an authorization flow and API key rotation.",
             "Read /Users/alice/.config/token before reviewing the report.",
             "The upstream service returned invalid API key.",
+            "surface sha256:269cc57b4d0c4368d8b02738ab709c810adb6212729b24bbdc34efb539a3ed07",
             "/etc/passwd",
         ] {
             let redaction = redact_model_input_text(input);
@@ -187,6 +202,15 @@ mod tests {
             );
             assert_eq!(redaction.text(), input);
         }
+    }
+
+    #[test]
+    fn labeled_hex_credential_is_redacted_even_though_unlabeled_digest_is_not() {
+        let secret = "269cc57b4d0c4368d8b02738ab709c810adb6212729b24bbdc34efb539a3ed07";
+        let redaction = redact_model_input_text(&format!("api key: {secret}"));
+
+        assert!(redaction.was_modified());
+        assert!(!redaction.text().contains(secret));
     }
 
     #[test]
