@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -337,6 +337,18 @@ impl RebornHostBindings {
     /// comes from [`RebornHostBindings::deployment`].
     pub fn profile(&self) -> RebornCompositionProfile {
         self.deployment.profile()
+    }
+
+    /// Exposes the root assembled by `local_filesystem_from_deployment` so
+    /// caller-level tests can observe storage identity. Test support only;
+    /// production code must use the assembled runtime rather than inspect its
+    /// substrate input.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn local_filesystem_storage_root_for_test(&self) -> Option<&Path> {
+        match &self.storage {
+            RebornStorageInput::LocalFilesystem { root, .. } => Some(root),
+            _ => None,
+        }
     }
 
     /// The deployment axes this build assembles from.

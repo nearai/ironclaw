@@ -135,6 +135,24 @@ exposes a volume mount. Without a volume, Railway deployments using
 `IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true` is explicitly set for a
 disposable test deployment.
 
+For this release only, a mounted-volume deployment can opt into the existing
+Railway user-sandbox shell without changing its configured storage profile:
+
+```bash
+IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume
+IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL=true
+IRONCLAW_REBORN_RAILWAY_PROJECT_ID=<railway-project-id>
+IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID=<railway-environment-id>
+RAILWAY_TOKEN=<railway-token> # or RAILWAY_API_TOKEN, but not both
+```
+
+The override applies only to `hosted-single-tenant-volume`; it assembles the
+Railway sandbox runtime while retaining the configured profile's durable path
+under `IRONCLAW_REBORN_HOME/hosted-single-tenant-volume`. The Railway project,
+environment, and exactly one token are required when it is enabled. To roll
+back to the processless volume profile, unset the override (or set it to
+`false`); no storage migration is required.
+
 For managed Postgres providers with a small session-pool cap, set
 `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE=1` or `2` rather than relying on the
 provider to queue excess sessions.

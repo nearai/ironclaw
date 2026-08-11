@@ -718,20 +718,31 @@ pub(crate) fn build_services_input_with_options(
 
     let owner_id = default_owner_id(config_file.as_ref());
 
-    let profile = effective_profile(config, config_file.as_ref())?;
-    reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
-    let mut services_input = match profile {
+    let configured_profile = effective_profile(config, config_file.as_ref())?;
+    let runtime_profile = railway_shell_runtime_profile(configured_profile)?;
+    reject_unsupported_runtime_sections(config_file.as_ref(), caller, configured_profile)?;
+    let mut services_input = match runtime_profile {
         RebornProfile::Standalone
         | RebornProfile::StandaloneUnrestricted
-        | RebornProfile::HostedSingleTenantVolume => {
-            build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
-        }
+        | RebornProfile::HostedSingleTenantVolume => build_standalone_local_runtime_services_input(
+            runtime_profile,
+            configured_profile,
+            owner_id,
+            config,
+            options,
+        )?,
         RebornProfile::HostedSingleTenantVolumeSandboxed
         | RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            build_sandboxed_local_runtime_services_input(profile, owner_id, config, options)?
+            build_sandboxed_local_runtime_services_input(
+                runtime_profile,
+                configured_profile,
+                owner_id,
+                config,
+                options,
+            )?
         }
         RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
-            profile,
+            runtime_profile,
             owner_id,
             config,
             config_file.as_ref(),
@@ -740,7 +751,7 @@ pub(crate) fn build_services_input_with_options(
             // MigrationDryRun needs production storage handles so follow-up migration
             // code can inspect durable schema state; this branch only constructs
             // those handles and does not execute migration writes.
-            build_production_services_input(profile, owner_id, config_file.as_ref())?
+            build_production_services_input(runtime_profile, owner_id, config_file.as_ref())?
         }
     };
     if let Some(ResolvedGoogleOAuthConfig {
@@ -777,7 +788,7 @@ pub(crate) fn build_services_input_with_options(
     // here, before the runtime is built.
     let memory_binding_policy = ironclaw_composition::resolve_memory_binding_policy(
         config_file.as_ref().and_then(|file| file.memory.as_ref()),
-        composition_profile(profile),
+        composition_profile(runtime_profile),
     )?;
     for diagnostic in ironclaw_composition::memory_binding_diagnostics(&memory_binding_policy) {
         // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
@@ -808,7 +819,7 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
-        profile,
+        profile: configured_profile,
         config_file,
     })
 }
@@ -819,6 +830,17 @@ const RAILWAY_SANDBOX_ENVIRONMENT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_ENVIRONME
 const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
 const RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES";
 const RAILWAY_SANDBOX_WORKER_IMAGE_ENV: &str = "IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE";
+const RAILWAY_SANDBOX_SHELL_OVERRIDE_ENV: &str = "IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL";
+
+fn railway_shell_runtime_profile(profile: RebornProfile) -> anyhow::Result<RebornProfile> {
+    if profile != RebornProfile::HostedSingleTenantVolume {
+        return Ok(profile);
+    }
+    match crate::operator_env::strict_bool_env_var(RAILWAY_SANDBOX_SHELL_OVERRIDE_ENV)? {
+        Some(true) => Ok(RebornProfile::HostedSingleTenantVolumeSandboxedRailway),
+        Some(false) | None => Ok(profile),
+    }
+}
 
 fn railway_preview_process_binding_from_env()
 -> Result<ironclaw_composition::RebornRuntimeProcessBinding, SandboxProcessBootError> {
@@ -909,50 +931,64 @@ enum SandboxProcessBootError {
 }
 
 fn build_sandboxed_local_runtime_services_input(
-    profile: RebornProfile,
+    runtime_profile: RebornProfile,
+    storage_profile: RebornProfile,
     owner_id: &str,
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let process_binding = match profile {
+    let process_binding = match runtime_profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
             let workspace_root =
-                local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
+                local_runtime_storage_root(config, storage_profile).join(SANDBOX_WORKSPACES_SUBDIR);
             block_on_cli(
                 ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
             )
             .map_err(|error| SandboxProcessBootError::DockerUnreachable {
-                profile,
+                profile: runtime_profile,
                 reason: error.to_string(),
             })?
         }
         RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
             railway_preview_process_binding_from_env()?
         }
-        _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
+        _ => {
+            return Err(SandboxProcessBootError::UnsupportedProfile {
+                profile: runtime_profile,
+            }
+            .into());
+        }
     };
-    let services_input =
-        build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
+    let services_input = build_standalone_local_runtime_services_input(
+        runtime_profile,
+        storage_profile,
+        owner_id,
+        config,
+        options,
+    )?;
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
 fn build_standalone_local_runtime_services_input(
-    profile: RebornProfile,
+    runtime_profile: RebornProfile,
+    storage_profile: RebornProfile,
     owner_id: &str,
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = local_runtime_workspace_root(profile)?;
+    let local_runtime_root = local_runtime_storage_root(config, storage_profile);
+    let workspace_root = local_runtime_workspace_root(storage_profile)?;
     let mut services_input = local_runtime_build_input_with_options(
-        composition_profile(profile),
+        composition_profile(runtime_profile),
         owner_id,
         local_runtime_root,
         RebornRuntimeProfileOptions {
             confirm_host_access: options.confirm_host_access,
         },
     )
-    .with_context(|| format!("failed to build local-runtime services for profile={profile}"))?
+    .with_context(|| {
+        format!("failed to build local-runtime services for profile={runtime_profile}")
+    })?
     .with_local_runtime_workspace_root(workspace_root);
     if services_input.requires_local_runtime_confirmed_host_home_root() {
         let host_home_root =
@@ -1745,10 +1781,11 @@ mod tests {
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, parse_rc1_channel_state_migration_override,
-        protect_reborn_log_filter, resolve_google_oauth_config, resolve_google_oauth_config_state,
-        resolve_google_oauth_config_state_merged,
+        build_runtime_input_with_options, build_services_input_with_options,
+        initialize_local_runtime_storage_root, no_assistant_text_message,
+        parse_rc1_channel_state_migration_override, protect_reborn_log_filter,
+        railway_shell_runtime_profile, resolve_google_oauth_config,
+        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -2667,6 +2704,7 @@ regex_activation_enabled = false
     fn build_runtime_input_accepts_hosted_single_tenant_volume_profile() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
+        let _override = EnvGuard::clear("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2737,6 +2775,110 @@ regex_activation_enabled = false
     }
 
     #[test]
+    fn hosted_volume_railway_shell_override_preserves_storage_profile() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _override = EnvGuard::set("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL", "true");
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _project_token = EnvGuard::set("RAILWAY_TOKEN", "railway-test-token");
+        let _api_token = EnvGuard::clear("RAILWAY_API_TOKEN");
+        let _cli_path = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_CLI_PATH");
+        let _idle_timeout = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES");
+        let _worker_image = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE");
+        let _docker = EnvGuard::set("DOCKER_HOST", "tcp://127.0.0.1:1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.clone().into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume".into()),
+        )
+        .expect("boot config");
+
+        let runtime_services = build_services_input_with_options(
+            &config,
+            RuntimeInputCaller::Run,
+            RuntimeInputOptions::default(),
+        )
+        .expect("runtime services");
+
+        assert_eq!(
+            runtime_services.profile,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolume
+        );
+        assert_eq!(
+            runtime_services.services_input.profile(),
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
+        );
+        assert_eq!(
+            runtime_services
+                .services_input
+                .runtime_policy()
+                .expect("runtime policy")
+                .process_backend
+                .as_str(),
+            "user_sandbox"
+        );
+        assert_eq!(
+            runtime_services
+                .services_input
+                .local_filesystem_storage_root_for_test(),
+            Some(reborn_home.join("hosted-single-tenant-volume").as_path())
+        );
+    }
+
+    #[test]
+    fn railway_shell_override_is_strict_and_scoped_to_base_volume() {
+        let _lock = lock_runtime_env();
+
+        for enabled in ["1", "true"] {
+            let _override = EnvGuard::set("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL", enabled);
+            assert_eq!(
+                railway_shell_runtime_profile(
+                    ironclaw_config::RebornProfile::HostedSingleTenantVolume
+                )
+                .expect("valid override"),
+                ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway
+            );
+        }
+
+        for disabled in ["0", "false"] {
+            let _override = EnvGuard::set("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL", disabled);
+            assert_eq!(
+                railway_shell_runtime_profile(
+                    ironclaw_config::RebornProfile::HostedSingleTenantVolume
+                )
+                .expect("valid override"),
+                ironclaw_config::RebornProfile::HostedSingleTenantVolume
+            );
+        }
+
+        let _override = EnvGuard::set("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL", "not-a-bool");
+        let error =
+            railway_shell_runtime_profile(ironclaw_config::RebornProfile::HostedSingleTenantVolume)
+                .expect_err("base volume consumes malformed override");
+        assert!(error.to_string().contains(
+            "IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL must be one of 1, true, 0, false"
+        ));
+
+        for profile in ironclaw_config::RebornProfile::all()
+            .iter()
+            .copied()
+            .filter(|profile| *profile != ironclaw_config::RebornProfile::HostedSingleTenantVolume)
+        {
+            assert_eq!(
+                railway_shell_runtime_profile(profile).expect("unrelated profile ignores override"),
+                profile
+            );
+        }
+    }
+
+    #[test]
     fn local_sandbox_profile_selects_docker_process_binding_when_required() {
         if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
             eprintln!(
@@ -2774,6 +2916,7 @@ regex_activation_enabled = false
     fn non_sandbox_profile_ignores_railway_sandbox_environment() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
+        let _override = EnvGuard::clear("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL");
         let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", " ");
         let _environment = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", " ");
         let _project_token = EnvGuard::set("RAILWAY_TOKEN", "railway-test-token");
@@ -2905,6 +3048,7 @@ regex_activation_enabled = false
 
     #[tokio::test]
     async fn local_profiles_initialize_their_runtime_storage_roots() {
+        let _lock = lock_runtime_env();
         for profile in [
             ironclaw_config::RebornProfile::Standalone,
             ironclaw_config::RebornProfile::StandaloneUnrestricted,
@@ -2943,6 +3087,42 @@ regex_activation_enabled = false
             error
                 .to_string()
                 .contains("failed to initialize Reborn runtime state")
+        );
+
+        let _override = EnvGuard::set("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL", "true");
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _project_token = EnvGuard::set("RAILWAY_TOKEN", "railway-test-token");
+        let _api_token = EnvGuard::clear("RAILWAY_API_TOKEN");
+        let _cli_path = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_CLI_PATH");
+        let _idle_timeout = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES");
+        let _worker_image = EnvGuard::clear("IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE");
+        let _docker = EnvGuard::set("DOCKER_HOST", "tcp://127.0.0.1:1");
+        let (_temp, config) = boot_config_with_config_toml("hosted-single-tenant-volume", "");
+        let runtime_services = build_services_input_with_options(
+            &config,
+            RuntimeInputCaller::Run,
+            RuntimeInputOptions::default(),
+        )
+        .expect("runtime services");
+
+        initialize_local_runtime_storage_root(&config, runtime_services.profile)
+            .await
+            .expect("initialize configured storage root");
+        assert!(
+            local_runtime_storage_root(
+                &config,
+                ironclaw_config::RebornProfile::HostedSingleTenantVolume,
+            )
+            .is_dir()
+        );
+        assert!(
+            !local_runtime_storage_root(
+                &config,
+                ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
+            )
+            .exists()
         );
     }
 
@@ -3009,6 +3189,7 @@ default_profile = "secure_default"
     fn build_runtime_input_for_hosted_volume_rejects_storage_section() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
+        let _override = EnvGuard::clear("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL");
         let (_temp, config) = boot_config_with_config_toml(
             "hosted-single-tenant-volume",
             r#"
