@@ -47,7 +47,7 @@ use types::{GoogleSheetsAction, ToolContext};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../ironclaw_wasm/wit/tool.wit",
+    path: "../../../../lanes/ironclaw_wasm/wit/tool.wit",
 });
 
 struct GoogleSheetsTool;

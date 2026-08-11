@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Pin `.githooks/pre-commit`'s staged-path selector.
 
-The hook runs the version-bump check only when a staged path matches a literal
-path pattern. Wave 3 moved the WIT directory into its owning crate, so that
-pattern changed from `^wit/` to `^crates/ironclaw_wasm/wit/`. A path-literal
-gate has a silent failure mode: move the directory it names and the hook keeps
-exiting 0, so version bumps stop being checked and nothing says so.
+The hook runs the version-bump check only when a staged path matches a path
+pattern. Wave 3 moved the WIT directory into its owning crate (`^wit/` →
+`^crates/ironclaw_wasm/wit/`) and WS7 moved that crate into its family
+directory (`crates/lanes/ironclaw_wasm/`, PROPOSAL §5). A path-literal gate has
+a silent failure mode: move the directory it names and the hook keeps exiting
+0, so version bumps stop being checked and nothing says so.
+
+The hook's WIT branch is therefore depth-agnostic (`^crates/([^/]+/)*
+ironclaw_wasm/wit/`) so a *family move* cannot dark it — but a **rename** still
+can, and a regex cannot follow a rename. That residue is what these tests
+close: the gated WIT prefix is resolved here from the shared crate inventory
+(`scripts/ci/lib/crate_tree.py`) by crate NAME, so the selector is checked
+against where the directory actually is today, not against a second copy of the
+literal that drifts with it.
 
 These tests pin both halves — that the selector still matches the directories it
 is meant to gate, and that those directories still exist. The second half is the
@@ -17,14 +26,27 @@ from __future__ import annotations
 import pathlib
 import re
 import subprocess
+import sys
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / ".githooks" / "pre-commit"
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+from crate_tree import crate_directory  # noqa: E402
+
+# The crate that owns `wit/`. Resolved by name, at whatever depth it sits.
+WIT_OWNER_CRATE = "ironclaw_wasm"
+
+
+def wit_prefix() -> str:
+    """`<wasm-crate-dir>/wit/`, discovered rather than written down."""
+    return f"{crate_directory(WIT_OWNER_CRATE, REPO_ROOT)}/wit/"
+
+
 # The alternation branches are directory prefixes, so each must name a real
 # directory. Anchors and the trailing slash are stripped to get the path.
-GATED_PREFIXES = ("crates/ironclaw_wasm/wit/", "channels-src/", "tools-src/")
+GATED_PREFIXES = (wit_prefix(), "channels-src/", "tools-src/")
 
 
 def selector_pattern() -> str:
@@ -63,19 +85,21 @@ class PreCommitStagedPathSelectorTests(unittest.TestCase):
                 )
 
     def test_relocated_wit_directory_exists(self) -> None:
-        """The rename guard: a path literal naming a directory that no longer
+        """The rename guard: a path pattern naming a directory that no longer
         exists is a gate that can never fire again.
 
-        Scoped to the WIT prefix, which is the one Wave 3 moved. `channels-src/`
-        and `tools-src/` are gated by the hook but exist neither here nor on
-        `origin/main` — pre-existing vestigial prefixes, not this branch's doing,
-        so they are reported (see `test_vestigial_prefixes_are_recorded`) rather
-        than failed, which would make the branch red for someone else's debt.
+        Scoped to the WIT prefix, which is the one Wave 3 and WS7 both moved.
+        `channels-src/` and `tools-src/` are gated by the hook but exist neither
+        here nor on `origin/main` — pre-existing vestigial prefixes, not this
+        branch's doing, so they are reported (see
+        `test_vestigial_prefixes_are_recorded`) rather than failed, which would
+        make the branch red for someone else's debt.
         """
+        prefix = wit_prefix()
         self.assertTrue(
-            (REPO_ROOT / "crates/ironclaw_wasm/wit/").is_dir(),
-            "crates/ironclaw_wasm/wit/ is gated by .githooks/pre-commit but "
-            "does not exist; move the gate with the directory",
+            (REPO_ROOT / prefix).is_dir(),
+            f"{prefix} is gated by .githooks/pre-commit but does not exist; "
+            "move the gate with the directory",
         )
 
     def test_vestigial_prefixes_are_recorded(self) -> None:

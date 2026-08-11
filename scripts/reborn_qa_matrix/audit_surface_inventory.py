@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # WebUI and OpenAI-compat descriptor sources are resolved by crate NAME
 # through the shared inventory (scripts/ci/lib/crate_tree.py), not literal
-# `crates/ironclaw_webui` / `crates/ironclaw_reborn_openai_compat` paths, so
+# `crates/ironclaw_webui` / `crates/ironclaw_openai_compat` paths, so
 # the target-architecture family move (crates/<family>/ironclaw_*,
 # PROPOSAL §5) cannot make this audit silently extract zero surfaces.
 # See docs/reborn/target-architecture/CHECKLIST.md WS10.
@@ -174,7 +174,7 @@ def api_surfaces(repo_root: Path) -> list[Surface]:
         ),
         *_descriptor_patterns(
             repo_root
-            / _crate_dir("ironclaw_reborn_openai_compat", repo_root)
+            / _crate_dir("ironclaw_openai_compat", repo_root)
             / "src/descriptors.rs",
             kind="openai_compat_api_pattern",
             repo_root=repo_root,

@@ -1091,21 +1091,48 @@ def _stable_history(messages: list[dict]) -> list[str]:
     return out
 
 
-def _conversation_key(messages: list[dict]) -> str:
-    """Group requests belonging to one conversation.
+def _conversation_key(messages: list[dict], system_text: str, surface: str) -> str:
+    """Conservatively attach a request to an observed conversation chain.
 
-    The first real user message is stable for the life of a conversation and
-    differs between scenarios, which is all the grouping needs.
+    The wire request carries no opaque thread ID. A first-user-text hash is not
+    an identity: unrelated threads can share the same opening message (or have
+    no user message). Treat a request as a continuation only when its stable
+    history extends a known chain, as an exact retry when history, prefix, and
+    tool surface all match, or when an otherwise stable chain has an observable
+    tool-surface transition or history rewrite. Ambiguous requests start a new
+    chain, which may under-report reuse but cannot blame one conversation for
+    another's churn.
 
-    Known limitation: compaction replaces the head of the transcript, so a
-    compacted conversation reads as a new one and its cache accounting restarts.
-    That errs toward under-reporting rather than blaming a legitimate compaction
-    for churn. Pinned by `test_compaction_starts_a_new_chain_rather_than_reporting_churn`.
+    Compaction replaces the history head and therefore starts a new chain, as
+    pinned by `test_compaction_starts_a_new_chain_rather_than_reporting_churn`.
     """
-    for msg in messages:
-        if msg.get("role") == "user" and not _is_host_reminder(msg):
-            return hashlib.sha256(_message_text(msg).encode()).hexdigest()[:16]
-    return "no-user-message"
+    history = _stable_history(messages)
+    for key, previous in reversed(tuple(_cache_chains.items())):
+        previous_history = previous["history"]
+        shared_history = 0
+        for index, entry in enumerate(previous_history):
+            if index >= len(history) or history[index] != entry:
+                break
+            shared_history += 1
+        extends_chain = (
+            len(history) > len(previous_history)
+            and shared_history == len(previous_history)
+        )
+        exact_retry = (
+            history == previous_history
+            and system_text == previous["system"]
+            and surface == previous["surface"]
+        )
+        surface_transition = history == previous_history and surface != previous["surface"]
+        history_rewrite = (
+            shared_history > 0
+            and history != previous_history
+            and system_text == previous["system"]
+            and surface == previous["surface"]
+        )
+        if extends_chain or exact_retry or surface_transition or history_rewrite:
+            return key
+    return f"chain-{len(_cache_chains) + 1}"
 
 
 def _tool_surface_signature(tools: object) -> str:
@@ -1123,10 +1150,10 @@ def _tool_surface_signature(tools: object) -> str:
 
 
 def _observe_cache_prefix(messages: list[dict], tools: object) -> None:
-    key = _conversation_key(messages)
     system_text = _leading_system_text(messages)
     history = _stable_history(messages)
     surface = _tool_surface_signature(tools)
+    key = _conversation_key(messages, system_text, surface)
     previous = _cache_chains.get(key)
 
     if previous is not None:

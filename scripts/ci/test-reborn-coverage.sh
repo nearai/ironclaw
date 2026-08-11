@@ -93,7 +93,7 @@ make_fixture_crate() {
     > "${fixture_repo}/crates/${dir}/Cargo.toml"
 }
 for crate in \
-  ironclaw_runner ironclaw_product ironclaw_reborn_composition \
+  ironclaw_turn_runner ironclaw_assistant ironclaw_composition \
   ironclaw_engine ironclaw_example \
   ironclaw_reborn_full ironclaw_reborn_half ironclaw_reborn_partial \
   ironclaw_reborn_zero ironclaw_reborn_zero_a ironclaw_reborn_zero_b; do
@@ -213,7 +213,7 @@ capture() {
 # ---------------------------------------------------------------------------
 
 cat > "${fixtures_dir}/m1_part0.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/runtime.rs
 DA:1,1
 DA:2,0
 DA:3,1
@@ -234,7 +234,7 @@ end_of_record
 EOF
 
 cat > "${fixtures_dir}/m1_part1.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/runtime.rs
 DA:1,0
 DA:2,1
 DA:3,0
@@ -247,7 +247,7 @@ LH:1
 BRF:4
 BRH:1
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
+SF:/work/ironclaw/crates/ironclaw_assistant/src/lib.rs
 DA:1,1
 DA:2,1
 LF:2
@@ -259,9 +259,9 @@ capture "${merge_sh}" "${tmp_root}/m1_merged.lcov" "${fixtures_dir}/m1_part0.lco
 assert_exit_code "M1: merge exits 0" 0 "${CAP_RC}"
 
 m1_merged_body="$(cat "${tmp_root}/m1_merged.lcov")"
-assert_contains "M1: merged output keeps crates/ironclaw_runner" "${m1_merged_body}" "SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs"
+assert_contains "M1: merged output keeps crates/ironclaw_turn_runner" "${m1_merged_body}" "SF:/work/ironclaw/crates/ironclaw_turn_runner/src/runtime.rs"
 assert_not_contains "M1: merged output drops non-crates/ src/main.rs" "${m1_merged_body}" "src/main.rs"
-assert_contains "M1: merged output keeps crates/ironclaw_product" "${m1_merged_body}" "ironclaw_product"
+assert_contains "M1: merged output keeps crates/ironclaw_assistant" "${m1_merged_body}" "ironclaw_assistant"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line1: 1+0=1)" "${m1_merged_body}" "DA:1,1"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line2: 0+1=1)" "${m1_merged_body}" "DA:2,1"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line3: 1+0=1)" "${m1_merged_body}" "DA:3,1"
@@ -312,7 +312,7 @@ DA:1,9
 LF:1
 LH:1
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/runtime.rs
 DA:1,3
 LF:1
 LH:1
@@ -322,7 +322,7 @@ capture "${merge_sh}" "${tmp_root}/m5_merged.lcov" "${fixtures_dir}/m5_vendored.
 assert_exit_code "M5: merge exits 0 with one workspace file present" 0 "${CAP_RC}"
 m5_merged_body="$(cat "${tmp_root}/m5_merged.lcov")"
 assert_contains "M5: merge keeps the workspace crate source" "${m5_merged_body}" \
-  "crates/ironclaw_runner/src/runtime.rs"
+  "crates/ironclaw_turn_runner/src/runtime.rs"
 assert_not_contains "M5: merge drops a vendored crate that ships its own crates/ dir" \
   "${m5_merged_body}" "wasmtime"
 
@@ -331,9 +331,9 @@ assert_not_contains "M5: merge drops a vendored crate that ships its own crates/
 # layout) still merges; the same tracefile against a repo root with no crate
 # tree at all fails closed instead of reporting an empty success.
 m6_root="${tmp_root}/m6_nested_repo"
-mkdir -p "${m6_root}/crates/substrates/ironclaw_events/src"
-printf '[package]\nname = "ironclaw_events"\n' \
-  > "${m6_root}/crates/substrates/ironclaw_events/Cargo.toml"
+mkdir -p "${m6_root}/crates/substrates/ironclaw_event_log/src"
+printf '[package]\nname = "ironclaw_event_log"\n' \
+  > "${m6_root}/crates/substrates/ironclaw_event_log/Cargo.toml"
 # 20 more crate directories so the discovery floor is satisfied by a realistic
 # tree rather than by a single fixture crate.
 for i in $(seq 1 20); do
@@ -342,7 +342,7 @@ for i in $(seq 1 20); do
     > "${m6_root}/crates/domains/ironclaw_filler_${i}/Cargo.toml"
 done
 cat > "${fixtures_dir}/m6_nested.lcov" <<'EOF'
-SF:/work/ironclaw/crates/substrates/ironclaw_events/src/lib.rs
+SF:/work/ironclaw/crates/substrates/ironclaw_event_log/src/lib.rs
 DA:1,4
 DA:2,0
 LF:2
@@ -354,7 +354,7 @@ capture env IRONCLAW_REPO_ROOT="${m6_root}" \
 assert_exit_code "M6: merge finds a crate nested under a family directory" 0 "${CAP_RC}"
 assert_contains "M6: merged output keeps the nested crate source" \
   "$(cat "${tmp_root}/m6_merged.lcov")" \
-  "SF:/work/ironclaw/crates/substrates/ironclaw_events/src/lib.rs"
+  "SF:/work/ironclaw/crates/substrates/ironclaw_event_log/src/lib.rs"
 
 m6_empty_root="${tmp_root}/m6_no_crate_tree"
 mkdir -p "${m6_empty_root}"
@@ -394,12 +394,12 @@ assert_contains "M4: merge keeps the next package report" \
 # ---------------------------------------------------------------------------
 
 cat > "${fixtures_dir}/a1_mixed.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/runtime.rs
 DA:1,1
 LF:100
 LH:80
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
+SF:/work/ironclaw/crates/ironclaw_assistant/src/lib.rs
 LF:50
 LH:50
 end_of_record
@@ -409,9 +409,9 @@ capture "${summary_sh}" "${fixtures_dir}/a1_mixed.lcov" "${empty_exemptions}"
 assert_exit_code "A1: summary exits 0 for a mixed-crate fixture" 0 "${CAP_RC}"
 assert_contains "A1: aggregate matches hand-computed 86.67% (130/150)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 86.67%** — 130 / 150 lines'
-assert_contains "A1: table includes ironclaw_runner row" "${CAP_OUT}" "| \`ironclaw_runner\` | 80% | 80 / 100 |"
-assert_contains "A1: table includes ironclaw_product row" "${CAP_OUT}" \
-  "| \`ironclaw_product\` | 100% | 50 / 50 |"
+assert_contains "A1: table includes ironclaw_turn_runner row" "${CAP_OUT}" "| \`ironclaw_turn_runner\` | 80% | 80 / 100 |"
+assert_contains "A1: table includes ironclaw_assistant row" "${CAP_OUT}" \
+  "| \`ironclaw_assistant\` | 100% | 50 / 50 |"
 
 # A2: no data at all -> exit 0, "no data" message.
 : > "${fixtures_dir}/a2_empty.lcov"
@@ -479,7 +479,7 @@ assert_contains "A6: aggregate drops the non-crates file's 999 lines (5/10, not 
 # containing no `ironclaw` at all resolves (PROPOSAL §5.1 names package
 # directories by extension identity), which no `ironclaw_*` regex can reach.
 cat > "${fixtures_dir}/a6b_nested.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/a.rs
 LF:10
 LH:5
 end_of_record
@@ -499,7 +499,7 @@ assert_contains "A6b: a package crate whose directory basename is not ironclaw_*
 assert_contains "A6b: a crate nested one level under crates/ is in the table" \
   "${CAP_OUT}" "| \`ironclaw_extension_support\` | 50% | 45 / 90 |"
 assert_contains "A6b: flat crates still resolve unchanged" "${CAP_OUT}" \
-  "| \`ironclaw_runner\` | 50% | 5 / 10 |"
+  "| \`ironclaw_turn_runner\` | 50% | 5 / 10 |"
 assert_contains "A6b: nested crates reach the global aggregate too (130/200, not 5/10)" \
   "${CAP_OUT}" '**Line coverage (Reborn crates): 65%** — 130 / 200 lines'
 
@@ -508,7 +508,7 @@ assert_contains "A6b: nested crates reach the global aggregate too (130/200, not
 # enter the denominator. crate_tree.py prunes it; this pins that the aggregator
 # inherits that pruning rather than promoting the guest to a crate.
 cat > "${fixtures_dir}/a6c_guest.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/a.rs
 LF:10
 LH:5
 end_of_record
@@ -527,7 +527,7 @@ assert_contains "A6c: the guest's 5000 uncoverable lines stay out of the aggrega
 # subdirectory must not be attributed to this workspace. The aggregator anchors
 # on the discovered inventory for the same reason the merge script does.
 cat > "${fixtures_dir}/a6d_vendored.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/a.rs
 LF:10
 LH:5
 end_of_record
@@ -608,7 +608,7 @@ assert_contains "A6f: says why a merged number is refused" "${CAP_ERR}" \
 # lives under the checkout root — 1067 of 1067 per lane, 1139 of 1139 merged,
 # measured on run 30865483401. The guard is for the day that stops being true.
 cat > "${fixtures_dir}/a6g_vendored_collision.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/a.rs
 DA:1,1
 DA:2,0
 LF:2
@@ -705,7 +705,7 @@ SF:/work/ironclaw/crates/ironclaw_example/src/a.rs
 LF:10
 LH:0
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/a.rs
 LF:10
 LH:5
 end_of_record
@@ -720,7 +720,7 @@ capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a
 assert_exit_code "A10: whole-crate exemption exits 0 (no KeyError on missing 'module')" 0 "${CAP_RC}"
 assert_not_contains "A10: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_example\` |"
 assert_contains "A10: exempted crate kept out of the table, other crate still reported" "${CAP_OUT}" \
-  "| \`ironclaw_runner\` | 50% | 5 / 10 |"
+  "| \`ironclaw_turn_runner\` | 50% | 5 / 10 |"
 assert_contains "A10: whole-crate exemption listed under its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_example\`"
 assert_contains "A10: aggregate excludes the exempted crate's lines (5/10, not 5/20)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 50%** — 5 / 10 lines'
@@ -729,7 +729,7 @@ assert_contains "A10: aggregate excludes the exempted crate's lines (5/10, not 5
 # entry) renders both, sorted together by their shared `label` field.
 cat > "${fixtures_dir}/a11_mixed_forms.toml" <<'TOML'
 [[exemption]]
-module = "crates/ironclaw_runner/src/a.rs"
+module = "crates/ironclaw_turn_runner/src/a.rs"
 reason = "per-file exemption"
 issue = "https://github.com/nearai/ironclaw/issues/2"
 
@@ -740,7 +740,7 @@ issue = "https://github.com/nearai/ironclaw/issues/1"
 TOML
 capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a11_mixed_forms.toml"
 assert_exit_code "A11: mixed module+crate manifest exits 0" 0 "${CAP_RC}"
-assert_contains "A11: per-file form still rendered by its module path" "${CAP_OUT}" "\`crates/ironclaw_runner/src/a.rs\`"
+assert_contains "A11: per-file form still rendered by its module path" "${CAP_OUT}" "\`crates/ironclaw_turn_runner/src/a.rs\`"
 assert_contains "A11: whole-crate form still rendered by its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_example\`"
 assert_contains "A11: both exemptions fully drain the table (no data left)" "${CAP_OUT}" \
   "No Reborn crate coverage data found"
@@ -749,7 +749,7 @@ assert_contains "A11: both exemptions fully drain the table (no data left)" "${C
 # validation rejects it instead of silently preferring one key.
 cat > "${fixtures_dir}/a12_both_keys.toml" <<'TOML'
 [[exemption]]
-module = "crates/ironclaw_runner/src/a.rs"
+module = "crates/ironclaw_turn_runner/src/a.rs"
 crate = "ironclaw_example"
 reason = "ambiguous"
 issue = "https://github.com/nearai/ironclaw/issues/1"
@@ -901,7 +901,7 @@ GHEOF
 chmod +x "${gh_bin_dir}/gh"
 
 cat > "${fixtures_dir}/c_basic_coverage.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_turn_runner/src/a.rs
 LF:10
 LH:8
 end_of_record
@@ -1069,7 +1069,7 @@ fi
 
 # C9: a zero-covered crate excluded by a whole-crate exemption must not surface
 # in the sticky comment's 0-coverage callout (reuses the A10/B4 fixture pair —
-# ironclaw_example is 0/10 but exempted, ironclaw_runner is 5/10 not zero).
+# ironclaw_example is 0/10 but exempted, ironclaw_turn_runner is 5/10 not zero).
 c9_log="${tmp_root}/c9-gh.log"
 capture env \
   GH_TOKEN="fake-token" \
@@ -1143,7 +1143,7 @@ fi
 # never gates). Pins PR #5718 user comment.
 cat > "${fixtures_dir}/c12_malformed_floor.toml" <<'TOML'
 [[crate]]
-name = "ironclaw_runner"
+name = "ironclaw_turn_runner"
 floor_percent = 90.0
 TOML
 c12_log="${tmp_root}/c12-gh.log"

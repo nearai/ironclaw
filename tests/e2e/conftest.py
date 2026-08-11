@@ -622,29 +622,26 @@ async def assert_prompt_cache_reuse(request):
     Only requests made by THIS test are considered — the counters reset first.
     Tests that legitimately rewrite the prefix (e.g. deliberately reconfiguring
     the system prompt mid-conversation) opt out with
-    `@pytest.mark.allow_prompt_cache_churn`.
+    `@pytest.mark.allow_prompt_cache_churn("reviewable reason")`.
     """
     if "mock_llm_server" not in request.fixturenames:
         yield
         return
+    allow_churn = _required_marker_reason(request, "allow_prompt_cache_churn")
+    disable_gate = _required_marker_reason(request, "disable_prompt_cache_gate")
+    if disable_gate is not None:
+        yield
+        return
     url = request.getfixturevalue("mock_llm_server")
     async with httpx.AsyncClient() as client:
-        try:
-            await client.post(f"{url}/__mock/cache_stats/reset", timeout=5)
-        except httpx.HTTPError:
-            # The mock is not reachable (a test that stops it deliberately);
-            # there is nothing to assert, and failing here would mask the
-            # test's own failure.
-            yield
-            return
+        response = await client.post(f"{url}/__mock/cache_stats/reset", timeout=5)
+        response.raise_for_status()
         yield
-        if request.node.get_closest_marker("allow_prompt_cache_churn"):
+        if allow_churn is not None:
             return
-        try:
-            response = await client.get(f"{url}/__mock/cache_stats", timeout=5)
-            stats = response.json()
-        except httpx.HTTPError:
-            return
+        response = await client.get(f"{url}/__mock/cache_stats", timeout=5)
+        response.raise_for_status()
+        stats = response.json()
     violations = stats.get("violations") or []
     assert not violations, (
         "the provider-cached system prompt changed while the advertised tool "
@@ -652,6 +649,22 @@ async def assert_prompt_cache_reuse(request):
         "counter) is sitting in the cached prefix and every model call is "
         f"paying full input cost for it (#6985):\n{json.dumps(violations, indent=2)}"
     )
+
+
+def _required_marker_reason(request, marker_name: str) -> str | None:
+    marker = request.node.get_closest_marker(marker_name)
+    if marker is None:
+        return None
+    if (
+        len(marker.args) != 1
+        or marker.kwargs
+        or not isinstance(marker.args[0], str)
+        or not marker.args[0].strip()
+    ):
+        pytest.fail(
+            f"@pytest.mark.{marker_name} requires exactly one non-empty reason string"
+        )
+    return marker.args[0].strip()
 
 
 async def _run_emulate_server(

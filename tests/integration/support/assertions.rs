@@ -17,12 +17,12 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
-use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_config::BudgetDefaults;
+use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
 use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
-use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
 use ironclaw_threads::SessionThreadService as _;
 use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState};
@@ -109,7 +109,7 @@ pub enum ToolErrorClass {
 impl ToolErrorClass {
     /// The `safe_summary` prefix the executor writes for this class — see
     /// `capability_{failed,denied}_summary` in
-    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    /// `crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`.
     fn summary_prefix(self) -> &'static str {
         match self {
             Self::Failed => "capability failed with ",
@@ -555,7 +555,8 @@ impl RebornIntegrationHarness {
     /// last-user-message consumers. This pins position and role directly.
     pub async fn assert_rides_conversation_tail(&self, needle: &str) -> HarnessResult<()> {
         let requests = self.scripted_llm.captured_requests();
-        for messages in &requests {
+        let mut checked = 0usize;
+        for (request_index, messages) in requests.iter().enumerate() {
             let Some(at) = messages
                 .iter()
                 .position(|message| message.content.contains(needle))
@@ -564,7 +565,7 @@ impl RebornIntegrationHarness {
             };
             if messages[at].role != Role::HostReminder {
                 return Err(format!(
-                    "{needle:?} reached the model at role {:?}; host guidance pinned to a \
+                    "request {request_index}: {needle:?} reached the model at role {:?}; host guidance pinned to a \
                      transcript position must be Role::HostReminder so last-user-message \
                      consumers (capability guard, smart routing, trace hints) skip it",
                     messages[at].role
@@ -579,12 +580,15 @@ impl RebornIntegrationHarness {
                 && last_thread > at
             {
                 return Err(format!(
-                    "{needle:?} sat at index {at}, ahead of the thread message at index \
+                    "request {request_index}: {needle:?} sat at index {at}, ahead of the thread message at index \
                      {last_thread}; per-call context must ride the conversation TAIL or it \
                      relocates every byte of transcript after it"
                 )
                 .into());
             }
+            checked += 1;
+        }
+        if checked > 0 {
             return Ok(());
         }
         Err(format!(
@@ -637,6 +641,14 @@ impl RebornIntegrationHarness {
     /// `tests/e2e/mock_llm.py` test gets from the `assert_prompt_cache_reuse`
     /// fixture.
     pub async fn assert_prompt_cache_prefix_stable(&self) -> HarnessResult<()> {
+        let captured = self.scripted_llm.captured_requests().len();
+        if captured < 2 {
+            return Err(format!(
+                "vacuous: need at least two captured model requests to compare cached prefixes; \
+                 saw {captured}"
+            )
+            .into());
+        }
         let churn = self.scripted_llm.prompt_cache_prefix_churn();
         if churn.is_empty() {
             return Ok(());

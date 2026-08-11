@@ -90,7 +90,7 @@ run_integration_tier() {
   prepare_postgres_test_image
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
-    run cargo test -p ironclaw_reborn_integration_tests \
+    run cargo test -p ironclaw_integration_tests \
       --test "${test_name}" -- --nocapture
   done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")
 }
@@ -183,7 +183,7 @@ case "${stage}" in
   qa)
     prepare_rust_dependencies
     run "${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
-    run cargo test -p ironclaw_reborn_integration_tests \
+    run cargo test -p ironclaw_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     ;;
   rust-e2e)
@@ -211,7 +211,7 @@ case "${stage}" in
       run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
     run_integration_tier
     run "${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
-    run cargo test -p ironclaw_reborn_integration_tests \
+    run cargo test -p ironclaw_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     run "${repo_root}/scripts/reborn-e2e-rust.sh" all
     run_frontend_tests

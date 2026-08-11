@@ -375,7 +375,7 @@ fn empty_gate_reference_in_an_interaction_command_is_rejected() {
 #[test]
 fn user_message_text_that_fails_shared_validation_is_rejected() {
     // The user-message arm routes through `UserMessagePayload::new` so the
-    // shared `ironclaw_product` validation fires on untrusted Telegram
+    // shared `ironclaw_assistant` validation fires on untrusted Telegram
     // text. A struct literal here would let control characters and
     // oversize bodies cross into the trusted envelope. Both bounds are
     // pinned: a control character (newline and tab stay legal) and a body

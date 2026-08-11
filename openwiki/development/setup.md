@@ -16,7 +16,7 @@ cd ironclaw
 cargo test --lib 2>&1 | head -20
 
 # Run the CLI
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
+cargo run -q -p ironclaw_cli --bin ironclaw-reborn -- --help
 ```
 
 If all commands succeed, you're ready to start developing!
@@ -88,7 +88,7 @@ cargo fmt -- --check
 cargo clippy -- -D warnings
 
 # Run a simple command
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
+cargo run -q -p ironclaw_cli --bin ironclaw-reborn -- config path
 ```
 
 ## Useful Commands
@@ -97,19 +97,19 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 
 ```bash
 # Build the main binary (debug)
-cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
+cargo build -p ironclaw_cli --bin ironclaw-reborn
 
 # Build for release
-cargo build --release -p ironclaw_reborn_cli --bin ironclaw-reborn
+cargo build --release -p ironclaw_cli --bin ironclaw-reborn
 
 # Build with WebUI (requires Node.js)
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn
+cargo build -p ironclaw_cli --features webui-v2-beta --bin ironclaw-reborn
 
 # Build with Slack support
-cargo build -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn
+cargo build -p ironclaw_cli --features slack-v2-host-beta --bin ironclaw-reborn
 
 # Build with all features
-cargo build --all-features -p ironclaw_reborn_cli
+cargo build --all-features -p ironclaw_cli
 ```
 
 ### Testing
@@ -163,16 +163,16 @@ cargo deny check advisories
 cargo watch -x test
 
 # Build and run the CLI
-cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
+cargo run -p ironclaw_cli --bin ironclaw-reborn -- run --message "hello"
 
 # Start an interactive REPL
-cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
+cargo run -p ironclaw_cli --bin ironclaw-reborn -- repl
 
 # Start the WebUI service (requires webui-v2-beta feature)
-cargo run -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+cargo run -p ironclaw_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
 
 # Get help for any command
-cargo run -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
+cargo run -p ironclaw_cli --bin ironclaw-reborn -- --help
 ```
 
 ## Environment Setup
@@ -187,14 +187,14 @@ export OPENAI_API_KEY="sk-..."
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 
 # Configure the model route
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- \
+cargo run -q -p ironclaw_cli --bin ironclaw-reborn -- \
   models set-provider openai --model gpt-4
 
 # Verify the configuration
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
+cargo run -q -p ironclaw_cli --bin ironclaw-reborn -- models status
 
 # Run a simple message
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- \
+cargo run -q -p ironclaw_cli --bin ironclaw-reborn -- \
   run --message "hello"
 ```
 
@@ -217,7 +217,7 @@ export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="dev-user"
 
 # Build and serve (requires webui-v2-beta feature)
-cargo run -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+cargo run -p ironclaw_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
 
 # Visit http://127.0.0.1:3000 in your browser
 ```

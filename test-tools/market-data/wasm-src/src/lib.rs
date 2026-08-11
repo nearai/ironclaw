@@ -19,7 +19,7 @@ use types::Snp500Snapshot;
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../crates/ironclaw_wasm/wit/tool.wit",
+    path: "../../../crates/lanes/ironclaw_wasm/wit/tool.wit",
 });
 
 struct MarketDataTool;

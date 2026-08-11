@@ -1,7 +1,7 @@
 ---
 name: portfolio
 version: 0.1.0
-description: Cross-chain DeFi portfolio discovery, rebalancing suggestions, and NEAR Intent construction. Activates when the user pastes a wallet address or asks about yield/positions/rebalancing. Bootstraps a per-user "portfolio" project, aggregates positions across all the user's addresses inside one project, and offers a recurring keeper mission.
+description: Cross-chain DeFi portfolio discovery, rebalancing suggestions, and NEAR Intent construction. Triggered by a pasted wallet address or questions about yield, positions or rebalancing. Aggregates positions across the user's addresses in one project.
 activation:
   keywords:
     - portfolio

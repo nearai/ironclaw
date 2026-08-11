@@ -10,6 +10,7 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     USER_ID,
     capability_preview_payload as _preview_payload,
     create_thread,
@@ -30,38 +31,7 @@ EMPTY_REPLY_RUN_ID = "22222222-3333-4444-5555-666666666666"
 
 
 async def _install_fake_event_source(page):
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
 
 async def _wait_for_request_count(
@@ -426,32 +396,94 @@ async def test_reborn_legacy_tool_failure_recovers_with_final_response(
 async def test_reborn_legacy_truncated_tool_call_recovers_without_activity_card(
     reborn_v2_yolo_server,
 ):
-    """Port issue-1780 truncated tool-call recovery to Reborn's v2 turn path."""
+    """Port issue-1780 truncated tool-call recovery to Reborn's v2 turn path.
+
+    #6845 completed the model-error recovery contract: a truncated textual
+    tool call is never recovered as a capability call (the gateway raises
+    `OutputTruncated` instead — pinned by
+    `gateway_does_not_recover_truncated_textual_tool_syntax_as_a_capability_call`),
+    so the run fails with `model_output_truncated` and no tool is dispatched.
+    """
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, reborn_v2_yolo_server)
-        await send_message(
-            client,
-            reborn_v2_yolo_server,
-            thread_id,
-            "issue 1780 truncated tool call",
-        )
 
-        assistant = await wait_for_assistant_message(
-            client,
-            reborn_v2_yolo_server,
-            thread_id,
-            timeout=45,
-        )
+        timeout = aiohttp.ClientTimeout(total=60, sock_read=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            events_url = (
+                f"{reborn_v2_yolo_server}"
+                f"/api/webchat/v2/threads/{thread_id}/events"
+            )
+            async with session.get(
+                events_url,
+                params={"token": REBORN_V2_AUTH_TOKEN},
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                assert response.status == 200, await response.text()
+                await send_message(
+                    client,
+                    reborn_v2_yolo_server,
+                    thread_id,
+                    "issue 1780 truncated tool call",
+                )
+                run_status = await _wait_for_truncated_run_projection(response)
+
         timeline = await fetch_timeline(client, reborn_v2_yolo_server, thread_id)
 
-    assert (
-        "response was truncated" in (assistant.get("content") or "").lower()
-    ), assistant
+    assert run_status.get("failure_category") == "model_output_truncated", run_status
+    # The truncated tool call must never be dispatched: no activity card, no
+    # display preview (the issue-1780 recovery contract from the legacy suite).
     assert [
         message
         for message in timeline.get("messages", [])
         if message.get("kind") == "capability_display_preview"
     ] == []
+
+
+async def _wait_for_truncated_run_projection(
+    response, *, timeout: float = 45.0
+) -> dict:
+    """Read the SSE stream until the failed-run projection for truncation lands."""
+    current_event = None
+    data_lines: list[str] = []
+    deadline = asyncio.get_running_loop().time() + timeout
+
+    async def next_line() -> str:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        raw = await asyncio.wait_for(response.content.readline(), timeout=remaining)
+        if raw == b"":
+            raise AssertionError(
+                f"SSE stream closed before truncated-run projection; frames: {current_event}"
+            )
+        return raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            line = await next_line()
+        except asyncio.TimeoutError:
+            break
+        if not line:
+            if current_event == "projection_update" and data_lines:
+                frame = json.loads("\n".join(data_lines))
+                for item in frame.get("state", {}).get("items", []):
+                    run_status = item.get("run_status")
+                    if not run_status:
+                        continue
+                    if run_status.get("status") == "failed":
+                        return run_status
+            current_event = None
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            current_event = line.removeprefix("event:").strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").strip())
+
+    raise AssertionError("Timed out waiting for the truncated-run failure projection")
 
 
 async def test_reborn_legacy_empty_reply_failure_projection_is_visible(

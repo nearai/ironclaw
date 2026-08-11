@@ -49,7 +49,11 @@ def test_flags_clock_in_the_cached_system_prefix():
     Nothing functional breaks — the model answers fine — so only a cache-shaped
     assertion can see it. This is the case the gate exists for.
     """
-    observe("You are IronClaw. Current time: 10:00", [{"role": "user", "content": "hi"}], TOOLS)
+    observe(
+        "You are IronClaw. Current time: 10:00",
+        [{"role": "user", "content": "hi"}],
+        TOOLS,
+    )
     observe(
         "You are IronClaw. Current time: 10:01",
         [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
@@ -70,7 +74,11 @@ def test_accepts_the_clock_riding_the_conversation_tail():
     The reminder text changes every request by design, so the gate must not
     read that as churn — otherwise the fix would fail its own check.
     """
-    observe("You are IronClaw.", [{"role": "user", "content": "hi"}, reminder("Time: 10:00")], TOOLS)
+    observe(
+        "You are IronClaw.",
+        [{"role": "user", "content": "hi"}, reminder("Time: 10:00")],
+        TOOLS,
+    )
     observe(
         "You are IronClaw.",
         [
@@ -95,7 +103,11 @@ def test_allows_churn_explained_by_a_tool_surface_change():
     That invalidation is the correct price of a real change, so gating on it
     would make the check unusable for the extension-lifecycle scenarios.
     """
-    observe("You are IronClaw. Capabilities: builtin.http", [{"role": "user", "content": "hi"}], TOOLS)
+    observe(
+        "You are IronClaw. Capabilities: builtin.http",
+        [{"role": "user", "content": "hi"}],
+        TOOLS,
+    )
     observe(
         "You are IronClaw. Capabilities: builtin.http, slack.send_message",
         [{"role": "user", "content": "hi"}],
@@ -112,8 +124,14 @@ def test_separate_conversations_do_not_cross_contaminate():
     The mock is session-scoped, so without per-conversation grouping every test
     would blame the previous test's system prompt.
     """
-    observe("System for scenario A", [{"role": "user", "content": "question one"}], TOOLS)
-    observe("System for scenario B", [{"role": "user", "content": "question two"}], TOOLS)
+    observe(
+        "System for scenario A", [{"role": "user", "content": "same opening"}], TOOLS
+    )
+    observe(
+        "System for scenario B", [{"role": "user", "content": "same opening"}], TOOLS
+    )
+    observe("System without a user A", [], TOOLS)
+    observe("System without a user B", [], TOOLS)
 
     assert mock_llm._cache_violations == []
 
@@ -152,7 +170,7 @@ def test_history_rewrite_is_measured_but_not_gated():
 
 
 def test_compaction_starts_a_new_chain_rather_than_reporting_churn():
-    """Documents a real limitation of keying chains on the first user message.
+    """Documents conservative history-continuation behavior after compaction.
 
     Compaction replaces the head of the transcript, so the mock cannot tell the
     compacted conversation from a brand-new one and starts a fresh chain. That
@@ -184,7 +202,9 @@ def test_first_request_of_a_conversation_is_not_scored():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("predicate", [mock_llm._is_host_reminder, mock_llm_trace._is_host_reminder])
+@pytest.mark.parametrize(
+    "predicate", [mock_llm._is_host_reminder, mock_llm_trace._is_host_reminder]
+)
 def test_both_mock_paths_skip_host_reminders(predicate):
     """The canned mock and the trace mock must agree on what a reminder is.
 
@@ -193,12 +213,17 @@ def test_both_mock_paths_skip_host_reminders(predicate):
     instead of the user's ask and replays the wrong step.
     """
     assert predicate(
-        {"role": "user", "content": "<system-reminder>\nTime: 10:00\n</system-reminder>"}
+        {
+            "role": "user",
+            "content": "<system-reminder>\nTime: 10:00\n</system-reminder>",
+        }
     )
     assert not predicate({"role": "user", "content": "summarize the report"})
 
 
-@pytest.mark.parametrize("predicate", [mock_llm._is_host_reminder, mock_llm_trace._is_host_reminder])
+@pytest.mark.parametrize(
+    "predicate", [mock_llm._is_host_reminder, mock_llm_trace._is_host_reminder]
+)
 def test_opening_tag_alone_is_not_a_reminder(predicate):
     """A user message that merely starts with the literal tag is still a user ask.
 
@@ -206,8 +231,12 @@ def test_opening_tag_alone_is_not_a_reminder(predicate):
     to anchor on an earlier turn or an empty ask. The emitter escapes payload
     delimiters, so requiring a complete frame is unambiguous.
     """
-    assert not predicate({"role": "user", "content": "<system-reminder> explain this to me"})
-    assert not predicate({"role": "user", "content": "why does </system-reminder> appear here?"})
+    assert not predicate(
+        {"role": "user", "content": "<system-reminder> explain this to me"}
+    )
+    assert not predicate(
+        {"role": "user", "content": "why does </system-reminder> appear here?"}
+    )
 
 
 def test_reminder_is_skipped_when_selecting_the_last_user_message():
@@ -215,9 +244,32 @@ def test_reminder_is_skipped_when_selecting_the_last_user_message():
     messages = [
         {"role": "system", "content": "prefix"},
         {"role": "user", "content": "what is the weather"},
-        {"role": "user", "content": "<system-reminder>\nTime: 10:00\n</system-reminder>"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "weather", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "weather",
+            "content": "sunny",
+        },
+        {
+            "role": "user",
+            "content": "<system-reminder>\nTime: 10:00\n</system-reminder>",
+        },
     ]
 
     assert mock_llm._last_user_content(messages) == "what is the weather"
     assert mock_llm._last_user_message(messages)["content"] == "what is the weather"
     assert mock_llm_trace._last_user_content(messages) == "what is the weather"
+    for finder in (mock_llm._find_tool_results, mock_llm_trace._find_tool_results):
+        results = finder(messages, after_latest_user=True)
+        assert len(results) == 1
+        assert results[0]["content"] == "sunny"

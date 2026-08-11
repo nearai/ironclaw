@@ -145,7 +145,7 @@ cargo test
 > **可选：** 微信语音消息（`audio/silk`）需要独立的 `ironclaw-silk-decoder`
 > 辅助二进制才能被转写。该工具因为依赖 `silk-codec`（会引入 `bindgen` /
 > `libclang`），已被排除在默认工作区之外。请使用
-> `./crates/ironclaw_silk_decoder/build.sh` 单独编译（需要 libclang 与 C
+> `./tools/ironclaw_silk_decoder/build.sh` 单独编译（需要 libclang 与 C
 > 编译器），再把生成的二进制放到 `$PATH`、`ironclaw` 同级目录，或通过
 > `IRONCLAW_SILK_DECODER` 环境变量指定路径。即使没有它，语音消息仍会送达，
 > 只是会以原始的 `audio/silk` 数据块形式呈现。

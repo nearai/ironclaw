@@ -1,5 +1,5 @@
 /// Test double substituting the production `ApprovalRequestStorePort` impl
-/// (`ApprovalRequestStore`, `crates/ironclaw_approvals/src/lib.rs`).
+/// (`ApprovalRequestStore`, `crates/kernel/ironclaw_approvals/src/lib.rs`).
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -10,7 +10,7 @@ use ironclaw_host_api::{ids::ApprovalRequestId, resource::ResourceScope};
 
 /// Records `(ApprovalRequestId, ResourceScope)` on `save_pending`, then delegates
 /// every method to the inner store. Synthetic local-dev capabilities (e.g.
-/// `outbound_delivery_target_set`) persist approval requests directly to the
+/// `notification_channels_set`) persist approval requests directly to the
 /// store rather than through the host runtime, so [`RecordingHostRuntime`]
 /// never captures their scope — wrapping the store they write through
 /// restores the `pending_approval_scopes` bookkeeping `approve_standalone_gate`

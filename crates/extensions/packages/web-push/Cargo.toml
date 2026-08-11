@@ -1,0 +1,27 @@
+[package]
+name = "ironclaw_web_push_extension"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Web Push channel package: browser-notification delivery for the web app (adapter, preference-target codec, outbound target provider)"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_extension_contracts = { path = "../../../contracts/ironclaw_extension_contracts" }
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api" }
+# The channel's vendor-side state — the per-user browser subscription
+# registry — is host-local by nature (the analogue of a chat vendor's
+# workspace lives in our own database), so this package reaches its domain
+# crate the same way the memory provider packages reach theirs.
+ironclaw_outbound = { path = "../../../domains/ironclaw_outbound" }
+ironclaw_web_push = { path = "../../../domains/ironclaw_web_push" }
+tracing = "0.1"
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+toml = "0.9"

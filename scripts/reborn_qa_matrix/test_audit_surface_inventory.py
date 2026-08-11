@@ -64,11 +64,11 @@ def _write_repo(
     root: Path,
     *,
     webui_dir_rel: str = "crates/ironclaw_webui",
-    openai_dir_rel: str = "crates/ironclaw_reborn_openai_compat",
+    openai_dir_rel: str = "crates/ironclaw_openai_compat",
 ) -> None:
     # Real Cargo.toml files (not just directories with source in them) so
     # crate_tree.py's discovery can find ironclaw_webui and
-    # ironclaw_reborn_openai_compat wherever `webui_dir_rel`/`openai_dir_rel`
+    # ironclaw_openai_compat wherever `webui_dir_rel`/`openai_dir_rel`
     # place them — the fixture must clear the MIN_CRATE_DIRECTORIES floor too,
     # so it also carries filler crates rather than being a two-crate stub.
     (root / webui_dir_rel).mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def _write_repo(
     )
     (root / openai_dir_rel).mkdir(parents=True, exist_ok=True)
     (root / openai_dir_rel / "Cargo.toml").write_text(
-        '[package]\nname = "ironclaw_reborn_openai_compat"\n', encoding="utf-8"
+        '[package]\nname = "ironclaw_openai_compat"\n', encoding="utf-8"
     )
     for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
         filler = root / "crates" / f"ironclaw_filler_{index}"
@@ -129,7 +129,7 @@ class AuditSurfaceInventoryTests(unittest.TestCase):
         )
 
     def test_real_repository_api_surfaces_are_extractable(self):
-        # WS10: this crosses the ironclaw_webui and ironclaw_reborn_openai_compat
+        # WS10: this crosses the ironclaw_webui and ironclaw_openai_compat
         # crate-directory resolution against whatever the LIVE repo's current
         # layout is (flat or already family-moved) — unlike
         # test_build_audit_flags_only_surfaces_missing_from_feature_inventory,
@@ -141,7 +141,7 @@ class AuditSurfaceInventoryTests(unittest.TestCase):
 
     def test_crate_resolution_follows_a_family_move(self):
         """WS10: browser_routes/api_surfaces still find their sources when
-        ironclaw_webui and ironclaw_reborn_openai_compat sit one family
+        ironclaw_webui and ironclaw_openai_compat sit one family
         directory down (crates/<family>/ironclaw_*, PROPOSAL §5) instead of
         flat under crates/ — the exact shape the restructure produces."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -149,7 +149,7 @@ class AuditSurfaceInventoryTests(unittest.TestCase):
             _write_repo(
                 root,
                 webui_dir_rel="crates/substrates/ironclaw_webui",
-                openai_dir_rel="crates/substrates/ironclaw_reborn_openai_compat",
+                openai_dir_rel="crates/substrates/ironclaw_openai_compat",
             )
 
             routes = audit_surface_inventory.browser_routes(root)

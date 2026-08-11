@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_sandbox`
+**Crate:** `crates/lanes/ironclaw_sandbox`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---

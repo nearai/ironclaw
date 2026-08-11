@@ -48,18 +48,37 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     ".github/workflows/ironclaw-stress.yml": (
         "schedule:",
+        "libsql-scripted-memory:",
+        'profile = "hosted-single-tenant-volume"',
+        "memory_roundtrip",
+        "memory_grow",
+        "memory_mixed",
+        "--api-scripted-doc-sizes 4096,32768,131072,1048576",
+        "--api-poll-interval-ms 10000",
+        "--api-terminal-timeout-ms 120000",
+        "--max-p95-ms 120000",
+        "--max-failure-rate 0 \\",
+        "ironclaw-stress-libsql-scripted-${script}",
         "libsql-user-session-soak:",
         "--preset soak-user-session",
         "postgres-api-capacity:",
         "cargo build --locked --profile dist",
         "target/dist/ironclaw serve",
+        "ironclaw-stress-postgres-scripted-memory-roundtrip",
     ),
     ".github/workflows/live-canary.yml": (
         '- cron: "0 */3 * * *"',
-        '- cron: "30 5 * * 1"',
         "github.event.schedule == '0 */3 * * *'",
-        "github.event.schedule == '30 5 * * 1'",
-        "provider-matrix:",
+    ),
+    ".github/workflows/code_style.yml": (
+        # The docs publication-boundary gate: the job, its self-test step, its
+        # check step, and the roll-up guard that fails closed BEFORE the
+        # has_code early exit (docs-only PRs have has_code=false, so a guard
+        # placed after it could never block).
+        "docs-publication-boundary:",
+        "python3 scripts/ci/test_docs_publication_boundary.py",
+        "python3 scripts/ci/docs_publication_boundary.py",
+        '"${{ needs.docs-publication-boundary.result }}" != "success"',
     ),
     ".github/workflows/reborn-playwright.yml": (
         "python3 scripts/ci/ws12_suite_shards.py --github-output",
@@ -108,14 +127,14 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("crates/ironclaw_webui/src/lib.rs", True),
     # The target-architecture layout. A `crates/ironclaw_[^/]+/` filter misses
     # every one of these.
-    ("crates/substrates/ironclaw_events/src/lib.rs", True),
+    ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
     ("docs/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
     ("Cargo.toml", True),
     # Still out of scope: the filter must stay a filter.
     ("README.md", False),
-    ("docs/plans/whatever.md", False),
+    ("docs/internal/plans/whatever.md", False),
     (".github/workflows/code_style.yml", False),
     ("src/main.rs", False),
 )
@@ -183,6 +202,887 @@ CODE_STYLE_WORKFLOW = ".github/workflows/code_style.yml"
 PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 
+# ---------------------------------------------------------------------------
+# Docs publication-boundary guard ordering
+#
+# The guard in the code-style roll-up must run BEFORE the has_code early
+# exit: a docs-only PR has has_code=false, so a guard placed after `exit 0`
+# can never block. REQUIRED_MARKERS is presence-only and cannot see order —
+# relocating the guard below the early exit leaves every marker in the file
+# while the gate is fully broken — so the ordering is pinned separately here.
+# ---------------------------------------------------------------------------
+
+CODE_STYLE_DOCS_GUARD_MARKER = (
+    '"${{ needs.docs-publication-boundary.result }}" != "success"'
+)
+CODE_STYLE_HAS_CODE_EXIT_MARKER = (
+    'echo "No code changes — style checks skipped correctly"'
+)
+
+
+def validate_code_style_docs_guard_order(text: str) -> list[str]:
+    """Return every way the docs-gate guard could sit past the early exit.
+
+    Only executable occurrences count: comment lines are stripped first, so a
+    commented-out copy of the guard above the early exit (a refactor
+    leftover) cannot satisfy the pin, and EVERY live guard occurrence must
+    precede the first early-exit occurrence.
+    """
+
+    executable = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    early_exit = executable.find(CODE_STYLE_HAS_CODE_EXIT_MARKER)
+    guard_positions: list[int] = []
+    cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER)
+    while cursor != -1:
+        guard_positions.append(cursor)
+        cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER, cursor + 1)
+    if not guard_positions or early_exit == -1:
+        # Presence itself is REQUIRED_MARKERS' job; report only what this pin
+        # cannot delegate — a missing EXECUTABLE anchor makes the order
+        # unassertable (a comment-only occurrence lands here on purpose).
+        missing = "guard" if not guard_positions else "has_code early-exit"
+        return [
+            (
+                f"{CODE_STYLE_WORKFLOW}: docs-gate guard order unassertable — "
+                f"no executable {missing} marker"
+            )
+        ]
+    if any(position > early_exit for position in guard_positions):
+        return [
+            (
+                f"{CODE_STYLE_WORKFLOW}: the docs publication-boundary guard "
+                "sits after the has_code early exit — docs-only PRs "
+                "(has_code=false) exit 0 before the guard runs, so the gate "
+                "cannot block them. Move the guard above the early exit in "
+                "the roll-up step"
+            )
+        ]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# libsql-scripted-memory job contract (#7360)
+#
+# REQUIRED_MARKERS pins tokens across the WHOLE workflow file, so it cannot
+# tell which job a token belongs to — `profile = "hosted-single-tenant-volume"`
+# appears in more than one job, and a marker satisfied by a neighbouring lane
+# reads as green while this lane is broken. This pin is scoped to ONE job:
+# the `libsql-scripted-memory` block is extracted from its two-space job key
+# through the next two-space job key, and every invariant below is checked
+# inside that block only. Exactly-one resolution is the contract: zero
+# matches means the lane is gone, two means the key was duplicated — either
+# way the pins cannot say which block they validated, so both refuse.
+#
+# The checked-in workflow is GREEN under this contract. The sabotage tests in
+# test_ws12_workflow_contracts.py normalize EITHER source shape — the
+# historical RED one (`--operations 2`, an EXIT trap that kills without
+# waiting, the server log embedded in every per-script upload, final
+# readiness curls without timeout flags) or the checked-in GREEN one — to
+# one canonical compliant fixture, then break exactly one piece per test.
+# ---------------------------------------------------------------------------
+
+LIBSQL_SCRIPTED_MEMORY_JOB = "libsql-scripted-memory"
+LIBSQL_SCRIPTED_SCRIPTS = ("memory_roundtrip", "memory_grow", "memory_mixed")
+# The loop line must enumerate exactly the three scripts in order — a
+# parametrized list, a dropped scenario, a reordered one, or an extra entry
+# all silently change what the matrix measures. `; do` (or end of line)
+# anchors the enumeration so a fourth name appended after `memory_mixed`
+# cannot pass.
+LIBSQL_SCRIPTED_LOOP = re.compile(
+    r"for[ \t]+script[ \t]+in[ \t]+memory_roundtrip[ \t]+memory_grow"
+    r"[ \t]+memory_mixed[ \t]*(?:;[ \t]*do|$)"
+)
+# Lookaheads keep the value EXACT: `--operations 14`/`--operations 4.0` and
+# `--max-failure-rate 0.5`/`10` must not satisfy their pins.
+LIBSQL_SCRIPTED_OPERATIONS = re.compile(r"--operations[ \t]+4(?![0-9.])")
+LIBSQL_SCRIPTED_MAX_FAILURE_RATE = re.compile(r"--max-failure-rate[ \t]+0(?![0-9.])")
+# The four sizes, then end of line (a trailing ` \` continuation is fine): a
+# fifth size appended after `1048576` is rejected by the `(?![0-9,])`
+# lookahead, and the argument must stay on one line.
+LIBSQL_SCRIPTED_DOC_SIZES = re.compile(
+    r"--api-scripted-doc-sizes[ \t]+4096,32768,131072,1048576(?![0-9,])"
+    r"[ \t]*(?:\\[ \t]*)?$",
+    re.MULTILINE,
+)
+LIBSQL_SCRIPTED_PROFILE = 'profile = "hosted-single-tenant-volume"'
+LIBSQL_SERVER_LOG_PATH = "target/ironclaw-stress/libsql-scripted-server.log"
+LIBSQL_SERVER_LOG_NAME = "ironclaw-stress-libsql-scripted-server-log"
+LIBSQL_PER_SCRIPT_ARTIFACT_PREFIX = "ironclaw-stress-libsql-scripted-"
+
+# Exact-value pins for the runner flags the matrix is paid to enforce.
+# Lookaheads keep the values EXACT: `--api-hot-writers 2.0`/`20`,
+# `--mock-llm-bind 127.0.0.1:19091`, `--api-poll-interval-ms 2000`,
+# `--api-terminal-timeout-ms 60000`, and `--max-p95-ms 30000`/`1200000`
+# must not satisfy their pins.
+LIBSQL_SCRIPTED_HOT_WRITERS = re.compile(r"--api-hot-writers[ \t]+2(?![0-9.])")
+LIBSQL_SCRIPTED_MOCK_BIND = re.compile(
+    r"--mock-llm-bind[ \t]+127\.0\.0\.1:19090(?![0-9])"
+)
+LIBSQL_SCRIPTED_POLL_INTERVAL = re.compile(
+    r"--api-poll-interval-ms[ \t]+10000(?![0-9.])"
+)
+LIBSQL_SCRIPTED_TERMINAL_TIMEOUT = re.compile(
+    r"--api-terminal-timeout-ms[ \t]+120000(?![0-9.])"
+)
+LIBSQL_SCRIPTED_P95 = re.compile(r"--max-p95-ms[ \t]+120000(?![0-9.])")
+
+# The loop must survive a failed invocation under `set -e`: the runner
+# call's `|| failed=1` tail records the failure and lets the next script
+# run, so the later scripts still produce and upload their evidence.
+# Presence alone cannot see structure, so the exact loop is extracted
+# (LIBSQL_SCRIPTED_LOOP_BODY) and the invariants are enforced positionally:
+# `failed=0` must initialize the accumulator BEFORE the loop (under `set -u`
+# an unset variable aborts the step before any script runs); the outdir
+# assignment, `mkdir -p "${outdir}"`, and the guarded invocation must appear
+# INSIDE the loop in that order (a mkdir relocated outside the loop leaves
+# the upload paths missing exactly when the invocation failed); and the step
+# must `exit "$failed"` AFTER the loop's `done` so a recorded failure fails
+# the job once every script has had its chance.
+LIBSQL_SCRIPTED_FAILED_INIT = re.compile(r"^[ \t]*failed=0[ \t]*$", re.MULTILINE)
+LIBSQL_SCRIPTED_OUTDIR_ASSIGN = re.compile(
+    r'^[ \t]*outdir="[^"\n]*"[ \t]*$', re.MULTILINE
+)
+LIBSQL_SCRIPTED_OUTDIR = re.compile(r'mkdir[ \t]+-p[ \t]+"\$\{outdir\}"')
+LIBSQL_SCRIPTED_FAILURE_GUARD = re.compile(
+    r'2>[ \t]+"\$\{outdir\}/report\.txt"[ \t]*\|\|[ \t]+failed=1[ \t]*$',
+    re.MULTILINE,
+)
+LIBSQL_SCRIPTED_FINAL_EXIT = re.compile(r'exit[ \t]+"\$failed"')
+# The exact scripted loop through its own `done`; the captured body is what
+# the positional checks above run against.
+LIBSQL_SCRIPTED_LOOP_BODY = re.compile(
+    r"for[ \t]+script[ \t]+in[ \t]+memory_roundtrip[ \t]+memory_grow"
+    r"[ \t]+memory_mixed[ \t]*(?:;[ \t]*do|$)"
+    r"(?P<body>.*?)\n[ \t]*done",
+    re.DOTALL,
+)
+
+# A readiness probe is a `for _ in $(seq 1 N)` loop: finite by construction,
+# and capped here so a dead server fails the job instead of burning the whole
+# job timeout. `while true` (or a bound past the cap) is the regression.
+LIBSQL_PROBE_LOOP = re.compile(
+    r"for[ \t]+_[ \t]+in[ \t]+\$\(seq[ \t]+1[ \t]+(?P<bound>[0-9]+)\)"
+)
+LIBSQL_PROBE_LOOP_BODY = re.compile(
+    r"for[ \t]+_[ \t]+in[ \t]+\$\(seq[ \t]+1[ \t]+[0-9]+\);[ \t]*do"
+    r"(?P<body>.*?)\n[ \t]*done",
+    re.DOTALL,
+)
+LIBSQL_PROBE_MAX_BOUND = 600
+# Every curl inside a probe loop AND after it must carry explicit short
+# timeouts: --connect-timeout caps the connect attempt and --max-time caps
+# the whole transfer, so a wedged server fails the probe instead of hanging
+# past the loop. Values are pinned exactly (5/10 — the same flags the
+# in-loop curls use): a missing flag or 50/100 is a regression, not a fix.
+LIBSQL_PROBE_TIMEOUT = re.compile(
+    r"--connect-timeout[ \t]+5(?![0-9])[ \t]+--max-time[ \t]+10(?![0-9])"
+)
+# After each bounded loop a final UNCONDITIONAL curl must fail the job when
+# the probe never succeeded — otherwise 120 failed tries degrade into a
+# matrix run against a dead server. The in-loop `if curl -fsS \` forms do not
+# match these (they are prefixed with `if ` / continued differently), and the
+# final curl must carry the same explicit timeouts as the loop probes.
+LIBSQL_FINAL_HEALTH_PROBE = re.compile(
+    r"^[ \t]*curl[ \t]+-fsS[ \t]+"
+    r"--connect-timeout[ \t]+5(?![0-9])[ \t]+--max-time[ \t]+10(?![0-9])"
+    r"[ \t]+http://127\.0\.0\.1:18080/api/health[ \t]+>/dev/null[ \t]*$",
+    re.MULTILINE,
+)
+LIBSQL_FINAL_SESSION_PROBE = re.compile(
+    r"^[ \t]*curl[ \t]+-fsS[ \t]+"
+    r"--connect-timeout[ \t]+5(?![0-9])[ \t]+--max-time[ \t]+10(?![0-9])"
+    r"[ \t]*\\\n"
+    r"[ \t]*-H[ \t]+\"Authorization: Bearer \$IRONCLAW_REBORN_WEBUI_TOKEN\""
+    r"[ \t]*\\\n"
+    r"[ \t]*http://127\.0\.0\.1:18080/api/webchat/v2/session[ \t]+>/dev/null"
+    r"[ \t]*$",
+    re.MULTILINE,
+)
+# Cleanup must kill AND wait: kill alone can leave the port bound when the
+# step ends, so the next run collides with a zombie server. The trap must be
+# single-quoted so the expansion is DELAYED — `$server_pid` is read when the
+# trap fires, not when it is registered — which is what makes the kill/wait
+# pair address the process this step actually started.
+LIBSQL_SERVER_TRAP = re.compile(r"trap[ \t]+'(?P<cmd>[^']*)'[ \t]+EXIT")
+
+# Two-space job keys (`  name:` at the top level of `jobs:`). Deeper YAML
+# keys are indented further and cannot match.
+JOB_HEADING = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
+UPLOAD_ARTIFACT_NAME = re.compile(
+    r"^[ \t]*name:[ \t]*(?P<name>[^#\n]+?)[ \t]*$", re.MULTILINE
+)
+UPLOAD_PATH_KEY = re.compile(r"^[ \t]*path:[ \t]*(?:[|>][+-]?)?[ \t]*$", re.MULTILINE)
+# Every upload step must run even when the matrix step failed (`if:
+# always()`) and must fail the job when its evidence is missing
+# (`if-no-files-found: error`) — an upload that silently carries nothing
+# hides a lost run behind a green job.
+UPLOAD_ALWAYS = re.compile(r"^[ \t]*if:[ \t]+always\(\)[ \t]*$", re.MULTILINE)
+UPLOAD_NO_FILES_ERROR = re.compile(
+    r"^[ \t]*if-no-files-found:[ \t]+error[ \t]*$", re.MULTILINE
+)
+
+
+def extract_job_block(text: str, job: str) -> tuple[str | None, str]:
+    """Return one job's text: from its two-space key line to the next.
+
+    Exactly-one resolution is the contract: zero matches means the lane is
+    gone, two means the key was duplicated — either way the scoped pins
+    cannot say which block they validated, so both refuse (the same
+    fail-closed stance as `extract_scope_regex`).
+    """
+
+    headings = list(JOB_HEADING.finditer(text))
+    matches = [match for match in headings if match.group("name") == job]
+    if len(matches) != 1:
+        return None, (
+            f"expected exactly one {job!r} job, found {len(matches)} — the "
+            "scoped libsql-scripted-memory contract cannot resolve its block"
+        )
+    start = matches[0].start()
+    following = next((m for m in headings if m.start() > start), None)
+    return text[start : following.start() if following else len(text)], ""
+
+def extract_continued_commands(text: str, executable: str) -> list[str]:
+    """Return shell commands whose first line is `<executable> \\`.
+
+    A command continues while its current line ends in a backslash. This
+    keeps flag validation scoped to one invocation instead of allowing a
+    same-step `echo` or sibling command to satisfy the contract.
+    """
+
+    lines = text.splitlines()
+    commands: list[str] = []
+    index = 0
+    first_line = f"{executable} \\"
+    while index < len(lines):
+        if lines[index].strip() != first_line:
+            index += 1
+            continue
+        command = [lines[index]]
+        while command[-1].rstrip().endswith("\\") and index + 1 < len(lines):
+            index += 1
+            command.append(lines[index])
+        commands.append("\n".join(command))
+        index += 1
+    return commands
+
+
+
+def extract_upload(body: str) -> tuple[str | None, list[str]]:
+    """One upload step's artifact name and path list, or (None, []) when the
+    step is not a recognizable `actions/upload-artifact` call."""
+
+    name_match = UPLOAD_ARTIFACT_NAME.search(body)
+    if name_match is None:
+        return None, []
+    name = name_match.group("name").strip()
+    path_match = UPLOAD_PATH_KEY.search(body)
+    if path_match is None:
+        return name, []
+    indent = len(path_match.group(0)) - len(path_match.group(0).lstrip())
+    paths: list[str] = []
+    for line in body[path_match.end() :].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        if stripped.startswith("#"):
+            continue
+        paths.append(stripped)
+    return name, paths
+
+
+def validate_libsql_scripted_memory_job(text: str) -> list[str]:
+    """Return every way the libsql-scripted-memory job breaks its contract.
+
+    REQUIRED_MARKERS pins presence file-wide; this pin is scoped to the one
+    job block and refuses to resolve it ambiguously. Every error names the
+    job and the broken invariant.
+    """
+
+    block, detail = extract_job_block(text, LIBSQL_SCRIPTED_MEMORY_JOB)
+    if block is None:
+        return [f"{STRESS_WORKFLOW}: {detail}"]
+    label = f"{STRESS_WORKFLOW} ({LIBSQL_SCRIPTED_MEMORY_JOB} job):"
+    errors: list[str] = []
+
+    # Comment lines are inert: a commented-out decoy cannot satisfy a pin
+    # (the same stance as validate_code_style_docs_guard_order).
+    executable = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    if not any(
+        "'schedule'" in line and "'workflow_dispatch'" in line
+        for line in executable.splitlines()
+        if line.lstrip().startswith("if:")
+    ):
+        errors.append(
+            f"{label} must gate on both schedule and workflow_dispatch "
+            "(if: github.event_name == 'schedule' || github.event_name == "
+            "'workflow_dispatch') — the daily scan must stay reachable by hand"
+        )
+    if LIBSQL_SCRIPTED_PROFILE not in executable:
+        errors.append(
+            f"{label} must boot the server with {LIBSQL_SCRIPTED_PROFILE!r} — "
+            "the libsql volume-backed profile is what the matrix measures"
+        )
+    if LIBSQL_SCRIPTED_LOOP.search(executable) is None:
+        errors.append(
+            f"{label} must run the three scripts in one fixed sequential loop — "
+            "`for script in memory_roundtrip memory_grow memory_mixed; do` — a "
+            "parametrized, reordered, or split loop silently drops a scenario"
+        )
+    loop = LIBSQL_SCRIPTED_LOOP_BODY.search(executable)
+    runner = ""
+    if loop is not None:
+        commands = extract_continued_commands(
+            loop.group("body"), "target/release/ironclaw_stress"
+        )
+        if len(commands) == 1:
+            runner = commands[0]
+        else:
+            errors.append(
+                f"{label} the fixed script loop must contain exactly one "
+                "target/release/ironclaw_stress command, found "
+                f"{len(commands)}"
+            )
+    if LIBSQL_SCRIPTED_OPERATIONS.search(runner) is None:
+        errors.append(
+            f"{label} must run each script with --operations 4 — fewer "
+            "operations under-sample the scripted verdicts the matrix is paid "
+            "to produce"
+        )
+    if LIBSQL_SCRIPTED_DOC_SIZES.search(runner) is None:
+        errors.append(
+            f"{label} must pass exactly the four scripted doc sizes "
+            "--api-scripted-doc-sizes 4096,32768,131072,1048576 — the matrix "
+            "pins the small-to-large latency curve"
+        )
+    if LIBSQL_SCRIPTED_MAX_FAILURE_RATE.search(runner) is None:
+        errors.append(
+            f"{label} must run each script with --max-failure-rate 0 — the "
+            "zero-tolerance gate on failed, leaked, or undisclosed scripted "
+            "verdicts"
+        )
+    if LIBSQL_SCRIPTED_HOT_WRITERS.search(runner) is None:
+        errors.append(
+            f"{label} must run each script with --api-hot-writers 2 — the "
+            "hot-writer count is part of what the scripted matrix measures"
+        )
+    if LIBSQL_SCRIPTED_MOCK_BIND.search(runner) is None:
+        errors.append(
+            f"{label} must bind the mock LLM sidecar at --mock-llm-bind "
+            "127.0.0.1:19090 — that is the address the server's LLM base_url "
+            "points at"
+        )
+    if LIBSQL_SCRIPTED_POLL_INTERVAL.search(runner) is None:
+        errors.append(
+            f"{label} must poll scripted terminal states every "
+            "--api-poll-interval-ms 10000 — the 10s cadence is what the "
+            "matrix runs with"
+        )
+    if LIBSQL_SCRIPTED_TERMINAL_TIMEOUT.search(runner) is None:
+        errors.append(
+            f"{label} must cap each scripted terminal wait at "
+            "--api-terminal-timeout-ms 120000"
+        )
+    if LIBSQL_SCRIPTED_P95.search(runner) is None:
+        errors.append(
+            f"{label} must run each script with --max-p95-ms 120000 — the "
+            "p95 ceiling the matrix enforces"
+        )
+    if loop is None:
+        errors.append(
+            f"{label} the script loop must be one complete "
+            "`for script in memory_roundtrip memory_grow memory_mixed; do "
+            "... done` block — a split, reordered, or unterminated loop "
+            "silently drops a scenario"
+        )
+    else:
+        body = loop.group("body")
+        if LIBSQL_SCRIPTED_FAILED_INIT.search(executable[: loop.start()]) is None:
+            errors.append(
+                f"{label} must initialize `failed=0` before the script loop — "
+                "under set -u an unset accumulator aborts the step before any "
+                "script runs"
+            )
+        outdir_assign = LIBSQL_SCRIPTED_OUTDIR_ASSIGN.search(body)
+        mkdir = LIBSQL_SCRIPTED_OUTDIR.search(body)
+        guard = LIBSQL_SCRIPTED_FAILURE_GUARD.search(body)
+        if mkdir is None:
+            errors.append(
+                f"{label} must create each script's outdir inside the loop "
+                '(`mkdir -p "${outdir}"` after the outdir= assignment, before '
+                "the invocation) — the per-script upload paths must exist even "
+                "when an invocation fails"
+            )
+        if outdir_assign is None:
+            errors.append(
+                f"{label} must assign each script's outdir inside the loop "
+                '(`outdir="target/ironclaw-stress/…/${script}"`) before the '
+                "mkdir and invocation — the per-script evidence paths are "
+                "built from it"
+            )
+        if guard is None:
+            errors.append(
+                f"{label} a failed invocation must not abort the loop under "
+                "set -e — the runner call must end with `|| failed=1` so the "
+                "later scripts still run and upload their evidence"
+            )
+        if (
+            outdir_assign is not None
+            and mkdir is not None
+            and guard is not None
+            and not (outdir_assign.start() < mkdir.start() < guard.start())
+        ):
+            errors.append(
+                f"{label} must keep the loop body in order — the outdir= "
+                'assignment, then `mkdir -p "${outdir}"`, then the guarded '
+                "invocation (`2> \"${outdir}/report.txt\" || failed=1`) — a "
+                "relocated or reordered line breaks the per-script evidence "
+                "path"
+            )
+        if LIBSQL_SCRIPTED_FINAL_EXIT.search(executable[loop.end() :]) is None:
+            errors.append(
+                f'{label} the step must `exit "$failed"` after the loop\'s '
+                "done — an exit before done fails the job before the later "
+                "scripts run and upload their evidence"
+            )
+
+    probes = list(LIBSQL_PROBE_LOOP.finditer(executable))
+    if not probes:
+        errors.append(
+            f"{label} every server readiness probe must be a bounded retry "
+            "loop (for _ in $(seq 1 120); do ... curl ...; done) — an "
+            "unbounded while loop hangs the job on a dead server"
+        )
+    else:
+        for probe in probes:
+            bound = int(probe.group("bound"))
+            if bound > LIBSQL_PROBE_MAX_BOUND:
+                errors.append(
+                    f"{label} readiness probe retry bound is {bound}, not "
+                    f"capped at {LIBSQL_PROBE_MAX_BOUND} — a dead server burns "
+                    "the whole job timeout; keep the bounded form "
+                    "(for _ in $(seq 1 120))"
+                )
+        for probe in LIBSQL_PROBE_LOOP_BODY.finditer(executable):
+            body = probe.group("body")
+            if not all(token in body for token in ("curl", "sleep", "break")) or (
+                LIBSQL_PROBE_TIMEOUT.search(body) is None
+            ):
+                errors.append(
+                    f"{label} every readiness probe loop must curl the "
+                    "endpoint, sleep, and break on success — a probe that "
+                    "cannot break keeps hammering a dead server, and a curl "
+                    "without explicit --connect-timeout/--max-time flags can "
+                    "hang on a wedged server"
+                )
+    missing_final = [
+        name
+        for name, pattern in (
+            ("health", LIBSQL_FINAL_HEALTH_PROBE),
+            ("webchat session", LIBSQL_FINAL_SESSION_PROBE),
+        )
+        if pattern.search(executable) is None
+    ]
+    if missing_final:
+        errors.append(
+            f"{label} after its bounded retry loop the "
+            f"{'/'.join(missing_final)} readiness probe must run one final "
+            "unconditional curl with explicit --connect-timeout and "
+            "--max-time flags — a probe removed entirely starts the matrix "
+            "against a dead server, and one without timeouts can hang past "
+            "the loop"
+        )
+
+    traps = list(LIBSQL_SERVER_TRAP.finditer(executable))
+    if not traps:
+        errors.append(
+            f"{label} must register an EXIT trap that kills the server — a "
+            "failed step otherwise leaks the background server across the job"
+        )
+    elif not any(
+        "kill" in trap.group("cmd") and "wait" in trap.group("cmd")
+        for trap in traps
+    ):
+        errors.append(
+            f"{label} the EXIT trap must kill the server AND wait for it "
+            "(trap 'kill \"$server_pid\" ...; wait \"$server_pid\" ...' EXIT) — "
+            "kill alone can leave the port bound when the step ends"
+        )
+
+    upload_steps: list[tuple[str, list[str], str]] = []
+    for heading in STEP_HEADING.finditer(block):
+        if not heading.group("name").strip().startswith("Upload "):
+            continue
+        following = STEP_HEADING.search(block, heading.end())
+        body = block[heading.end() : following.start() if following else len(block)]
+        name, paths = extract_upload(body)
+        if name is not None:
+            upload_steps.append((name, paths, body))
+    uploads = [(name, paths) for name, paths, _ in upload_steps]
+
+    not_always = [
+        name
+        for name, _, body in upload_steps
+        if UPLOAD_ALWAYS.search(body) is None
+    ]
+    if not_always:
+        errors.append(
+            f"{label} every upload step must run with `if: always()` so a "
+            "failed matrix step still uploads its evidence — missing on "
+            f"{', '.join(not_always)}"
+        )
+    not_error_on_missing = [
+        name
+        for name, _, body in upload_steps
+        if UPLOAD_NO_FILES_ERROR.search(body) is None
+    ]
+    if not_error_on_missing:
+        errors.append(
+            f"{label} every upload step must set `if-no-files-found: error` "
+            "so silently missing evidence fails the job instead of "
+            f"uploading nothing — missing on {', '.join(not_error_on_missing)}"
+        )
+
+    server_log_uploads = [upload for upload in uploads if upload[0] == LIBSQL_SERVER_LOG_NAME]
+    if len(server_log_uploads) != 1:
+        errors.append(
+            f"{label} must upload the server log as its own artifact step "
+            f"named {LIBSQL_SERVER_LOG_NAME!r} (found {len(server_log_uploads)}) "
+            "— without a separate artifact the log is split across the "
+            "per-script uploads and a failed run has no single log to fetch"
+        )
+    elif LIBSQL_SERVER_LOG_PATH not in server_log_uploads[0][1]:
+        errors.append(
+            f"{label} the {LIBSQL_SERVER_LOG_NAME!r} artifact must include "
+            f"{LIBSQL_SERVER_LOG_PATH!r}"
+        )
+
+    expected_names = {
+        f"{LIBSQL_PER_SCRIPT_ARTIFACT_PREFIX}{script.replace('_', '-')}"
+        for script in LIBSQL_SCRIPTED_SCRIPTS
+    }
+    per_script_uploads = [upload for upload in uploads if upload[0] in expected_names]
+    actual_names = sorted(upload[0] for upload in per_script_uploads)
+    if len(per_script_uploads) != len(expected_names) or len(set(actual_names)) != len(
+        expected_names
+    ):
+        errors.append(
+            f"{label} must upload exactly three distinct per-script artifacts "
+            f"({', '.join(sorted(expected_names))}) — found {actual_names}; two "
+            "scripts sharing one artifact identity makes one of them "
+            "unrecoverable after a failure"
+        )
+    for name, paths in uploads:
+        if name == LIBSQL_SERVER_LOG_NAME:
+            continue
+        if LIBSQL_SERVER_LOG_PATH in paths:
+            errors.append(
+                f"{label} artifact {name!r} must not include "
+                f"{LIBSQL_SERVER_LOG_PATH!r} — the server log is uploaded once, "
+                "by its own step; embedding it in every per-script upload "
+                "duplicates it and hides which script owns it"
+            )
+
+    expected_script_paths = {
+        f"{LIBSQL_PER_SCRIPT_ARTIFACT_PREFIX}{script.replace('_', '-')}": [
+            f"target/ironclaw-stress/ironclaw-stress-libsql-scripted-{script}/"
+            + suffix
+            for suffix in ("summary.jsonl", "summary.json", "report.txt")
+        ]
+        for script in LIBSQL_SCRIPTED_SCRIPTS
+    }
+    for name, paths in uploads:
+        if name not in expected_script_paths:
+            continue
+        if paths != expected_script_paths[name]:
+            errors.append(
+                f"{label} artifact {name!r} must include exactly the three "
+                "paths for its own script's outdir — "
+                + ", ".join(expected_script_paths[name])
+                + " — a swapped or missing path leaves that script's "
+                "evidence unrecoverable after a failure"
+            )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# postgres-api-capacity scripted parity (#7360 Phase 1)
+#
+# The Postgres job's scripted leg is the parity twin of the libsql matrix:
+# the same four doc sizes through the same runner. The runner picks each
+# operation's document size by cycling the size list (`doc_size_for`), so N
+# operations exercise only the FIRST N sizes. The historical `--operations
+# 2` therefore ran only the 4096/32768 buckets and never touched the two
+# largest — the Postgres leg measured half the curve. The pin requires at
+# least one operation per configured size (>= 4) AND the exact four-size
+# list; together they prove every configured bucket is exercised. The
+# operations pin is anchored to the `--api-scripted-tool memory_roundtrip`
+# line that follows it, so the capacity leg's `--operations 1` cannot
+# satisfy it.
+# ---------------------------------------------------------------------------
+
+POSTGRES_API_CAPACITY_JOB = "postgres-api-capacity"
+POSTGRES_SCRIPTED_OPERATIONS = re.compile(
+    r"--operations[ \t]+(?P<count>[0-9]+)(?![0-9.])[ \t]*\\[ \t]*\n"
+    r"[ \t]*--api-scripted-tool[ \t]+memory_roundtrip"
+)
+POSTGRES_SCRIPTED_DOC_SIZES = re.compile(
+    r"--api-scripted-doc-sizes[ \t]+4096,32768,131072,1048576(?![0-9,])"
+    r"[ \t]*(?:\\[ \t]*)?$",
+    re.MULTILINE,
+)
+POSTGRES_SCRIPTED_MIN_OPERATIONS = 4
+POSTGRES_SCRIPTED_MAX_FAILURE_RATE = re.compile(
+    r"--max-failure-rate[ \t]+0(?![0-9.])"
+)
+
+
+def validate_postgres_scripted_parity(text: str) -> list[str]:
+    """Return every way the Postgres scripted leg stops reaching every
+    configured doc size.
+
+    `doc_size_for` cycles the --api-scripted-doc-sizes list by operation
+    index, so fewer operations than sizes leave the largest buckets
+    unexercised and the parity leg reports green on half the curve.
+    """
+
+    block, detail = extract_job_block(text, POSTGRES_API_CAPACITY_JOB)
+    if block is None:
+        return [f"{STRESS_WORKFLOW}: {detail}"]
+    label = f"{STRESS_WORKFLOW} ({POSTGRES_API_CAPACITY_JOB} job):"
+    errors: list[str] = []
+
+    # Comment lines are inert, matching the other scoped validators.
+    executable = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    commands = [
+        command
+        for command in extract_continued_commands(
+            executable, "target/release/ironclaw_stress"
+        )
+        if "--api-scripted-tool memory_roundtrip" in command
+    ]
+    if len(commands) == 1:
+        runner = commands[0]
+    else:
+        errors.append(
+            f"{label} must contain exactly one scripted memory runner command, "
+            f"found {len(commands)}"
+        )
+        runner = ""
+
+
+    ops = POSTGRES_SCRIPTED_OPERATIONS.search(runner)
+    if ops is None:
+        errors.append(
+            f"{label} the scripted memory leg must pass --operations N "
+            f"(N >= {POSTGRES_SCRIPTED_MIN_OPERATIONS}) directly before "
+            "--api-scripted-tool memory_roundtrip — the runner cycles the "
+            "doc-size list by operation index, so fewer operations than "
+            "configured sizes leave the largest buckets unexercised"
+        )
+    elif int(ops.group("count")) < POSTGRES_SCRIPTED_MIN_OPERATIONS:
+        errors.append(
+            f"{label} the scripted memory leg runs --operations "
+            f"{ops.group('count')}, below the "
+            f"{POSTGRES_SCRIPTED_MIN_OPERATIONS} configured doc sizes — "
+            "doc_size_for() cycles sizes by operation index, so the "
+            "131072/1048576 buckets are never exercised"
+        )
+    if POSTGRES_SCRIPTED_DOC_SIZES.search(runner) is None:
+        errors.append(
+            f"{label} the scripted memory leg must pass exactly the four "
+            "scripted doc sizes --api-scripted-doc-sizes "
+            "4096,32768,131072,1048576 — the Postgres parity leg measures "
+            "the same small-to-large latency curve as the libsql matrix"
+        )
+    if POSTGRES_SCRIPTED_MAX_FAILURE_RATE.search(runner) is None:
+        errors.append(
+            f"{label} the scripted memory leg must pass --max-failure-rate 0 "
+            "on its runner command — one leak or lost write must fail the "
+            "32-operation parity leg"
+        )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Per-package clippy target selection (#6965)
+#
+# `Check production-target lints` runs `cargo clippy -p <changed package> …`,
+# so its command has to hold for every package shape in the workspace. Explicit
+# target filters do not:
+#
+#   * `--lib` is a hard error on a bin-only package ("no library targets found
+#     in package `ironclaw`"), so a PR whose only changed package is
+#     crates/ironclaw_cli fails the lane on the flag, not on a lint;
+#   * `--bins` on a lib-only package is "target filter `bins` specified, but no
+#     targets matched; this is a no-op" — the lane reports green having linted
+#     nothing, which is the worse failure of the two;
+#   * `--bin`/`--example`/`--test`/`--bench` and their plurals swap the
+#     package's default production targets for a hand-picked set.
+#
+# Cargo's default target set is already lib + bins, tests/examples/benches
+# excluded, so the lane needs no filter at all — and this contract keeps it
+# that way.
+#
+# The check reads the whole step body rather than locating the command and
+# parsing its arguments. That is deliberate: a matcher is a thing to fool, and
+# every attempt to write one leaked (a wrapper binary, a prefixed command, a
+# continuation line). Scanning the body has no match position to displace and
+# no formatting to get wrong. The trade is that a command deliberately written
+# to look inert — `echo cargo clippy … -- -D warnings` — would pass. This file
+# is repo-controlled and changed through reviewed PRs; the regression worth
+# catching is a flag added back by hand, not a disguise.
+#
+# Known gap, deliberately unguarded: a package with neither a lib nor a bin
+# target (today only `ironclaw_integration_tests`) lints nothing and
+# exits 0 without even the `no targets matched` warning. Unreachable while
+# `changed_workspace_packages.py` only selects the root package for a
+# `Cargo.toml`/`Cargo.lock` change — which selects every other package too — so
+# the assertion would have no failing case to pin.
+# ---------------------------------------------------------------------------
+
+PRODUCTION_LINT_STEP = "Check production-target lints"
+WINDOWS_CLIPPY_JOB = "clippy-windows"
+WEBUI_INSTALL_STEP = "Install WebUI frontend dependencies"
+
+# One `- name:` step heading. The scan is bounded to its own step because the
+# neighbouring `Check all-target lints` legitimately passes `--tests
+# --examples`; unbounded, this contract would blame this step for them.
+STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
+JOB_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
+
+# `${{ matrix.flags }}` is the lane's other flag channel: `clippy_matrix` is
+# defined in this same workflow and expands into the command, so a target
+# filter added there widens the lane exactly as one on the command line would.
+# Scoped to the lines defining that matrix — `clippy_matrix` is the only
+# `flags`-bearing matrix here today, and an unrelated one that legitimately
+# passes `--tests` should not be read as widening this lane.
+CLIPPY_MATRIX_ASSIGNMENT = "clippy_matrix"
+MATRIX_FLAGS = re.compile(r'"flags"[ \t]*:[ \t]*"(?P<flags>[^"]*)"')
+
+# Ways to keep the command intact while throwing away its verdict. These are
+# not the disguised-command case the block above rules out of scope: each is a
+# plausible edit someone makes on purpose and for a stated reason ("unblock the
+# queue", "this lane is flaky"), and each leaves a lane that runs clippy and
+# ignores it — the silent-green failure this contract exists to prevent.
+EXIT_STATUS_MASKS = (
+    ("|| true", "swallows a failing lint"),
+    ("|| :", "swallows a failing lint"),
+    ("set +e", "stops the shell failing on a failing lint"),
+    ("continue-on-error", "lets the job report success with the lane red"),
+)
+
+# Matched on word boundaries so `--bins` is not also reported as `--bin`, and
+# so value-bearing forms (`--bin ironclaw`, `--bench=throughput`) are caught.
+FORBIDDEN_PRODUCTION_LINT_FLAGS = tuple(
+    (flag, why, re.compile(rf"(?<![\w-]){re.escape(flag)}(?![\w-])"))
+    for flag, why in (
+        ("--lib", "is a hard error on a bin-only package"),
+        ("--bins", "silently lints nothing on a lib-only package"),
+        ("--bin", "pins the lane to one binary and skips the package's other targets"),
+        ("--all-targets", "widens the lane past production targets"),
+        ("--tests", "widens the lane past production targets"),
+        ("--test", "widens the lane past production targets"),
+        ("--examples", "widens the lane past production targets"),
+        ("--example", "widens the lane past production targets"),
+        ("--benches", "widens the lane past production targets"),
+        ("--bench", "widens the lane past production targets"),
+    )
+)
+
+
+def step_body(text: str, step_name: str) -> str | None:
+    """Return one workflow step's body, bounded by the next step heading."""
+    for heading in STEP_HEADING.finditer(text):
+        if heading.group("name").strip() != step_name:
+            continue
+        following = STEP_HEADING.search(text, heading.end())
+        return text[heading.end() : following.start() if following else len(text)]
+    return None
+
+
+def job_body(text: str, job_name: str) -> str | None:
+    """Return one workflow job's body, bounded by the next job heading."""
+    for heading in JOB_HEADING.finditer(text):
+        if heading.group("name") != job_name:
+            continue
+        following = JOB_HEADING.search(text, heading.end())
+        return text[heading.end() : following.start() if following else len(text)]
+    return None
+
+
+def validate_windows_webui_install_shell(text: str) -> list[str]:
+    """Keep POSIX WebUI setup commands out of PowerShell on Windows."""
+    windows_job = job_body(text, WINDOWS_CLIPPY_JOB)
+    if windows_job is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: could not find the {WINDOWS_CLIPPY_JOB!r} job"
+        ]
+    install_step = step_body(windows_job, WEBUI_INSTALL_STEP)
+    if install_step is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: {WINDOWS_CLIPPY_JOB!r} has no "
+            f"{WEBUI_INSTALL_STEP!r} step"
+        ]
+    if re.search(r"^[ \t]*shell:[ \t]*bash[ \t]*$", install_step, re.MULTILINE):
+        return []
+    return [
+        f"{CODE_STYLE_WORKFLOW}: {WINDOWS_CLIPPY_JOB!r} must run "
+        f"{WEBUI_INSTALL_STEP!r} with `shell: bash` because its commands use "
+        "POSIX shell syntax"
+    ]
+
+
+def validate_production_lint_targets(text: str) -> list[str]:
+    """Return every way the per-package clippy lane could error or no-op."""
+    body = step_body(text, PRODUCTION_LINT_STEP)
+    if body is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: could not find the {PRODUCTION_LINT_STEP!r} step "
+            "— it is the only clippy gate on pull requests and must stay assertable"
+        ]
+    # Comments in the step explain which flags are absent and why, so they name
+    # the very strings being rejected.
+    command = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+    if "cargo clippy" not in command:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} no longer runs "
+            "`cargo clippy` — this contract can only pin a command it can see"
+        ]
+    errors = [
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not pass {flag} — it {why}"
+        for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
+        if pattern.search(command)
+    ]
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not mask the lint's "
+        f"exit status with `{mask}` — it {why}"
+        for mask, why in EXIT_STATUS_MASKS
+        if mask in command
+    )
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: clippy_matrix flags {match.group('flags')!r} must not "
+        f"contain {flag} — it {why}, and the matrix expands into "
+        f"{PRODUCTION_LINT_STEP!r}"
+        for line in text.splitlines()
+        if CLIPPY_MATRIX_ASSIGNMENT in line
+        for match in MATRIX_FLAGS.finditer(line)
+        for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
+        if pattern.search(match.group("flags"))
+    )
+    return errors
+
 # Every single-quoted ERE in a workflow that looks like a path scope filter.
 # Both spellings in use are covered: `grep -Eq '^(...)'` and the `has_match
 # '^(...)'` helper. A filter is selected out of the result by an anchor
@@ -231,25 +1131,54 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         in_scope=(
             "crates/ironclaw_llm/src/lib.rs",
-            f"crates/{NESTED_FAMILY}/ironclaw_events/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
-        out_of_scope=("README.md", "docs/plans/whatever.md", "openwiki/index.md"),
+        out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
+    ),
+    # The guidance-surface companion to `has_code`: check-guidance.py scans
+    # `.claude/` rules and skills, the root AGENTS.md/CLAUDE.md pair, and
+    # resolves references into docs/, none of which `has_code` covers (the row
+    # above pins docs/ OUT of it on purpose). This filter OR-s into
+    # fast-checks' condition only, so a `.claude/`-only PR runs the gate built
+    # for exactly that change shape (#7306 review: the gate must run for the
+    # files it governs).
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_guidance",
+        anchor="\\.claude/",
+        kind="regex",
+        in_scope=(
+            ".claude/rules/testing.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "docs/reborn/guidance-conventions.md",
+        ),
+        out_of_scope=(
+            # Crate-tier guidance rides `has_code`'s `crates/` prefix; this
+            # filter must stay the narrow guidance-surface half, and the root
+            # README is not a guidance scan surface.
+            "crates/AGENTS.md",
+            "crates/domains/ironclaw_llm/AGENTS.md",
+            "README.md",
+            "openwiki/index.md",
+        ),
     ),
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
         name="has_reborn_cli",
-        anchor="ironclaw_reborn_cli",
+        anchor="ironclaw_cli",
         kind="regex",
         crates=(
-            ("ironclaw_runner", "src/lib.rs"),
+            ("ironclaw_turn_runner", "src/lib.rs"),
             # WS3 runner sheds: the model gateway and the tool-disclosure
             # decorator live here now, so the lane must follow them.
             ("ironclaw_loop_host", "src/model_gateway.rs"),
-            ("ironclaw_reborn_cli", "src/main.rs"),
-            ("ironclaw_reborn_config", "src/lib.rs"),
-            ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
+            ("ironclaw_cli", "src/main.rs"),
+            ("ironclaw_config", "src/lib.rs"),
+            ("ironclaw_architecture_tests", "tests/reborn_dependency_boundaries.rs"),
         ),
         in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
         out_of_scope=(
@@ -257,8 +1186,39 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # and is deliberately NOT triggered by every crate.
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
-            "crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs",
+            "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
+        ),
+    ),
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_docs",
+        # Not crate-keyed: docs/ is deliberately outside the has_code scope,
+        # so this trigger is the ONLY thing that runs the publication-boundary
+        # gate on a docs-only PR. A narrowed grep here skips the gate with
+        # nothing red anywhere — the same silent-skip class as the crate
+        # filters, pinned the same way.
+        anchor="docs_publication_boundary",
+        kind="regex",
+        in_scope=(
+            "docs/index.mdx",
+            # Both halves of the gate's contract: navigation (docs.json) and
+            # the fence (.mintignore). A future markdown-only narrowing of
+            # the grep would drop them while every .mdx probe stays green.
+            "docs/docs.json",
+            "docs/.mintignore",
+            "docs/internal/plans/whatever.md",
+            # The gate's own files (review-discipline.md "Guardrails are
+            # code": checks must run when their own files change).
+            "scripts/ci/docs_publication_boundary.py",
+            "scripts/ci/test_docs_publication_boundary.py",
+            ".github/workflows/code_style.yml",
+        ),
+        out_of_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            "README.md",
+            "openwiki/index.md",
         ),
     ),
     CrateScopeFilter(
@@ -524,7 +1484,7 @@ def validate_crate_scope_filters(
 # directly: a `cache-dependency-path:` value (12), a `cd` inside a `run:`
 # block (12), and a `working-directory:` key (4). Two more workflows spelled a
 # single crate's Cargo.toml / source path directly: docker.yml's release
-# VERSION extraction (`ironclaw_reborn_cli`) and nightly-deep-ci.yml's
+# VERSION extraction (`ironclaw_cli`) and nightly-deep-ci.yml's
 # mutation-audit target (`ironclaw_capabilities`). All of these break the
 # moment their crate moves into a family directory (crates/<family>/
 # ironclaw_*, PROPOSAL §5).
@@ -555,8 +1515,14 @@ DOCKER_WORKFLOW = ".github/workflows/docker.yml"
 NIGHTLY_DEEP_CI_WORKFLOW = ".github/workflows/nightly-deep-ci.yml"
 
 WEBUI_FRONTEND_CRATE = "ironclaw_webui"
+# One directory level deeper than the crate sits TODAY. WS7 moved the crate
+# into `crates/product/`, so the single-`*` form now matches its real location
+# and stopped being a depth probe — the gate below rejects exactly that ("not
+# depth-tolerant, just broad"). Two `*` segments keep the spare one level below
+# wherever the crate actually is; `*` does not cross `/` in a GitHub glob, so
+# this cannot collapse back onto the flat line.
 WEBUI_NESTED_LOCKFILE_PATTERN = (
-    f"crates/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+    f"crates/*/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
 )
 
 
@@ -611,8 +1577,12 @@ def validate_webui_frontend_sites(
         )
     flat_pattern = github_glob_to_regex(flat_lockfile)
     nested_pattern = github_glob_to_regex(WEBUI_NESTED_LOCKFILE_PATTERN)
+    # Two family segments, matching WEBUI_NESTED_LOCKFILE_PATTERN's depth: the
+    # probe has to be one level below where the crate sits today, and today it
+    # already sits inside a family directory (WS7).
     nested_probe = (
-        f"crates/{NESTED_FAMILY}/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+        f"crates/{NESTED_FAMILY}/{NESTED_FAMILY}/"
+        f"{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
     )
     if not flat_pattern.match(flat_lockfile):
         errors.append(
@@ -672,7 +1642,7 @@ def validate_webui_frontend_sites(
 # once fixed (B1/B2 in #7155); this is the pin that catches the workflow TEXT
 # itself going stale — a rename or deletion the workflow never followed.
 CRATE_NAME_RESIDUE: tuple[tuple[str, str], ...] = (
-    (DOCKER_WORKFLOW, "ironclaw_reborn_cli"),
+    (DOCKER_WORKFLOW, "ironclaw_cli"),
     (NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities"),
 )
 
@@ -722,6 +1692,15 @@ def validate_workflow_texts(
     e2e = workflows.get(E2E_WORKFLOW)
     if e2e is not None:
         errors.extend(validate_e2e_scope_filters(e2e))
+    code_style = workflows.get(CODE_STYLE_WORKFLOW)
+    if code_style is not None:
+        errors.extend(validate_production_lint_targets(code_style))
+        errors.extend(validate_code_style_docs_guard_order(code_style))
+        errors.extend(validate_windows_webui_install_shell(code_style))
+    stress = workflows.get(STRESS_WORKFLOW)
+    if stress is not None:
+        errors.extend(validate_libsql_scripted_memory_job(stress))
+        errors.extend(validate_postgres_scripted_parity(stress))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))

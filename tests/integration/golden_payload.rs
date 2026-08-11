@@ -113,9 +113,8 @@ async fn golden_multi_turn_history() {
 /// a substring check like `assert_model_request_contains` cannot see.
 #[tokio::test]
 async fn golden_context_surfacing() {
-    let provider = RecordingCommunicationContextProvider::with_target_and_channel(
-        "reborn-golden-target",
-        "slack",
+    let provider = RecordingCommunicationContextProvider::with_notification_count_and_channel(
+        1,
         "reborn-golden-channel",
     );
     let h = RebornIntegrationHarness::test_default()
@@ -236,7 +235,7 @@ async fn golden_gated_turn_approve() {
 // `state.compaction_state.force_compact_on_next_iteration`, but Reborn's
 // `DefaultPlanner` wires `PromptCompactionStep` to
 // `ActiveTaskPreservingCompactionStrategy::should_compact`
-// (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
+// (crates/loop/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
 // which never reads that flag — it only compacts on a genuine ~8,000+ token
 // accumulated tail. The force path is a dead letter under Reborn's installed
 // strategy; exercising it here needs a production fix (out of scope) or a

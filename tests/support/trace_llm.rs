@@ -323,11 +323,52 @@ pub fn leading_system_block(messages: &[ChatMessage]) -> String {
 fn tool_surface_signature(tools: Option<&Vec<ToolDefinition>>) -> Vec<String> {
     tools
         .map(|defs| {
-            let mut names: Vec<String> = defs.iter().map(|def| def.name.clone()).collect();
-            names.sort();
-            names
+            let mut definitions = defs
+                .iter()
+                .map(|def| {
+                    serde_json::to_string(&(&def.name, &def.description, &def.parameters))
+                        .expect("ToolDefinition fields are JSON-serializable")
+                })
+                .collect::<Vec<_>>();
+            definitions.sort();
+            definitions
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod prompt_cache_tests {
+    use super::*;
+
+    fn tool(description: &str, parameters: serde_json::Value) -> ToolDefinition {
+        ToolDefinition {
+            name: "search".to_string(),
+            description: description.to_string(),
+            parameters,
+        }
+    }
+
+    #[test]
+    fn tool_surface_signature_includes_description_and_parameters() {
+        let baseline = vec![tool("search docs", serde_json::json!({"type": "object"}))];
+        let description_changed = vec![tool(
+            "search all docs",
+            serde_json::json!({"type": "object"}),
+        )];
+        let parameters_changed = vec![tool(
+            "search docs",
+            serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        )];
+
+        assert_ne!(
+            tool_surface_signature(Some(&baseline)),
+            tool_surface_signature(Some(&description_changed))
+        );
+        assert_ne!(
+            tool_surface_signature(Some(&baseline)),
+            tool_surface_signature(Some(&parameters_changed))
+        );
+    }
 }
 
 /// Excerpt around the first differing BYTE, clamped to char boundaries.

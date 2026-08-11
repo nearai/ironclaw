@@ -2,7 +2,7 @@
 //!
 //! Proves `.with_tool_disclosure_bridged()` reaches production's
 //! `ToolDisclosureCapabilityDecorator` wiring
-//! (`ironclaw_runner::runtime::build_default_planned_runtime_inner`, gated on
+//! (`ironclaw_turn_runner::runtime::build_default_planned_runtime_inner`, gated on
 //! `DefaultPlannedRuntimeConfig::tool_disclosure.is_bridged()`) — the same
 //! lower-level factory this harness's group assembly already calls.
 //!
@@ -18,7 +18,7 @@
 //! 2. **Threshold gate**: `Bridged` mode alone does NOT defer — deferral is
 //!    additionally gated on the catalog exceeding `DisclosureCaps::default()`
 //!    (`max_tools: 32` / ~12k estimated schema tokens; `select_active_set`,
-//!    `crates/ironclaw_loop_host/src/tool_disclosure.rs`). The
+//!    `crates/loop/ironclaw_loop_host/src/tool_disclosure.rs`). The
 //!    `GithubIssueTools` backend surfaces all 48 `github.*` manifest
 //!    capabilities (`github_support::capability_ids()`), none of which is
 //!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id), so
@@ -27,10 +27,10 @@
 //!    bridged mode is wired-but-inert there — pinned below as the threshold
 //!    control.
 //!
-//! Harness note: bridged groups default to `CapabilityAllowSet::All` (see
-//! `into_group`) — production's top-level resolution. Narrowed allow-sets
-//! (the #5647 seam) also keep the bridge: bridge ids are host-exempt in
-//! `CapabilitySurfaceProfileFilter`, pinned below.
+//! Harness note: bridged groups default to `CapabilitySurfacePolicy::allow_all()`
+//! (see `into_group`) — production's top-level resolution. Narrowed policies
+//! (the #5647 seam) still keep the synthetic disclosure bridge when deferral is
+//! needed, while its catalog contents are filtered by that exact policy.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -39,6 +39,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::extension_surface::BUNDLED_EXTENSION_CAPABILITY_IDS;
@@ -60,6 +61,12 @@ const FLAT_GITHUB_TOOL_NAME: &str = "github__get_repo";
 
 /// Flat first-party tool (wire form) for the below-caps threshold control.
 const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
+
+/// Globally disabled in the production planned-runtime configuration. The
+/// disclosure catalog must never reveal it even though the spawn decorator
+/// installs its definition below disclosure.
+const SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
+const SPAWN_SUBAGENT_TOOL_NAME: &str = "builtin__spawn_subagent";
 
 fn deferred_bridge_script() -> [RebornScriptedReply; 4] {
     [
@@ -148,10 +155,95 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
         .expect("deferral replaces the flat tool list, not adds to it");
 }
 
-/// Negative control: the SAME wide catalog without
-/// `.with_tool_disclosure_bridged()` surfaces the flat 48-tool list (today's
-/// default, `ToolDisclosureMode::Off`) — proves the bridged assertion above
-/// discriminates on the disclosure mode, not on the backend.
+/// Regression for prod run df55a9c5: the model discovered the globally
+/// disabled spawn tool through `tool_search`, loaded its schema, then retried
+/// the denied invocation until the run failed. A capability excluded by the
+/// resolved model-surface policy must be absent from every bridged disclosure
+/// path, not merely from the flat provider tool list.
+#[tokio::test]
+async fn bridged_disclosure_never_advertises_globally_disabled_spawn_subagent() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "spawn subagent", "limit": 20}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_DESCRIBE_NAME,
+                serde_json::json!({"name": SPAWN_SUBAGENT_TOOL_NAME}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({
+                    "name": SPAWN_SUBAGENT_TOOL_NAME,
+                    "arguments": r#"{"goal":"inspect the repository"}"#,
+                }),
+            ),
+            RebornScriptedReply::text("done without spawning"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("inspect the repository without spawning a subagent")
+        .await
+        .expect("disabled spawn remains a recoverable unknown tool");
+
+    harness
+        .assert_model_tools_contains(TOOL_SEARCH_NAME)
+        .await
+        .expect("allowed disclosure bridge remains advertised");
+    harness
+        .assert_model_tools_excludes(SPAWN_SUBAGENT_TOOL_NAME)
+        .await
+        .expect("disabled spawn is absent from the flat provider tool list");
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, SPAWN_SUBAGENT_TOOL_NAME)
+        .await
+        .expect("disabled spawn is absent from tool_search's catalog index");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    assert!(
+        output["results"]
+            .as_array()
+            .expect("results is an array")
+            .iter()
+            .all(|result| result["capability_id"].as_str() != Some(SPAWN_SUBAGENT_CAPABILITY_ID)),
+        "disabled spawn capability leaked into tool_search results: {output}"
+    );
+
+    harness
+        .assert_tool_error_summary_contains("tool_describe target is unknown")
+        .await
+        .expect("disabled spawn schema is not describable");
+    harness
+        .assert_tool_error_summary_contains("tool_call target is not a known tool")
+        .await
+        .expect("disabled spawn is not resolvable through the bridge");
+    harness
+        .assert_tool_not_invoked(SPAWN_SUBAGENT_CAPABILITY_ID)
+        .await
+        .expect("disabled spawn never reaches dispatch");
+    harness
+        .assert_capability_result_count(SPAWN_SUBAGENT_CAPABILITY_ID, 0)
+        .await
+        .expect("disabled spawn produces no capability result");
+    harness
+        .assert_reply_contains("done without spawning")
+        .await
+        .expect("the run continues after the recoverable unknown-tool results");
+}
+
+/// Negative control: the SAME wide catalog under explicit
+/// `ToolDisclosureMode::Off` surfaces the flat 48-tool list — proves the
+/// bridged assertion above discriminates on the disclosure mode, not on the
+/// backend.
 ///
 /// Pins Off-mode explicitly via `.with_tool_disclosure_off()` rather than
 /// leaving this on the `from_env()` default-resolution path: without an
@@ -185,6 +277,35 @@ async fn explicit_off_surfaces_the_flat_wide_tool_list() {
                 panic!("explicit Off must exclude discovery bridge {bridge:?}: {error}")
             });
     }
+}
+
+/// The production default enables progressive disclosure for a wide catalog.
+/// The `ironclaw_loop_host` unit contract separately proves that an unset or
+/// empty environment value resolves to this default.
+#[tokio::test]
+async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_production_default()
+        .with_github_issue_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("production-default disclosure harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_contains(bridge)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("production default must advertise bridge {bridge:?}: {error}")
+            });
+    }
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("production default defers the flat wide catalog");
 }
 
 /// General harnesses pin Off rather than inheriting the production environment,
@@ -274,7 +395,7 @@ async fn bridged_mode_single_permitted_tool_stays_flat_and_direct() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .with_narrowed_capability_surface_policy_for_bridged_test(["github.get_repo"])
         .script([
             RebornScriptedReply::tool_call(
                 "github.get_repo",
@@ -309,15 +430,15 @@ async fn bridged_mode_single_permitted_tool_stays_flat_and_direct() {
 /// The test drives a normal text turn and inspects the actual model tool list;
 /// it does not guess a bridge name that the empty surface never offered.
 #[tokio::test]
-async fn empty_allow_set_advertises_no_tools() {
+async fn empty_policy_advertises_no_tools() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test([])
+        .with_narrowed_capability_surface_policy_for_bridged_test([])
         .script([RebornScriptedReply::text("done")])
         .build()
         .await
-        .expect("empty-allow-set bridged-disclosure harness builds");
+        .expect("empty-policy bridged-disclosure harness builds");
 
     harness
         .submit_turn("answer without tools")
@@ -327,24 +448,64 @@ async fn empty_allow_set_advertises_no_tools() {
     harness
         .assert_model_tools_empty()
         .await
-        .expect("an empty effective allow-set advertises no tools or bridges");
+        .expect("an empty effective policy advertises no tools or bridges");
     harness
         .assert_network_egress_count(0)
         .await
         .expect("an empty surface performs no capability side effects");
 }
 
-/// #5647 trust boundary: the bridge-id exemption must not widen access to
-/// UNDERLYING tools. Even a malformed deferred call that would otherwise take
-/// the describe-first recovery path resolves to the real capability id
-/// (`github.list_issues`), which the narrowed allow-set still denies at the
-/// profile filter's scope check — the exempt set admits only `ironclaw.*`.
+/// The disclosure catalog must consume the complete policy-qualified visible
+/// surface, not rebuild a broader corpus by checking capability IDs alone.
+/// An empty runtime dimension therefore hides host-runtime tools and must not
+/// synthesize discovery bridges for their excluded metadata, even though every
+/// capability ID remains permitted. Host-synthetic core tools are outside that
+/// runtime catalog and remain governed by their owning surface.
 #[tokio::test]
-async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral() {
+async fn runtime_excluded_policy_advertises_no_runtime_tools_or_disclosure_bridges() {
+    let mut policy = CapabilitySurfacePolicy::allow_all();
+    policy.allowed_runtimes.clear();
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .with_capability_surface_policy_for_bridged_test(policy)
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("runtime-excluded bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("answer without tools")
+        .await
+        .expect("text-only turn completes");
+
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("a runtime-excluded policy advertises no host-runtime tools");
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_excludes(bridge)
+            .await
+            .expect("runtime-excluded metadata must not synthesize a disclosure bridge");
+    }
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("a runtime-excluded surface performs no capability side effects");
+}
+
+/// #5647 trust boundary: the bridge-id exemption must not widen access to
+/// UNDERLYING tools. Even a malformed deferred call that would otherwise take
+/// the describe-first recovery path resolves to the real capability id
+/// (`github.list_issues`), which the narrowed policy still denies at the
+/// profile filter's scope check — the exempt set admits only `ironclaw.*`.
+#[tokio::test]
+async fn narrowed_policy_still_denies_non_allowlisted_tool_through_deferral() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_surface_policy_for_bridged_test(["github.get_repo"])
         .script([RebornScriptedReply::tool_call(
             "github.list_issues",
             serde_json::json!({}),
@@ -378,19 +539,19 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .expect("a non-allowlisted underlying tool must never reach dispatch");
 }
 
-/// #5659-w6 follow-up: a genuinely wide effective allow-set still defers and
+/// #5659-w6 follow-up: a genuinely wide effective policy still defers and
 /// keeps the tool_search bridge, whose own advertised *description*
 /// (the always-on catalog index of discoverable tool names, see
 /// `catalog_index_tool_search_description`) must be narrowed by the caller's
-/// allow-set too — not just tool_search RESULTS and tool_describe (#5712).
-/// The bridge id is host-exempt from the outer `CapabilitySurfaceProfileFilter`
-/// (#5647) so nothing else strips a leaked name out of that description text.
+/// policy too — not just tool_search RESULTS and tool_describe (#5712).
+/// The bridge is synthesized outside the filtered base surface (#5647), so the
+/// disclosure catalog must apply the same policy before constructing the text.
 #[tokio::test]
-async fn bridged_mode_wide_effective_allow_set_keeps_narrowed_tool_search_description() {
+async fn bridged_mode_wide_effective_policy_keeps_narrowed_tool_search_description() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(wide_effective_github_allowlist())
+        .with_narrowed_capability_surface_policy_for_bridged_test(wide_effective_github_allowlist())
         .script([RebornScriptedReply::text("done")])
         .build()
         .await
@@ -401,7 +562,7 @@ async fn bridged_mode_wide_effective_allow_set_keeps_narrowed_tool_search_descri
     harness
         .assert_model_tools_contains(TOOL_SEARCH_NAME)
         .await
-        .expect("bridge ids stay advertised under a narrowed allow-set (#5647)");
+        .expect("bridge ids stay advertised under a narrowed policy (#5647)");
     harness
         .assert_model_tool_description_contains(TOOL_SEARCH_NAME, FLAT_GITHUB_TOOL_NAME)
         .await
@@ -418,15 +579,15 @@ async fn bridged_mode_wide_effective_allow_set_keeps_narrowed_tool_search_descri
         );
 }
 
-/// #5712: tool_search RESULTS are narrowed by the caller's allow-set — the
+/// #5712: tool_search RESULTS are narrowed by the caller's policy — the
 /// bridge port's catalog is built below the profile filter, so without
 /// result filtering a narrowed profile reads every capability's metadata.
 #[tokio::test]
-async fn narrowed_allow_set_filters_tool_search_results() {
+async fn narrowed_policy_filters_tool_search_results() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(wide_effective_github_allowlist())
+        .with_narrowed_capability_surface_policy_for_bridged_test(wide_effective_github_allowlist())
         .script([
             RebornScriptedReply::tool_call(
                 "tool_search",
@@ -464,6 +625,50 @@ async fn narrowed_allow_set_filters_tool_search_results() {
     }
 }
 
+/// #7177: retrieval must use admitted schema vocabulary, not only provider
+/// names and top-level descriptions. `committer` exists in the GitHub file
+/// mutation schemas but not in their catalog descriptions.
+#[tokio::test]
+async fn tool_search_discovers_authorized_tools_by_parameter_only_vocabulary() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "committer", "limit": 10}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("find a tool that accepts committer identity")
+        .await
+        .expect("turn completes");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    let ids: std::collections::BTreeSet<&str> = output["results"]
+        .as_array()
+        .expect("results is an array")
+        .iter()
+        .filter_map(|result| result["capability_id"].as_str())
+        .collect();
+    assert!(
+        ids.contains("github.delete_file") || ids.contains("github.create_or_update_file"),
+        "parameter-only query must discover a matching authorized file tool, got {ids:?}"
+    );
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "committer")
+        .await
+        .expect("richer internal search metadata must not grow the prompt-side names-only index");
+}
+
 /// #5712: tool_describe of a non-allowlisted id reads as unknown — same
 /// message as a nonexistent name, so existence itself is not disclosed.
 ///
@@ -471,19 +676,19 @@ async fn narrowed_allow_set_filters_tool_search_results() {
 /// index, and would miss an existence oracle hiding in the envelope's other
 /// fields (`model_observation`'s structured diagnostic, in particular). This
 /// scripts BOTH a non-allowlisted target (`github.list_issues`, present in
-/// the catalog but outside the allow-set) and a target that is not in the
+/// the catalog but outside the policy) and a target that is not in the
 /// catalog at all, then asserts their persisted `ToolResultReferenceEnvelope`s
 /// are identical modulo `result_ref` — which is derived from
 /// `RebornScriptedReply::tool_call`'s process-global call-id counter (see
 /// `synthetic_provider_error_result_ref`) and so differs between the two
-/// calls by construction, carrying no allow-set/existence information.
+/// calls by construction, carrying no policy/existence information.
 #[tokio::test]
-async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
+async fn narrowed_policy_denies_tool_describe_of_non_allowlisted_id() {
     const NONEXISTENT_TARGET: &str = "totally_nonexistent_tool";
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .with_narrowed_capability_surface_policy_for_bridged_test(["github.get_repo"])
         .script([
             RebornScriptedReply::tool_call(
                 "tool_describe",
@@ -540,16 +745,16 @@ async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
 }
 
 /// A host-exempt `tool_call` bridge must not expose whether a requested target
-/// exists outside the caller's effective allow-set. Both a catalog-known denied
+/// exists outside the caller's effective policy. Both a catalog-known denied
 /// target and a genuinely nonexistent target stay on the same recoverable bridge
 /// path and persist byte-equivalent result envelopes modulo their run-scoped ids.
 #[tokio::test]
-async fn narrowed_allow_set_denies_tool_call_of_non_allowlisted_id_without_existence_oracle() {
+async fn narrowed_policy_denies_tool_call_of_non_allowlisted_id_without_existence_oracle() {
     const NONEXISTENT_TARGET: &str = "totally_nonexistent_tool";
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .with_narrowed_capability_surface_policy_for_bridged_test(["github.get_repo"])
         .script([
             RebornScriptedReply::tool_call(
                 TOOL_CALL_NAME,
@@ -601,9 +806,9 @@ async fn narrowed_allow_set_denies_tool_call_of_non_allowlisted_id_without_exist
 }
 
 /// #5712 control: an unnarrowed (All) caller keeps the full search catalog —
-/// proves the result filter discriminates on the allow-set, not the query.
+/// proves the result filter discriminates on the policy, not the query.
 #[tokio::test]
-async fn unnarrowed_allow_set_keeps_full_tool_search_catalog() {
+async fn unnarrowed_policy_keeps_full_tool_search_catalog() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
@@ -635,6 +840,6 @@ async fn unnarrowed_allow_set_keeps_full_tool_search_catalog() {
         .collect();
     assert!(
         ids.len() > 1,
-        "an All allow-set must surface the full catalog's matches, got only {ids:?}"
+        "an unrestricted policy must surface the full catalog's matches, got only {ids:?}"
     );
 }

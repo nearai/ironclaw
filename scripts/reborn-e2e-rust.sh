@@ -65,25 +65,25 @@ run_lib_test_exact() {
 }
 
 run_architecture_boundaries() {
-  run_test ironclaw_architecture reborn_dependency_boundaries
+  run_test ironclaw_architecture_tests reborn_dependency_boundaries
   # Pins docs/reborn/contracts/turns-agent-loop.md: terminal model
   # provider authentication and transcript persistence failures remain durable,
   # actionable, redacted, and never issue duplicate model/tool side effects.
-  run_test_exact ironclaw_reborn_integration_tests reborn_integration_cancel \
+  run_test_exact ironclaw_integration_tests reborn_integration_cancel \
     mid_turn_auth_provider_error_reaches_failed_with_credentials_category
-  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+  run_test_exact ironclaw_integration_tests reborn_integration_model_recovery \
     transcript_write_failure_stops_without_another_model_or_tool_side_effect
-  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+  run_test_exact ironclaw_integration_tests reborn_integration_model_recovery \
     tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect
   # Keep protocol/recovery selectors with the targets already compiled by this
   # lane instead of rebuilding them in the host-runtime lane.
   run_test_exact ironclaw_loop_host llm_gateway \
     gateway_maps_deterministic_provider_response_errors_to_invalid_output
-  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+  run_test_exact ironclaw_integration_tests reborn_integration_model_recovery \
     deterministic_provider_response_errors_use_bounded_invalid_output_recovery
   # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
   # routes from re-entering the Reborn context.
-  run_test ironclaw_architecture telegram_extension_gates
+  run_test ironclaw_architecture_tests telegram_extension_gates
   # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
   # an inline model diagnostic, and legacy omissions upgrade explicitly.
   run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
@@ -101,9 +101,29 @@ run_architecture_boundaries() {
 run_architecture_runtime() {
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
+  # Pins docs/reborn/contracts/host-runtime.md: scoped JSON files expose
+  # bounded collection selection and numeric aggregation through the real turn.
+  run_test_exact ironclaw_integration_tests reborn_integration_tool_call \
+    json_runs_bounded_collection_operations
   run_test ironclaw_host_runtime reborn_e2e_gate
   run_test ironclaw_host_runtime reborn_invoke_vertical_slice
   run_test ironclaw_host_runtime runtime_http_egress_contract
+  # Pins docs/reborn/contracts/host-runtime.md: an HTTP 4xx/5xx response is a
+  # model-visible failed capability outcome, not transport-level success.
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_surfaces_http_error_status_as_failed_outcome
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_keeps_redirect_responses_model_visible
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_surfaces_server_error_status_as_failed_outcome
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_save_surfaces_http_error_status_as_failed_outcome
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_classifies_status_range_boundaries
+  # Pins docs/reborn/contracts/host-runtime.md: the failure diagnostic is
+  # trimmed to the model-visible diagnostic budget and stays valid JSON.
+  run_test_exact ironclaw_host_runtime first_party_builtin_tools \
+    builtin_http_error_diagnostic_respects_model_diagnostic_budget
   run_test ironclaw_host_runtime builtin_obligation_handler_contract
   run_test ironclaw_host_runtime obligation_services_composition_contract
   run_test ironclaw_host_runtime production_trust_contract
@@ -140,7 +160,7 @@ run_runtimes() {
   run_test ironclaw_mcp mcp_dispatch_integration
   # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
   # turn: the scrubbed, bounded MCP cause reaches the next model request.
-  run_test_exact ironclaw_reborn_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
+  run_test_exact ironclaw_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
   run_test ironclaw_processes process_host_contract
   run_test ironclaw_processes process_journal_store_contract
   run_test ironclaw_processes legacy_migration_backend_contract
@@ -148,7 +168,7 @@ run_runtimes() {
 }
 
 run_substrates() {
-  run_test ironclaw_events durable_log_contract
+  run_test ironclaw_event_log durable_log_contract
   # Pins docs/reborn/contracts/events.md: runtime snapshot/replay projections
   # preserve nested dispatcher failures without synthesizing child run rows.
   run_test ironclaw_event_projections nested_dispatch_projection_contract

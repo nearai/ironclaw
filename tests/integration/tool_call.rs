@@ -348,6 +348,330 @@ async fn runs_http_save_tool_call_through_real_egress_and_persists_body() {
         .expect("final reply finalized");
 }
 
+fn transcript_json_fixture() -> Vec<u8> {
+    let source = serde_json::json!({
+        "schema": "ironclaw.thread.export.v1",
+        "messages": [
+            {
+                "sequence": 23,
+                "tool_call": {
+                    "capability_id": "builtin.json",
+                    "arguments": {
+                        "data": "/workspace/market-data.json",
+                        "operation": "parse"
+                    }
+                }
+            },
+            {
+                "sequence": 64,
+                "tool_call": {
+                    "capability_id": "builtin.json",
+                    "arguments": {
+                        "data": "{\"end\":1.7405,\"start\":2.5528}",
+                        "operation": "query",
+                        "path": "$"
+                    }
+                }
+            },
+            {
+                "sequence": 180,
+                "tool_call": {
+                    "capability_id": "builtin.json",
+                    "arguments": {
+                        "data": "{\"change\":((1.74-1.70)/1.70)*100}",
+                        "operation": "stringify"
+                    }
+                }
+            }
+        ],
+        "nodes": [
+            null,
+            null,
+            {"data": (0..16).map(|index| vec![format!("value-{index}")]).collect::<Vec<_>>()}
+        ],
+        "redaction": {"applied": true},
+        "synthetic_padding": "x".repeat(470_000)
+    });
+    let source_bytes = serde_json::to_vec(&source).expect("JSON fixture serializes");
+    assert!(
+        (470_000..480_000).contains(&source_bytes.len()),
+        "sanitized fixture should preserve the supplied export's size class"
+    );
+    source_bytes
+}
+
+async fn run_scoped_file_json_queries() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .with_real_egress_response_bodies([transcript_json_fixture()])
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http.save",
+                json!({"url": HTTP_TOOL_URL, "save_to": "/workspace/source.json"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "parse",
+                    "data": "/workspace/source.json"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "file_path": "/workspace/source.json",
+                    "path": "$.messages[1].tool_call.arguments.path"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "file_path": "/workspace/source.json",
+                    "path": "$.nodes[2].data[15][0]"
+                }),
+            ),
+            RebornScriptedReply::text("queried"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("save the response and query its JSON paths")
+        .await
+        .expect("turn completes");
+    h
+}
+
+async fn run_inline_jsonpath_queries() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": "{\"end\":1.7404796872364274,\"start\":2.5528116140825894}",
+                    "path": "$"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": [["zero"], ["root-array-value"]],
+                    "path": "$[1][0]"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": {"items": [{"name": "jsonpath-root-value"}]},
+                    "path": "$.items[0].name"
+                }),
+            ),
+            RebornScriptedReply::text("queried"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("query inline JSON with JSONPath-style roots")
+        .await
+        .expect("turn completes");
+    h
+}
+
+async fn run_invalid_json_query() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "stringify",
+                    "data": "{\"change\":((1.74-1.70)/1.70)*100}"
+                }),
+            ),
+            RebornScriptedReply::text("queried"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("stringify invalid JSON")
+        .await
+        .expect("turn completes");
+    h
+}
+
+async fn run_json_collection_analysis() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .with_real_egress_response_bodies([transcript_json_fixture()])
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http.save",
+                json!({"url": HTTP_TOOL_URL, "save_to": "/workspace/source.json"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "last",
+                    "file_path": "/workspace/source.json",
+                    "path": "$.nodes[2].data"
+                }),
+            ),
+            RebornScriptedReply::text("selected"),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "aggregate",
+                    "data": {"prices": [[1, 10.0], [2, 20.0], [3, 30.0]]},
+                    "path": "prices",
+                    "function": "average",
+                    "value_index": 1
+                }),
+            ),
+            RebornScriptedReply::text("analyzed"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("select the last saved JSON row")
+        .await
+        .expect("file-backed collection turn completes");
+    h.submit_turn("average the inline JSON price rows")
+        .await
+        .expect("aggregate turn completes");
+    h
+}
+
+async fn run_json_schema_disclosure() -> RebornIntegrationHarness {
+    let h = RebornIntegrationHarness::test_default()
+        .with_real_egress_pipeline()
+        .script([RebornScriptedReply::text("described")])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("describe the JSON capability")
+        .await
+        .expect("turn completes");
+    h
+}
+
+fn assert_json_schema_disclosure(h: &RebornIntegrationHarness) {
+    let definitions = h.scripted_llm.captured_tool_definitions();
+    let definition = definitions
+        .iter()
+        .flatten()
+        .find(|definition| definition.name == "builtin__json")
+        .expect("JSON capability reaches the model");
+    assert_eq!(
+        definition.parameters["properties"]["operation"]["enum"],
+        json!([
+            "parse",
+            "stringify",
+            "query",
+            "validate",
+            "length",
+            "last",
+            "slice",
+            "aggregate"
+        ])
+    );
+    assert!(
+        definition.parameters["properties"]["file_path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("/workspace"))
+    );
+    assert!(
+        definition.parameters["properties"]["path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("$.nodes")),
+        "model-visible schema must advertise optional root markers"
+    );
+    assert!(
+        definition.parameters["properties"]["path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("not supported")),
+        "model-visible schema must distinguish traversal paths from full JSONPath"
+    );
+    assert!(
+        definition.parameters["oneOf"]
+            .as_array()
+            .is_some_and(|branches| branches.iter().any(|branch| {
+                branch["required"] == json!(["operation", "file_path", "path"])
+                    && branch["not"]["required"] == json!(["data"])
+            })),
+        "model-visible schema must disclose the file-backed query alternative unambiguously"
+    );
+}
+
+/// A realistic-size response saved under `/workspace` remains queryable without
+/// shell or inline copying, including repeated adjacent array indices.
+#[tokio::test]
+async fn json_queries_scoped_file_and_adjacent_array_indices() {
+    let h = run_scoped_file_json_queries().await;
+    h.assert_tool_invoked("builtin.http.save")
+        .await
+        .expect("http.save tool ran");
+    h.assert_workspace_file_contains("source.json", "value-15")
+        .await
+        .expect("http.save persisted the JSON source");
+    h.assert_tool_result_contains("\"$\"")
+        .await
+        .expect("the transcript-derived file query returns its nested root marker");
+    h.assert_tool_result_contains("value-15")
+        .await
+        .expect("file-backed query traversed repeated adjacent indices");
+}
+
+/// `$`-rooted inline queries support object roots, array roots, and traversal.
+#[tokio::test]
+async fn json_queries_inline_jsonpath_roots() {
+    let h = run_inline_jsonpath_queries().await;
+    h.assert_tool_result_contains("1.7404796872364274")
+        .await
+        .expect("the transcript-derived inline root query returns the full object");
+    h.assert_tool_result_contains("root-array-value")
+        .await
+        .expect("inline compatibility includes JSONPath-style root-array queries");
+    h.assert_tool_result_contains("jsonpath-root-value")
+        .await
+        .expect("JSONPath-style object roots resolve through the real capability path");
+}
+
+/// Invalid JSON produces actionable, model-visible correction guidance.
+#[tokio::test]
+async fn invalid_json_is_recoverable() {
+    let h = run_invalid_json_query().await;
+    h.assert_tool_error_summary_contains("JSON input is not valid JSON")
+        .await
+        .expect("invalid JSON is explained to the model with an actionable safe summary");
+}
+
+/// Bounded collection operations work for both scoped files and inline rows.
+#[tokio::test]
+async fn json_runs_bounded_collection_operations() {
+    let h = run_json_collection_analysis().await;
+    h.assert_tool_result_contains("value-15")
+        .await
+        .expect("last selects the final item from the scoped JSON array");
+    h.assert_tool_result_contains(r#""function":"average""#)
+        .await
+        .expect("aggregate reports the selected numeric operation");
+    h.assert_tool_result_contains(r#""value":20.0"#)
+        .await
+        .expect("aggregate selects and averages the numeric row values");
+}
+
+/// The model-visible schema advertises operations and file-backed JSONPath queries.
+#[tokio::test]
+async fn json_schema_discloses_file_queries() {
+    let h = run_json_schema_disclosure().await;
+    assert_json_schema_disclosure(&h);
+}
+
 /// Regression for #5817: a decimal lifted from prose (`0.95`) tokenizes as
 /// `digits.digits`, satisfying the capability-id shape check. The guard must
 /// not mistake it for a requested-but-unavailable capability and suppress the
@@ -410,13 +734,13 @@ async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
 
 /// The globally-disabled `builtin.spawn_subagent` capability (configured
 /// through `DefaultPlannedRuntimeConfig::disabled_capability_ids`, applied as
-/// the OUTERMOST `PerSurfaceCapabilityDenyDecorator` in
+/// the OUTERMOST `CapabilitySurfacePolicyFilter` in
 /// `build_default_planned_runtime_inner` — see that function's doc comments)
 /// must never reach the model-facing tool list, whichever port would
 /// otherwise have surfaced it: the flavor-aware `SubagentSpawnCapabilityDecorator`
 /// (always wired, independent of any harness extension registry) or the
 /// host-runtime first-party manifest stub (`builtin_first_party_package()` in
-/// `crates/ironclaw_host_runtime/src/first_party_tools/mod.rs`, included in
+/// `crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs`, included in
 /// `core_builtin_tools()`'s registry unconditionally).
 ///
 /// Non-vacuity: confirmed by direct inspection that `core_builtin_tools()`'s
@@ -461,7 +785,7 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 }
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
-/// at the gateway (`CapabilitySurfaceDenyFilter`, before
+/// at the gateway (`CapabilitySurfacePolicyFilter`, before
 /// `register_provider_tool_call` ever stages an invocation). The loop must
 /// surface the precise `outside_capability_surface` observation to the model,
 /// let it repair the response on the next call, and complete without ever
@@ -499,6 +823,40 @@ async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     h.assert_capability_result_count("builtin.spawn_subagent", 0)
         .await
         .expect("the rejected call must not produce a successful capability result");
+}
+
+/// Regression for the host-policy propagation seam: capability metadata
+/// lookup must resolve against the same already-narrowed host-visible surface
+/// that disclosure and the outer gate use. A denied target is therefore
+/// indistinguishable from an unknown target and returns a normal tool failure;
+/// it must not escape registration as terminal invalid model output.
+#[tokio::test]
+async fn capability_info_for_disabled_spawn_is_opaque_and_model_recoverable() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "capability_info",
+                json!({"name": "builtin__spawn_subagent", "detail": "schema"}),
+            ),
+            RebornScriptedReply::text("continued without the disabled capability"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("inspect the disabled spawn capability")
+        .await
+        .expect("run recovers from opaque capability_info failure");
+    h.assert_tool_error_summary_contains("capability_info target is not on the visible surface")
+        .await
+        .expect("denied target is reported through the model-visible tool-result path");
+    h.assert_reply_contains("continued without the disabled capability")
+        .await
+        .expect("the model can continue after the tool failure");
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("metadata lookup never dispatches the denied target");
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
@@ -595,19 +953,16 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
     );
 }
 
-/// `result_read` continuation (issue #5838): a second scripted turn on the
-/// SAME thread calls `builtin.result_read` (`RESULT_READ_CAPABILITY_ID`,
-/// `runtime/standalone/result_read.rs`) with the durable `result_ref` and
-/// `next_offset` the first turn's `read_file` observation reported —
-/// discovered via `latest_tool_result_ref`/`latest_tool_result_next_offset`
-/// (a static script cannot know a server-minted ref ahead of time) and
-/// injected with `push_script`. Asserts the returned chunk continues
-/// byte-exactly from the SAME canonical serialization `tool_result_output`
-/// returns for `read_file` — no gap, no overlap — and reports the true
-/// `total_bytes` of the durable record. The requested chunk contains a
-/// credential marker, so its inline preview is suppressed; replay must still
-/// retain the original durable ref and continuation metadata rather than the
-/// unreadable `InlineOnly` invocation ref.
+/// `result_read` continuation (issue #5838): two subsequent scripted turns on
+/// the SAME thread page the durable `read_file` result. Page two is invoked
+/// exclusively with the `result_ref` and `next_offset` surfaced by page one,
+/// proving that model-visible continuation metadata retains the original
+/// pageable identity instead of exposing the fresh `InlineOnly` write ref.
+/// Both chunks continue byte-exactly through the SAME canonical serialization
+/// `tool_result_output` returns for `read_file` — no gap, no overlap — and
+/// report the durable record's true `total_bytes`. Page one's chunk contains a
+/// credential marker, so its inline preview is suppressed; the continuation
+/// identity and offset must survive independently of preview content.
 #[tokio::test]
 async fn result_read_continues_a_durable_result_byte_exactly() {
     let h = RebornIntegrationHarness::test_default()
@@ -688,38 +1043,125 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         "fixture must put the rejected marker inside the requested chunk"
     );
 
+    let surfaced_result_ref = h
+        .latest_tool_result_ref()
+        .await
+        .expect("page one surfaces a continuation result_ref");
+    let page_two_offset = h
+        .latest_tool_result_next_offset()
+        .await
+        .expect("page one surfaces a continuation offset");
+    assert_eq!(
+        surfaced_result_ref, result_ref,
+        "page one must surface the original durable result ref, not its inline-only write ref"
+    );
+
+    h.push_script([
+        RebornScriptedReply::tool_call(
+            "builtin.result_read",
+            json!({
+                "result_ref": surfaced_result_ref,
+                "offset": page_two_offset,
+                "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+            }),
+        ),
+        RebornScriptedReply::text("continued again"),
+    ]);
+    h.submit_turn("continue reading the next page")
+        .await
+        .expect("third turn completes");
+
+    let page_two = h
+        .tool_result_output("builtin.result_read")
+        .await
+        .expect("second result_read result recorded");
+    let page_two_content = page_two["content"]
+        .as_str()
+        .expect("second chunk content is text");
+    let page_two_start = page_two_offset as usize;
+    let page_two_expected = &serialized[page_two_start..page_two_start + page_two_content.len()];
+    assert_eq!(
+        page_two_content.as_bytes(),
+        page_two_expected,
+        "second result_read chunk must continue from page one's surfaced next_offset"
+    );
+    assert_eq!(
+        page_two["total_bytes"].as_u64(),
+        Some(serialized.len() as u64),
+        "every page must report the same durable total byte length"
+    );
+
     let envelopes = h
         .persisted_tool_result_envelopes()
         .await
         .expect("tool-result envelopes persist");
-    let result_read = envelopes.last().expect("result_read envelope exists");
-    let observation = result_read
+    let result_read_envelopes = envelopes
+        .iter()
+        .filter(|envelope| {
+            envelope.result_ref == result_ref
+                && envelope
+                    .model_observation
+                    .as_ref()
+                    .and_then(|observation| observation["summary"].as_str())
+                    == Some("Requested tool-result chunk returned.")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result_read_envelopes.len(),
+        2,
+        "exactly the two ordered result_read envelopes must be selected"
+    );
+    let page_one_envelope = result_read_envelopes[0];
+    let page_two_envelope = result_read_envelopes[1];
+    let page_one_observation = page_one_envelope
         .model_observation
         .as_ref()
-        .expect("metadata-only result_read observation survives");
-    let detail = &observation["detail"];
-    assert_ne!(
-        result_read.result_ref, result_ref,
-        "the result_read invocation keeps its own ephemeral envelope ref"
+        .expect("metadata-only first-page observation survives");
+    let page_one_detail = &page_one_observation["detail"];
+    assert_eq!(
+        page_one_envelope.result_ref, result_ref,
+        "first-page replay must retain the original pageable result ref"
     );
     assert_eq!(
-        detail["result_ref"].as_str(),
+        page_one_detail["result_ref"].as_str(),
         Some(result_ref.as_str()),
         "continuation authority remains the durable source ref"
     );
     assert!(
-        detail.get("preview").is_none(),
+        page_one_detail.get("preview").is_none(),
         "credential-bearing preview remains suppressed"
     );
     assert_eq!(
-        detail["total_bytes"].as_u64(),
+        page_one_detail["total_bytes"].as_u64(),
         Some(serialized.len() as u64)
     );
-    assert!(
-        detail["next_offset"]
-            .as_u64()
-            .is_some_and(|offset| offset > next_offset),
-        "paging metadata survives independently of preview content"
+    assert_eq!(
+        page_one_detail["next_offset"].as_u64(),
+        Some(page_two_offset),
+        "first-page replay must retain the offset fed into page two"
+    );
+
+    let page_two_observation = page_two_envelope
+        .model_observation
+        .as_ref()
+        .expect("second-page observation survives");
+    let page_two_detail = &page_two_observation["detail"];
+    assert_eq!(
+        page_two_envelope.result_ref, result_ref,
+        "second-page replay must retain the original pageable result ref"
+    );
+    assert_eq!(
+        page_two_detail["result_ref"].as_str(),
+        Some(result_ref.as_str())
+    );
+    assert_eq!(
+        page_two_detail["total_bytes"].as_u64(),
+        Some(serialized.len() as u64)
+    );
+    assert_eq!(
+        page_two_detail["next_offset"].as_u64(),
+        page_two["next_offset"].as_u64(),
+        "second-page replay metadata must match the second page output"
     );
 }
 

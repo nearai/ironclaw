@@ -4,8 +4,8 @@
 
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_host_runtime/AGENTS.md`
-  - `crates/ironclaw_filesystem/AGENTS.md`
+  - `crates/kernel/ironclaw_host_runtime/AGENTS.md`
+  - `crates/substrates/ironclaw_filesystem/AGENTS.md`
 
 ## Where The Packages Live
 
@@ -54,7 +54,7 @@ Every tool here is an **executor**, never a capability handler. That means:
   `ironclaw_host_runtime::first_party_tools` for the always-on builtins, or in
   the binary's `FirstPartyHandlerRegistrar` for the binary-registered ones.
 
-`ironclaw_host_runtime` and `ironclaw_extensions` are on this crate's forbidden
+`ironclaw_host_runtime` and `ironclaw_extension_registry` are on this crate's forbidden
 list (`reborn_dependency_boundaries.rs`), so this is enforced, not a
 convention. If an executor cannot be written without one of them, the seam is
 in the wrong place — move less, not the rule.
@@ -70,4 +70,4 @@ in the wrong place — move less, not the rule.
 
 - Fast local check: `cargo test -p ironclaw_extension_support`
 - Caller check after tool behavior changes: `cargo test -p ironclaw_host_runtime --test first_party_coding_tools`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
