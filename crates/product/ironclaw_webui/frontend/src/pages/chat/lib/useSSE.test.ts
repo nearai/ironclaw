@@ -517,43 +517,47 @@ test("useSSE routes a mid-stream body failure through the coordinator backoff", 
 
 test("the packaged client yields mid-stream body failures to the coordinator instead of retrying at 2ms", async () => {
   vi.useFakeTimers();
-  const body = new ReadableStream({
-    start(controller) {
-      controller.enqueue(
-        new TextEncoder().encode("event: keep_alive\ndata: {}\n\n"),
-      );
-      controller.error(new Error("connection reset"));
-    },
-  });
-  const fetch = vi.fn(async () =>
-    new Response(body, {
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-    }),
-  );
-  const stream = new PackagedEventSourcePlus("http://localhost/events", {
-    fetch,
-    retryStrategy: "on-error",
-    maxRetryCount: 0,
-  });
   let controller;
-  const abortEvents = [];
 
-  controller = stream.listen({});
-  controller.onAbort((event) => abortEvents.push(event));
-  await vi.advanceTimersByTimeAsync(1_000);
+  try {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode("event: keep_alive\ndata: {}\n\n"),
+        );
+        controller.error(new Error("connection reset"));
+      },
+    });
+    const fetch = vi.fn(async () =>
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const stream = new PackagedEventSourcePlus("http://localhost/events", {
+      fetch,
+      retryStrategy: "on-error",
+      maxRetryCount: 0,
+    });
+    const abortEvents = [];
 
-  assert.equal(
-    fetch.mock.calls.length,
-    1,
-    "a mid-stream body failure must not reopen on the package's 2ms internal clock",
-  );
-  assert.ok(
-    abortEvents.some((event) => event.type === "error"),
-    "a mid-stream body failure must surface as one error abort event the coordinator can schedule",
-  );
-  controller.abort("test complete");
-  vi.useRealTimers();
+    controller = stream.listen({});
+    controller.onAbort((event) => abortEvents.push(event));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    assert.equal(
+      fetch.mock.calls.length,
+      1,
+      "a mid-stream body failure must not reopen on the package's 2ms internal clock",
+    );
+    assert.ok(
+      abortEvents.some((event) => event.type === "error"),
+      "a mid-stream body failure must surface as one error abort event the coordinator can schedule",
+    );
+  } finally {
+    controller?.abort("test complete");
+    vi.useRealTimers();
+  }
 });
 
 test("the packaged client yields retry ownership when an error hook aborts", async () => {
@@ -588,7 +592,7 @@ test("the packaged client yields retry ownership when an error hook aborts", asy
   }
 });
 
-test("useSSE resets reconnect backoff only after a valid SSE frame", () => {
+test("useSSE resets reconnect backoff after a valid frame stays open for the stable interval", () => {
   const { advanceTime, streams, timers } = createHarness();
   const stream = streams[0];
 
@@ -633,8 +637,15 @@ test("useSSE resets reconnect backoff only after a valid SSE frame", () => {
 
   stream.respond();
   stream.message({ type: "keep_alive" });
+  const stableReset = timers.find(
+    (timer) => !timer.cleared && timer.delay === 15_000,
+  );
+  assert.ok(
+    stableReset,
+    "the first valid frame must schedule a stable-connection reset",
+  );
   advanceTime(15_000);
-  stream.message({ type: "keep_alive" });
+  stableReset.handler();
   stream.end();
   assert.ok(
     timers.some(
@@ -646,7 +657,7 @@ test("useSSE resets reconnect backoff only after a valid SSE frame", () => {
         timer.delay >= 800 &&
         timer.delay <= 1_200,
     ),
-    "a valid frame after a stable interval must restore the initial retry delay",
+    "a valid frame followed by a quiet stable interval must restore the initial retry delay",
   );
 });
 

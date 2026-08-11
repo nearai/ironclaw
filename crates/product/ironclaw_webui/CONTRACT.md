@@ -252,9 +252,10 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
   IronClaw owns one reconnect coordinator across transport failures, stream
   endings, activity stalls, visibility recovery, and network recovery. It uses
-  jittered 1/2/4/8/16/30-second backoff, honors `Retry-After`, and resets only
-  after a valid application frame arrives beyond a stable 15-second interval;
-  HTTP headers and the immediate admission keep-alive do not reset it. The
+  jittered 1/2/4/8/16/30-second backoff and honors `Retry-After`. A valid
+  application frame starts the stability interval, and backoff resets only if
+  that stream remains open for the full 15 seconds; HTTP headers and the
+  immediate admission keep-alive alone do not reset it. The
   bearer is sent in the `Authorization` header rather than
   the request URL. A bounded, random `connection_id` remains stable for one
   browser tab across SPA mounts and document reloads, while

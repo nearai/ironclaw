@@ -136,12 +136,13 @@ export function useSSE({
     let controller = null;
     let activityWatchdog = null;
     let retryTimer = null;
+    let retryBackoffResetTimer = null;
     let retryAttempt = 0;
     let disposed = false;
     let terminalErrorReceived = false;
     let connectedOnce = false;
     let streamOpen = false;
-    let streamOpenedAt = null;
+    let streamStabilityConfirmed = false;
     const request = eventStreamRequest({
       threadId,
     });
@@ -171,10 +172,18 @@ export function useSSE({
       }
     }
 
+    function clearRetryBackoffResetTimer() {
+      if (retryBackoffResetTimer) {
+        clearTimeout(retryBackoffResetTimer);
+        retryBackoffResetTimer = null;
+      }
+    }
+
     function markTransportUnavailable() {
       streamOpen = false;
-      streamOpenedAt = null;
+      streamStabilityConfirmed = false;
       clearActivityWatchdog();
+      clearRetryBackoffResetTimer();
     }
 
     function cancelScheduledRetry() {
@@ -187,6 +196,16 @@ export function useSSE({
     function resetRetryBackoff() {
       retryAttempt = 0;
       cancelScheduledRetry();
+    }
+
+    function scheduleRetryBackoffReset() {
+      if (streamStabilityConfirmed || retryBackoffResetTimer) return;
+      retryBackoffResetTimer = setTimeout(() => {
+        retryBackoffResetTimer = null;
+        if (disposed || terminalErrorReceived || !streamOpen) return;
+        streamStabilityConfirmed = true;
+        resetRetryBackoff();
+      }, SSE_RETRY_RESET_AFTER_MS);
     }
 
     function scheduleReconnect(reason, response = null) {
@@ -250,7 +269,6 @@ export function useSSE({
 
     function markConnected() {
       if (disposed || terminalErrorReceived) return;
-      if (!streamOpen) streamOpenedAt = Date.now();
       streamOpen = true;
       connectedOnce = true;
       setStatus(CONNECTION_STATUS.CONNECTED);
@@ -324,14 +342,10 @@ export function useSSE({
           if (type !== "error") {
             markConnected();
             // The server emits one keep_alive immediately after admission.
-            // Require a frame after a stable interval before resetting, or a
-            // stream that opens, pings once, and dies can still loop at 1s.
-            if (
-              streamOpenedAt !== null &&
-              Date.now() - streamOpenedAt >= SSE_RETRY_RESET_AFTER_MS
-            ) {
-              resetRetryBackoff();
-            }
+            // Start the stability interval only after that valid application
+            // frame. A quiet stream that remains open for the full interval is
+            // healthy even when no second frame arrives to trigger a reset.
+            scheduleRetryBackoffReset();
           }
           onEventRef.current?.({
             type,
@@ -427,6 +441,7 @@ export function useSSE({
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       clearActivityWatchdog();
+      clearRetryBackoffResetTimer();
       cancelScheduledRetry();
       syncActivityWatchdogRef.current = () => {};
       controller?.abort("component disposed");
