@@ -291,6 +291,10 @@ async fn discovery_batch_classifies_parallel_and_preserves_valid_siblings() {
         .await
         .expect("valid describe sibling reaches the next model request");
     harness
+        .assert_model_message_content_contains("tool_describe target is unknown")
+        .await
+        .expect("recoverable invalid describe reaches the next model request");
+    harness
         .assert_reply_contains("done")
         .await
         .expect("turn continues after the recoverable bad describe");
