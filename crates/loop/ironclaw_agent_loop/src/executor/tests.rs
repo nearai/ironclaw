@@ -3227,7 +3227,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
     assert_eq!(appended[0].safe_summary, "auth gate aborted");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
     let first_ref = LoopResultRef::new("result:parallel-first").expect("valid");
     let second_ref = LoopResultRef::new("result:parallel-second").expect("valid");
@@ -3256,16 +3256,27 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
             std::time::Duration::from_millis(75),
             std::time::Duration::from_millis(5),
         ]);
-    let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
+    let run_host = host.clone();
+    let executor = tokio::spawn(async move {
+        CanonicalAgentLoopExecutor
+            .execute_family(
+                &support::family_with_parallel_batch_execution(),
+                &run_host,
+                state,
+            )
+            .await
+    });
+
+    while host.single_invocations().len() < 2 && !executor.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_millis(5)).await;
+    tokio::time::advance(std::time::Duration::from_millis(75)).await;
 
     let exit = executor
-        .execute_family(
-            &support::family_with_parallel_batch_execution(),
-            &host,
-            state,
-        )
         .await
+        .expect("executor task must not panic")
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
