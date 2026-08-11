@@ -1057,6 +1057,14 @@ pub(crate) struct OAuthFlowStatusResponse {
 pub(crate) struct DeviceLinkFlowResponse {
     pub(crate) flow_id: AuthFlowId,
     pub(crate) status: AuthFlowStatus,
+    /// The invocation the flow's scope was minted with, echoed for the same
+    /// reason [`ManualTokenSetupResponse`] echoes it: `scope_matches` is exact
+    /// equality over the whole scope, and `poll`/`input`/`cancel` re-derive
+    /// that scope from what the browser sends back. A caller that had no
+    /// invocation to carry into `start` (the Extensions configure modal — no
+    /// run, no gate) gets a freshly minted one here; without it in the
+    /// response, that caller could start a link and then never advance it.
+    pub(crate) invocation_id: InvocationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) device_link: Option<DeviceLinkPromptView>,
 }

@@ -1,5 +1,5 @@
-//! Tests for the device-link adapter's pure decision surface: the QR poll
-//! cadence, the payload the card renders, and the identity shown after
+//! Tests for the device-link adapter's pure decision surface: the payload the
+//! card renders on every poll, and the identity shown after
 //! completion. Error classification is pinned next to its table, in
 //! `linked_login_errors.rs`.
 //!
@@ -14,17 +14,6 @@ use super::*;
 // ---------------------------------------------------------------------------
 // Poll cadence and the rendered payload
 // ---------------------------------------------------------------------------
-
-#[test]
-fn the_poll_interval_is_capped_at_three_seconds_and_floored_above_zero() {
-    assert_eq!(poll_interval(Duration::from_secs(30)), MAX_POLL_INTERVAL);
-    assert_eq!(poll_interval(Duration::from_secs(3)), MAX_POLL_INTERVAL);
-    assert_eq!(
-        poll_interval(Duration::from_secs(1)),
-        Duration::from_secs(1)
-    );
-    assert_eq!(poll_interval(Duration::ZERO), MIN_POLL_INTERVAL);
-}
 
 #[test]
 fn expiry_is_judged_against_the_servers_clock_not_the_local_one() {
@@ -62,6 +51,37 @@ fn the_rendered_payload_is_the_url_a_telegram_client_scans() {
     assert!(!token.contains('+'));
     assert!(!token.contains('/'));
     assert!(!token.contains('='));
+}
+
+#[test]
+fn a_re_export_of_the_same_token_keeps_painting_the_code_it_carries() {
+    // Telegram returns the SAME bytes on every poll within a token's window,
+    // so this is the ordinary case, not an edge one. It used to answer
+    // `AwaitingVendor` — "nothing to show" — which blanked a still-valid QR
+    // about one poll after painting it and parked the card on "waiting for the
+    // vendor" forever: the code was never displayed again and no one could
+    // scan it.
+    let mut state = PendingState::default();
+    let exported = tl::types::auth::LoginToken {
+        expires: (local_unix_seconds() + 30) as i32,
+        token: vec![0xde, 0xad, 0xbe, 0xef],
+    };
+
+    let first = paint_token(&mut state, exported.clone());
+    let second = paint_token(&mut state, exported);
+
+    for (label, step) in [("first", first), ("re-export", second)] {
+        match step {
+            DeviceLinkStep::Display { payload, .. } => {
+                assert_eq!(
+                    payload.expose(),
+                    "tg://login?token=3q2-7w",
+                    "{label} poll must paint the live code"
+                );
+            }
+            other => panic!("{label} poll produced {other:?} instead of the code to scan"),
+        }
+    }
 }
 
 #[test]

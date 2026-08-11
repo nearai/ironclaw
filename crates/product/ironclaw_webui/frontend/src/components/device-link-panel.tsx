@@ -108,12 +108,23 @@ export function DeviceLinkPanel({
   // The highest frame revision adopted on the current flow.
   const revisionRef = React.useRef(-1);
   const flowIdRef = React.useRef("");
+  // The invocation every follow-up call must send back. `scope_matches` is
+  // exact equality over the whole scope, so poll/input/cancel can only reach
+  // the flow if they re-derive the scope it was stored with. A card opened
+  // outside a run (the Extensions configure modal) has no invocation to carry
+  // in, and `start` mints one server-side — so the authoritative value is
+  // whatever the response reports, and the prop is only the starting guess.
+  const invocationIdRef = React.useRef(invocationId || "");
   const completedRef = React.useRef(false);
 
   const name = displayName || provider || extensionName;
 
   const adopt = (response, generation) => {
     if (generation !== generationRef.current) return false;
+    // Captured before the frame check: the invocation is what makes the next
+    // call reach this flow at all, and it is carried by every device-link
+    // response whether or not one produced a renderable frame.
+    if (response?.invocation_id) invocationIdRef.current = response.invocation_id;
     const next = deviceLinkFrameFromWire(response?.device_link);
     if (!next) return false;
     const nextFlowId = response?.flow_id || next.flowId || "";
@@ -140,6 +151,9 @@ export function DeviceLinkPanel({
     const generation = generationRef.current;
     revisionRef.current = -1;
     flowIdRef.current = "";
+    // Back to the caller's own invocation: the one the abandoned flow was
+    // scoped with belongs to a link nobody is on any more.
+    invocationIdRef.current = invocationId || "";
     completedRef.current = false;
     setFlowId("");
     setError("");
@@ -186,7 +200,7 @@ export function DeviceLinkPanel({
     const timer = setInterval(async () => {
       if (generation !== generationRef.current) return;
       try {
-        const response = await pollDeviceLink({ flowId, invocationId });
+        const response = await pollDeviceLink({ flowId, invocationId: invocationIdRef.current });
         adopt(response, generation);
       } catch (_) {
         // Poll is best-effort; the next tick retries.
@@ -201,7 +215,7 @@ export function DeviceLinkPanel({
     if (!abandoned || stepIsTerminal) return;
     // Best effort: the host logs the device out so an accepted-but-abandoned
     // link is not left as an orphan authorization.
-    Promise.resolve(cancelDeviceLink({ flowId: abandoned, invocationId })).catch(() => {});
+    Promise.resolve(cancelDeviceLink({ flowId: abandoned, invocationId: invocationIdRef.current })).catch(() => {});
   };
 
   const switchMode = () => {
@@ -222,7 +236,7 @@ export function DeviceLinkPanel({
     setIsRenewing(true);
     setError("");
     try {
-      adopt(await pollDeviceLink({ flowId, invocationId }), generation);
+      adopt(await pollDeviceLink({ flowId, invocationId: invocationIdRef.current }), generation);
     } catch (renewError) {
       setError(deviceLinkError(renewError, t("deviceLink.pollFailed", { name })));
     } finally {
@@ -243,7 +257,7 @@ export function DeviceLinkPanel({
         revision: frame.revision,
         kind: frame.inputKind,
         value,
-        invocationId,
+        invocationId: invocationIdRef.current,
       });
       // Drop the code/password from component state the moment the host has
       // it. Nothing here keeps a secret across a step.

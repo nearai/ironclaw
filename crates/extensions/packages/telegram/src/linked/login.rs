@@ -23,9 +23,15 @@
 //! event-driven clients to call it sooner. Telegram Web K — an official client
 //! — consumes no updates at all and polls `exportLoginToken` every 3 s. So the
 //! recipe here is: poll on the **same** session with identical `except_ids`, at
-//! `min(3s, expires − serverNow)`, repaint only when the token bytes change,
-//! and correct for **server** time. That is what keeps `drop(updates)` a global
-//! rule (PROPOSAL §4.2).
+//! the host's device-link cadence (`DEVICE_LINK_POLL_INTERVAL_MILLIS`, 3 s),
+//! repainting the live code on **every** poll, and correct for **server** time.
+//! That is what keeps `drop(updates)` a global rule (PROPOSAL §4.2).
+//!
+//! Repainting unconditionally is deliberate. An earlier revision answered
+//! `AwaitingVendor` when the re-exported bytes were unchanged — which is what
+//! they are for the whole of a token's window — and since that variant means
+//! "nothing to show", the card blanked a still-valid QR one poll after painting
+//! it. Identical bytes repaint identically, so there is nothing to churn.
 //!
 //! # Logout on abort, never in `Drop`
 //!
@@ -64,10 +70,6 @@ mod errors;
 
 use errors::{custody_error, fatal_step, invocation_error, vendor_error};
 
-/// Longest gap between two `exportLoginToken` polls.
-const MAX_POLL_INTERVAL: Duration = Duration::from_secs(3);
-/// Shortest gap, so a token that is about to expire cannot spin the caller.
-const MIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// First backoff after a failed export; doubles up to [`MAX_EXPORT_BACKOFF`].
 const INITIAL_EXPORT_BACKOFF: Duration = Duration::from_secs(1);
 /// TDLib's defensive ceiling. No flood limit is documented for this method, so
@@ -244,7 +246,7 @@ impl TelegramDeviceLinkAdapter {
         for _ in 0..MAX_MIGRATIONS {
             match token {
                 tl::enums::auth::LoginToken::Token(exported) => {
-                    return Ok(self.paint_token(state, exported));
+                    return Ok(paint_token(state, exported));
                 }
                 tl::enums::auth::LoginToken::Success(success) => {
                     return self
@@ -279,41 +281,6 @@ impl TelegramDeviceLinkAdapter {
             code: DeviceLinkErrorCode::VendorUnavailable,
             restartable: true,
         })
-    }
-
-    /// Record a freshly exported token and decide whether the card repaints.
-    ///
-    /// Repaint **only** when the bytes change: within the token's window the
-    /// server returns the same bytes, so repainting every poll would churn the
-    /// code under a user mid-scan.
-    fn paint_token(
-        &self,
-        state: &mut PendingState,
-        exported: tl::types::auth::LoginToken,
-    ) -> DeviceLinkStep {
-        let changed = !matches!(
-            &state.phase,
-            PendingPhase::AwaitingScan { token } if token == &exported.token
-        );
-        let remaining = remaining_for(exported.expires, state.server_offset);
-        state.export_backoff = INITIAL_EXPORT_BACKOFF;
-        state.phase = PendingPhase::AwaitingScan {
-            token: exported.token.clone(),
-        };
-
-        if !changed {
-            return DeviceLinkStep::AwaitingVendor {
-                retry_in: poll_interval(remaining),
-            };
-        }
-        match login_payload(&exported.token) {
-            Ok(payload) => DeviceLinkStep::Display {
-                kind: DeviceLinkDisplayKind::QrCode,
-                payload,
-                expires_in: remaining,
-            },
-            Err(step) => step,
-        }
     }
 
     /// Move to the password phase and ask for it.
@@ -556,7 +523,7 @@ impl DeviceLinkAdapter for TelegramDeviceLinkAdapter {
             // Only the scan phase advances on a poll. While the flow waits on
             // the user, `poll` is a pure read — the host polls it concurrently
             // with whatever is being typed.
-            PendingPhase::AwaitingScan { .. } => self.drive_scan(ctx, &link, &mut state).await,
+            PendingPhase::AwaitingScan => self.drive_scan(ctx, &link, &mut state).await,
             PendingPhase::AwaitingIdentifier => Ok(identifier_prompt()),
             PendingPhase::AwaitingCode { .. } => Ok(code_prompt()),
             PendingPhase::AwaitingPassword { token } => Ok(password_prompt(token)),
@@ -754,9 +721,7 @@ impl PendingState {
 }
 
 enum PendingPhase {
-    AwaitingScan {
-        token: Vec<u8>,
-    },
+    AwaitingScan,
     AwaitingIdentifier,
     AwaitingCode {
         token: Box<LoginToken>,
@@ -888,16 +853,41 @@ fn login_payload(token: &[u8]) -> Result<DeviceLinkPayload, DeviceLinkStep> {
 }
 
 /// Seconds left on a token, judged against the server's clock.
+/// Record a freshly exported token and paint the code it carries.
+///
+/// **Always a `Display`, unchanged bytes included.** Within the token's
+/// window the server returns the same bytes on every poll, and this used
+/// to answer `AwaitingVendor` for that case. That variant means "nothing
+/// to show" (`DeviceLinkStep::AwaitingVendor`), so the card blanked the QR
+/// roughly one poll after painting it and sat on "waiting for the vendor"
+/// while the still-valid code was never displayed again — a link nobody
+/// could complete.
+///
+/// Re-emitting the same payload is not the churn the old comment feared:
+/// the code a user is mid-scan on only changes when the *bytes* change, and
+/// identical bytes repaint identically. `expires_in` is recomputed each
+/// time, so the countdown stays honest. It costs no extra durable write
+/// either — the driver applies whatever step comes back, so both arms
+/// already wrote a revision.
+fn paint_token(state: &mut PendingState, exported: tl::types::auth::LoginToken) -> DeviceLinkStep {
+    let remaining = remaining_for(exported.expires, state.server_offset);
+    state.export_backoff = INITIAL_EXPORT_BACKOFF;
+    state.phase = PendingPhase::AwaitingScan;
+
+    match login_payload(&exported.token) {
+        Ok(payload) => DeviceLinkStep::Display {
+            kind: DeviceLinkDisplayKind::QrCode,
+            payload,
+            expires_in: remaining,
+        },
+        Err(step) => step,
+    }
+}
+
 fn remaining_for(expires: i32, server_offset: i64) -> Duration {
     let server_now = local_unix_seconds() + server_offset;
     let remaining = i64::from(expires) - server_now;
     Duration::from_secs(remaining.max(0).unsigned_abs())
-}
-
-/// `min(3s, expires − serverNow)`, floored so an about-to-expire token cannot
-/// spin the poller.
-fn poll_interval(remaining: Duration) -> Duration {
-    remaining.min(MAX_POLL_INTERVAL).max(MIN_POLL_INTERVAL)
 }
 
 fn local_unix_seconds() -> i64 {

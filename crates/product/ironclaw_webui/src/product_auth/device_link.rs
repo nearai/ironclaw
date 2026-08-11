@@ -52,6 +52,11 @@ fn driver(
 fn response(record: AuthFlowRecord) -> Json<DeviceLinkFlowResponse> {
     Json(DeviceLinkFlowResponse {
         flow_id: record.id,
+        // Read from the stored record's own scope, never from the request:
+        // this is the value a follow-up call must send back for
+        // `scope_matches` to hold, so it has to be the one the flow was
+        // actually persisted with.
+        invocation_id: record.scope.resource.invocation_id,
         status: record.status,
         device_link: ironclaw_auth::product_prompt::device_link_view_for_flow(&record),
     })

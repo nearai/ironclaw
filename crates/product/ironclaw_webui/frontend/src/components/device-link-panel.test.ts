@@ -50,6 +50,10 @@ function createHarness({ startResponses = [], pollResponses = [], submitResponse
   const state = { hookIndex: 0, values: {}, refs: {}, effects: {}, pendingEffects: [] };
   const timers = { nextId: 1, active: new Map() };
   const calls = [];
+  // Whole request objects, kept alongside the compact `calls` tuples: scope
+  // fields never appear in those tuples, and an argument the production caller
+  // passes has to be captured to be asserted on.
+  const requests = [];
   const completions = [];
 
   const takeScripted = (queue, label) => {
@@ -114,18 +118,22 @@ function createHarness({ startResponses = [], pollResponses = [], submitResponse
     deviceLinkPollDelayMs,
     startDeviceLink: async (request) => {
       calls.push(["start", request.mode]);
+      requests.push(["start", request]);
       return takeScripted(startResponses, "startDeviceLink");
     },
     pollDeviceLink: async (request) => {
       calls.push(["poll", request.flowId]);
+      requests.push(["poll", request]);
       return takeScripted(pollResponses, "pollDeviceLink");
     },
     submitDeviceLinkInput: async (request) => {
       calls.push(["submit", request.kind, request.revision, request.value]);
+      requests.push(["submit", request]);
       return takeScripted(submitResponses, "submitDeviceLinkInput");
     },
     cancelDeviceLink: async (request) => {
       calls.push(["cancel", request.flowId]);
+      requests.push(["cancel", request]);
       return {};
     },
     deviceLinkError: (error, fallback) => error?.payload?.error || error?.message || fallback,
@@ -166,6 +174,7 @@ function createHarness({ startResponses = [], pollResponses = [], submitResponse
     render,
     mount,
     calls,
+    requests,
     completions,
     timers,
     context,
@@ -548,4 +557,45 @@ test("DeviceLinkPanel surfaces a failed start as a retryable error rather than a
   assert.ok(stringify(rendered).includes("device link unavailable"));
   assert.ok(stringify(rendered).includes("deviceLink.startAgain"));
   assert.equal(harness.timers.active.size, 0, "a card with no flow polls nothing");
+});
+
+// A card opened outside a run — the Extensions configure modal — has no
+// invocation to carry in. `start` mints one server-side, and the flow's scope
+// is stored with it; `scope_matches` is exact equality, so a follow-up call
+// that omits it re-derives a different scope and the host answers
+// `invalid_request`. Before the response carried `invocation_id`, that link
+// could be started and then never advanced.
+test("DeviceLinkPanel carries the host-minted invocation into every follow-up call", async () => {
+  const harness = createHarness({
+    startResponses: [
+      { ...response(wireFrame()), invocation_id: "inv-minted-by-host" },
+    ],
+    pollResponses: [
+      {
+        ...response(
+          wireFrame({
+            step: DEVICE_LINK_STEPS.inputRequired,
+            input_kind: DEVICE_LINK_INPUT_KINDS.code,
+            revision: 2,
+          }),
+        ),
+        invocation_id: "inv-minted-by-host",
+      },
+    ],
+    submitResponses: [
+      {
+        ...response(wireFrame({ step: DEVICE_LINK_STEPS.completed, revision: 3 })),
+        invocation_id: "inv-minted-by-host",
+      },
+    ],
+  });
+
+  // No `invocationId` prop: this is the modal, not a chat gate.
+  await harness.mount();
+  const started = harness.requests.find(([kind]) => kind === "start")[1];
+  assert.ok(!started.invocationId, "start had none to send");
+
+  await harness.fireTimers(3000);
+  const polled = harness.requests.find(([kind]) => kind === "poll")[1];
+  assert.equal(polled.invocationId, "inv-minted-by-host");
 });

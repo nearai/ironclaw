@@ -46,6 +46,27 @@ export function deviceLinkStatusPath(flowId) {
   return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status`;
 }
 
+// Drop optional identifiers the caller does not have.
+//
+// An absent id must be OMITTED, never sent as `""`. The host parses every one
+// of these into a validated newtype (`ThreadId`, `InvocationId`, `TurnRunRef`,
+// `AuthGateRef`), and a blank string fails that parse — so a body carrying
+// `thread_id: ""` is rejected with `invalid_request` before the flow is ever
+// started. The gate model has no `threadId` at all and leaves `invocationId`
+// null, so a card that defaulted those to `""` could never start a link.
+//
+// Required fields (`provider`, `extension_name`) are deliberately NOT filtered:
+// blank ones must reach the host and be rejected, not silently vanish into a
+// request that means something else.
+function withoutBlankIds(body) {
+  const kept = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null || value === "") continue;
+    kept[key] = value;
+  }
+  return kept;
+}
+
 // Device-link specific — see the header.
 const DEVICE_LINK_BASE = "/api/reborn/product-auth/device-link";
 const START_PATH = `${DEVICE_LINK_BASE}/start`;
@@ -76,12 +97,14 @@ export function startDeviceLink({
     body: JSON.stringify({
       provider,
       extension_name: extensionName,
-      mode,
-      thread_id: threadId,
-      run_id: runId,
-      gate_ref: gateRef,
-      invocation_id: invocationId,
-      resume_flow_id: resumeFlowId,
+      ...withoutBlankIds({
+        mode,
+        thread_id: threadId,
+        run_id: runId,
+        gate_ref: gateRef,
+        invocation_id: invocationId,
+        resume_flow_id: resumeFlowId,
+      }),
     }),
   });
 }
@@ -96,7 +119,10 @@ export function pollDeviceLink({ flowId, invocationId, signal } = {}) {
   return apiFetch(POLL_PATH, {
     method: "POST",
     signal,
-    body: JSON.stringify({ flow_id: flowId, invocation_id: invocationId }),
+    body: JSON.stringify({
+      flow_id: flowId,
+      ...withoutBlankIds({ invocation_id: invocationId }),
+    }),
   });
 }
 
@@ -130,7 +156,7 @@ export function submitDeviceLinkInput({
       revision,
       kind,
       value,
-      invocation_id: invocationId,
+      ...withoutBlankIds({ invocation_id: invocationId }),
     }),
   });
 }
@@ -141,7 +167,10 @@ export function cancelDeviceLink({ flowId, invocationId, signal } = {}) {
   return apiFetch(CANCEL_PATH, {
     method: "POST",
     signal,
-    body: JSON.stringify({ flow_id: flowId, invocation_id: invocationId }),
+    body: JSON.stringify({
+      flow_id: flowId,
+      ...withoutBlankIds({ invocation_id: invocationId }),
+    }),
   });
 }
 
