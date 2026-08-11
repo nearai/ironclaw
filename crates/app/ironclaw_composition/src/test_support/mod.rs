@@ -61,6 +61,9 @@
 //!     binding over a composed harness's own stores, late-bound into the
 //!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
 //!     issue #6105).
+//! 16. `local_filesystem_storage_root_for_test` and
+//!     `supplemental_builtin_shell_guidance_for_test` — narrowly inspect
+//!     host bindings assembled by the CLI profile tests.
 
 /// Build the production runtime and return the exact resource governor wired
 /// into its capability path.
@@ -170,6 +173,22 @@ pub use trace_capture::trace_capture_turn_event_sink_for_test;
 pub use trigger_materializer::materialize_trigger_prompt_for_test;
 #[cfg(feature = "test-support")]
 pub use user_profile::build_user_profile_source_for_test;
+
+/// Exposes the assembled storage root for caller-level profile tests.
+#[cfg(feature = "test-support")]
+pub fn local_filesystem_storage_root_for_test(
+    bindings: &crate::RebornHostBindings,
+) -> Option<&std::path::Path> {
+    crate::input::local_filesystem_storage_root_for_test(bindings)
+}
+
+/// Exposes optional shell guidance carried by caller-level profile tests.
+#[cfg(feature = "test-support")]
+pub fn supplemental_builtin_shell_guidance_for_test(
+    bindings: &crate::RebornHostBindings,
+) -> Option<&'static str> {
+    crate::input::supplemental_builtin_shell_guidance_for_test(bindings)
+}
 
 /// Expose the production skill mount views so a test can compare the read and write sides.
 ///

@@ -2781,9 +2781,10 @@ regex_activation_enabled = false
         );
         assert_eq!(policy.process_backend.as_str(), "user_sandbox");
         assert!(
-            services
-                .supplemental_builtin_shell_guidance_for_test()
-                .is_some_and(|guidance| guidance.contains("Railway Sandbox"))
+            ironclaw_composition::test_support::supplemental_builtin_shell_guidance_for_test(
+                &services,
+            )
+            .is_some_and(|guidance| guidance.contains("Railway Sandbox"))
         );
     }
 
@@ -2838,16 +2839,16 @@ regex_activation_enabled = false
             "user_sandbox"
         );
         assert_eq!(
-            runtime_services
-                .services_input
-                .local_filesystem_storage_root_for_test(),
+            ironclaw_composition::test_support::local_filesystem_storage_root_for_test(
+                &runtime_services.services_input,
+            ),
             Some(reborn_home.join("hosted-single-tenant-volume").as_path())
         );
         assert!(
-            runtime_services
-                .services_input
-                .supplemental_builtin_shell_guidance_for_test()
-                .is_some_and(|guidance| guidance.contains("Railway Sandbox"))
+            ironclaw_composition::test_support::supplemental_builtin_shell_guidance_for_test(
+                &runtime_services.services_input,
+            )
+            .is_some_and(|guidance| guidance.contains("Railway Sandbox"))
         );
     }
 
@@ -2930,7 +2931,9 @@ regex_activation_enabled = false
         );
         assert_eq!(policy.process_backend.as_str(), "user_sandbox");
         assert_eq!(
-            services.supplemental_builtin_shell_guidance_for_test(),
+            ironclaw_composition::test_support::supplemental_builtin_shell_guidance_for_test(
+                &services,
+            ),
             None
         );
     }

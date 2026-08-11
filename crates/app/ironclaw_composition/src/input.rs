@@ -340,24 +340,6 @@ impl RebornHostBindings {
         self.deployment.profile()
     }
 
-    /// Exposes the root assembled by `local_filesystem_from_deployment` so
-    /// caller-level tests can observe storage identity. Test support only;
-    /// production code must use the assembled runtime rather than inspect its
-    /// substrate input.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn local_filesystem_storage_root_for_test(&self) -> Option<&Path> {
-        match &self.storage {
-            RebornStorageInput::LocalFilesystem { root, .. } => Some(root),
-            _ => None,
-        }
-    }
-
-    /// Test-support accessor for the opaque supplemental built-in shell guidance.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn supplemental_builtin_shell_guidance_for_test(&self) -> Option<&'static str> {
-        self.supplemental_builtin_shell_guidance
-    }
-
     /// The deployment axes this build assembles from.
     pub fn deployment(&self) -> &DeploymentConfig {
         &self.deployment
@@ -633,6 +615,31 @@ impl RebornHostBindings {
                     || policy.secret_mode == SecretMode::InheritedEnv
             })
     }
+}
+
+/// Exposes the root assembled by `local_filesystem_from_deployment` so
+/// caller-level tests can observe storage identity. Production code must use
+/// the assembled runtime rather than inspect its substrate input.
+///
+/// This is a free function so test support does not add a member to the
+/// production `RebornHostBindings` struct.
+#[cfg(feature = "test-support")]
+pub(crate) fn local_filesystem_storage_root_for_test(
+    bindings: &RebornHostBindings,
+) -> Option<&Path> {
+    match &bindings.storage {
+        RebornStorageInput::LocalFilesystem { root, .. } => Some(root),
+        _ => None,
+    }
+}
+
+/// Returns the opaque supplemental built-in shell guidance carried by test
+/// bindings without adding a test-only method to `RebornHostBindings`.
+#[cfg(feature = "test-support")]
+pub(crate) fn supplemental_builtin_shell_guidance_for_test(
+    bindings: &RebornHostBindings,
+) -> Option<&'static str> {
+    bindings.supplemental_builtin_shell_guidance
 }
 
 #[cfg(any(test, feature = "test-support"))]
