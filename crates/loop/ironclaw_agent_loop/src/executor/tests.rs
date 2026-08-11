@@ -3268,9 +3268,15 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
             .await
     });
 
-    while host.single_invocations().len() < 2 && !executor.is_finished() {
+    // Wait only for the first launch. If dispatch regresses to sequential,
+    // waiting for both calls would deadlock under paused time instead of
+    // reaching the concurrency assertion below.
+    while host.single_invocations().is_empty() && !executor.is_finished() {
         tokio::task::yield_now().await;
     }
+    // Let the initial poll register every concurrently launched sibling
+    // before advancing either timer.
+    tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(5)).await;
     tokio::time::advance(std::time::Duration::from_millis(75)).await;
 
