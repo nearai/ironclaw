@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enjimi.dev/schemas/icwm/g0c/HARNESS-RESULT.v1.schema.json",
+  "title": "ICWM Gate 0C candidate-neutral harness result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate",
+    "dependency_graph",
+    "harness_commit",
+    "component_commits",
+    "scenario_hash",
+    "vector_hashes",
+    "tier",
+    "homeservers",
+    "clients",
+    "disposition",
+    "effects",
+    "failpoints_reached",
+    "evidence_hashes"
+  ],
+  "properties": {
+    "schema_version": { "const": "icwm.g0c.harness-result.v1" },
+    "candidate": { "$ref": "#/$defs/identity" },
+    "dependency_graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "artifact"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "artifact": { "type": "string", "minLength": 1 }
+      }
+    },
+    "harness_commit": { "$ref": "#/$defs/gitCommit" },
+    "component_commits": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/gitCommit" }
+    },
+    "scenario_hash": { "$ref": "#/$defs/sha256" },
+    "vector_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "tier": { "enum": ["deterministic", "live"] },
+    "homeservers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/identity" }
+    },
+    "clients": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/identity" }
+    },
+    "disposition": {
+      "enum": ["supported", "failed", "infeasible", "not_applicable"]
+    },
+    "disposition_reason": { "type": "string", "minLength": 1 },
+    "effects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "at_ms", "effect_id", "kind", "semantic_digest"],
+        "properties": {
+          "sequence": { "type": "integer", "minimum": 0 },
+          "at_ms": { "type": "integer", "minimum": 0 },
+          "effect_id": { "$ref": "#/$defs/sha256" },
+          "kind": { "type": "string", "minLength": 1 },
+          "semantic_digest": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "failpoints_reached": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "evidence_hashes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "capability_dispositions": {
+      "type": "object",
+      "additionalProperties": { "enum": ["supported", "failed", "infeasible", "not_applicable"] }
+    },
+    "expected_failures": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyRecord" }
+    },
+    "waivers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyRecord" }
+    },
+    "blacklists": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyRecord" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "disposition": { "enum": ["infeasible", "not_applicable"] }
+        },
+        "required": ["disposition"]
+      },
+      "then": { "required": ["disposition_reason"] }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "policyRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "reason", "evidence", "reviewer_identity"],
+      "properties": {
+        "scope": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 },
+        "reviewer_identity": { "type": "string", "minLength": 1 }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "stable_id"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "stable_id": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schema_version": "icwm.g0c.harness-result.v1",
+  "candidate": {
+    "name": "control",
+    "version": "1",
+    "stable_id": "9ffc40c2eeb5d95b57d052aa0e0b5f97f4a303c0b2f6986cf6232b3ed00ecc6d"
+  },
+  "dependency_graph": {
+    "sha256": "05f78de0c0d2a30389cebc978752418d5564dbfa7158265e7bc3e61aa2fd3e3d",
+    "artifact": "Cargo.lock"
+  },
+  "harness_commit": "2d64363101ef0ff062a6345a5573ee855766552f",
+  "component_commits": {
+    "ironclaw_source_baseline": "2d64363101ef0ff062a6345a5573ee855766552f"
+  },
+  "scenario_hash": "4dc447ef48355e832dae27074b40c8283d4874b384ed5cb7885ba3d1192b3056",
+  "vector_hashes": {
+    "identifier_admission_corpus": "fe0549dd777ede3dfb270a4d505c71feda913cbc693359f673816601fcb84149",
+    "request_vectors_v1": "2422a729df9b88f8005f34e35fe2794248412b05cdca50d0d83edeb1c4193878"
+  },
+  "tier": "deterministic",
+  "homeservers": [],
+  "clients": [],
+  "disposition": "supported",
+  "effects": [
+    {
+      "sequence": 0,
+      "at_ms": 25,
+      "effect_id": "ea99c992173e0369b9f4fa5a764acaf1e68e3028a540d46566e8b134c89e2cad",
+      "kind": "matrix_request",
+      "semantic_digest": "c5041d0d725b32f265483bd41b04e57a341c02cdafc60ae3c6177eef31638000"
+    }
+  ],
+  "failpoints_reached": [],
+  "evidence_hashes": {
+    "tested_harness_source": "81686b3f66e62d2d673802a79fb9aa862f08a76898abe7dd3304b73ba69cd815",
+    "approved_ignored_common_aggregate": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b"
+  },
+  "capabilities": {
+    "ordered_effect_ledger": true,
+    "scripted_response_consumption": true,
+    "virtual_clock": true
+  },
+  "capability_dispositions": {
+    "sync": "not_applicable",
+    "keys_query": "not_applicable",
+    "keys_claim": "not_applicable",
+    "to_device": "not_applicable",
+    "room_send": "not_applicable",
+    "keys_upload": "not_applicable",
+    "device_list": "not_applicable",
+    "room_keys_backup": "not_applicable",
+    "cross_signing": "not_applicable",
+    "signatures_upload": "not_applicable",
+    "verification": "not_applicable",
+    "keys_changes": "not_applicable"
+  },
+  "expected_failures": [],
+  "waivers": [],
+  "blacklists": []
+}

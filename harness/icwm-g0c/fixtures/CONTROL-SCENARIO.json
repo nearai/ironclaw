@@ -1,0 +1,13 @@
+{
+  "schema_version": "icwm.g0c.scenario.v1",
+  "scenario_id": "26c475d63a86933769752d5f1d40ec7c179b369bc01446c0a7d381584e1ff4d9",
+  "name": "control-common-contracts",
+  "inputs": [
+    {"type":"emit","data":{"effect_id":"ea99c992173e0369b9f4fa5a764acaf1e68e3028a540d46566e8b134c89e2cad","kind":{"type":"matrix_request","data":{"method":"POST","path":"/_matrix/client/v3/keys/query","body":[123,34,100,101,118,105,99,101,95,107,101,121,115,34,58,123,34,64,97,108,105,99,101,58,101,120,97,109,112,108,101,46,111,114,103,34,58,91,93,125,125]}}}},
+    {"type":"consume_next_response"}
+  ],
+  "expected_effects": [
+    {"effect_id":"ea99c992173e0369b9f4fa5a764acaf1e68e3028a540d46566e8b134c89e2cad","kind":{"type":"matrix_request","data":{"method":"POST","path":"/_matrix/client/v3/keys/query","body":[123,34,100,101,118,105,99,101,95,107,101,121,115,34,58,123,34,64,97,108,105,99,101,58,101,120,97,109,112,108,101,46,111,114,103,34,58,91,93,125,125]}}}
+  ],
+  "failpoints": []
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "icwm.g0c.request-vector-corpus.v1",
+  "corpus_id": "13797e4974c637f05e98aab58dc06548ae4675b8380358776f83f815676a3d09",
+  "vectors": [
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"0b3f26d7f15c59c016ee080ece96170df0983013317d0bfc498686a24ca32a09","purpose":"sync","method":"GET","path":"/_matrix/client/v3/sync?since=s0&timeout=30000","credential_free_body":[]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"4d0b9b24bf0706fc9d421f272a87b7b0f3ce552bd65a5d3a5ad9bd4d26303a91","purpose":"keys_query","method":"POST","path":"/_matrix/client/v3/keys/query","credential_free_body":[123,34,100,101,118,105,99,101,95,107,101,121,115,34,58,123,34,64,97,108,105,99,101,58,101,120,97,109,112,108,101,46,111,114,103,34,58,91,93,125,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"9e83145476910a40f94bda37f0455247b7c87d587c91b714ad3b998300f6237e","purpose":"keys_claim","method":"POST","path":"/_matrix/client/v3/keys/claim","credential_free_body":[123,34,111,110,101,95,116,105,109,101,95,107,101,121,115,34,58,123,34,64,97,108,105,99,101,58,101,120,97,109,112,108,101,46,111,114,103,34,58,123,34,65,76,73,67,69,34,58,34,115,105,103,110,101,100,95,99,117,114,118,101,50,53,53,49,57,34,125,125,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"7f9e36859e2f11ed4532c3d9386fb3d3e48512170f55278c560b3c86ed9346b8","purpose":"to_device","method":"PUT","path":"/_matrix/client/v3/sendToDevice/m.room.encrypted/txn-1","credential_free_body":[123,34,109,101,115,115,97,103,101,115,34,58,123,125,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"9cd78cc12f1bc5bd7b2be1693eaf9439bff48447624777e0f21bcea5f518ab03","purpose":"room_send","method":"PUT","path":"/_matrix/client/v3/rooms/!room:example.org/send/m.room.encrypted/txn-2","credential_free_body":[123,34,97,108,103,111,114,105,116,104,109,34,58,34,109,46,109,101,103,111,108,109,46,118,49,46,97,101,115,45,115,104,97,50,34,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"7f5eccefa4419e0e8d4b324923785afb45d3d8b45386a6e469ce3f396cec53cc","purpose":"keys_upload","method":"POST","path":"/_matrix/client/v3/keys/upload","credential_free_body":[123,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"c9523ee34dae6df5b384fdcc6a834a437f32cc258d4a574598263c46440b48f6","purpose":"device_list","method":"GET","path":"/_matrix/client/v3/devices","credential_free_body":[]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"5508022f9f693a1de9691dbe66b9a62fffee6a26308b58bd09546c9395d776d9","purpose":"room_keys_backup","method":"PUT","path":"/_matrix/client/v3/room_keys/version/1","credential_free_body":[123,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"1757fdbebd713f88ee51d8a40b933ef0ba271936e1779542dd0d9d5e4732c7bf","purpose":"cross_signing","method":"POST","path":"/_matrix/client/v3/keys/device_signing/upload","credential_free_body":[123,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"2fb9f8321c564cb2819b24b3166b7adcc2aa9f3198a665c90293d0a921ef9cf9","purpose":"signatures_upload","method":"POST","path":"/_matrix/client/v3/keys/signatures/upload","credential_free_body":[123,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"559d5184f6efcbd27cc5ee14bd4808dca2ad2bb4ffaa5199589dd90338f6a082","purpose":"verification","method":"PUT","path":"/_matrix/client/v3/sendToDevice/m.key.verification.start/txn-v","credential_free_body":[123,125]},
+    {"schema_version":"icwm.g0c.request-vector.v1","vector_id":"049c146bcf8e05e06279659ab1c23443e3bb9703615d229a6586ebc188ad9827","purpose":"keys_changes","method":"GET","path":"/_matrix/client/v3/keys/changes?from=s0&to=s1","credential_free_body":[]}
+  ],
+  "capability_expectations": {
+    "sync":"required","keys_query":"required","keys_claim":"required","to_device":"required","room_send":"required","keys_upload":"required","device_list":"required","room_keys_backup":"candidate_declared","cross_signing":"candidate_declared","signatures_upload":"candidate_declared","verification":"candidate_declared","keys_changes":"required"
+  }
+}

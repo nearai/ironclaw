@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enjimi.dev/schemas/icwm/g0c/REQUEST-VECTOR.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "corpus_id", "vectors", "capability_expectations"],
+  "properties": {
+    "schema_version": { "const": "icwm.g0c.request-vector-corpus.v1" },
+    "corpus_id": { "$ref": "#/$defs/sha256" },
+    "vectors": {
+      "type": "array",
+      "minItems": 12,
+      "items": { "$ref": "#/$defs/vector" }
+    },
+    "capability_expectations": {"type":"object","minProperties":12,"additionalProperties":{"enum":["required","candidate_declared","not_applicable"]}}
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "vector_id", "purpose", "method", "path", "credential_free_body"],
+      "properties": {
+        "schema_version": { "const": "icwm.g0c.request-vector.v1" },
+        "vector_id": { "$ref": "#/$defs/sha256" },
+        "purpose": { "enum": ["sync", "keys_query", "keys_claim", "to_device", "room_send", "keys_upload", "device_list", "room_keys_backup", "cross_signing", "signatures_upload", "verification", "keys_changes"] },
+        "method": { "type": "string", "enum": ["GET", "POST", "PUT"] },
+        "path": { "type": "string", "pattern": "^/_matrix/" },
+        "credential_free_body": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } }
+      }
+    }
+  }
+}

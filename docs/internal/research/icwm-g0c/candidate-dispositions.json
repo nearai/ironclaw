@@ -1,0 +1,48 @@
+{
+  "schema_version": "icwm.g0c.published-candidate-dispositions.v1",
+  "authority": "contribution_grade_not_gate_or_adr_acceptance",
+  "governing_lighthouse_g0c_status": "Revisions Required",
+  "publication_package_review_status": "pending_exact_head_review",
+  "tested_source_baseline": "2d64363101ef0ff062a6345a5573ee855766552f",
+  "approved_common_aggregate_sha256": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b",
+  "candidates": [
+    {
+      "id": "full-matrix-sdk-client-0.18.0",
+      "disposition": "infeasible_under_frozen_ownership_envelope",
+      "supported_observation": "persistent Client construction and shared clone state",
+      "disqualifiers": [
+        "no supported ironclaw_network request/effect transport seam",
+        "BaseClient accessor is not public",
+        "no pre-dispatch durable prepared-ciphertext handoff",
+        "no observable durable three-state maintenance-effect boundary"
+      ]
+    },
+    {
+      "id": "matrix-sdk-base-plus-crypto-0.18.0",
+      "disposition": "bounded_feasible",
+      "supported_observation": "BaseClient activated a managed OlmMachine and enumerated two initial transport-free crypto requests",
+      "not_run": [
+        "sync processing",
+        "durable store reopen",
+        "room encryption",
+        "crash recovery",
+        "multi-writer fencing"
+      ]
+    },
+    {
+      "id": "direct-olm-machine-0.18.0-sqlite-control",
+      "disposition": "bounded_native_gap",
+      "supported_observation": "native store open/reopen, semantic request replay, and bounded lease takeover",
+      "adapter_gaps": [
+        "async candidate API versus synchronous neutral adapter",
+        "complete CryptoStore commit instrumentation",
+        "typed response and request correlation across restart"
+      ],
+      "placement": {
+        "native_host": "supported_for_deeper_spike",
+        "authenticated_sidecar": "not_yet_demonstrated",
+        "generic_channel_wasm32_wasip2": "disqualified_for_current_wasi_candidate"
+      }
+    }
+  ]
+}

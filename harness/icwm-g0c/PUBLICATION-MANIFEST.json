@@ -1,0 +1,99 @@
+{
+  "aggregate_sha256": "f5915c39f0f541d01bf37c16eb95de60d82f0caa345bddf41576ef3d8a9e7d10",
+  "algorithm": "sha256 of UTF-8 lines `<file-sha256><two spaces><relative-path>\\n`, entries sorted bytewise by relative path",
+  "approved_ignored_common_aggregate_sha256": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b",
+  "authority": "contribution_grade_not_gate_or_adr_acceptance",
+  "containing_commit_binding": "external_exact_head_review_and_post_merge_receipt",
+  "entries": [
+    {
+      "bytes": 2534,
+      "path": "../../docs/internal/research/icwm-g0c/README.md",
+      "sha256": "c238a67d2a86e91e6c43ac36459434cad9052bda5ec1b3f3fa93159c664dbf09"
+    },
+    {
+      "bytes": 2031,
+      "path": "../../docs/internal/research/icwm-g0c/candidate-dispositions.json",
+      "sha256": "ab18300bcd6314e62425b719108f2b11a8823b4079e21f9804d1f4eb8fd0321d"
+    },
+    {
+      "bytes": 2414,
+      "path": "../../docs/internal/research/icwm-g0c/complement-live-tier.md",
+      "sha256": "a56f49c218974901822b88795f520b81d029b9c9922e469373c04fd5c638792f"
+    },
+    {
+      "bytes": 24506,
+      "path": "Cargo.lock",
+      "sha256": "05f78de0c0d2a30389cebc978752418d5564dbfa7158265e7bc3e61aa2fd3e3d"
+    },
+    {
+      "bytes": 240,
+      "path": "Cargo.toml",
+      "sha256": "2ec9c9eb7588b72a57b73c8315d230d25855c75d50512667c438ac000e36b79d"
+    },
+    {
+      "bytes": 2515,
+      "path": "README.md",
+      "sha256": "fb1977c02d866ad95fb83c610da4a42f9644ca8404217437f2403dad2540f3ee"
+    },
+    {
+      "bytes": 4269,
+      "path": "contracts/HARNESS-RESULT.schema.json",
+      "sha256": "43f97f2780234b7ea27da3942109b97b45adb90957c8b8292a8820113b2ca583"
+    },
+    {
+      "bytes": 1570,
+      "path": "contracts/REQUEST-VECTOR.schema.json",
+      "sha256": "33fe7c893fde8b5d47e749fbe0bf2f922ee4c1401dd23d2a5f99329b7181eac5"
+    },
+    {
+      "bytes": 7561,
+      "path": "contracts/SCENARIO.schema.json",
+      "sha256": "ea65f42fcfb26f9b4ced2b7381e91fcda517cc7dcf98050fab768753b2514a41"
+    },
+    {
+      "bytes": 2133,
+      "path": "fixtures/CONTROL-RESULT.json",
+      "sha256": "d27a6b780f8199b38042897989dd1d84f5336f0f187382ef662dd9d484fd92d2"
+    },
+    {
+      "bytes": 977,
+      "path": "fixtures/CONTROL-SCENARIO.json",
+      "sha256": "4dc447ef48355e832dae27074b40c8283d4874b384ed5cb7885ba3d1192b3056"
+    },
+    {
+      "bytes": 3063,
+      "path": "fixtures/IDENTIFIER-FIXTURE.json",
+      "sha256": "fe0549dd777ede3dfb270a4d505c71feda913cbc693359f673816601fcb84149"
+    },
+    {
+      "bytes": 4164,
+      "path": "fixtures/REQUEST-VECTORS-v1.json",
+      "sha256": "2422a729df9b88f8005f34e35fe2794248412b05cdca50d0d83edeb1c4193878"
+    },
+    {
+      "bytes": 41740,
+      "path": "src/lib.rs",
+      "sha256": "81686b3f66e62d2d673802a79fb9aa862f08a76898abe7dd3304b73ba69cd815"
+    },
+    {
+      "bytes": 27882,
+      "path": "tests/contracts.rs",
+      "sha256": "1e22842e1f148b95fb163b87022c9dfcb1119040f34f6905c036589792634e8a"
+    },
+    {
+      "bytes": 1693,
+      "path": "verify-publication.py",
+      "sha256": "bee39f8c4d6c14039a2e10afac609610bc11571814f6dbb76510f96f08f841db"
+    }
+  ],
+  "exclusions": [
+    "PUBLICATION-MANIFEST.json",
+    "PUBLICATION-MANIFEST.sha256",
+    "target/",
+    "raw logs and generated evidence"
+  ],
+  "governing_lighthouse_g0c_status": "Revisions Required",
+  "publication_package_review_status": "pending_exact_head_review",
+  "schema_version": "icwm.g0c.publication-manifest.v1",
+  "tested_source_baseline": "2d64363101ef0ff062a6345a5573ee855766552f"
+}
