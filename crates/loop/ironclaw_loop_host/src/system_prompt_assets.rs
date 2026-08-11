@@ -113,4 +113,15 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn tool_disclosure_protocol_makes_describe_conditional() {
+        assert!(TOOL_DISCLOSURE_PROTOCOL_PROMPT.contains("schema_complete=true"));
+        assert!(TOOL_DISCLOSURE_PROTOCOL_PROMPT.contains("schema_complete=false"));
+        assert!(TOOL_DISCLOSURE_PROTOCOL_PROMPT.contains("marker is absent"));
+        assert!(
+            TOOL_DISCLOSURE_PROTOCOL_PROMPT.contains("invoke it directly"),
+            "a complete search signature must remove the describe round trip"
+        );
+    }
 }

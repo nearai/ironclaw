@@ -1739,7 +1739,12 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
-        if let Some(guard) = unavailable_capability_guard {
+        if let Some(guard) = unavailable_capability_guard
+            && response
+                .tool_calls
+                .iter()
+                .any(|call| !guard.permits_policy_checked_call(call))
+        {
             debug!(
                 requested_capability_id = %guard.capability_id,
                 tool_call_count = response.tool_calls.len(),
@@ -1924,6 +1929,25 @@ fn provider_calls_are_advertised_or_resolvable(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnavailableCapabilityGuard {
     capability_id: CapabilityId,
+}
+
+impl UnavailableCapabilityGuard {
+    fn permits_policy_checked_call(&self, call: &ToolCall) -> bool {
+        if matches!(call.name.as_str(), "tool_search" | "tool_describe") {
+            return true;
+        }
+        let canonical = self.capability_id.as_str();
+        let encoded = canonical.replace('.', "__");
+        if call.name == canonical || call.name == encoded {
+            return true;
+        }
+        call.name == "tool_call"
+            && call
+                .arguments
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name == canonical || name == encoded)
+    }
 }
 
 fn unavailable_requested_capability_guard(
