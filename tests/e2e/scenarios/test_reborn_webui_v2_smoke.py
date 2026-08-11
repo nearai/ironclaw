@@ -1531,7 +1531,7 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
             headers=reborn_bearer_headers(default_member_token)
         ) as default_member:
             selected_context = await reborn_v2_browser.new_context(
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1100, "height": 720}
             )
             selected_page = await selected_context.new_page()
             default_context = await reborn_v2_browser.new_context(
@@ -1570,16 +1570,49 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
                     "option", name=selected_model, exact=True
                 ).click()
                 await expect(button).to_contain_text(selected_model)
+                description = selected_page.get_by_text(
+                    "Used for future messages in all conversations.", exact=True
+                )
                 selector_box = await selector.bounding_box()
+                description_box = await description.bounding_box()
+                layout_box = await selector.locator("xpath=../..").bounding_box()
                 assert selector_box is not None
-                viewport_size = selected_page.viewport_size
-                assert viewport_size is not None
+                assert description_box is not None
+                assert layout_box is not None
                 assert (
-                    selector_box["x"] + selector_box["width"]
-                    <= viewport_size["width"]
+                    selector_box["y"]
+                    >= description_box["y"] + description_box["height"]
                 ), (
-                    "the long selected model overflowed the Settings viewport: "
-                    f"{selector_box}"
+                    "the selector did not stack below its description on a narrow "
+                    f"viewport: selector={selector_box}, description={description_box}"
+                )
+                assert abs(selector_box["x"] - layout_box["x"]) <= 1
+                assert abs(selector_box["width"] - layout_box["width"]) <= 1
+
+                await selected_page.set_viewport_size(
+                    {"width": 1440, "height": 720}
+                )
+                selector_box = await selector.bounding_box()
+                description_box = await description.bounding_box()
+                layout_box = await selector.locator("xpath=../..").bounding_box()
+                assert selector_box is not None
+                assert description_box is not None
+                assert layout_box is not None
+                assert (
+                    selector_box["y"]
+                    < description_box["y"] + description_box["height"]
+                ), (
+                    "the selector did not move beside its description on a wide "
+                    f"viewport: selector={selector_box}, description={description_box}"
+                )
+                assert abs(
+                    selector_box["x"]
+                    + selector_box["width"]
+                    - layout_box["x"]
+                    - layout_box["width"]
+                ) <= 1, (
+                    "the wide selector was not right-aligned inside its card: "
+                    f"selector={selector_box}, layout={layout_box}"
                 )
 
                 preference = None
