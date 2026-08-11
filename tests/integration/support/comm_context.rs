@@ -22,6 +22,7 @@ use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, NotificationChannelsState,
+    PendingExtensionAuthState,
 };
 
 /// A [`CommunicationContextProvider`] that returns a pre-resolved
@@ -45,6 +46,7 @@ impl RecordingCommunicationContextProvider {
     ) -> Arc<dyn CommunicationContextProvider> {
         Arc::new(Self {
             context: CommunicationRuntimeContext {
+                pending_extension_auth: PendingExtensionAuthState::Unknown,
                 connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
                     name: channel_name.into(),
                     authenticated: true,

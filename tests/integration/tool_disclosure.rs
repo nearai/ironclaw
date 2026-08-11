@@ -3,7 +3,7 @@
 //! Proves `.with_tool_disclosure_bridged()` reaches production's
 //! `ToolDisclosureCapabilityDecorator` wiring
 //! (`ironclaw_turn_runner::runtime::build_default_planned_runtime_inner`, gated on
-//! `DefaultPlannedRuntimeConfig::tool_disclosure.is_bridged()`) — the same
+//! `DefaultPlannedRuntimeConfig::tool_disclosure.is_enabled()`) — the same
 //! lower-level factory this harness's group assembly already calls.
 //!
 //! Two load-bearing mechanics, both empirically verified (NOT what the
@@ -21,8 +21,9 @@
 //!    `crates/loop/ironclaw_loop_host/src/tool_disclosure.rs`). The
 //!    `GithubIssueTools` backend surfaces all 48 `github.*` manifest
 //!    capabilities (`github_support::capability_ids()`), none of which is
-//!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id), so
-//!    the deferred active set is exactly the complete discovery bridge set. The
+//!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id). The
+//!    production interactive profile may additionally keep reviewed pins
+//!    visible beside the complete discovery bridge set. The
 //!    13-capability `BuiltinHttpTools` backend stays UNDER the cap, so
 //!    bridged mode is wired-but-inert there — pinned below as the threshold
 //!    control.
@@ -40,6 +41,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::extension_surface::BUNDLED_EXTENSION_CAPABILITY_IDS;
@@ -130,7 +132,8 @@ fn wide_effective_github_allowlist() -> impl Iterator<Item = &'static str> {
 /// Bridged mode + a catalog over `DisclosureCaps::default().max_tools` (48
 /// github capabilities > 32): `select_active_set` defers, so the model sees
 /// the complete advertised `tool_search` → `tool_describe` → `tool_call`
-/// bridge set and NOT the flat `github__*` list.
+/// bridge set and NOT the ordinary flat `github__*` list (reviewed profile pins
+/// may remain directly visible).
 #[tokio::test]
 async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
     let harness = RebornIntegrationHarness::test_default()
@@ -306,6 +309,155 @@ async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
         .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
         .await
         .expect("production default defers the flat wide catalog");
+    harness
+        .assert_model_tools_excludes("github__search_code")
+        .await
+        .expect("namespace-summary production default does not expose opt-in profile pins");
+}
+
+#[tokio::test]
+async fn bridged_mode_exposes_authorized_profile_pin_for_matching_profile() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("bridged profile-pin harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    harness
+        .assert_model_tools_contains("github__search_code")
+        .await
+        .expect("matching interactive profile exposes its authorized pin");
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("an unrelated deferred GitHub tool remains deferred");
+}
+
+#[tokio::test]
+async fn comparison_arms_are_selectable_through_the_production_caller_path() {
+    let compact = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_mode(ToolDisclosureMode::Compact)
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "get repository", "limit": 1}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("compact comparison harness builds");
+    compact
+        .submit_turn("find repo tool")
+        .await
+        .expect("compact turn");
+    let compact_output = compact
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("compact search output");
+    assert!(
+        compact_output["results"][0]
+            .get("schema_complete")
+            .is_none()
+    );
+    compact
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "Namespaces:")
+        .await
+        .expect("compact arm uses the legacy preview");
+
+    let namespaces = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_mode(ToolDisclosureMode::Namespaces)
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "get repository", "limit": 1}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("namespace comparison harness builds");
+    namespaces
+        .submit_turn("find repo tool")
+        .await
+        .expect("namespace turn");
+    let namespace_output = namespaces
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("namespace search output");
+    assert_eq!(namespace_output["results"][0]["schema_complete"], true);
+    namespaces
+        .assert_model_tool_description_contains(TOOL_SEARCH_NAME, "Namespaces:")
+        .await
+        .expect("namespace arm uses the fair namespace preview");
+    namespaces
+        .assert_model_tools_excludes("github__search_code")
+        .await
+        .expect("namespace arm does not enable the production pin set");
+}
+
+#[tokio::test]
+async fn denied_profile_pin_is_absent_from_surface_preview_search_and_calls() {
+    let allowed = BUNDLED_EXTENSION_CAPABILITY_IDS
+        .iter()
+        .copied()
+        .filter(|id| *id != "github.search_code")
+        .take(WIDE_EFFECTIVE_GITHUB_CAPABILITY_COUNT)
+        .collect::<Vec<_>>();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_surface_policy_for_bridged_test(allowed)
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "search code", "limit": 20}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({
+                    "name": "github__search_code",
+                    "arguments": r#"{"query":"repo:nearai/ironclaw ToolDisclosureMode"}"#,
+                }),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("denied-pin harness builds");
+
+    harness
+        .submit_turn("search code")
+        .await
+        .expect("turn completes");
+    harness
+        .assert_model_tools_excludes("github__search_code")
+        .await
+        .expect("denied pin is absent from the direct surface");
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__search_code")
+        .await
+        .expect("denied pin is absent from the passive preview");
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    assert!(
+        output["results"].as_array().is_some_and(|results| results
+            .iter()
+            .all(|result| result["capability_id"] != "github.search_code")),
+        "denied pin must not leak through explicit search: {output}"
+    );
+    harness
+        .assert_tool_error_summary_contains("tool_call target is not a known tool")
+        .await
+        .expect("denied pin is not callable through the bridge");
 }
 
 /// General harnesses pin Off rather than inheriting the production environment,

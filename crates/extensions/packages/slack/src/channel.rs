@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAdapter, ChannelError, DeliveryReport, ImmediateResponse, InboundOutcome,
-    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate,
-    TargetQuery, VerifiedInbound,
+    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
+    RunReaction, TargetCandidate, TargetQuery, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -199,6 +199,26 @@ impl ChannelAdapter for SlackChannelAdapter {
                     let outcome =
                         delete_slack_message(egress, &credential, &channel, vendor_message_ref)
                             .await;
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
+                OutboundPart::React {
+                    vendor_message_ref,
+                    reaction,
+                    action,
+                } => {
+                    let outcome = react_slack_message(
+                        egress,
+                        &credential,
+                        &channel,
+                        vendor_message_ref,
+                        slack_reaction_name(*reaction),
+                        *action,
+                    )
+                    .await;
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
                     if !sent {
@@ -429,6 +449,89 @@ async fn delete_slack_message(
     part_outcome_for_kind(
         slack_error_kind(&error),
         format!("slack rejected chat.delete ({error})"),
+    )
+}
+
+/// Slack reaction name (shortcode, no colons) for a neutral run reaction.
+fn slack_reaction_name(reaction: RunReaction) -> &'static str {
+    match reaction {
+        RunReaction::Working => "eyes",
+        RunReaction::Done => "white_check_mark",
+        RunReaction::NeedsInput => "warning",
+        RunReaction::Failed => "x",
+    }
+}
+
+/// Add or remove a reaction on `ts` via `reactions.add` / `reactions.remove`.
+/// Best-effort: `already_reacted` / `no_reaction` are treated as success so the
+/// idempotent 👀→✅ swap never surfaces a spurious failure on a retry.
+async fn react_slack_message(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    ts: &str,
+    name: &str,
+    action: ReactionAction,
+) -> PartDeliveryOutcome {
+    let path = match action {
+        ReactionAction::Add => "reactions.add",
+        ReactionAction::Remove => "reactions.remove",
+    };
+    let body = match serde_json::to_vec(
+        &serde_json::json!({ "channel": channel, "timestamp": ts, "name": name }),
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("{path} body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/{path}"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("{path} response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    if matches!(error.as_str(), "already_reacted" | "no_reaction") {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected {path} ({error})"),
     )
 }
 
@@ -1952,6 +2055,89 @@ mod tests {
         let body = body_json(&requests[0]);
         assert_eq!(body["channel"], "D123");
         assert_eq!(body["ts"], "1710000001.000001");
+    }
+
+    #[tokio::test]
+    async fn deliver_react_add_calls_reactions_add_with_the_mapped_emoji() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true}"#)]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::React {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                        reaction: RunReaction::Working,
+                        action: ReactionAction::Add,
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Sent {
+                vendor_message_ref: None
+            }
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/reactions.add");
+        let body = body_json(&requests[0]);
+        assert_eq!(body["channel"], "D123");
+        assert_eq!(body["timestamp"], "1710000001.000001");
+        assert_eq!(body["name"], "eyes");
+    }
+
+    #[tokio::test]
+    async fn deliver_react_remove_calls_reactions_remove_and_maps_failure_to_x() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true}"#)]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::React {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                        reaction: RunReaction::Failed,
+                        action: ReactionAction::Remove,
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }));
+        let requests = egress.requests();
+        assert_eq!(requests[0].url, "https://slack.com/api/reactions.remove");
+        assert_eq!(body_json(&requests[0])["name"], "x");
+    }
+
+    #[tokio::test]
+    async fn deliver_react_treats_already_reacted_as_sent() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"already_reacted"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::React {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                        reaction: RunReaction::Working,
+                        action: ReactionAction::Add,
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(
+            matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }),
+            "an already-present reaction is a benign no-op for the idempotent swap"
+        );
     }
 
     #[tokio::test]

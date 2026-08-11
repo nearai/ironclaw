@@ -1,3 +1,4 @@
+// arch-exempt: large_file, missing dedicated host API credential-contract fixture module; Basic credential wire-contract coverage stays with the existing host API credential fixtures, plan #4088
 use std::path::PathBuf;
 
 use ironclaw_host_api::{
@@ -142,6 +143,23 @@ fn runtime_credential_targets_validate_declaration_shape() {
             "{invalid:?} should be rejected"
         );
     }
+    assert!(
+        RuntimeCredentialTarget::Basic {
+            username: "api-user".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", " ", "user:name", "user\nname", "user\0name"] {
+        assert!(
+            RuntimeCredentialTarget::Basic {
+                username: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
 }
 
 #[test]
@@ -204,6 +222,23 @@ fn runtime_credential_target_serializes_path_placeholder() {
     let wire = json!({
         "type": "path_placeholder",
         "placeholder": "__credential__"
+    });
+
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
+    );
+}
+
+#[test]
+fn runtime_basic_credential_target_round_trips_on_the_wire() {
+    let target = RuntimeCredentialTarget::Basic {
+        username: "api-user".to_string(),
+    };
+    let wire = json!({
+        "type": "basic",
+        "username": "api-user"
     });
 
     assert_eq!(serde_json::to_value(&target).unwrap(), wire);

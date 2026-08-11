@@ -135,6 +135,10 @@ pub enum HostInputQueueError {
 /// serialized size; 32 is far beyond any interactive use while keeping the
 /// durable document's rewrite-per-enqueue cost trivial.
 pub const MAX_QUEUED_INPUTS_PER_RUN: usize = 32;
+/// Independent replay-dedup window for inputs already consumed successfully.
+/// Keeping this separate from live capacity avoids exhausting a long-running
+/// run merely because it has processed inputs over time.
+const RECENTLY_CONSUMED_DEDUP_LIMIT: usize = MAX_QUEUED_INPUTS_PER_RUN;
 
 #[async_trait]
 pub trait HostInputEnqueuePort: Send + Sync {
@@ -222,6 +226,18 @@ pub(crate) struct PendingSubmitFlip {
     pub(crate) status: QueuedMessageStatusUpdate,
 }
 
+/// Bounded dedup identity for an input the loop already consumed. Successful
+/// transcript flips remove [`PendingSubmitFlip`], so they cannot double as the
+/// replay tombstone: a request that classified the row as `Queued` before the
+/// flip may reach enqueue afterward. Retaining the message id with its original
+/// sequence lets that racing replay return the same envelope without becoming
+/// deliverable again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ConsumedMessage {
+    pub(crate) sequence: u64,
+    pub(crate) message_id: ThreadMessageId,
+}
+
 fn first_sequence() -> u64 {
     1
 }
@@ -240,9 +256,8 @@ pub(crate) struct RunQueueModel {
     entries: Vec<QueueEntry>,
     /// Compact ack state: every sequence `<= acked_watermark` is acked, plus
     /// the sparse out-of-order set above it. Keeps duplicate/redelivered acks
-    /// idempotent without a tombstone per input, so the state does not grow
-    /// (or, durably, get reparsed and rewritten) without bound over a
-    /// long-lived run. `BTreeSet` serializes as a sorted array.
+    /// idempotent without an unbounded tombstone per input. `BTreeSet`
+    /// serializes as a sorted array.
     #[serde(default)]
     acked_watermark: u64,
     #[serde(default)]
@@ -252,6 +267,12 @@ pub(crate) struct RunQueueModel {
     /// every later ack, re-enqueue, and the terminal reconciliation.
     #[serde(default)]
     pending_submit_flips: Vec<PendingSubmitFlip>,
+    /// Recent successful or pending consumptions, retained independently from
+    /// live queue capacity. The ring is bounded to cover concurrent/retried
+    /// admissions without making a long-lived run permanently full after the
+    /// same number of successful inputs.
+    #[serde(default)]
+    recently_consumed: Vec<ConsumedMessage>,
     /// Terminal tombstone: set by [`Self::close_and_claim`]. A closed queue
     /// rejects enqueues ([`HostInputQueueError::RunClosed`]) and treats late
     /// acks as no-ops — terminal reconciliation owns settlement from then on.
@@ -274,6 +295,7 @@ impl Default for RunQueueModel {
             acked_watermark: 0,
             acked_above: BTreeSet::new(),
             pending_submit_flips: Vec::new(),
+            recently_consumed: Vec::new(),
             closed: false,
             pending_reject_flips: Vec::new(),
         }
@@ -348,11 +370,18 @@ impl RunQueueModel {
                 flip: pending.clone(),
             });
         }
-        // The ceiling bounds the WHOLE persisted state, not only the live
-        // segment: a consumed entry whose `Submitted` flip keeps failing
-        // moves to `pending_submit_flips` rather than vanishing, so counting
-        // live entries alone would let the document grow past the bound one
-        // failed flip at a time.
+        if let Some(consumed) = self
+            .recently_consumed
+            .iter()
+            .find(|consumed| consumed.message_id == status.message_id)
+        {
+            return Ok(EnqueueDisposition::Duplicate {
+                sequence: consumed.sequence,
+            });
+        }
+        // The ceiling bounds the live + failed-flip segment. The independently
+        // bounded recent-consumption ring does not consume live capacity: a
+        // successful run must remain able to accept later distinct inputs.
         if self.entries.len() + self.pending_submit_flips.len() >= MAX_QUEUED_INPUTS_PER_RUN {
             return Err(HostInputQueueError::CapacityExhausted);
         }
@@ -453,6 +482,13 @@ impl RunQueueModel {
                 sequence,
                 status: entry.status.clone(),
             });
+            self.recently_consumed.push(ConsumedMessage {
+                sequence,
+                message_id: entry.status.message_id,
+            });
+            if self.recently_consumed.len() > RECENTLY_CONSUMED_DEDUP_LIMIT {
+                self.recently_consumed.remove(0);
+            }
             newly_acked.push(sequence);
         }
         for sequence in &newly_acked {
@@ -487,6 +523,9 @@ impl RunQueueModel {
             .collect();
         self.pending_reject_flips.extend(claimed);
         self.entries.clear();
+        // `closed` is now the authoritative tombstone, so replay identities
+        // are unnecessary while a terminal document awaits flip settlement.
+        self.recently_consumed.clear();
     }
 
     /// Drop the pending `RejectedBusy` flips whose transcript writes
@@ -879,4 +918,66 @@ pub(crate) fn ack_sequence(token: &LoopInputAckToken) -> Result<u64, HostInputQu
         .ok_or_else(|| HostInputQueueError::InvalidCursor {
             reason: "input ack token is malformed".to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::ids::{AgentId, TenantId};
+    use ironclaw_turns::LoopMessageRef;
+
+    #[test]
+    fn recently_consumed_dedup_window_stays_bounded() {
+        let mut model = RunQueueModel::default();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new("tenant-iq").unwrap(),
+            agent_id: AgentId::new("agent-iq").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_id = ThreadId::new("thread-iq").unwrap();
+        let mut oldest_message_id = None;
+
+        for index in 0..=RECENTLY_CONSUMED_DEDUP_LIMIT {
+            let message_id = ThreadMessageId::new();
+            if index == 0 {
+                oldest_message_id = Some(message_id);
+            }
+            let message_ref = format!("msg:{message_id}");
+            let disposition = model
+                .enqueue_dedup(
+                    LoopInput::Steering {
+                        message_ref: LoopMessageRef::new(&message_ref).unwrap(),
+                    },
+                    QueuedMessageStatusUpdate {
+                        turn_id: TurnId::new(),
+                        scope: scope.clone(),
+                        thread_id: thread_id.clone(),
+                        message_id,
+                    },
+                )
+                .expect("enqueue distinct input");
+            let EnqueueDisposition::Inserted { sequence } = disposition else {
+                panic!("distinct input must insert");
+            };
+            model
+                .validate_and_ack(&[ack_token(sequence).unwrap()])
+                .expect("ack inserted input");
+            model.confirm_submit_flips(&[sequence]);
+        }
+
+        assert_eq!(
+            model.recently_consumed.len(),
+            RECENTLY_CONSUMED_DEDUP_LIMIT,
+            "consumed replay identities must not grow durable state without bound"
+        );
+        assert!(
+            !model
+                .recently_consumed
+                .iter()
+                .any(|consumed| Some(consumed.message_id) == oldest_message_id),
+            "the oldest consumed identity must be evicted when the window is full"
+        );
+    }
 }

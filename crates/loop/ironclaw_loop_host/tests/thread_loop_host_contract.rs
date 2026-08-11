@@ -155,6 +155,37 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
 }
 
 #[tokio::test]
+async fn thread_context_port_uses_documented_ascii_token_rate() {
+    let fixture = ThreadFixture::new_with_user_content(&"a".repeat(40)).await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(10, 0, 0));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.messages.len(), 1);
+    assert_eq!(
+        bundle.messages[0]
+            .compaction
+            .as_ref()
+            .expect("budget-admitted message should retain compaction metadata")
+            .estimated_tokens,
+        10
+    );
+}
+
+#[tokio::test]
 async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
     let fixture = ThreadFixture::new_with_user_content("message 1").await;
     for sequence in 2..=17 {
@@ -2415,7 +2446,9 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 4);
+    // identity + instruction + memory recall framing (#7294) + memory snippet
+    // + user message.
+    assert_eq!(prompt_bundle.messages.len(), 5);
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let model_port = ThreadBackedLoopModelPort::new(
@@ -2446,15 +2479,18 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         .iter()
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        contents,
-        vec![
-            "identity policy summary",
-            "project instruction summary",
-            "project memory summary",
-            "hello reborn",
-        ]
+    assert_eq!(contents.len(), 5);
+    assert_eq!(contents[0], "identity policy summary");
+    assert_eq!(contents[1], "project instruction summary");
+    // The memory section opens with the recall-framing guidance (#7294),
+    // ahead of the memory snippet it frames.
+    assert!(
+        contents[2].starts_with("Recalled memory notice:"),
+        "memory section must open with the recall framing, got {:?}",
+        contents[2]
     );
+    assert_eq!(contents[3], "project memory summary");
+    assert_eq!(contents[4], "hello reborn");
 }
 
 #[tokio::test]

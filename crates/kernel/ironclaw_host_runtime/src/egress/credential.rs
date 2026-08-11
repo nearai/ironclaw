@@ -1,3 +1,4 @@
+use base64::Engine;
 use ironclaw_host_api::{
     http::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -9,7 +10,10 @@ use ironclaw_host_api::{
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
 use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
-use secrecy::{ExposeSecret, zeroize::Zeroize};
+use secrecy::{
+    ExposeSecret,
+    zeroize::{Zeroize, Zeroizing},
+};
 use std::sync::LazyLock;
 
 use crate::obligations::RuntimeSecretInjectionStore;
@@ -163,14 +167,21 @@ where
         // consume raw bytes, but the cache itself never holds a non-zeroizing
         // copy.
         let plaintext = value.expose_secret();
-        if let Err(error) =
-            apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
-        {
-            restore_staged_secrets(secret_injections, request, &mut credential_materials);
-            request.credential_injections = credential_injections;
-            return Err(error);
-        }
+        let derived_redaction_values = match apply_credential_injection(
+            request,
+            &mut parsed_url,
+            &injection.target,
+            plaintext,
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                restore_staged_secrets(secret_injections, request, &mut credential_materials);
+                request.credential_injections = credential_injections;
+                return Err(error);
+            }
+        };
         redaction_values.extend(redaction_values_for_secret(plaintext));
+        redaction_values.extend(derived_redaction_values);
     }
     if let Some(url) = parsed_url {
         request.url = url.to_string();
@@ -378,7 +389,7 @@ fn apply_credential_injection(
     parsed_url: &mut Option<url::Url>,
     target: &RuntimeCredentialTarget,
     value: &str,
-) -> Result<(), RuntimeHttpEgressError> {
+) -> Result<Vec<String>, RuntimeHttpEgressError> {
     target
         .validate_declaration()
         .map_err(|_| RuntimeHttpEgressError::Credential {
@@ -428,7 +439,21 @@ fn apply_credential_injection(
                     reason: "credential injection header value is invalid".to_string(),
                 });
             }
-            request.headers.push((name.clone(), injected));
+            push_injected_header(request, name, injected)?;
+        }
+        RuntimeCredentialTarget::Basic { username } => {
+            if value.chars().any(char::is_control) {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection basic secret is invalid".to_string(),
+                });
+            }
+            let joined = Zeroizing::new(format!("{username}:{value}"));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
+            let authorization = format!("Basic {encoded}");
+            push_injected_header(request, "Authorization", authorization.clone())?;
+            let mut derived_redaction_values = redaction_values_for_secret(&encoded);
+            derived_redaction_values.extend(redaction_values_for_secret(&authorization));
+            return Ok(derived_redaction_values);
         }
         RuntimeCredentialTarget::QueryParam { name } => {
             let url = parsed_request_url(&request.url, parsed_url)?;
@@ -542,11 +567,33 @@ fn apply_credential_injection(
                         reason: error.sanitized_reason().to_string(),
                     },
                 )?;
-            request
-                .headers
-                .push(("authorization".to_string(), header_value));
+            push_injected_header(request, "authorization", header_value.clone())?;
+            return Ok(redaction_values_for_secret(&header_value));
         }
     }
+    Ok(Vec::new())
+}
+
+/// Push an injected header, rejecting the request when a header with the same
+/// name (case-insensitive) already exists — either supplied by the caller or
+/// injected by an earlier credential. A proxy or origin may select either of
+/// two colliding `Authorization` fields, so the request could execute under a
+/// different identity than the credential the caller approved.
+fn push_injected_header(
+    request: &mut RuntimeHttpEgressRequest,
+    name: &str,
+    value: String,
+) -> Result<(), RuntimeHttpEgressError> {
+    if request
+        .headers
+        .iter()
+        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    {
+        return Err(RuntimeHttpEgressError::Credential {
+            reason: format!("credential injection header '{name}' duplicates an existing header"),
+        });
+    }
+    request.headers.push((name.to_string(), value));
     Ok(())
 }
 

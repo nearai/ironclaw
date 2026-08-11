@@ -635,44 +635,45 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // flag. Contract vocabulary only — the fetch impl lives in the slack
         // package, the flag is consumed by the channel workflow. Count read from
         // this test's failure on the rebased base.
-        // 7_851 -> 9_359 (2026-08-10, telegram-linked-device PR 1): the
+        // 7_851 -> 7_892 (2026-08-10, main): the `OutboundPart::React` variant
+        // plus the neutral `RunReaction` / `ReactionAction` enums for
+        // run-lifecycle reactions on the triggering message (#7446), then
+        // #7076's Basic credential target declaration and validator
+        // vocabulary. Contract vocabulary only — vendor reaction rendering
+        // lives in the channel packages, and Basic composition/injection in
+        // ironclaw_host_runtime.
+        //
+        // 7_892 -> <see below> (2026-08-10, telegram-linked-device): the
         // device-link membrane. Two new modules — `linked_session` (the
         // host-implemented custody port plus the value types its signature
         // names: zeroizing `SessionBytes`, the CAS `LinkedSessionVersion`, the
-        // opaque `LinkedAccountRef`/`LinkedAccountGrant`) and `device_link`
-        // (`DeviceLinkAdapter` and its step/input/error vocabulary) — plus the
+        // opaque `LinkedAccountRef`/`LinkedAccountGrant`, and the
+        // `LinkedAccountResolver` port) and `device_link` (`DeviceLinkAdapter`
+        // and its step/input/error vocabulary) — plus the
         // `VendorAuthRecipe::DeviceLink` display-metadata variant and the
-        // `DeviceLinkPromptView` projection.
+        // `DeviceLinkPromptView` projection with §8.12's four additive fields
+        // (`flow_id`, `input_kind`, `mode`, `restartable`).
         //
         // Every type here is forced onto this side of the membrane: the
         // implementing package's `BoundaryRule` forbids `ironclaw_auth`, so a
         // port declared in contracts cannot name a domain type in its
-        // signature. Nothing executes — the step machine and revision CAS live
-        // in `ironclaw_auth`, the driver glue in `ironclaw_extension_host`, and
-        // every protocol mechanic in the extension package.
+        // signature. `LinkedAccountResolver` in particular MOVED here from the
+        // telegram package, because PROPOSAL §5.1 requires the tool half's
+        // containment to be rooted in a HOST-minted grant and a port the
+        // package declared could only ever have been satisfied by the package.
         //
-        // Roughly a third of the delta is the inline `#[cfg(test)]` modules
-        // this ratchet also counts, in `recipe.rs` and `auth_prompt.rs`. The
-        // two NEW modules do not pay that: their test modules were written as
-        // `device_link/tests.rs` and `linked_session/tests.rs` siblings, which
-        // `production_rust_files` excludes — the same split #7157 made for
-        // `runtime_context`. Count read from this test's own failure message.
+        // Nothing executes — the step machine and revision CAS live in
+        // `ironclaw_auth`, the driver glue and the resolver implementation in
+        // `ironclaw_extension_host`, and every protocol mechanic in the
+        // extension package. Roughly a third of the delta is the inline
+        // `#[cfg(test)]` modules this ratchet also counts, in `recipe.rs` and
+        // `auth_prompt.rs`; the two NEW modules do not pay that, their test
+        // modules being `device_link/tests.rs` and `linked_session/tests.rs`
+        // siblings that `production_rust_files` excludes — the same split
+        // #7157 made for `runtime_context`.
         //
-        // 9_359 -> 9_422 (2026-08-10, implementation pass): §8.12's four
-        // additive `DeviceLinkPromptView` fields (`flow_id`, `input_kind`,
-        // `mode`, `restartable` — each carried rather than derived, because
-        // every consumer-side derivation is a guess: a card that cannot name
-        // its flow starts a second one, and one that guesses `input_kind`
-        // renders a cloud password in plain text), plus the
-        // `LinkedAccountResolver` port and its error, which moved here from
-        // the telegram package. That move is the point: PROPOSAL §5.1 requires
-        // the tool half's containment to be rooted in a HOST-minted grant, and
-        // a port the package declared could only ever have been satisfied by
-        // the package. Declaration only — the resolver is implemented in
-        // `ironclaw_extension_host` over the same credential-account selection
-        // every runtime injection uses. Count read from this test's own
-        // failure message.
-        ("ironclaw_extension_contracts", 9_422),
+        // Count read from this test's own failure message after the merge.
+        ("ironclaw_extension_contracts", 9_464),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -701,20 +702,27 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        // 18_974 -> 19_431 (2026-08-10, telegram-linked-device PR 1): the
+        // 18_974 -> 18_994 (2026-08-10, main / #7076 takeover): the
+        // `RuntimeCredentialTarget::Basic` declaration, username validation,
+        // and wire-contract vocabulary; RFC 7617 composition remains in
+        // ironclaw_host_runtime.
+        //
+        // 18_994 -> <see below> (2026-08-10, telegram-linked-device): the
         // `send_message.output` schema graduation (design §6.2) — a NEW `.v2`
         // schema file carrying the `sent_unverified` evidence branch, the
         // version-plural `StandardOpContract` (`StandardSchemaVersion`,
         // `PublishedSchema`, `output_schema_for`) that keeps `.v1` resolving
-        // forever, and `RuntimeCredentialAccountSetup::DeviceLink`. Declaration
-        // + version-lookup only: schema *enforcement* stays in
-        // ironclaw_host_runtime's `standard_op_output`, and the device-link flow
-        // itself lives in ironclaw_auth and the telegram package. About two
-        // thirds of the delta is the inline `#[cfg(test)]` module this ratchet
-        // also counts — the superset property (`.v2` accepts every `.v1`-valid
-        // output) has to be pinned because the runtime validator is keyed by op,
-        // not by version. Count read from this test's own failure message.
-        ("ironclaw_host_api", 19_431),
+        // forever, and `RuntimeCredentialAccountSetup::DeviceLink`.
+        // Declaration + version-lookup only: schema *enforcement* stays in
+        // ironclaw_host_runtime's `standard_op_output`, and the device-link
+        // flow itself lives in ironclaw_auth and the telegram package. About
+        // two thirds of the delta is the inline `#[cfg(test)]` module this
+        // ratchet also counts — the superset property (`.v2` accepts every
+        // `.v1`-valid output) has to be pinned because the runtime validator
+        // is keyed by op, not by version.
+        //
+        // Count read from this test's own failure message after the merge.
+        ("ironclaw_host_api", 19_451),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -755,7 +763,22 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Vocabulary/comment change only — the actor-first ladder itself is
         // preserved (WebChat=actor, trigger=creator, system=fallback). Count
         // read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_112),
+        // 13_112 -> 13_172 (2026-08-10, #7247 truthful connection context):
+        // `PendingExtensionAuthState` (the per-caller "installed but not
+        // authenticated for this user" DTO) + its bounded, sanitized render
+        // arm beside the existing connected-channels line. Declaration and
+        // rendering vocabulary only — the per-caller verdict computation
+        // lives in ironclaw_assistant (`caller_extension_auth`), the ports in
+        // composition. Count read from this test's own failure message.
+        // 13_172 -> 13_306 (2026-08-10, #7294 recalled-memory framing,
+        // batch-merged with #7247): the instruction bundle's recall-framing
+        // message (`memory_recall_framing.md` include + its render wiring)
+        // lands in the same crate as #7247's raise; each fix measured the
+        // ceiling alone against main, so the batch branch re-measures the
+        // union — the #7147 parallel-baseline lesson applied. Framing/render
+        // vocabulary only — scope filtering stays in the memory providers
+        // and host runtime. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_306),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

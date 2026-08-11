@@ -35,6 +35,12 @@ const CAPABILITY_SURFACE_USAGE_POLICY: &str =
 /// (`pub(super)`) so that sibling module can reach it without re-deriving
 /// visibility itself.
 pub(super) const DELIVERY_GUIDANCE: &str = include_str!("../prompts/delivery.md");
+/// Header for the prompt's memory section (#7294): recalled memory snippets
+/// are user-scoped and cross conversations BY DESIGN, so without framing the
+/// model reads a recollection ("user asked for a BTC news routine") as
+/// verified current state ("you already have this set up"). Pushed once,
+/// ahead of the memory snippets, whenever at least one snippet is admitted.
+const MEMORY_RECALL_FRAMING: &str = include_str!("../prompts/memory_recall_framing.md");
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);
@@ -353,6 +359,14 @@ impl InstructionBundleBuilder {
         let memory_snippets = request.context_bundle.memory_snippets;
         if !memory_snippets.is_empty() {
             requires_materialization_store = true;
+            // Open the memory section with the recall framing (#7294): the
+            // snippets below are recollections to verify, not live state.
+            push_memory_recall_framing(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                &mut synthetic_refs,
+            )?;
         }
         for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
             let content_ref =
@@ -541,6 +555,47 @@ fn snippet_model_content_surface(
         }
         _ => PromptTextSurface::GenericModelContent,
     }
+}
+
+/// Push the memory-section recall framing (#7294) as a system message ahead
+/// of the memory snippets. Called only when at least one snippet was
+/// admitted, so the guidance never floats free of the content it frames. The
+/// framing text is host-authored but still fails closed through the standard
+/// model-safe validation, like every other host-assembled section.
+fn push_memory_recall_framing(
+    messages: &mut Vec<LoopModelMessage>,
+    materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
+    fingerprint: &mut Sha256,
+    synthetic_refs: &mut SyntheticMessageRefRegistry,
+) -> Result<(), AgentLoopHostError> {
+    let framing = MEMORY_RECALL_FRAMING.trim();
+    if framing.is_empty() {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "memory recall framing prompt is empty",
+        ));
+    }
+    let model_content = validate_model_safe_text(framing.to_string(), "memory recall framing")?;
+    let content_ref = synthetic_message_ref(
+        "memory-guidance",
+        "memory-recall-framing",
+        &model_content,
+        0,
+        synthetic_refs,
+    )?;
+    feed_field(fingerprint, b"section", b"memory-guidance");
+    feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+    feed_field(fingerprint, b"content", model_content.as_bytes());
+    materialized_messages.push(InstructionBundleMaterializedMessage {
+        role: "system".to_string(),
+        content_ref: content_ref.clone(),
+        model_content,
+    });
+    messages.push(LoopModelMessage {
+        role: "system".to_string(),
+        content_ref,
+    });
+    Ok(())
 }
 
 fn push_safety_context(
@@ -1094,6 +1149,85 @@ mod tests {
         assert!(
             summary.contains("(none)"),
             "an all-omitted surface must render the empty marker: {summary}"
+        );
+    }
+
+    fn memory_snippet(content: &str) -> LoopContextSnippet {
+        LoopContextSnippet {
+            snippet_ref: "memory-snippet:0123456789abcdef".to_string(),
+            safe_summary: content.to_string(),
+            model_content: content.to_string(),
+            metadata: None,
+        }
+    }
+
+    fn bundle_with_memory_snippets(snippets: Vec<LoopContextSnippet>) -> InstructionBundle {
+        InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle {
+                    memory_snippets: snippets,
+                    ..LoopContextBundle::default()
+                },
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: Vec::new(),
+            })
+            .expect("instruction bundle builds")
+    }
+
+    /// #7294 presentation regression: recalled memory must reach the model
+    /// framed as a recollection to verify, not as live state. The memory
+    /// section opens with the recall-framing guidance message, ahead of every
+    /// memory snippet.
+    #[test]
+    fn memory_snippets_are_preceded_by_recall_framing_guidance() {
+        let bundle = bundle_with_memory_snippets(vec![
+            memory_snippet("Untrusted memory content: ordinary planning note"),
+            memory_snippet("Untrusted memory content: second recollection"),
+        ]);
+
+        let contents: Vec<&str> = bundle
+            .materialized_messages
+            .iter()
+            .map(|message| message.model_content.as_str())
+            .collect();
+        let framing_index = contents
+            .iter()
+            .position(|content| content.starts_with("Recalled memory notice:"))
+            .expect("memory section must open with the recall-framing guidance");
+        let first_snippet_index = contents
+            .iter()
+            .position(|content| content.contains("ordinary planning note"))
+            .expect("memory snippet must be materialized");
+        assert!(
+            framing_index < first_snippet_index,
+            "recall framing must precede the memory snippets \
+             (framing at {framing_index}, first snippet at {first_snippet_index})"
+        );
+        assert_eq!(
+            bundle.materialized_messages[framing_index].role, "system",
+            "recall framing must be a system message"
+        );
+        assert!(
+            contents[framing_index].contains("not the current state"),
+            "framing must tell the model recollections are not live state: \
+             {:?}",
+            contents[framing_index]
+        );
+    }
+
+    /// The framing is a memory-section header: with no memory snippets it must
+    /// not appear at all (no free-floating guidance about absent content).
+    #[test]
+    fn no_memory_snippets_means_no_recall_framing() {
+        let bundle = bundle_with_memory_snippets(Vec::new());
+        assert!(
+            bundle
+                .materialized_messages
+                .iter()
+                .all(|message| !message.model_content.starts_with("Recalled memory notice:")),
+            "an empty memory section must not push recall framing"
         );
     }
 
