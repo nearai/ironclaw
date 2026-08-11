@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +44,232 @@ from ws12_workflow_contracts import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+ICWM_G0C_WORKFLOW = ROOT / ".github/workflows/icwm-g0c-harness.yml"
+
+
+class IcwmG0cWorkflowContractTests(unittest.TestCase):
+    """Freeze the dedicated, least-privilege ICWM harness validation lane."""
+
+    @staticmethod
+    def indented_block(text: str, heading: str, indent: int) -> str:
+        lines = text.splitlines()
+        marker = f"{' ' * indent}{heading}:"
+        starts = [index for index, line in enumerate(lines) if line == marker]
+        if len(starts) != 1:
+            raise AssertionError(f"expected exactly one {marker!r}, found {len(starts)}")
+        start = starts[0]
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            line = lines[index]
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if len(line) - len(line.lstrip()) <= indent:
+                end = index
+                break
+        return "\n".join(lines[start:end])
+
+    @staticmethod
+    def step_blocks(job: str) -> list[str]:
+        starts = [
+            match.start()
+            for match in re.finditer(r"(?m)^      - (?:name|uses):", job)
+        ]
+        return [
+            job[start : starts[index + 1] if index + 1 < len(starts) else len(job)]
+            for index, start in enumerate(starts)
+        ]
+
+    @staticmethod
+    def list_values(block: str, key: str) -> list[str]:
+        inline = re.search(
+            rf"(?m)^    {re.escape(key)}:\s*\[([^]]*)\]\s*$", block
+        )
+        if inline is not None:
+            return [value.strip().strip("\"'") for value in inline.group(1).split(",")]
+        marker = re.search(rf"(?m)^    {re.escape(key)}:$", block)
+        if marker is None:
+            return []
+        values: list[str] = []
+        for line in block[marker.end() :].splitlines()[1:]:
+            match = re.fullmatch(r"      - [\"']?([^\"']+?)[\"']?", line)
+            if match is None:
+                break
+            values.append(match.group(1))
+        return values
+
+    @staticmethod
+    def executable_commands(step: str) -> list[list[str]]:
+        lines = step.splitlines()
+        run_index = next(
+            (index for index, line in enumerate(lines) if re.match(r"^        run:", line)),
+            None,
+        )
+        if run_index is None:
+            return []
+        value = lines[run_index].split("run:", 1)[1].strip()
+        body = [line[10:] for line in lines[run_index + 1 :] if line.startswith(" " * 10)]
+        if value and value not in {"|", "|-", "|+", ">", ">-", ">+"}:
+            body.insert(0, value)
+
+        folded = value.startswith(">")
+        logical: list[str] = []
+        current = ""
+        for line in body:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            current = f"{current} {stripped}".strip()
+            if current.endswith("\\"):
+                current = current[:-1].rstrip()
+                continue
+            if not folded:
+                logical.append(current)
+                current = ""
+        if current:
+            logical.append(current)
+        return [shlex.split(command, posix=True) for command in logical]
+
+    @staticmethod
+    def command_argv(command: list[str]) -> list[str]:
+        index = 0
+        while index < len(command) and re.match(
+            r"^[A-Za-z_][A-Za-z0-9_]*=", command[index]
+        ):
+            index += 1
+        return command[index:]
+
+    def test_dedicated_workflow_runs_the_complete_standalone_gate(self) -> None:
+        self.assertTrue(
+            ICWM_G0C_WORKFLOW.is_file(),
+            "missing dedicated ICWM G0C harness workflow",
+        )
+        source = ICWM_G0C_WORKFLOW.read_text(encoding="utf-8")
+
+        triggers = self.indented_block(source, "on", 0)
+        required_trigger_lines = {
+            "harness/icwm-g0c/**",
+            "docs/internal/research/icwm-g0c/**",
+            ".github/workflows/icwm-g0c-harness.yml",
+            "scripts/ci/test_ws12_workflow_contracts.py",
+            "scripts/ci/ws12_workflow_contracts.py",
+        }
+        for event in ("pull_request", "push"):
+            with self.subTest(event=event):
+                event_block = self.indented_block(triggers, event, 2)
+                self.assertTrue(
+                    required_trigger_lines.issubset(set(self.list_values(event_block, "paths"))),
+                    f"{event} must watch all ICWM publication surfaces",
+                )
+        pull_request = self.indented_block(triggers, "pull_request", 2)
+        merge_group = self.indented_block(triggers, "merge_group", 2)
+        push = self.indented_block(triggers, "push", 2)
+        self.assertIn("main", self.list_values(pull_request, "branches"))
+        self.assertIn("main", self.list_values(merge_group, "branches"))
+        self.assertIn("checks_requested", self.list_values(merge_group, "types"))
+        self.assertEqual(self.list_values(merge_group, "paths"), [])
+        self.assertIn("main", self.list_values(push, "branches"))
+
+        permissions = self.indented_block(source, "permissions", 0)
+        permission_lines = [
+            line
+            for line in permissions.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(permission_lines, ["permissions:", "  contents: read"])
+        job, detail = extract_job_block(source, "validate")
+        self.assertIsNotNone(job, detail)
+        assert job is not None
+        self.assertRegex(job, r"(?m)^    timeout-minutes: ([1-9]|[12][0-9]|30)$")
+        executable_job = "\n".join(
+            line for line in job.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertIsNone(ws12_workflow_contracts.UNCONDITIONAL_SKIP.search(executable_job))
+        for forbidden, _why in ws12_workflow_contracts.EXIT_STATUS_MASKS:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, executable_job)
+        self.assertNotRegex(
+            executable_job,
+            r"(?m)^\s*shell\s*:",
+            "the validate job must use GitHub's fail-fast default shell",
+        )
+
+        steps = self.step_blocks(job)
+        uses = re.findall(r"(?m)^        uses: ([^\s#]+)", job)
+        self.assertGreaterEqual(len(uses), 2)
+        for action in uses:
+            with self.subTest(action=action):
+                self.assertRegex(action, r"^[^@\s]+@[0-9a-f]{40}$")
+        checkout = next(step for step in steps if "uses: actions/checkout@" in step)
+        self.assertIn(
+            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            checkout,
+        )
+        self.assertRegex(checkout, r"(?m)^          persist-credentials: false$")
+        rust = next(step for step in steps if "uses: dtolnay/rust-toolchain@" in step)
+        self.assertIn(
+            "uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
+            rust,
+        )
+        self.assertRegex(rust, r"(?m)^          toolchain: stable$")
+        self.assertRegex(rust, r"(?m)^          components: (?:rustfmt, clippy|clippy, rustfmt)$")
+
+        required_commands = (
+            ("python3", "scripts/ci/test_ws12_workflow_contracts.py"),
+            ("python3", "harness/icwm-g0c/verify-publication.py"),
+            (
+                "cargo", "fmt", "--manifest-path", "harness/icwm-g0c/Cargo.toml",
+                "--", "--check",
+            ),
+            (
+                "cargo", "test", "--locked", "--manifest-path",
+                "harness/icwm-g0c/Cargo.toml",
+            ),
+            (
+                "cargo", "clippy", "--locked", "--manifest-path",
+                "harness/icwm-g0c/Cargo.toml", "--all-targets", "--", "-D", "warnings",
+            ),
+            (
+                "python3", "-m", "jsonschema", "-i",
+                "harness/icwm-g0c/fixtures/CONTROL-RESULT.json",
+                "harness/icwm-g0c/contracts/HARNESS-RESULT.schema.json",
+            ),
+            (
+                "python3", "-m", "jsonschema", "-i",
+                "harness/icwm-g0c/fixtures/CONTROL-SCENARIO.json",
+                "harness/icwm-g0c/contracts/SCENARIO.schema.json",
+            ),
+            (
+                "python3", "-m", "jsonschema", "-i",
+                "harness/icwm-g0c/fixtures/REQUEST-VECTORS-v1.json",
+                "harness/icwm-g0c/contracts/REQUEST-VECTOR.schema.json",
+            ),
+        )
+        step_commands = [self.executable_commands(step) for step in steps]
+        pip_steps = [
+            index
+            for index, commands in enumerate(step_commands)
+            if any(
+                self.command_argv(command)[:4] == ["python3", "-m", "pip", "install"]
+                and "jsonschema==4.25.1" in self.command_argv(command)[4:]
+                for command in commands
+            )
+        ]
+        self.assertEqual(len(pip_steps), 1, "expected one pinned jsonschema install step")
+        for command in required_commands:
+            with self.subTest(command=command):
+                matching_steps = [
+                    index
+                    for index, commands in enumerate(step_commands)
+                    if any(
+                        self.command_argv(candidate) == list(command)
+                        for candidate in commands
+                    )
+                ]
+                self.assertEqual(
+                    len(matching_steps),
+                    1,
+                    f"expected one executable validate step for {command!r}",
+                )
 
 
 class WorkflowContractSabotageTests(unittest.TestCase):

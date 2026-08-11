@@ -1,0 +1,78 @@
+name: ICWM G0C Harness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "harness/icwm-g0c/**"
+      - "docs/internal/research/icwm-g0c/**"
+      - ".github/workflows/icwm-g0c-harness.yml"
+      - "scripts/ci/test_ws12_workflow_contracts.py"
+      - "scripts/ci/ws12_workflow_contracts.py"
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - "harness/icwm-g0c/**"
+      - "docs/internal/research/icwm-g0c/**"
+      - ".github/workflows/icwm-g0c-harness.yml"
+      - "scripts/ci/test_ws12_workflow_contracts.py"
+      - "scripts/ci/ws12_workflow_contracts.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: icwm-g0c-harness-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate standalone publication package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Install Python validators
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          "jsonschema==4.25.1"
+
+      - name: Validate workflow contracts
+        run: python3 scripts/ci/test_ws12_workflow_contracts.py
+
+      - name: Verify publication manifest
+        run: python3 harness/icwm-g0c/verify-publication.py
+
+      - name: Check standalone formatting
+        run: cargo fmt --manifest-path harness/icwm-g0c/Cargo.toml -- --check
+
+      - name: Test standalone harness
+        run: cargo test --locked --manifest-path harness/icwm-g0c/Cargo.toml
+
+      - name: Lint standalone harness
+        run: cargo clippy --locked --manifest-path harness/icwm-g0c/Cargo.toml --all-targets -- -D warnings
+
+      - name: Validate published schemas and fixtures
+        run: |
+          python3 -m jsonschema \
+            -i harness/icwm-g0c/fixtures/CONTROL-RESULT.json \
+            harness/icwm-g0c/contracts/HARNESS-RESULT.schema.json
+          python3 -m jsonschema \
+            -i harness/icwm-g0c/fixtures/CONTROL-SCENARIO.json \
+            harness/icwm-g0c/contracts/SCENARIO.schema.json
+          python3 -m jsonschema \
+            -i harness/icwm-g0c/fixtures/REQUEST-VECTORS-v1.json \
+            harness/icwm-g0c/contracts/REQUEST-VECTOR.schema.json
