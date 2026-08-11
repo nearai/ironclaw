@@ -2101,6 +2101,29 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .expect("visible surface");
+        let hint_of = |name: &str| {
+            surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.safe_name == name)
+                .unwrap_or_else(|| panic!("{name} descriptor on the deferred surface"))
+                .concurrency_hint
+        };
+        assert_eq!(
+            hint_of(TOOL_SEARCH_NAME),
+            ConcurrencyHint::SafeForParallel,
+            "tool_search is a side-effect-free catalog lookup"
+        );
+        assert_eq!(
+            hint_of(TOOL_DESCRIBE_NAME),
+            ConcurrencyHint::SafeForParallel,
+            "tool_describe is a side-effect-free schema lookup"
+        );
+        assert_eq!(
+            hint_of(TOOL_CALL_NAME),
+            ConcurrencyHint::Exclusive,
+            "an unresolved tool_call can target an arbitrary capability"
+        );
         assert!(
             !surface
                 .descriptors
