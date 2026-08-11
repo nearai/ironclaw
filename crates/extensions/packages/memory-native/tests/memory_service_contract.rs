@@ -579,12 +579,17 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
     // the method, not a thread_id convention (F4 regression). Only the general
     // doc survives, so the two lanes stay disjoint (no duplicate snippet when
     // the host concatenates them).
+    //
+    // The surviving doc is an ORDINARY path, not `MEMORY.md`: the standing
+    // document leads this lane through the curated prefix and is deliberately
+    // excluded from the search half, so using it here would test that
+    // exclusion rather than the thread-scratch one.
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![
             search_result(
                 "tenant-native-memory",
                 "user-native-memory",
-                "MEMORY.md",
+                "notes/planning.md",
                 1.0,
                 "durable planning fact",
             ),
@@ -626,7 +631,7 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
         1,
         "long-term retrieval must exclude per-thread short-term scratch"
     );
-    assert_eq!(snippets[0].relative_path, "MEMORY.md");
+    assert_eq!(snippets[0].relative_path, "notes/planning.md");
 }
 
 #[tokio::test]
@@ -1535,6 +1540,92 @@ async fn native_oversized_standing_document_is_capped_and_marked_truncated() {
             .text
             .ends_with(" (truncated)"),
         "a clipped document must say so"
+    );
+}
+
+/// The standing document leads the lane, so it must not ALSO arrive as a search
+/// hit for a query that happens to match it — that spends a second snippet slot
+/// re-admitting what the model can already see, and displaces a different
+/// document that matched. Driven at a tight `max_snippets` so the displacement
+/// would be visible if it happened.
+#[tokio::test]
+async fn native_long_term_lane_does_not_readmit_the_standing_document_as_a_search_hit() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, "the user tracks kayak races").await;
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "notes/kayak".to_string(),
+                content: "the kayak races start in autumn".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("searchable write");
+
+    // "kayak" matches BOTH documents, and only two slots are available.
+    let snippets = service
+        .read_long_term(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "kayak".to_string(),
+                max_snippets: 2,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("long-term lane retrieval");
+
+    let paths: Vec<&str> = snippets
+        .iter()
+        .map(|snippet| snippet.relative_path.as_str())
+        .collect();
+    assert_eq!(
+        paths.iter().filter(|path| **path == "MEMORY.md").count(),
+        1,
+        "the standing document must appear exactly once: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|path| path.contains("kayak")),
+        "the matching note must keep its slot: {paths:?}"
+    );
+}
+
+/// One line longer than a chunk must not become an oversized chunk. The host
+/// sanitizes a curated chunk through the same path as a search hit, which
+/// truncates SILENTLY, so an over-long line would otherwise reach the model
+/// shortened with nothing saying so.
+#[tokio::test]
+async fn native_oversized_single_line_is_clipped_and_marked_by_the_provider() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, &"a".repeat(1200)).await;
+
+    let snippets = service
+        .read_long_term(invocation, unrelated_query_request(10))
+        .await
+        .expect("long-term lane retrieval");
+
+    assert!(!snippets.is_empty(), "the standing document must be served");
+    for snippet in &snippets {
+        assert!(
+            snippet.text.len() <= 400,
+            "every curated chunk must fit the raw-byte limit; got {} bytes",
+            snippet.text.len()
+        );
+    }
+    assert!(
+        snippets
+            .iter()
+            .any(|snippet| snippet.text.ends_with(" (truncated)")),
+        "clipped content must say it was clipped"
     );
 }
 

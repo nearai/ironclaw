@@ -448,7 +448,16 @@ impl MemoryService for NativeMemoryService {
         // Exclude every per-thread short-term scratch subtree, regardless of
         // whether the invocation carries an active thread, so the two lanes
         // stay disjoint when the host concatenates them into one memory block.
-        results.retain(|result| !is_thread_scoped_path(result.path.relative_path()));
+        //
+        // `MEMORY_PATH` is excluded for a different reason: it is already at the
+        // head of this lane. A query whose words happen to match the standing
+        // document would otherwise spend a second snippet slot re-admitting
+        // what the model can already see, displacing a different document that
+        // matched.
+        results.retain(|result| {
+            let path = result.path.relative_path();
+            !is_thread_scoped_path(path) && path != MEMORY_PATH
+        });
         snippets.extend(rank_and_truncate(results, remaining));
         Ok(snippets)
     }
@@ -959,9 +968,14 @@ fn format_interaction(messages: &[MemoryInteractionMessage]) -> String {
 
 /// Split the standing memory document into at most `max_chunks` chunks of at
 /// most `max_raw_bytes` each, preferring line boundaries so a one-fact-per-line
-/// `MEMORY.md` is never cut mid-fact. A single line longer than the byte budget
-/// becomes its own chunk and is truncated by the host's sanitizer. Blank lines
-/// are dropped.
+/// `MEMORY.md` is never cut mid-fact. Blank lines are dropped.
+///
+/// A single line longer than the byte budget is clipped and marked HERE rather
+/// than left for the host to clip: the host sanitizes a curated chunk with the
+/// same code path it uses for a search hit, which truncates silently, so an
+/// over-long line would reach the model shortened with nothing saying so.
+/// Clipping it at a char boundary first keeps every emitted chunk inside the
+/// documented limit and keeps the marker.
 ///
 /// `max_chunks` bounds the work, not just the result: the caller passes its
 /// admission budget plus one, so an arbitrarily large user-controlled document
@@ -980,6 +994,15 @@ fn split_curated_text(text: &str, max_raw_bytes: usize, max_chunks: usize) -> Ve
         if line.trim().is_empty() {
             continue;
         }
+        // Clipped before the packing logic below, so everything after this
+        // point can assume a line fits a chunk on its own.
+        let clipped_line;
+        let line = if line.len() > max_raw_bytes {
+            clipped_line = clip_and_mark(line, max_raw_bytes);
+            clipped_line.as_str()
+        } else {
+            line
+        };
         if !current.is_empty()
             && current.len() + CURATED_LINE_SEPARATOR.len() + line.len() > max_raw_bytes
         {
@@ -1005,15 +1028,22 @@ fn split_curated_text(text: &str, max_raw_bytes: usize, max_chunks: usize) -> Ve
 /// was sized for, and the sanitizer would clip the marker back off — leaving a
 /// clipped document indistinguishable from a complete one.
 fn mark_curated_truncation(chunk: &mut String) {
-    let room = CURATED_CHUNK_RAW_BYTES.saturating_sub(CURATED_TRUNCATION_MARKER.len());
-    if chunk.len() > room {
-        let mut end = room;
-        while end > 0 && !chunk.is_char_boundary(end) {
-            end -= 1;
-        }
-        chunk.truncate(end);
+    let marked = clip_and_mark(chunk, CURATED_CHUNK_RAW_BYTES);
+    *chunk = marked;
+}
+
+/// Clip `text` at a char boundary and append the truncation marker, so the
+/// result is at most `max_raw_bytes`. Text already inside the budget is only
+/// marked. Never slices mid-character.
+fn clip_and_mark(text: &str, max_raw_bytes: usize) -> String {
+    let room = max_raw_bytes.saturating_sub(CURATED_TRUNCATION_MARKER.len());
+    let mut end = text.len().min(room);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
     }
-    chunk.push_str(CURATED_TRUNCATION_MARKER);
+    let mut clipped = text[..end].to_string();
+    clipped.push_str(CURATED_TRUNCATION_MARKER);
+    clipped
 }
 
 fn map_search_result_to_snippet(result: MemorySearchResult) -> MemoryServiceContextSnippet {
