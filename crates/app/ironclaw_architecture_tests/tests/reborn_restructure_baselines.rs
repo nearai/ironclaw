@@ -134,7 +134,11 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// production wiring and inline regression coverage to the current main tree.
 /// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
 /// manifest ceiling and observed value move with this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_582;
+/// ✎ Re-recorded 41_582 → 43_454 on 2026-08-11 for the
+/// release/2026-08-11 tree. The exact release base measured 43_386; this PR
+/// adds 68 governed LOC of composition-only Railway guidance transport and
+/// assembly. The manifest ceiling and observed value move with this record.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_454;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

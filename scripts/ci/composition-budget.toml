@@ -167,7 +167,11 @@ observed_date = "2026-08-07"
 # implement-issue-6896-fix: #7131's run-failure settlement observer adds its
 # production wiring and inline regression coverage to the current main tree.
 # Measured with --print; set to current rather than hidden in tolerance.
-loc_ceiling = 41582
+# Re-seeded 41582 -> 43454 on 2026-08-11 for the release/2026-08-11 tree.
+# The exact release base already measured 43386; this PR adds 68 governed LOC
+# of composition-only transport and assembly for Railway shell guidance.
+# Measured on this PR head with the gate, not derived from the diff.
+loc_ceiling = 43454
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -178,8 +182,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41582
-loc_observed_date = "2026-08-10"
+loc_observed = 43454
+loc_observed_date = "2026-08-11"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
@@ -215,6 +219,9 @@ loc_observed_date = "2026-08-10"
 # only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
 # two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
 # count exactly, no slack.
-arc_dyn_ceiling = 816
+# 2026-08-11 release re-seed: the release base and this PR both measure 832;
+# this PR adds no Arc<dyn> sites. Move the ceiling by one so the existing
+# 15-site working tolerance records the exact release-head observation.
+arc_dyn_ceiling = 817
 arc_dyn_tolerance = 15
-arc_dyn_observed = 831
+arc_dyn_observed = 832
