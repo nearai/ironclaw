@@ -150,6 +150,11 @@ mod types;
 mod views;
 mod web_push;
 
+// Crate-internal seam for the runtime communication context (#7247): the
+// model-facing prompt slice reuses the extensions card's per-caller auth
+// verdict instead of re-deriving "connected for this caller" a second way.
+pub(crate) use extensions::{CallerExtensionAuth, caller_extension_auth};
+
 pub use admin_configuration::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,

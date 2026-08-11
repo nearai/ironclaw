@@ -712,7 +712,22 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Vocabulary/comment change only — the actor-first ladder itself is
         // preserved (WebChat=actor, trigger=creator, system=fallback). Count
         // read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_112),
+        // 13_112 -> 13_172 (2026-08-10, #7247 truthful connection context):
+        // `PendingExtensionAuthState` (the per-caller "installed but not
+        // authenticated for this user" DTO) + its bounded, sanitized render
+        // arm beside the existing connected-channels line. Declaration and
+        // rendering vocabulary only — the per-caller verdict computation
+        // lives in ironclaw_assistant (`caller_extension_auth`), the ports in
+        // composition. Count read from this test's own failure message.
+        // 13_172 -> 13_306 (2026-08-10, #7294 recalled-memory framing,
+        // batch-merged with #7247): the instruction bundle's recall-framing
+        // message (`memory_recall_framing.md` include + its render wiring)
+        // lands in the same crate as #7247's raise; each fix measured the
+        // ceiling alone against main, so the batch branch re-measures the
+        // union — the #7147 parallel-baseline lesson applied. Framing/render
+        // vocabulary only — scope filtering stays in the memory providers
+        // and host runtime. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_306),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

@@ -2415,7 +2415,9 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 4);
+    // identity + instruction + memory recall framing (#7294) + memory snippet
+    // + user message.
+    assert_eq!(prompt_bundle.messages.len(), 5);
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let model_port = ThreadBackedLoopModelPort::new(
@@ -2446,15 +2448,18 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         .iter()
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        contents,
-        vec![
-            "identity policy summary",
-            "project instruction summary",
-            "project memory summary",
-            "hello reborn",
-        ]
+    assert_eq!(contents.len(), 5);
+    assert_eq!(contents[0], "identity policy summary");
+    assert_eq!(contents[1], "project instruction summary");
+    // The memory section opens with the recall-framing guidance (#7294),
+    // ahead of the memory snippet it frames.
+    assert!(
+        contents[2].starts_with("Recalled memory notice:"),
+        "memory section must open with the recall framing, got {:?}",
+        contents[2]
     );
+    assert_eq!(contents[3], "project memory summary");
+    assert_eq!(contents[4], "hello reborn");
 }
 
 #[tokio::test]

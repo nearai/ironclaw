@@ -208,6 +208,13 @@ loc_observed_date = "2026-08-10"
 # baseline without lowering the mass ratchet; future work must shrink again.
 # 2026-08-05 (program closure): nudge taken, 1122 -> 814 — locked at today's
 # observed count; the WS0 record (827) stays within the effective ceiling (829).
-arc_dyn_ceiling = 814
+# 2026-08-10 PR #7474 (#7247 truthful connection context): 814 -> 816 for the
+# two injected context-provider ports (`ExtensionCredentialSetupService` +
+# channel-connection facade) wired into the communication-context assembly —
+# genuine dyn seams (implementations live in extension_manager/auth; composition
+# only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
+# two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
+# count exactly, no slack.
+arc_dyn_ceiling = 816
 arc_dyn_tolerance = 15
-arc_dyn_observed = 814
+arc_dyn_observed = 831
