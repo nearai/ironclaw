@@ -897,7 +897,28 @@ where
 
             let chronological = newest_first.iter().rev().cloned().collect::<Vec<_>>();
             let context = context_messages_with_summary_replacements(&chronological, summaries);
-            if context.len() > max_messages || entry_count < limit as usize {
+            let oldest_loaded_sequence = newest_first
+                .last()
+                .map(|message| message.sequence)
+                .unwrap_or(u64::MAX);
+            let retained_boundary_start =
+                context.len().saturating_sub(max_messages.saturating_add(1));
+            let tail_has_unvalidated_summary = context[retained_boundary_start..]
+                .iter()
+                .filter_map(|message| message.summary_id)
+                .any(|summary_id| {
+                    summaries.iter().any(|summary| {
+                        summary.summary_id == summary_id
+                            && summary.start_sequence < oldest_loaded_sequence
+                    })
+                });
+            // A replacement summary inside the retained suffix can move the
+            // exact truncation watermark. Do not stop until its whole durable
+            // range has been read, otherwise an older Draft/redaction can be
+            // missed and a synthetic summary sequence reported as the boundary.
+            if (context.len() > max_messages && !tail_has_unvalidated_summary)
+                || entry_count < limit as usize
+            {
                 return Ok(context);
             }
         }

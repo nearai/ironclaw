@@ -5251,14 +5251,15 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
             .unwrap();
     }
 
-    // Summary spans [1..19] covering the Draft at seq 2. Seq 20 remains a
-    // recent message outside the replacement range.
+    // Summary spans [1..4] covering the Draft at seq 2. Its terminal sequence
+    // is present in the first durable page, but its start and the Draft are
+    // not; pagination must continue far enough to validate the complete range.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
-            end_sequence: 19,
+            end_sequence: 4,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
@@ -5288,6 +5289,11 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
     );
     assert_eq!(context.messages[0].content, "filler 5");
     assert_eq!(context.messages[15].content, "filler 20");
+    let truncation = context
+        .recent_window_truncation
+        .expect("the omitted fourth user message is the exact truncation boundary");
+    assert_eq!(truncation.omitted_through_sequence, 4);
+    assert_eq!(truncation.omitted_through_kind, MessageKind::User);
 }
 
 // Real thread store backend that fails only the summary-artifact write, so all
