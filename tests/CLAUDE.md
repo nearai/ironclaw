@@ -126,9 +126,9 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Search memory from a different conversation and find what was written | `scenario_memory_search_finds_seeded.rs` |
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
-| Trust that only the memory hooks the provider declares actually fire — while the always-on standing-document read still runs against any bound provider, because the host composes it rather than the manifest declaring it | `scenario_lifecycle_gates_host_memory_calls.rs` |
+| Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
 | Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
-| Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — the search lanes cannot cover this, because they match on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
+| Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 

@@ -1,6 +1,6 @@
 //! System-prompt content owned by the loop tier.
 //!
-//! These six assets are the *content* half of the default system prompt. They
+//! These five assets are the *content* half of the default system prompt. They
 //! live here — beside the other `prompts/*.md` assets this crate ships and
 //! beside [`identity_context`](crate::identity_context), whose
 //! `HostIdentityContextSource` is what puts them in front of a model — rather
@@ -44,24 +44,6 @@ pub const TOOL_DISCLOSURE_PROTOCOL_PROMPT: &str =
 /// uses.
 pub const SELF_KNOWLEDGE_PROTOCOL_PROMPT: &str = include_str!("../prompts/self_knowledge.md");
 
-/// Persistent-memory protocol, appended to the system prompt when a memory
-/// provider is bound.
-///
-/// Nothing otherwise tells the model *when* a durable user fact is worth
-/// saving, that surfaced memories came from earlier conversations, or how to
-/// phrase one so it does not read as a standing instruction later (#7185).
-/// That is ground knowledge about the running system rather than a user
-/// preference, so — like the self-knowledge section — seeding it into the
-/// user-editable file would only reach fresh installs; it is appended in memory
-/// on every resolve instead.
-///
-/// It is NOT unconditional: this text names concrete `ironclaw.memory.*` tools,
-/// and a `Disabled` memory binding registers no memory package, so a deployment
-/// without a bound provider must not be told the tools exist. The composition
-/// root gates it on resolved memory availability, the same way the
-/// tool-disclosure protocol is gated on the bridge tools existing.
-pub const MEMORY_PROTOCOL_PROMPT: &str = include_str!("../prompts/memory_protocol.md");
-
 /// Appended only when benchmarking mode is active.
 ///
 /// Tells the model there is no human to ask, overriding the "ask the user...a
@@ -96,7 +78,6 @@ mod tests {
                 TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             ),
             ("self_knowledge.md", SELF_KNOWLEDGE_PROTOCOL_PROMPT),
-            ("memory_protocol.md", MEMORY_PROTOCOL_PROMPT),
             ("benchmarking_mode.md", BENCHMARKING_MODE_PROTOCOL_PROMPT),
             (
                 "scheduled_trigger_mode.md",
@@ -107,7 +88,7 @@ mod tests {
         }
     }
 
-    /// The five *appended* protocols are concatenated after the user's file,
+    /// The four *appended* protocols are concatenated after the user's file,
     /// separated by a blank line; each must open with a markdown heading so it
     /// reads as its own section rather than running into the previous
     /// paragraph. The base prompt is a whole document and is exempt.
@@ -119,7 +100,6 @@ mod tests {
                 TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             ),
             ("self_knowledge.md", SELF_KNOWLEDGE_PROTOCOL_PROMPT),
-            ("memory_protocol.md", MEMORY_PROTOCOL_PROMPT),
             ("benchmarking_mode.md", BENCHMARKING_MODE_PROTOCOL_PROMPT),
             (
                 "scheduled_trigger_mode.md",
@@ -135,90 +115,13 @@ mod tests {
         }
     }
 
-    /// The memory protocol is the only thing that tells the model *when* to
-    /// save a durable user fact and *what* the automatically surfaced memory
-    /// block is (#7185). Pin the load-bearing parts: the exact tool ids it
-    /// names (a renamed tool would leave the instruction pointing at nothing),
-    /// the curated `memory` target plus append mode the always-on prompt lane
-    /// reads back, and the never-save carve-out for secrets.
-    ///
-    /// Both write modes are pinned by name. The save path is the append mode,
-    /// so a forget instruction that does not say otherwise is read as "append
-    /// the correction" — which leaves the entry the user asked to drop in the
-    /// document, and the always-on lane then re-injects both.
-    #[test]
-    fn memory_protocol_names_the_save_path_and_its_limits() {
-        for expected in [
-            "ironclaw.memory.write",
-            "ironclaw.memory.search",
-            "`memory`",
-            "append: true",
-            "append: false",
-            "across conversations",
-            "Never save secrets",
-        ] {
-            assert!(
-                MEMORY_PROTOCOL_PROMPT.contains(expected),
-                "memory protocol must mention {expected:?}"
-            );
-        }
-    }
-
-    /// Field-proven doctrine the protocol has to carry, each pinned because
-    /// dropping it degrades recall quality in a way no compiler catches:
-    ///
-    /// - **Declarative form.** A memory saved as an imperative ("Always respond
-    ///   concisely") is re-read as a standing directive on every later turn —
-    ///   and the always-on lane re-injects it every turn — so it can override
-    ///   what the user is asking for now. The worked example pair is the part
-    ///   models actually copy, so pin both halves.
-    /// - **Staleness skip-list.** Task progress, session outcomes, and
-    ///   short-lived artifacts (PR numbers, commit SHAs) crowd out durable
-    ///   facts and go wrong within days.
-    /// - **Priority framing.** Tells the model which memory is worth the write
-    ///   when it has to choose.
-    #[test]
-    fn memory_protocol_carries_the_write_quality_doctrine() {
-        for (doctrine, expected) in [
-            ("declarative-form rule", "declarative fact"),
-            (
-                "declarative example (good)",
-                "User prefers concise responses",
-            ),
-            ("declarative example (bad)", "Always respond concisely"),
-            ("staleness skip-list", "task progress"),
-            ("staleness skip-list", "commit SHAs"),
-            ("staleness horizon", "stale within a week"),
-            ("priority framing", "repeat or correct themselves"),
-        ] {
-            assert!(
-                MEMORY_PROTOCOL_PROMPT.contains(expected),
-                "memory protocol lost its {doctrine}: expected {expected:?}"
-            );
-        }
-    }
-
-    /// The protocol must stay short enough to be worth appending to every
-    /// prompt on every turn. Guidance that grows unchecked is how a system
-    /// prompt quietly becomes the dominant cost of a cheap turn.
-    #[test]
-    fn memory_protocol_stays_within_its_prompt_budget() {
-        let lines = MEMORY_PROTOCOL_PROMPT.lines().count();
-        assert!(
-            lines <= 18,
-            "memory protocol is appended to every turn's prompt and must stay compact; \
-             {lines} lines"
-        );
-    }
-
-    /// The five appended protocols are distinct sections — a copy/paste that
+    /// The four appended protocols are distinct sections — a copy/paste that
     /// duplicated one would silently double a section in the resolved prompt.
     #[test]
     fn appended_protocol_assets_are_distinct() {
         let appended = [
             TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             SELF_KNOWLEDGE_PROTOCOL_PROMPT,
-            MEMORY_PROTOCOL_PROMPT,
             BENCHMARKING_MODE_PROTOCOL_PROMPT,
             SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
         ];

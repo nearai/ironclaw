@@ -621,6 +621,7 @@ mod tests {
             Some(inert_provider()),
             &MemoryDescriptor {
                 lifecycle: ironclaw_extension_contracts::memory::MemoryLifecycleHook::ALL.to_vec(),
+                ..MemoryDescriptor::default()
             },
         );
         assert!(full.memory_context_service.is_some());

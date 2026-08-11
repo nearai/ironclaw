@@ -21,7 +21,10 @@
 //! The declared tools are model-visible memory tools under the stable
 //! `ironclaw.memory.*` ids. Input schemas are served inline on the always-on
 //! lane (see `first_party_tools::resolve_native_memory_input_schema_ref`), so
-//! no asset materialization is required.
+//! no asset materialization is required. The bound provider's
+//! `[memory].guidance_doc` — its model-facing memory guidance, appended to the
+//! system prompt by composition — is served the same way, by
+//! [`memory_guidance_text`].
 
 use ironclaw_extension_contracts::memory::MemoryDescriptor;
 use ironclaw_extension_registry::{
@@ -55,6 +58,36 @@ const NATIVE_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/ironclaw.memory";
 /// Raw bundled manifest TOML for the native memory extension.
 pub const NATIVE_MEMORY_MANIFEST_TOML: &str =
     include_str!("../../../extensions/packages/memory-native/manifest.toml");
+
+/// Memory guidance the bound provider ships for the model, or `None` when it
+/// declares none.
+///
+/// The `[memory].guidance_doc` ref names a file inside the provider's own
+/// package, and bundled providers ride the always-on lane, so nothing is
+/// materialized to the package root to read it back from. The text comes from
+/// the OWNING package's public API rather than by compiling its asset tree into
+/// this crate — a reach-in would bypass the dependency graph the boundary gates
+/// police (`reborn_cross_crate_include_scan` §11.2.7, shrink-only). Each
+/// bundled provider that ships guidance exports its own ref/text pair; this
+/// maps a declared ref onto the matching one.
+///
+/// Fail-quiet by contract: a ref no bundled provider claims yields `None`, so
+/// an unrecognized or future declaration appends nothing rather than failing a
+/// boot. Guidance is optional prompt context, not a capability.
+pub fn memory_guidance_text(descriptor: &MemoryDescriptor) -> Option<&'static str> {
+    match descriptor.guidance_doc.as_ref()?.as_str() {
+        ironclaw_memory_native::MEMORY_GUIDANCE_DOC_REF => {
+            Some(ironclaw_memory_native::MEMORY_GUIDANCE)
+        }
+        unknown => {
+            tracing::debug!(
+                guidance_doc = unknown,
+                "bound memory provider declares a guidance doc no bundled provider serves"
+            );
+            None
+        }
+    }
+}
 
 /// Reserved (host-bundled) extension id for the mem0 memory backend. Mirrors
 /// `ironclaw_memory_mem0::MEM0_MEMORY_EXTENSION_ID`; the `[memory]` binding
@@ -185,6 +218,63 @@ mod tests {
         MEMORY_WRITE_CAPABILITY_ID,
     };
     use ironclaw_extension_registry::{CapabilityVisibility, ExtensionRuntimeV2};
+
+    /// The native provider's bundle must carry its guidance ref through from
+    /// the manifest AND resolve to real text. Two halves, because either one
+    /// failing silently costs the model its memory guidance with nothing
+    /// failing: a manifest that drops the key, or a key that no longer matches
+    /// the bundled file's path.
+    #[test]
+    fn native_bundle_declares_guidance_that_resolves_to_the_bundled_asset() {
+        let bundle = native_memory_provider_bundle().expect("native bundle loads");
+        assert_eq!(
+            bundle
+                .lifecycle
+                .guidance_doc
+                .as_ref()
+                .map(|doc| doc.as_str()),
+            Some("prompts/memory-guidance.md"),
+            "the native manifest must keep declaring its memory guidance"
+        );
+        let guidance = memory_guidance_text(&bundle.lifecycle)
+            .expect("the declared guidance ref must resolve to a bundled asset");
+        assert!(
+            guidance.starts_with('#'),
+            "guidance is appended as its own system-prompt section and must open with a heading"
+        );
+        assert!(
+            guidance.contains("ironclaw.memory.write"),
+            "the native guidance must name the tool it tells the model to call"
+        );
+    }
+
+    /// mem0 deliberately ships no guidance: its recall is search-first, so the
+    /// native provider's standing-document advice would be wrong under it.
+    /// Absent must mean "append nothing", never "fall back to native's".
+    #[test]
+    fn a_provider_without_a_guidance_declaration_resolves_to_none() {
+        let bundle = mem0_memory_provider_bundle().expect("mem0 bundle loads");
+        assert!(bundle.lifecycle.guidance_doc.is_none());
+        assert!(memory_guidance_text(&bundle.lifecycle).is_none());
+    }
+
+    /// Fail-quiet, not fail-closed: guidance is optional prompt context, so a
+    /// ref this host has no bundled asset for appends nothing rather than
+    /// taking a boot down. (A ref that is not a valid relative asset path never
+    /// gets this far — it fails the manifest parse.)
+    #[test]
+    fn an_unrecognized_guidance_ref_resolves_to_none_without_failing() {
+        let descriptor = MemoryDescriptor {
+            guidance_doc: Some(
+                ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef::new(
+                    "prompts/from-a-future-provider.md",
+                )
+                .expect("valid asset ref"),
+            ),
+            ..MemoryDescriptor::default()
+        };
+        assert!(memory_guidance_text(&descriptor).is_none());
+    }
 
     /// The bundle loader is only for `[memory]`-declaring providers; a
     /// bundled manifest that lost its `[memory]` section must fail loud, not

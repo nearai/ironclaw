@@ -16,9 +16,8 @@ use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
-    IdentityApplicability, IdentityFileName, MEMORY_PROTOCOL_PROMPT,
-    SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
-    TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
+    IdentityApplicability, IdentityFileName, SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
+    SELF_KNOWLEDGE_PROTOCOL_PROMPT, TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
 };
 use ironclaw_turns::LoopMessageRef;
 
@@ -47,7 +46,7 @@ pub(crate) enum DefaultSystemPromptError {
 /// Named fields rather than positional `bool`s: every one of these describes a
 /// capability the prompt is allowed to claim, and a swapped pair would silently
 /// tell the model about a surface it does not have.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SystemPromptProtocols {
     /// When true, the progressive tool-disclosure protocol is appended to the
     /// system prompt so the model is told to discover deferred tools via
@@ -60,16 +59,21 @@ pub(crate) struct SystemPromptProtocols {
     /// the `BENCHMARKING_MODE` env var at build time (see `runtime.rs`); off
     /// by default, so normal product usage is unaffected.
     pub(crate) benchmarking_mode: bool,
-    /// When true, the persistent-memory protocol is appended. Set from whether
-    /// a memory provider is actually bound at build time (see `runtime.rs`).
+    /// The bound memory provider's own guidance text, appended verbatim, or
+    /// `None` when no provider is bound or the bound one ships none. Resolved
+    /// at build time from the provider's `[memory].guidance_doc` (see
+    /// `runtime.rs`).
     ///
-    /// A `Disabled` memory binding registers no package, so the model's surface
-    /// carries no `ironclaw.memory.*` tools at all. Appending the protocol there
-    /// would tell the model that persistent memory exists and instruct it to
-    /// call tools it cannot see — a false capability claim that produces
-    /// unusable tool calls. Same reasoning as `disclosure`: a protocol that
+    /// Content rather than a flag, because the text is not the host's to write.
+    /// It names concrete `ironclaw.memory.*` tools and describes one provider's
+    /// recall behavior, so the provider that implements them owns what it says
+    /// — a search-first backend needs to tell the model something different
+    /// from one that serves a standing document. A `Disabled` binding registers
+    /// no package and the model's surface carries no memory tools at all, so
+    /// `None` there is what keeps the prompt from claiming a surface the
+    /// deployment does not have. Same reasoning as `disclosure`: guidance that
     /// names concrete tools must not outlive those tools.
-    pub(crate) memory: bool,
+    pub(crate) memory_guidance: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +108,8 @@ impl DefaultSystemPromptIdentitySource {
         // — and so existing installs get them, not just freshly seeded ones.
         let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
         append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
-        if self.protocols.memory {
-            append_section(&mut content, MEMORY_PROTOCOL_PROMPT);
+        if let Some(guidance) = self.protocols.memory_guidance.as_deref() {
+            append_section(&mut content, guidance);
         }
         if self.protocols.disclosure {
             append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
@@ -392,6 +396,20 @@ mod tests {
             ))
     }
 
+    /// Guidance a bound memory provider ships. Composition appends the
+    /// provider's text verbatim and owns none of it, so the tests use their own
+    /// fixture rather than any real provider's asset — if this were pinned to
+    /// memory-native's file, the test would be asserting that one provider's
+    /// wording instead of the composition rule.
+    const PROVIDER_GUIDANCE: &str = "## Persistent Memory\n\nprovider-shipped memory guidance.";
+
+    fn protocols_with_memory_guidance() -> SystemPromptProtocols {
+        SystemPromptProtocols {
+            memory_guidance: Some(PROVIDER_GUIDANCE.to_string()),
+            ..SystemPromptProtocols::default()
+        }
+    }
+
     #[tokio::test]
     async fn default_system_prompt_loads_and_resolves_as_identity_message() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -401,10 +419,7 @@ mod tests {
         let source = DefaultSystemPromptIdentitySource::try_new(
             storage_root,
             prompt_path.clone(),
-            SystemPromptProtocols {
-                memory: true,
-                ..SystemPromptProtocols::default()
-            },
+            protocols_with_memory_guidance(),
         )
         .expect("prompt loads");
         let context = test_run_context().await;
@@ -626,10 +641,7 @@ mod tests {
         let bound = DefaultSystemPromptIdentitySource::try_new(
             storage_root,
             prompt_path,
-            SystemPromptProtocols {
-                memory: true,
-                ..SystemPromptProtocols::default()
-            },
+            protocols_with_memory_guidance(),
         )
         .expect("bound source loads");
         let context = test_run_context().await;
@@ -735,10 +747,7 @@ mod tests {
         let source = DefaultSystemPromptIdentitySource::try_new(
             storage_root.clone(),
             prompt_path.clone(),
-            SystemPromptProtocols {
-                memory: true,
-                ..SystemPromptProtocols::default()
-            },
+            protocols_with_memory_guidance(),
         )
         .expect("prompt loads");
         let context = test_run_context().await;

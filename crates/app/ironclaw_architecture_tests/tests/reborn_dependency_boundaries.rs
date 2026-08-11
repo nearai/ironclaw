@@ -644,7 +644,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // read from this test's failure message. 7_885 -> 7_892 after merging
         // #7076's Basic credential target declaration and validator vocabulary;
         // composition and injection remain in ironclaw_host_runtime.
-        ("ironclaw_extension_contracts", 7_892),
+        // 7_892 -> 7_947 (2026-08-11, #7185 provider-shipped memory guidance):
+        // the optional `[memory].guidance_doc` field on `MemoryDescriptor`, its
+        // doc comment, and two parse tests. Manifest declaration vocabulary
+        // only — the guidance TEXT ships with the memory-native package, the
+        // ref is resolved through that package's public API in
+        // ironclaw_host_runtime, and prompt assembly stays in composition. This
+        // crate gains a field name and no behavior. Count read from this test's
+        // own failure message.
+        ("ironclaw_extension_contracts", 7_947),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

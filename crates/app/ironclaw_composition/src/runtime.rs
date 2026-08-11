@@ -3662,11 +3662,21 @@ pub(crate) async fn build_runtime_with_resource_governor(
         resolved_memory_provider,
         &memory_lifecycle,
     );
-    // Whether this runtime has a bound memory provider at all. The context
-    // adapter exists exactly when a provider was resolved (it self-gates its
-    // individual lanes), so this is the honest "does the model have memory"
-    // answer, and it gates the persistent-memory system-prompt protocol below.
-    let memory_protocol_active = wired_memory_context_service.is_some();
+    // The bound provider's own memory guidance for the model, if it ships any
+    // (#7185). The text is the provider's — it names that provider's tools and
+    // describes that provider's recall behavior — so composition only asks the
+    // bound descriptor for it and appends what comes back. Two conditions, both
+    // necessary: a provider must actually be resolved (a `Disabled` binding
+    // registers no package, so the model sees no `ironclaw.memory.*` tools and
+    // must not be told they exist), and that provider must declare a
+    // `guidance_doc`. Either missing ⇒ nothing is appended.
+    let memory_guidance = wired_memory_context_service
+        .is_some()
+        .then(|| {
+            ironclaw_host_runtime::memory_native_extension::memory_guidance_text(&memory_lifecycle)
+        })
+        .flatten()
+        .map(str::to_string);
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -3824,13 +3834,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
                             // the disclosure protocol to every enabled mode.
                             disclosure: resolved_tool_disclosure.is_enabled(),
                             benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
-                            // A `Disabled` memory binding resolves to no
-                            // provider and registers no package, so the model
-                            // sees no `ironclaw.memory.*` tools. Carry that
-                            // resolved availability into prompt assembly rather
-                            // than claiming a surface the deployment does not
-                            // have.
-                            memory: memory_protocol_active,
+                            // Provider-shipped, not host-owned: whatever the
+                            // bound memory extension declares as its guidance,
+                            // or nothing.
+                            memory_guidance,
                         },
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {

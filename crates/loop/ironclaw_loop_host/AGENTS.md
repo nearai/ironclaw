@@ -53,12 +53,11 @@ Working rules for the host-port adapter crate. Orientation lives in
   — so this module may reach only `host_api`, `loop_contracts`, `filesystem`,
   `skills`, `turns`, and this crate, even though `loop_host` itself may reach
   far more.
-- `system_prompt_assets.rs` + `prompts/{default_system,tool_disclosure_protocol,self_knowledge,memory_protocol,benchmarking_mode,scheduled_trigger_mode}.md`
+- `system_prompt_assets.rs` + `prompts/{default_system,tool_disclosure_protocol,self_knowledge,benchmarking_mode,scheduled_trigger_mode}.md`
   — the system-prompt *content*: `DEFAULT_SYSTEM_PROMPT` (seed text written
-  once into the user-editable `SYSTEM.md`) and the five protocols appended in
+  once into the user-editable `SYSTEM.md`) and the four protocols appended in
   memory at resolve time (`SELF_KNOWLEDGE_PROTOCOL_PROMPT` unconditional,
   `TOOL_DISCLOSURE_PROTOCOL_PROMPT` bridged mode only,
-  `MEMORY_PROTOCOL_PROMPT` bound memory provider only,
   `BENCHMARKING_MODE_PROTOCOL_PROMPT` process-wide benchmarking only, and
   `SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT` trusted scheduled-trigger origin
   only). The text lives in `prompts/*.md`, never inline in Rust. Evicted from

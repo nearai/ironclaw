@@ -171,7 +171,7 @@ pub use synthetic_capability::{
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use system_prompt_assets::{
-    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, MEMORY_PROTOCOL_PROMPT,
+    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT,
     SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
     TOOL_DISCLOSURE_PROTOCOL_PROMPT,
 };

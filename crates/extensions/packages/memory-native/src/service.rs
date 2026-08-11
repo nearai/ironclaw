@@ -37,7 +37,25 @@ use serde_json::{Map, Value, json};
 // `ironclaw_memory`; consumers import them from there. The imports above are
 // private to this module — #6943 deleted the re-export shim that used to
 // republish them under `ironclaw_memory_native::` — and this module exports
-// only `NativeMemoryService`, the native adapter implemented below.
+// only `NativeMemoryService`, the native adapter implemented below, plus this
+// package's own memory-guidance asset.
+
+/// The `[memory].guidance_doc` ref this package's manifest declares, paired
+/// with the text it names.
+///
+/// Exported rather than reached into: the host resolves a bound provider's
+/// declared guidance ref through the owning package's public API, so no host
+/// crate compiles this package's asset tree into its own
+/// (`reborn_cross_crate_include_scan` §11.2.7 is shrink-only). Keeping the ref
+/// and the text together here is also what makes the manifest and the asset
+/// impossible to drift apart — a rename that touches one and not the other
+/// fails `native_bundle_declares_guidance_that_resolves_to_the_bundled_asset`.
+pub const MEMORY_GUIDANCE_DOC_REF: &str = "prompts/memory-guidance.md";
+
+/// Model-facing memory guidance this provider ships: when a durable fact is
+/// worth saving, how to phrase it, and what never to save. Appended to the
+/// system prompt by composition while this provider is the bound one (#7185).
+pub const MEMORY_GUIDANCE: &str = include_str!("../prompts/memory-guidance.md");
 
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
