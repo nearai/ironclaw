@@ -64,7 +64,9 @@ Tier-selection rule: `.claude/rules/testing.md`.
 
 Totals: **51** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**869** test functions).
+**102** Python scenario files (**869** test functions) registered in the active
+Reborn coverage map below. Section 6 separately inventories retained and legacy
+Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
@@ -187,7 +189,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
-| With a large tool catalog, bridged mode and the production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools | `tool_disclosure.rs` |
+| With a large tool catalog, progressive-disclosure modes and the `namespaces` production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools; a complete search signature invokes directly, while incomplete or explicitly inspected results fall back through `tool_describe` | `tool_disclosure.rs` |
 | Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
 | Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
