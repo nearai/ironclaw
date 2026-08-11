@@ -429,6 +429,7 @@ mod tests {
             (RunNotificationEventKind::ProgressUpdate, "progress"),
             (RunNotificationEventKind::RunBlocked, "blocked"),
             (RunNotificationEventKind::DeliveryStatus, "delivery-status"),
+            (RunNotificationEventKind::ModelDelivery, "model-delivery"),
         ] {
             assert_eq!(
                 run_notification_projection_id(run_id, kind, None)
