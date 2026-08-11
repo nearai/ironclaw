@@ -3377,6 +3377,65 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn parallel_batch_stops_launching_new_calls_after_cancelled_resolution() {
+    let mut outcomes = vec![resolution::failed(
+        FailureKind::Cancelled,
+        "cancelled by capability".to_string(),
+        diagnostic_failure_detail("cancelled by capability"),
+    )];
+    outcomes.extend((1..6).map(|index| {
+        resolution::completed(
+            LoopResultRef::new(format!("result:parallel-cancel-window-{index}")).expect("valid"),
+            format!("completed {index}"),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
+    }));
+
+    let host = MockHost::new(vec![calls_response_with_count(6)])
+        .with_single_outcomes(outcomes)
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(5),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let run_host = host.clone();
+    let executor = tokio::spawn(async move {
+        CanonicalAgentLoopExecutor
+            .execute_family(
+                &support::family_with_parallel_batch_execution(),
+                &run_host,
+                state,
+            )
+            .await
+    });
+
+    while host.single_invocations().len() < 4 && !executor.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_millis(5)).await;
+    tokio::time::advance(std::time::Duration::from_millis(75)).await;
+
+    let exit = executor
+        .await
+        .expect("executor task must not panic")
+        .expect("execute");
+    assert!(matches!(exit, LoopExit::Cancelled(_)));
+    assert_eq!(
+        host.single_invocations().len(),
+        4,
+        "a typed cancelled result must close the launch window before replacement calls start"
+    );
+}
+
 #[tokio::test]
 async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_gate() {
     // Independent gate-raising outcomes in the same bounded-parallel window —
@@ -3606,7 +3665,7 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         "the single approval resume slot must belong to the first input-order gate"
     );
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn parallel_batch_reports_first_input_order_terminal_error() {
     let host = MockHost::new(vec![two_calls_response()])
         .with_single_results(vec![
@@ -3645,6 +3704,194 @@ async fn parallel_batch_reports_first_input_order_terminal_error() {
             } if safe_summary.as_str() == "first input call failed"
         ),
         "terminal error selection must follow input order, not completion order: {error:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn parallel_batch_persists_completed_sibling_before_terminal_port_error() {
+    let completed_ref =
+        LoopResultRef::new("result:parallel-terminal-sibling-completed").expect("valid");
+    let host = MockHost::new(vec![provider_two_calls_response()])
+        .with_single_results(vec![
+            Ok(resolution::completed(
+                completed_ref.clone(),
+                "completed before sibling host error".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            )),
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "second input call failed terminally",
+            )),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(75),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("terminal capability failure must end the run");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics { .. }
+            | AgentLoopExecutorError::HostUnavailable { .. }
+    ));
+    assert_eq!(
+        host.appended_result_refs()
+            .into_iter()
+            .map(|request| request.result_ref)
+            .collect::<Vec<_>>(),
+        vec![completed_ref.clone()],
+        "a launched successful sibling must be durable before the terminal error returns"
+    );
+    assert_eq!(
+        final_staged_state(&host).result_refs,
+        vec![completed_ref],
+        "the terminal path checkpoint must retain the launched sibling result"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn parallel_batch_selects_earlier_cancelled_resolution_over_terminal_port_error() {
+    let host = MockHost::new(vec![provider_two_calls_response()])
+        .with_single_results(vec![
+            Ok(resolution::failed(
+                FailureKind::Cancelled,
+                "cancelled by capability".to_string(),
+                diagnostic_failure_detail("cancelled by capability"),
+            )),
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "later input call failed terminally",
+            )),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(5),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect("the earlier typed cancellation must control the run exit");
+
+    assert!(
+        matches!(exit, LoopExit::Cancelled(_)),
+        "terminal selection must use input order rather than completion order or error class"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn parallel_batch_selects_earlier_terminal_port_error_over_cancelled_resolution() {
+    let host = MockHost::new(vec![provider_two_calls_response()])
+        .with_single_results(vec![
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "earlier input call failed terminally",
+            )),
+            Ok(resolution::failed(
+                FailureKind::Cancelled,
+                "cancelled by capability".to_string(),
+                diagnostic_failure_detail("cancelled by capability"),
+            )),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(5),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("the earlier terminal host error must control the run exit");
+
+    assert!(
+        matches!(
+            error,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics { .. }
+                | AgentLoopExecutorError::HostUnavailable { .. }
+        ),
+        "terminal selection must use input order rather than completion order or error class"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn parallel_batch_persists_recoverable_sibling_before_terminal_port_error() {
+    let expected_error_ref =
+        LoopResultRef::new("result:provider-error-turn_1-call_1").expect("valid");
+    let host = MockHost::new(vec![provider_two_calls_response()])
+        .with_single_results(vec![
+            Ok(resolution::failed(
+                FailureKind::Network,
+                "first invocation hit a network failure".to_string(),
+                diagnostic_failure_detail("first invocation hit a network failure"),
+            )),
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "second input call failed terminally",
+            )),
+        ])
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(75),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("the terminal host failure must end the run");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics { .. }
+            | AgentLoopExecutorError::HostUnavailable { .. }
+    ));
+    assert_eq!(
+        host.single_invocations().len(),
+        2,
+        "terminal drain must persist retry-fated siblings without dispatching replacement calls"
+    );
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].result_ref, expected_error_ref);
+    assert_eq!(
+        appended[0]
+            .model_observation
+            .as_ref()
+            .expect("recoverable failure must remain model-visible")
+            .status,
+        ToolObservationStatus::Error
+    );
+    assert_eq!(
+        final_staged_state(&host).result_refs,
+        vec![expected_error_ref],
+        "the terminal checkpoint must retain recoverable sibling bookkeeping"
     );
 }
 

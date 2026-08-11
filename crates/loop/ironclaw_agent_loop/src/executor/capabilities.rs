@@ -127,13 +127,86 @@ fn rebuild_terminal_exit_against_checkpoint(
     }
 }
 
+enum InvokedCapabilityOutcome {
+    Resolution(Resolution),
+    TerminalError(ironclaw_loop_contracts::AgentLoopHostError),
+}
+
+struct InvokedCapabilityBatch {
+    outcomes: Vec<InvokedCapabilityOutcome>,
+    stopped_on_suspension: bool,
+}
+
+enum SelectedParallelTerminal {
+    Loop(LoopExit),
+    Host(ironclaw_loop_contracts::AgentLoopHostError),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapabilityRetryMode {
+    Allow,
+    Suppress,
+}
+
+struct CapabilityErrorHandling {
+    summary: CapabilityErrorSummary,
+    model_observation: Option<ModelVisibleToolObservation>,
+    retry_mode: CapabilityRetryMode,
+}
+async fn finish_selected_parallel_terminal(
+    ctx: StageContext<'_>,
+    state: LoopExecutionState,
+    terminal: SelectedParallelTerminal,
+) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+    let checked = CheckpointStage
+        .write(ctx, state, CheckpointKind::Final)
+        .await?;
+    match terminal {
+        SelectedParallelTerminal::Loop(exit) => {
+            let exit = rebuild_terminal_exit_against_checkpoint(
+                ctx,
+                exit,
+                checked.state,
+                checked.checkpoint_id,
+            )?;
+            Ok(TurnCompletedStep::Exit(exit))
+        }
+        SelectedParallelTerminal::Host(error) => Err(capability_host_error(error)),
+    }
+}
+
+impl InvokedCapabilityBatch {
+    fn from_resolution_batch(batch: ResolutionBatch) -> Self {
+        Self {
+            outcomes: batch
+                .resolutions
+                .into_iter()
+                .map(InvokedCapabilityOutcome::Resolution)
+                .collect(),
+            stopped_on_suspension: batch.stopped_on_suspension,
+        }
+    }
+}
+fn resolution_stops_parallel_launch(resolution: &Resolution) -> bool {
+    resolution.parks()
+        || matches!(
+            resolution,
+            Resolution::Done(outcome)
+                if matches!(
+                    &outcome.verdict,
+                    ToolVerdict::RecoverableFailure { error_kind, .. }
+                        if *error_kind == FailureKind::Cancelled
+                )
+        )
+}
+
 impl CapabilityStage {
     async fn invoke_batch(
         &self,
         ctx: StageContext<'_>,
         policy: BatchPolicy,
         invocations: Vec<LoopRequest>,
-    ) -> Result<ResolutionBatch, ironclaw_loop_contracts::AgentLoopHostError> {
+    ) -> Result<InvokedCapabilityBatch, ironclaw_loop_contracts::AgentLoopHostError> {
         if ctx.planner.batch().execution_mode() != CapabilityBatchExecutionMode::BoundedParallel
             || policy != BatchPolicy::Parallel
         {
@@ -143,7 +216,8 @@ impl CapabilityStage {
                     invocations,
                     stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential),
                 })
-                .await;
+                .await
+                .map(InvokedCapabilityBatch::from_resolution_batch);
         }
 
         let invocation_count = invocations.len();
@@ -166,18 +240,18 @@ impl CapabilityStage {
             .collect::<Vec<
                 Option<Result<Resolution, ironclaw_loop_contracts::AgentLoopHostError>>,
             >>();
-        let mut parked = false;
+        let mut stop_launching = false;
         let mut terminal_error_seen = false;
         while let Some((index, result)) = pending.next().await {
             match &result {
-                Ok(resolution) => parked |= resolution.parks(),
+                Ok(resolution) => stop_launching |= resolution_stops_parallel_launch(resolution),
                 Err(error) => {
                     terminal_error_seen |= capability_port_error_is_terminal(error.kind);
                 }
             }
             outcomes[index] = Some(result);
 
-            if !parked
+            if !stop_launching
                 && !terminal_error_seen
                 && let Some(indexed_invocation) = indexed_invocations.next()
             {
@@ -186,26 +260,29 @@ impl CapabilityStage {
             }
         }
 
-        let mut resolutions = Vec::with_capacity(launched);
-        let mut terminal_error = None;
-        for outcome in outcomes.into_iter().flatten() {
-            match outcome {
-                Ok(resolution) => resolutions.push(resolution),
-                Err(error) if capability_port_error_is_terminal(error.kind) => {
-                    if terminal_error.is_none() {
-                        terminal_error = Some(error);
-                    }
+        let mut normalized = Vec::with_capacity(launched);
+        for outcome in outcomes.into_iter().take(launched) {
+            let outcome = match outcome {
+                Some(Ok(resolution)) => InvokedCapabilityOutcome::Resolution(resolution),
+                Some(Err(error)) if capability_port_error_is_terminal(error.kind) => {
+                    InvokedCapabilityOutcome::TerminalError(error)
                 }
-                Err(error) => resolutions.push(recoverable_port_error_resolution(error)),
-            }
-        }
-        if let Some(error) = terminal_error {
-            return Err(error);
+                Some(Err(error)) => {
+                    InvokedCapabilityOutcome::Resolution(recoverable_port_error_resolution(error))
+                }
+                None => {
+                    return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                        "parallel capability invocation completed without an indexed outcome",
+                    ));
+                }
+            };
+            normalized.push(outcome);
         }
 
-        Ok(ResolutionBatch {
-            resolutions,
-            stopped_on_suspension: parked && launched < invocation_count,
+        Ok(InvokedCapabilityBatch {
+            outcomes: normalized,
+            stopped_on_suspension: stop_launching && launched < invocation_count,
         })
     }
 }
@@ -285,8 +362,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 ctx,
                 state,
                 call,
-                summary,
-                None,
+                CapabilityErrorHandling {
+                    summary,
+                    model_observation: None,
+                    retry_mode: CapabilityRetryMode::Allow,
+                },
                 &mut capability_batch,
             ))
             .await?
@@ -455,8 +535,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx,
                         state,
                         call,
-                        summary,
-                        None,
+                        CapabilityErrorHandling {
+                            summary,
+                            model_observation: None,
+                            retry_mode: CapabilityRetryMode::Allow,
+                        },
                         &mut capability_batch,
                     ))
                     .await?
@@ -493,8 +576,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx,
                         state,
                         call,
-                        summary.clone(),
-                        Some(observation.clone()),
+                        CapabilityErrorHandling {
+                            summary: summary.clone(),
+                            model_observation: Some(observation.clone()),
+                            retry_mode: CapabilityRetryMode::Allow,
+                        },
                         &mut capability_batch,
                     ))
                     .await?
@@ -510,6 +596,195 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .await;
             }
             Err(error) => return Err(capability_host_error(error)),
+        };
+
+        if batch
+            .outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, InvokedCapabilityOutcome::TerminalError(_)))
+        {
+            let (result_count, denied_count, gated_count, mut failed_count) =
+                capability_batch_counts(batch.outcomes.iter().filter_map(
+                    |outcome| match outcome {
+                        InvokedCapabilityOutcome::Resolution(resolution) => Some(resolution),
+                        InvokedCapabilityOutcome::TerminalError(_) => None,
+                    },
+                ));
+            failed_count += batch
+                .outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, InvokedCapabilityOutcome::TerminalError(_)))
+                .count() as u32;
+            CheckpointStage
+                .emit_progress(
+                    ctx,
+                    LoopProgressEvent::CapabilityBatchCompleted {
+                        iteration: state.iteration,
+                        result_count,
+                        denied_count,
+                        gated_count,
+                        failed_count,
+                    },
+                )
+                .await;
+
+            let mut pending_outcomes = Vec::new();
+            for (index, (call, outcome)) in
+                visible_calls.into_iter().zip(batch.outcomes).enumerate()
+            {
+                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                match outcome {
+                    InvokedCapabilityOutcome::Resolution(Resolution::Done(outcome))
+                        if outcome.verdict.is_success() =>
+                    {
+                        clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
+                        let result = capability_result_from_outcome(&outcome)?;
+                        append_completed_capability_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            result,
+                            &mut capability_batch,
+                        )
+                        .await?;
+                    }
+                    InvokedCapabilityOutcome::Resolution(Resolution::Done(outcome))
+                        if matches!(outcome.verdict, ToolVerdict::ChildSpawned { .. }) =>
+                    {
+                        clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
+                        let input = child_result_from_outcome(&outcome)?;
+                        append_spawned_child_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            input,
+                            &mut capability_batch,
+                        )
+                        .await?;
+                    }
+                    other => pending_outcomes.push((index, call, other)),
+                }
+            }
+
+            let mut first_gate = None;
+            let mut sibling_outcomes = Vec::with_capacity(pending_outcomes.len());
+            for item in pending_outcomes {
+                let is_gate = matches!(
+                    &item.2,
+                    InvokedCapabilityOutcome::Resolution(resolution)
+                        if gate_outcome_writes_before_block(resolution)
+                );
+                if first_gate.is_none() && is_gate {
+                    first_gate = Some(item);
+                } else {
+                    sibling_outcomes.push(item);
+                }
+            }
+
+            let mut selected: Option<(usize, SelectedParallelTerminal)> = None;
+            for (index, call, outcome) in sibling_outcomes {
+                match outcome {
+                    InvokedCapabilityOutcome::TerminalError(error) => {
+                        if selected
+                            .as_ref()
+                            .is_none_or(|(selected_index, _)| index < *selected_index)
+                        {
+                            selected = Some((index, SelectedParallelTerminal::Host(error)));
+                        }
+                    }
+                    InvokedCapabilityOutcome::Resolution(resolution)
+                        if gate_outcome_writes_before_block(&resolution) =>
+                    {
+                        persist_later_gate_outcome(ctx, &mut state, call, resolution).await?;
+                    }
+                    InvokedCapabilityOutcome::Resolution(resolution) => {
+                        let snapshot = state.clone();
+                        match self
+                            .handle_capability_outcome(
+                                ctx,
+                                snapshot,
+                                call,
+                                resolution,
+                                &mut capability_batch,
+                                CapabilityRetryMode::Suppress,
+                            )
+                            .await?
+                        {
+                            OutcomeStep::Continue(next) => state = *next,
+                            OutcomeStep::Exit {
+                                exit,
+                                state: mutated,
+                            } => {
+                                let Some(mutated) = mutated else {
+                                    return Ok(TurnCompletedStep::Exit(exit));
+                                };
+                                state = *mutated;
+                                if selected
+                                    .as_ref()
+                                    .is_none_or(|(selected_index, _)| index < *selected_index)
+                                {
+                                    selected = Some((index, SelectedParallelTerminal::Loop(exit)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((
+                gate_index,
+                first_call,
+                InvokedCapabilityOutcome::Resolution(first_gate_outcome),
+            )) = first_gate
+            {
+                if selected
+                    .as_ref()
+                    .is_some_and(|(selected_index, _)| *selected_index < gate_index)
+                {
+                    persist_later_gate_outcome(ctx, &mut state, first_call, first_gate_outcome)
+                        .await?;
+                } else {
+                    match self
+                        .handle_capability_outcome(
+                            ctx,
+                            state,
+                            first_call,
+                            first_gate_outcome,
+                            &mut capability_batch,
+                            CapabilityRetryMode::Suppress,
+                        )
+                        .await?
+                    {
+                        OutcomeStep::Continue(next) => state = *next,
+                        OutcomeStep::Exit { exit, .. } => {
+                            return Ok(TurnCompletedStep::Exit(exit));
+                        }
+                    }
+                }
+            }
+
+            let Some((_, terminal)) = selected else {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "terminal capability error batch had no selected terminal outcome",
+                });
+            };
+            return finish_selected_parallel_terminal(ctx, state, terminal).await;
+        }
+
+        let batch = ResolutionBatch {
+            resolutions: batch
+                .outcomes
+                .into_iter()
+                .filter_map(|outcome| match outcome {
+                    InvokedCapabilityOutcome::Resolution(resolution) => Some(resolution),
+                    InvokedCapabilityOutcome::TerminalError(_) => None,
+                })
+                .collect(),
+            stopped_on_suspension: batch.stopped_on_suspension,
         };
 
         if batch.resolutions.is_empty()
@@ -666,6 +941,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                                 call,
                                 outcome,
                                 &mut capability_batch,
+                                CapabilityRetryMode::Allow,
                             )
                             .await?
                         {
@@ -695,6 +971,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                                     call,
                                     outcome,
                                     &mut capability_batch,
+                                    CapabilityRetryMode::Allow,
                                 )
                                 .await?
                             {
@@ -773,6 +1050,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             first_call,
                             first_outcome,
                             &mut capability_batch,
+                            CapabilityRetryMode::Allow,
                         )
                         .await?
                     {
@@ -974,6 +1252,7 @@ impl CapabilityStage {
         call: CapabilityCallCandidate,
         resolution: Resolution,
         capability_batch: &mut CapabilityBatchTurnSummary,
+        retry_mode: CapabilityRetryMode,
     ) -> Result<OutcomeStep, AgentLoopExecutorError> {
         // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` re-splits on
         // its typed `ToolVerdict`; every gate/suspension arm reconstructs the loop
@@ -1037,8 +1316,11 @@ impl CapabilityStage {
                         ctx,
                         state,
                         call,
-                        summary,
-                        model_observation,
+                        CapabilityErrorHandling {
+                            summary,
+                            model_observation,
+                            retry_mode,
+                        },
                         capability_batch,
                     ))
                     .await
@@ -1088,8 +1370,11 @@ impl CapabilityStage {
                     ctx,
                     state,
                     call,
-                    summary,
-                    Some(observation),
+                    CapabilityErrorHandling {
+                        summary,
+                        model_observation: Some(observation),
+                        retry_mode,
+                    },
                     capability_batch,
                 ))
                 .await
@@ -1222,10 +1507,14 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
-        mut summary: CapabilityErrorSummary,
-        mut model_observation: Option<ironclaw_loop_contracts::ModelVisibleToolObservation>,
+        handling: CapabilityErrorHandling,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<OutcomeStep, AgentLoopExecutorError> {
+        let CapabilityErrorHandling {
+            mut summary,
+            mut model_observation,
+            retry_mode,
+        } = handling;
         // Snapshot resume-origin flags for this call BEFORE clearing the pending
         // slots.
         //
@@ -1279,7 +1568,9 @@ impl CapabilityStage {
                 .on_capability_error(&state, &summary, model_observation.as_ref())
                 .await;
             let outcome = match outcome {
-                RecoveryOutcome::Retry { recovery, .. } if is_resume_origin => {
+                RecoveryOutcome::Retry { recovery, .. }
+                    if is_resume_origin || retry_mode == CapabilityRetryMode::Suppress =>
+                {
                     RecoveryOutcome::ToolErrorResult { recovery }
                 }
                 other => other,
@@ -1479,6 +1770,7 @@ impl CapabilityStage {
                                 call,
                                 promoted,
                                 capability_batch,
+                                retry_mode,
                             ))
                             .await;
                         }
@@ -1662,8 +1954,11 @@ impl CapabilityStage {
                 ctx,
                 state,
                 call,
-                summary,
-                model_observation,
+                CapabilityErrorHandling {
+                    summary,
+                    model_observation,
+                    retry_mode: CapabilityRetryMode::Allow,
+                },
                 capability_batch,
             ))
             .await?
