@@ -2490,8 +2490,8 @@ review_after = "2026-10-31"
 # PR #7001 stable prompt prefix (#6985).
 
 [[exemption]]
-path = "crates/ironclaw_loop_contracts/src/instruction_bundle.rs"
-lines = [394, 408]
+path = "crates/contracts/ironclaw_loop_contracts/src/instruction_bundle.rs"
+lines = [438, 452]
 owner = "@nearai/reborn"
 reason = "Closing `)?;` lines of the relocated push_runtime_context/push_inline_message calls (#6985 moved the calls after the thread section). LLVM maps only the `?` early-return error region to these physical lines; the success paths execute in every integration turn (runtime context) and in reborn_integration_prompt_prefix_stability (inline nudges), while the error arms guard host-validated inputs and are not reachable through the integration tier."
 issue = "https://github.com/nearai/ironclaw/issues/6985"
