@@ -121,7 +121,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
             if state.compaction_state.force_compact_initiator
                 == Some(CompactionInitiator::WindowEviction)
             {
-                return eligible_window_eviction_boundary(state, prompt_fingerprint)
+                return eligible_window_eviction_boundary(state, prompt_fingerprint, None)
                     .map(|sequence| self.trigger_at(state, sequence))
                     .unwrap_or(CompactionDecision::Skip);
             }
@@ -145,6 +145,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
 pub(super) fn eligible_window_eviction_boundary(
     state: &LoopExecutionState,
     prompt_fingerprint: u64,
+    before_sequence: Option<u64>,
 ) -> Option<u64> {
     let watermark = state.compaction_state.window_eviction.as_ref()?;
     let eligible_kind = matches!(
@@ -168,13 +169,15 @@ pub(super) fn eligible_window_eviction_boundary(
             matches!(
                 entry.kind,
                 IndexedMessageKind::User | IndexedMessageKind::ToolResult
-            ) && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+            ) && before_sequence.is_none_or(|before| entry.sequence < before)
+                && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
         })
         .map(|entry| entry.sequence)
         .or_else(|| {
             (Some(watermark.omitted_through_sequence)
                 > state.compaction_state.last_compacted_through_seq)
                 .then_some(watermark.omitted_through_sequence)
+                .filter(|sequence| before_sequence.is_none_or(|before| *sequence < before))
         })
 }
 
