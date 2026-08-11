@@ -268,6 +268,7 @@ INTEGRATION_SUPPORT_OWNERS = {
     "tests/support/hosted_mcp_registration_server.rs": (
         "tests/integration/hosted_mcp_registration.rs"
     ),
+    "tests/support/trace_llm.rs": "tests/integration/prompt_prefix_stability.rs",
 }
 INTEGRATION_SNAPSHOT_PREFIX_OWNERS = {
     "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
