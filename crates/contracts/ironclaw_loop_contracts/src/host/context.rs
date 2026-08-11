@@ -32,8 +32,15 @@ pub struct LoopContextBundle {
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
     pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
+    pub recent_window_truncation: Option<LoopContextWindowTruncation>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopContextWindowTruncation {
+    pub omitted_through_sequence: u64,
+    pub omitted_through_kind: LoopContextCompactionKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

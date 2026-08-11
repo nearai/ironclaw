@@ -206,10 +206,10 @@ use ironclaw_loop_contracts::{
     CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
     LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
     LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-    LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-    LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch,
-    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+    LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind, LoopHostMilestoneEmitter,
+    LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
+    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
+    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
     MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
@@ -493,15 +493,14 @@ where
         let mode = request.mode;
         let context_window = async {
             let started_at = ironclaw_observability::live_latency_started_at();
-            let context = self
-                .thread_service
-                .load_context_window(LoadContextWindowRequest {
-                    scope: self.thread_scope.clone(),
-                    thread_id: self.run_context.thread_id.clone(),
-                    max_messages,
-                })
-                .await
-                .map_err(context_read_error)?;
+            let context = load_task_pinned_context_window(
+                self.thread_service.as_ref(),
+                &self.thread_scope,
+                &self.run_context,
+                max_messages,
+            )
+            .await
+            .map_err(context_read_error)?;
             trace_loop_host_latency_ok(
                 "context_load_window",
                 &self.run_context,
@@ -605,10 +604,20 @@ where
             .iter()
             .filter_map(context_message_to_compaction_metadata)
             .collect();
+        let recent_window_truncation =
+            context
+                .recent_window_truncation
+                .map(|truncation| LoopContextWindowTruncation {
+                    omitted_through_sequence: truncation.omitted_through_sequence,
+                    omitted_through_kind: compaction_kind_for_message(
+                        truncation.omitted_through_kind,
+                    ),
+                });
         let messages = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
-        );
+            accepted_task_message_id(&self.run_context),
+        )?;
         trace_loop_host_latency_ok(
             "context_select_messages",
             &self.run_context,
@@ -624,6 +633,7 @@ where
                 .filter_map(context_message_to_loop_message)
                 .collect(),
             compaction_message_index,
+            recent_window_truncation,
             instruction_snippets,
             memory_snippets,
         })
@@ -1764,7 +1774,8 @@ where
             let context_messages = prompt_context_budget::select_prompt_context_messages(
                 context.messages,
                 self.prompt_context_budget,
-            );
+                accepted_task_message_id(&self.run_context),
+            )?;
             let mut messages = Vec::with_capacity(context_messages.len());
             for (message, _) in context_messages {
                 let Some(content_ref) = message_ref_from_context(&message) else {
@@ -1980,15 +1991,14 @@ where
         );
 
         let started_at = ironclaw_observability::live_latency_started_at();
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                max_messages: self.max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
+        let context = load_task_pinned_context_window(
+            self.thread_service.as_ref(),
+            &self.thread_scope,
+            &self.run_context,
+            self.max_messages,
+        )
+        .await
+        .map_err(context_read_error)?;
         trace_loop_host_latency_ok(
             "model_context_load_window",
             &self.run_context,
@@ -2820,6 +2830,71 @@ fn bounded_limit(requested: usize, configured: usize) -> usize {
     } else {
         requested.min(configured)
     }
+}
+
+fn accepted_task_message_id(run_context: &LoopRunContext) -> Option<ThreadMessageId> {
+    let message_ref = run_context.accepted_message_ref.as_ref()?.as_str();
+    let raw_message_id = message_ref.strip_prefix("msg:")?;
+    ThreadMessageId::parse(raw_message_id).ok()
+}
+
+async fn load_task_pinned_context_window<S>(
+    thread_service: &S,
+    thread_scope: &ThreadScope,
+    run_context: &LoopRunContext,
+    max_messages: usize,
+) -> Result<ironclaw_threads::ContextWindow, SessionThreadError>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    let mut context = thread_service
+        .load_context_window(LoadContextWindowRequest {
+            scope: thread_scope.clone(),
+            thread_id: run_context.thread_id.clone(),
+            max_messages,
+        })
+        .await?;
+    let Some(message_id) = accepted_task_message_id(run_context) else {
+        return Ok(context);
+    };
+    if max_messages == 0
+        || context.messages.iter().any(|message| {
+            message.message_id == Some(message_id) && message.kind == MessageKind::User
+        })
+    {
+        return Ok(context);
+    }
+    let mut pinned = thread_service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope: thread_scope.clone(),
+            thread_id: run_context.thread_id.clone(),
+            message_ids: vec![message_id],
+        })
+        .await?
+        .messages
+        .into_iter()
+        .find(|message| {
+            message.message_id == Some(message_id) && message.kind == MessageKind::User
+        });
+    let Some(pinned) = pinned.take() else {
+        return Ok(context);
+    };
+    if context.messages.len() >= max_messages {
+        let displaced = context.messages.remove(0);
+        if context
+            .recent_window_truncation
+            .as_ref()
+            .is_none_or(|current| current.omitted_through_sequence < displaced.sequence)
+        {
+            context.recent_window_truncation = Some(ironclaw_threads::ContextWindowTruncation {
+                omitted_through_sequence: displaced.sequence,
+                omitted_through_kind: displaced.kind,
+            });
+        }
+    }
+    context.messages.push(pinned);
+    context.messages.sort_by_key(|message| message.sequence);
+    Ok(context)
 }
 
 fn validate_context_cursor(

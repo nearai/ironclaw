@@ -542,6 +542,25 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that the final interactive model request still carries `needle`.
+    /// This avoids a vacuous pass from an earlier request when testing context
+    /// retained across a long-running turn.
+    pub async fn assert_last_model_message_content_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let last = requests.last().ok_or("no model requests were captured")?;
+        if last.iter().any(|message| message.content.contains(needle)) {
+            return Ok(());
+        }
+        Err(format!(
+            "final model request did not contain {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
     /// Assert that one model-visible message contains every `needle` in the
     /// supplied order. Other content may appear between needles.
     pub async fn assert_model_message_content_in_order(
@@ -1938,6 +1957,21 @@ impl RebornIntegrationHarness {
     pub async fn assert_conversation_history_contains(&self, needle: &str) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, None, needle)
             .await
+    }
+
+    pub async fn assert_conversation_history_message_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        if history.len() >= minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "persisted conversation history contained {} message(s), expected at least {minimum}",
+            history.len()
+        )
+        .into())
     }
 
     /// Assert NO persisted thread-history message's `content` contains

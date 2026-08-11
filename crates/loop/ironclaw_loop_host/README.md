@@ -69,6 +69,9 @@ and the loop tier's system-prompt content assets.
   (`--test reborn_composition_boundaries composition_root_embeds_no_prompt_content`).
 - No decorator performs a turn-lifecycle state transition, and nothing here
   bypasses `CapabilityHost` or dispatcher authority paths.
+- Message-backed runs retain their exact accepted user task across both
+  message-count and token-budget selection. If that task alone exceeds the
+  prompt budget, prompt construction fails instead of silently dropping it.
 
 ## Tests
 

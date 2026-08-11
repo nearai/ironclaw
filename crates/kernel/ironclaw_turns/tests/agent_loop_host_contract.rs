@@ -488,6 +488,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 compaction: None,
             }],
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![
                 LoopContextSnippet {
                     snippet_ref: "instruction:project".to_string(),
@@ -785,6 +786,7 @@ async fn instruction_bundle_renders_runtime_context_section() {
             }],
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:system".to_string(),
                 model_content: "system rule".to_string(),
@@ -873,6 +875,7 @@ async fn instruction_bundle_renders_memory_section_from_memory_snippets() {
             identity_messages: Vec::new(),
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: Vec::new(),
             memory_snippets: vec![
                 LoopContextSnippet {
@@ -948,6 +951,7 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
         }],
         messages: Vec::new(),
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_snippets: vec![LoopContextSnippet {
             snippet_ref: "instruction:system".to_string(),
             model_content: "system rule".to_string(),
@@ -1035,6 +1039,7 @@ async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
             }],
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:system".to_string(),
                 model_content: "system rule".to_string(),
@@ -1100,6 +1105,7 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
             }],
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:system".to_string(),
                 model_content: "system rule".to_string(),
@@ -1180,6 +1186,7 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "Explain how to rotate a secret without exposing values"
@@ -1209,6 +1216,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "Explain preauthorization sync behavior".to_string(),
@@ -1236,6 +1244,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "client secret should not appear in prompt context".to_string(),
@@ -1297,6 +1306,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
@@ -1338,6 +1348,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "skill:github".to_string(),
                     model_content: model_content.clone(),
@@ -1375,6 +1386,7 @@ fn skill_instruction_request(
             identity_messages: Vec::new(),
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "skill:github".to_string(),
                 model_content: model_content.into(),
@@ -1402,6 +1414,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "skill:empty".to_string(),
                     model_content: String::new(),
@@ -1436,6 +1449,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "skill:oversized".to_string(),
                     model_content: "x".repeat(LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES + 1),
@@ -1566,6 +1580,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![
                     LoopContextSnippet {
                         snippet_ref: "skill:code-review".to_string(),
@@ -1633,6 +1648,7 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "Review authorization checks before release".to_string(),
@@ -1681,6 +1697,7 @@ async fn instruction_bundle_preserves_memory_snippet_insertion_order() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: Vec::new(),
                 memory_snippets: vec![
                     LoopContextSnippet {
@@ -1737,6 +1754,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
@@ -1874,6 +1892,7 @@ async fn prompt_bundle_authority_consumes_grant_after_successful_model_authoriza
         messages: messages.clone(),
         surface_version: None,
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -3466,6 +3485,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
             identity_messages: self.context_system_messages.clone(),
             messages,
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: self.context_instruction_snippets.clone(),
             memory_snippets: self.context_memory_snippets.clone(),
         })
@@ -3524,6 +3544,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 .collect(),
             surface_version: request.surface_version,
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -4625,6 +4646,7 @@ async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795
         }],
         messages: Vec::new(),
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_snippets: Vec::new(),
         memory_snippets: Vec::new(),
     };
@@ -4684,6 +4706,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
             }],
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         },
@@ -4760,6 +4783,7 @@ async fn instruction_bundle_runtime_scheduled_trigger_without_delivery_tools_omi
             }],
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         },

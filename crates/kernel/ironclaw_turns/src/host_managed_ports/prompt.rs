@@ -340,6 +340,7 @@ where
         } else {
             context.compaction_message_index.clone()
         };
+        let recent_window_truncation = context.recent_window_truncation.clone();
         trace_prompt_latency_ok(
             "compaction_index",
             &self.context,
@@ -386,6 +387,7 @@ where
             messages: instruction_bundle.messages,
             surface_version: request.surface_version.clone(),
             compaction_message_index,
+            recent_window_truncation,
             instruction_fingerprint: Some(instruction_bundle.fingerprint),
             identity_message_count,
             instruction_snippet_count,
@@ -600,6 +602,7 @@ mod tests {
                 identity_messages: self.identity_messages.clone(),
                 messages: self.messages.clone(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_snippets: vec![],
                 memory_snippets: vec![],
             })

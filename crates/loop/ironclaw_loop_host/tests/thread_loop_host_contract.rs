@@ -224,6 +224,80 @@ async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
 }
 
 #[tokio::test]
+async fn thread_context_port_pins_the_run_accepted_task_ahead_of_the_recent_tail() {
+    let mut fixture = ThreadFixture::new_with_user_content("original accepted task").await;
+    fixture.pin_initial_message_to_run();
+    for sequence in 2..=6 {
+        fixture
+            .accept_user_message(&format!("event-{sequence}"), &format!("message {sequence}"))
+            .await;
+    }
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 3,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .messages
+            .iter()
+            .map(|message| {
+                message
+                    .compaction
+                    .as_ref()
+                    .expect("transcript message metadata")
+                    .sequence
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 5, 6]
+    );
+    let truncation = bundle
+        .recent_window_truncation
+        .expect("the displaced recent message must remain an exact compaction watermark");
+    assert_eq!(truncation.omitted_through_sequence, 4);
+    assert_eq!(
+        truncation.omitted_through_kind,
+        ironclaw_loop_contracts::LoopContextCompactionKind::User
+    );
+
+    let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    ));
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt = prompt_port
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(3),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(prompt.recent_window_truncation, Some(truncation));
+}
+
+#[tokio::test]
 async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallback() {
     let fixture = ThreadFixture::new_with_user_content("old short").await;
     fixture
@@ -260,6 +334,46 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
 }
 
 #[tokio::test]
+async fn model_port_empty_request_pins_the_run_accepted_task_on_cache_miss() {
+    let mut fixture = ThreadFixture::new_with_user_content("original accepted task").await;
+    fixture.pin_initial_message_to_run();
+    for sequence in 2..=6 {
+        fixture
+            .accept_user_message(&format!("event-{sequence}"), &format!("message {sequence}"))
+            .await;
+    }
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        3,
+    );
+    issue_prompt_grant(&fixture.run_context, &[]);
+
+    port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages: Vec::new(),
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        iteration: 0,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].messages.len(), 1);
+    assert_eq!(
+        calls[0].messages[0].content,
+        "original accepted task\nmessage 5\nmessage 6"
+    );
+}
+
+#[tokio::test]
 async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boundary() {
     let fixture = ThreadFixture::new_with_user_content("diagnostic prompt body").await;
     let gateway = Arc::new(RecordingGateway::reply_with_usage_and_fallback(
@@ -280,6 +394,7 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         messages: messages.clone(),
         surface_version: None,
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 2,
@@ -2416,6 +2531,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 compaction: None,
             }],
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
                 model_content: "project instruction summary".to_string(),
@@ -5529,6 +5645,7 @@ fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
         messages: messages.to_vec(),
         surface_version: None,
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -5626,6 +5743,16 @@ impl ThreadFixture {
             })
             .await
             .unwrap()
+    }
+
+    fn pin_initial_message_to_run(&mut self) {
+        self.run_context = self.run_context.clone().with_accepted_message_ref(
+            ironclaw_host_api::turn::AcceptedMessageRef::new(format!(
+                "msg:{}",
+                self.user_message_id
+            ))
+            .expect("message-backed accepted ref"),
+        );
     }
 }
 
@@ -6234,6 +6361,7 @@ impl SessionThreadService for StaticContextThreadService {
         Ok(ContextWindow {
             thread_id: request.thread_id,
             messages: vec![context_message],
+            recent_window_truncation: None,
         })
     }
 
