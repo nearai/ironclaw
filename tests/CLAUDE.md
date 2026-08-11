@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **55** flat integration bins (49 in
+Totals: **51** group scenarios · **63** flat integration bins (57 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -160,7 +160,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (63)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -172,6 +172,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | The exact prompt + tool surface sent to the model is snapshot-pinned per iteration | `golden_payload.rs` |
+| Their long conversations stay cheap: the cached system prefix never churns, so per-call context (the clock, loop-control nudges) rides the conversation tail instead of re-billing the whole prompt | `prompt_prefix_stability.rs` |
 | Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
@@ -243,7 +244,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-push` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_push_enrollment_and_notification_channel_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 63 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |
@@ -312,7 +313,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,141 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (104 files, 1,155 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -455,6 +456,7 @@ entries.
 | Every lifecycle state-machine claim names executable evidence, with zero gaps | `test_state_machine_coverage.py` (12) |
 | The product-surface coverage report can't pass vacuously or hide lost evidence | `test_product_surface_coverage.py` (7) |
 | Playwright diagnostic artifacts stay bounded | `test_reborn_webui_harness_artifacts.py` (10) |
+| Long conversations keep reusing the provider-cached prompt prefix, while a changed tool surface remains a valid cache-invalidation boundary | `test_prompt_cache_gate.py` (13) |
 
 > These gates fail loudly when coverage regresses. Prefer adding a row to one of their
 > registries over adding a line to §7.

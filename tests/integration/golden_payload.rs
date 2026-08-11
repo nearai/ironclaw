@@ -96,8 +96,10 @@ async fn golden_multi_turn_history() {
     assert_eq!(requests.len(), 2, "one inference call per turn");
     assert_eq!(
         requests[1].len(),
-        4,
-        "second call carries system prompt + turn-1 user/assistant + turn-2 user"
+        5,
+        "second call carries system prompt + turn-1 user/assistant + turn-2 user \
+         + the ephemeral tail runtime-context reminder (#6985; one per request, \
+         never accumulated into history)"
     );
     h.assert_golden_payload("multi_turn");
     h.assert_reply_eq("Second reply")

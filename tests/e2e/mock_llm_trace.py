@@ -23,9 +23,41 @@ def _message_text(message: dict) -> str:
     return content
 
 
+# Frame delimiters for host-authored, transcript-positioned guidance. Must
+# match `REMINDER_OPEN`/`REMINDER_CLOSE` in
+# `crates/domains/ironclaw_llm/src/provider.rs`, which actually emits them.
+REMINDER_OPEN = "<system-reminder>"
+REMINDER_CLOSE = "</system-reminder>"
+
+
+def is_host_reminder_text(text: str) -> bool:
+    """Whether `text` is a complete host-reminder frame.
+
+    Tail-positioned host context (the runtime clock, loop-control nudges) is
+    delivered as `<system-reminder>`-framed user messages so the cached system
+    prefix stays byte-stable (#6985). It is host guidance, not the user's ask,
+    so response matching and trace anchoring must skip it.
+
+    BOTH delimiters are required. Matching the opening tag alone would swallow
+    a genuine user message that merely starts with the literal text — trace
+    replay would then anchor on an earlier turn or an empty ask. The emitter
+    escapes any delimiters inside the payload, so a complete frame is
+    unambiguous.
+
+    This is the single definition; `mock_llm.py` delegates to it so the two
+    mock paths cannot drift.
+    """
+    stripped = text.strip()
+    return stripped.startswith(REMINDER_OPEN) and stripped.endswith(REMINDER_CLOSE)
+
+
+def _is_host_reminder(message: dict) -> bool:
+    return is_host_reminder_text(_message_text(message))
+
+
 def _last_user_content(messages: list[dict]) -> str:
     for message in reversed(messages):
-        if message.get("role") == "user":
+        if message.get("role") == "user" and not _is_host_reminder(message):
             return _message_text(message)
     return ""
 
@@ -51,7 +83,9 @@ def _find_tool_results(
     last_user_index = -1
     if after_latest_user:
         for index in range(len(messages) - 1, -1, -1):
-            if messages[index].get("role") == "user":
+            if messages[index].get("role") == "user" and not _is_host_reminder(
+                messages[index]
+            ):
                 last_user_index = index
                 break
 

@@ -829,6 +829,13 @@ def build_plan(
                 "shared root-test support changed; PR runs a representative partition"
             )
             continue
+        if path == "tests/support/trace_llm.rs":
+            integration_lanes.add(0)
+            root_partitions.add(0)
+            reasons.append(
+                "shared scripted-provider support changed; PR runs representative lanes"
+            )
+            continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
