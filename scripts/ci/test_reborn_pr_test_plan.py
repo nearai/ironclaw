@@ -171,6 +171,9 @@ def real_owner_metadata() -> dict:
     optional dependency plus a dev-dependency, both in its real manifest),
     which is why routing a package asset to the support crate also schedules
     the host that embeds three of those manifests itself.
+
+    `ironclaw` (the CLI package) is here for the same reason, as the owner
+    `ROOT_FIXTURE_TEST_OWNERS` routes the shipped Docker runtime configs to.
     """
 
     def package(name: str, manifest: str, deps: tuple[str, ...] = ()) -> dict:
@@ -196,6 +199,7 @@ def real_owner_metadata() -> dict:
             "ironclaw_slack_extension",
             "crates/extensions/packages/slack/Cargo.toml",
         ),
+        package("ironclaw", "crates/app/ironclaw_cli/Cargo.toml"),
     ]
     return {
         "workspace_members": [entry["id"] for entry in packages],
@@ -1473,22 +1477,92 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertNotEqual(plan["crate_buckets"], [])
 
     def test_sibling_container_inputs_still_require_a_decision(self) -> None:
-        """The entrypoint is decided; its neighbours are not.
+        """The entrypoint and the two parsed configs are decided; the rest are not.
 
         `docker/` is classified per-file for the same reason repo-root
-        `scripts/` is: a blanket prefix would silently absorb the runtime
-        configs, which have no owning lane yet. Keep the fail-closed arm proven
-        for the paths nobody has decided.
+        `scripts/` is: a blanket prefix would silently absorb inputs nobody has
+        attributed to a lane. Keep the fail-closed arm proven for the paths that
+        are still undecided — no test parses either hosted-single-tenant config,
+        so neither may inherit the decision made for its siblings.
         """
         for path in (
-            "docker/reborn/config.production.toml",
             "docker/process-sandbox-entrypoint.sh",
+            "docker/reborn/config.hosted-single-tenant.toml",
+            "docker/reborn/config.hosted-single-tenant-volume.toml",
         ):
             with self.subTest(path=path):
                 with self.assertRaisesRegex(
                     ValueError, "unclassified pull-request path"
                 ):
                     self.plan("pull_request", [path])
+
+    def test_docker_runtime_configs_select_the_test_that_pins_them(self) -> None:
+        """A shipped config change runs the smoke target asserting its contents.
+
+        `smoke.rs` parses both files and pins their boot profile, storage
+        backend and pool sizing, so the honest plan is that exact test target —
+        not static control (which would skip the assertions the edit can break)
+        and not the whole `ironclaw` lane.
+        """
+        for path in (
+            "docker/reborn/config.toml",
+            "docker/reborn/config.production.toml",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan_real_owners([path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertEqual(plan["changed_packages"], ["ironclaw"])
+                self.assertEqual(
+                    plan["crate_buckets"],
+                    [
+                        {
+                            "name": "selected",
+                            "packages": ["ironclaw"],
+                            "exact_targets": [
+                                {
+                                    "package": "ironclaw",
+                                    "kind": "test",
+                                    "name": "smoke",
+                                }
+                            ],
+                        }
+                    ],
+                )
+
+    def test_root_fixture_owners_name_a_file_a_real_test_reads(self) -> None:
+        """The mapping is only correct while both halves still exist.
+
+        A rename on either side turns a routed path back into an unattributed
+        one, which is the failure this table exists to prevent. Pin the fixture,
+        the owning test target, and the reference between them.
+        """
+        for path, (package, target) in planner.ROOT_FIXTURE_TEST_OWNERS.items():
+            with self.subTest(path=path):
+                self.assertTrue(
+                    (ROOT / path).is_file(), f"fixture {path} no longer exists"
+                )
+                directory = next(
+                    (
+                        manifest.parent
+                        for manifest in (ROOT / "crates").rglob("Cargo.toml")
+                        if f'name = "{package}"'
+                        in manifest.read_text(encoding="utf-8")
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(
+                    directory, f"no crate declares package {package}"
+                )
+                source = directory / "tests" / f"{target}.rs"
+                self.assertTrue(
+                    source.is_file(),
+                    f"{package} has no `{target}` test target",
+                )
+                self.assertIn(
+                    path,
+                    source.read_text(encoding="utf-8"),
+                    f"{source} no longer reads {path}",
+                )
 
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.

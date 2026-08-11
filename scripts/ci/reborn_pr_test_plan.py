@@ -439,10 +439,36 @@ PR_STATIC_CONTROL_PATHS = {
     # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
     # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
     # and owns the image build, not the entrypoint's behaviour. `docker/` stays
-    # per-file, never a prefix: `docker/reborn/config.*.toml` and
-    # `docker/process-sandbox-entrypoint.sh` have no owning lane and must keep
-    # refusing.)
+    # per-file, never a prefix: `docker/process-sandbox-entrypoint.sh` and the
+    # `config.hosted-single-tenant*.toml` pair have no owning lane and must keep
+    # refusing. The two configs a package test *parses* are decided in
+    # `ROOT_FIXTURE_TEST_OWNERS` below.)
     "docker/reborn/entrypoint.sh",
+}
+# Files outside every package directory that a package's own test reads from the
+# workspace root, mapped to the exact test target that pins them. This is the
+# read-at-test-time counterpart of `EMBEDDED_ASSET_OWNERS` (compiled-in assets):
+# the file is not part of any crate, but a specific test target asserts its
+# contents field by field, so that target *is* the owning lane and a change here
+# must select it.
+#
+# `crates/app/ironclaw_cli/tests/smoke.rs` parses both shipped Docker runtime
+# configs through `ironclaw_config::RebornConfigFile::parse_text` and asserts
+# their boot profile, storage backend, pool sizing and runtime policy
+# (`docker_reborn_config_defaults_to_standalone`,
+# `docker_reborn_production_config_uses_postgres_storage`). Classifying them as
+# static control would be wrong under that set's own membership rule ("no Reborn
+# test lane reads the file") — this lane does read them, and an edit that
+# contradicts the assertions breaks the smoke target. Unclassified until
+# 2026-08-10, when raising the production pool ceiling failed
+# `Detect Reborn test scope` and skipped every downstream Reborn lane.
+#
+# The sibling `config.hosted-single-tenant*.toml` files are deliberately absent:
+# no test parses them (they appear only in a doc comment), so they keep hitting
+# the fail-closed arm until someone decides them.
+ROOT_FIXTURE_TEST_OWNERS: dict[str, tuple[str, str]] = {
+    "docker/reborn/config.toml": ("ironclaw", "smoke"),
+    "docker/reborn/config.production.toml": ("ironclaw", "smoke"),
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
@@ -775,6 +801,15 @@ def build_plan(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
+            continue
+        if path in ROOT_FIXTURE_TEST_OWNERS:
+            package, target = ROOT_FIXTURE_TEST_OWNERS[path]
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", target))
+            reasons.append(
+                f"workspace fixture pinned by {package}'s `{target}` test changed: "
+                f"{path}"
+            )
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated workflow owns: {path}")
