@@ -39,7 +39,7 @@ pub const TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES: usize = 8;
 /// lease is still live — rather than a lease expiry discovered by a recovery
 /// sweep with no idea whether the worker is alive.
 fn heartbeat_failure_budget_within_lease(interval: Duration) -> usize {
-    let cost_per_failure = interval.saturating_mul(2);
+    let cost_per_failure = heartbeat_interval_within_lease(interval).saturating_mul(2);
     if cost_per_failure.is_zero() {
         return TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES;
     }
@@ -51,6 +51,22 @@ fn heartbeat_failure_budget_within_lease(interval: Duration) -> usize {
     affordable.clamp(1, TURN_RUN_MAX_CONSECUTIVE_HEARTBEAT_FAILURES)
 }
 
+/// The requested heartbeat interval, capped so that a *single* failure still
+/// fits inside the lease TTL.
+///
+/// A failure costs `2 * interval` (one interval of waiting plus one heartbeat
+/// timeout, which the supervisor sets to the interval), so half the TTL is the
+/// widest interval any budget can pay for. Past that, the smallest budget the
+/// scheduler can run with — one failure — already outlives the lease, and
+/// clamping the *budget* up to 1 would only make the promise untrue: the worker
+/// would still be waiting on its first heartbeat when the journal declared its
+/// lease expired. Capping the interval instead keeps `budget >= 1` honest for
+/// every value an operator can configure, and errs toward heartbeating *more*
+/// often than asked, which is the safe direction.
+fn heartbeat_interval_within_lease(interval: Duration) -> Duration {
+    interval.min(ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION / 2)
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnRunSchedulerConfig {
     inner: ProcessSupervisorConfig,
@@ -59,9 +75,12 @@ pub struct TurnRunSchedulerConfig {
 impl Default for TurnRunSchedulerConfig {
     fn default() -> Self {
         let inner = ProcessSupervisorConfig::default();
-        let budget = heartbeat_failure_budget_within_lease(inner.heartbeat_interval());
+        let interval = heartbeat_interval_within_lease(inner.heartbeat_interval());
+        let budget = heartbeat_failure_budget_within_lease(interval);
         Self {
-            inner: inner.with_max_consecutive_heartbeat_failures(budget),
+            inner: inner
+                .with_heartbeat_interval(interval)
+                .with_max_consecutive_heartbeat_failures(budget),
         }
     }
 }
@@ -120,16 +139,27 @@ impl TurnRunSchedulerConfig {
 
     /// Set the heartbeat interval, and with it the failure budget the lease TTL
     /// can afford at that interval. A deployment that widens the interval gets a
-    /// smaller budget rather than an abandon window that outlives its lease.
+    /// smaller budget rather than an abandon window that outlives its lease, and
+    /// an interval too wide for even one failure is itself capped
+    /// ([`heartbeat_interval_within_lease`]) rather than accepted with a budget
+    /// that cannot be honoured.
     pub fn with_runner_heartbeat_interval(mut self, value: Duration) -> Self {
-        self.inner = self.inner.with_heartbeat_interval(value);
+        self.inner = self
+            .inner
+            .with_heartbeat_interval(heartbeat_interval_within_lease(value));
         let budget = heartbeat_failure_budget_within_lease(self.inner.heartbeat_interval());
         self.inner = self.inner.with_max_consecutive_heartbeat_failures(budget);
         self
     }
 
+    /// Lower the failure budget. The lease-derived budget for the configured
+    /// interval is the ceiling: a caller may be more conservative than the TTL
+    /// affords, never less.
     pub fn with_max_consecutive_heartbeat_failures(mut self, maximum: usize) -> Self {
-        self.inner = self.inner.with_max_consecutive_heartbeat_failures(maximum);
+        let ceiling = heartbeat_failure_budget_within_lease(self.inner.heartbeat_interval());
+        self.inner = self
+            .inner
+            .with_max_consecutive_heartbeat_failures(maximum.min(ceiling));
         self
     }
 
@@ -361,24 +391,52 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(30),
             Duration::from_secs(60),
+            // Wider than the TTL can pay for even once: the interval itself
+            // must be capped, not the budget clamped up to a lie.
             Duration::from_secs(120),
+            ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION.saturating_mul(10),
         ];
         for interval in intervals {
             let config = TurnRunSchedulerConfig::default().with_runner_heartbeat_interval(interval);
             let budget = config.max_consecutive_heartbeat_failures();
+            // The effective interval is what the supervisor actually waits on,
+            // which is the requested one only while the TTL can afford it.
+            let effective = config.runner_heartbeat_interval();
             assert!(budget >= 1, "a run must tolerate at least one failure");
+            assert!(
+                effective <= interval,
+                "interval {interval:?} must never be widened, got {effective:?}"
+            );
             // The supervisor passes the interval as the per-heartbeat timeout,
             // so a failed heartbeat costs interval + timeout.
-            let abandon_window = interval
+            let abandon_window = effective
                 .saturating_mul(2)
                 .saturating_mul(u32::try_from(budget).expect("budget fits u32"));
             assert!(
-                abandon_window <= ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION || budget == 1,
-                "interval {interval:?} yields budget {budget} and an abandon window of \
-                 {abandon_window:?}, past the {:?} lease TTL",
+                abandon_window <= ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION,
+                "interval {interval:?} (effective {effective:?}) yields budget {budget} and an \
+                 abandon window of {abandon_window:?}, past the {:?} lease TTL",
                 ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION
             );
         }
+    }
+
+    /// The budget setter is the other way to construct a scheduler config, so
+    /// it must not be able to reintroduce an abandon window past the TTL.
+    #[test]
+    fn an_explicit_failure_budget_cannot_exceed_what_the_lease_affords() {
+        let config = TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(Duration::from_secs(30))
+            .with_max_consecutive_heartbeat_failures(usize::MAX);
+        let budget = config.max_consecutive_heartbeat_failures();
+        let abandon_window = config
+            .runner_heartbeat_interval()
+            .saturating_mul(2)
+            .saturating_mul(u32::try_from(budget).expect("budget fits u32"));
+        assert!(
+            abandon_window <= ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION,
+            "an explicit budget of {budget} yields {abandon_window:?}, past the lease TTL"
+        );
     }
 
     /// The hosted configuration is the one the pool-starvation incident hit: a
