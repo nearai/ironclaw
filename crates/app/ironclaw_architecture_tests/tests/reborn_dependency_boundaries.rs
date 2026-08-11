@@ -641,8 +641,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // message. Contract vocabulary only — vendor reaction rendering (Slack
         // reactions.add/remove, Telegram setMessageReaction) lives in the channel
         // packages and the reaction lifecycle in the delivery observer. Count
-        // read from this test's failure message.
-        ("ironclaw_extension_contracts", 7_885),
+        // read from this test's failure message. 7_885 -> 7_892 after merging
+        // #7076's Basic credential target declaration and validator vocabulary;
+        // composition and injection remain in ironclaw_host_runtime.
+        ("ironclaw_extension_contracts", 7_892),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -671,7 +673,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        ("ironclaw_host_api", 18_974),
+        // 18_974 -> 18_994 (#7076 takeover): the
+        // `RuntimeCredentialTarget::Basic` declaration, username validation,
+        // and wire-contract vocabulary; RFC 7617 composition remains in
+        // ironclaw_host_runtime.
+        ("ironclaw_host_api", 18_994),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

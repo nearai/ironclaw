@@ -1322,6 +1322,64 @@ mod tests {
     }
 
     #[test]
+    fn multibyte_excerpt_desired_end_rounds_down_to_a_char_boundary() {
+        let body = format!("{}{}{}", "a".repeat(8_500), QUERY, "€".repeat(300));
+
+        let bounded = bound_search_result_content(body, QUERY);
+
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert!(bounded.contains(QUERY));
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        assert!(bounded.ends_with('€'));
+    }
+
+    #[test]
+    fn match_already_covered_by_the_previous_tail_excerpt_is_not_duplicated() {
+        let first = 8_900;
+        let second = 8_950;
+        let mut body = "a".repeat(9_000);
+        body.replace_range(first..first + QUERY.len(), QUERY);
+        body.replace_range(second..second + QUERY.len(), QUERY);
+        let expected = body[first - SEARCH_EXCERPT_PRE_BYTES..].to_string();
+
+        let bounded = bound_search_result_content(body, QUERY);
+
+        assert_eq!(bounded, expected);
+        assert_eq!(bounded.matches(QUERY).count(), 2);
+        assert!(!bounded.contains(SEARCH_EXCERPT_DELIMITER));
+    }
+
+    #[test]
+    fn contiguous_long_match_that_cannot_fit_stops_at_the_complete_prefix() {
+        let query = "q".repeat(4_100);
+        let body = query.repeat(2);
+
+        let bounded = bound_search_result_content(body, &query);
+
+        assert_eq!(bounded.len(), query.len() + SEARCH_EXCERPT_POST_BYTES);
+        assert!(bounded.starts_with(&query));
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+    }
+
+    #[test]
+    fn cap_clipped_multibyte_excerpt_rounds_start_and_end_to_char_boundaries() {
+        let query = "q".repeat(3_903);
+        let mut body = query.clone();
+        body.push_str(&"a".repeat(1_000));
+        body.push_str(&"€".repeat(400));
+        body.push_str(&query);
+        body.push_str(&"€".repeat(400));
+
+        let bounded = bound_search_result_content(body, &query);
+
+        assert!(bounded.len() <= MAX_SEARCH_RESULT_CONTENT_BYTES);
+        assert_eq!(bounded.matches(&query).count(), 2);
+        assert!(bounded.contains(SEARCH_EXCERPT_DELIMITER));
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        assert!(bounded.ends_with('q'));
+    }
+
+    #[test]
     fn empty_query_keeps_bounded_head() {
         // The empty query matches everywhere; excerpting would degenerate to
         // the whole snippet, so the preview stays a plain head — the query

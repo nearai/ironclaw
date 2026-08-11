@@ -133,6 +133,15 @@ pub(crate) struct IronHubSkillEntry {
     #[serde(default)]
     pub(crate) provenance: IronHubProvenance,
     pub(crate) skill_md: IronHubArtifact,
+    #[serde(default)]
+    pub(crate) files: Vec<IronHubSkillFile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct IronHubSkillFile {
+    pub(crate) path: String,
+    #[serde(flatten)]
+    pub(crate) artifact: IronHubArtifact,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

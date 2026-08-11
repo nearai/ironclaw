@@ -4025,6 +4025,7 @@ dependencies = [
  "base64 0.23.0",
  "chrono",
  "ed25519-dalek",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "ironclaw_approvals",
