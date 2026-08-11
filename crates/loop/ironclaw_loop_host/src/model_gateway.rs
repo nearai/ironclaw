@@ -1698,7 +1698,9 @@ fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
             "description": definition.description.as_str(),
             "parameters": &definition.parameters,
         });
-        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+        total.saturating_add(
+            crate::estimate_tokens_from_chars(&schema.to_string()).saturating_as_u32(),
+        )
     })
 }
 

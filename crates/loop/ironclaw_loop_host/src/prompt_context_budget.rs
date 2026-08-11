@@ -23,6 +23,9 @@ pub(crate) fn select_prompt_context_messages(
             selected_tokens = selected_tokens.saturating_add(message_tokens);
             selected.push((message, message_tokens));
         } else {
+            // Keep a contiguous transcript suffix. Skipping a middle message
+            // can orphan provider tool calls from their result references;
+            // grouping-aware truncation belongs at a higher transcript seam.
             break;
         }
     }

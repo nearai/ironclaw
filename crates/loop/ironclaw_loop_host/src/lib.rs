@@ -28,7 +28,6 @@ mod capability_port;
 mod capability_surface_filter;
 mod capability_surface_policy;
 mod compaction_task;
-mod context_shadow;
 mod context_window_cache;
 mod driver_host_port_adapters;
 mod durable_input_queue;

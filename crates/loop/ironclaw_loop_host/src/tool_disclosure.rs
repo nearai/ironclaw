@@ -1067,7 +1067,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
 }
 
 fn estimate_definition_tokens(definition: &ProviderToolDefinition) -> u32 {
-    crate::context_shadow::estimate_tokens(&canonical_tool_schema_json(definition))
+    crate::estimate_tokens_from_chars(&canonical_tool_schema_json(definition)).saturating_as_u32()
 }
 
 fn canonical_tool_schema_json(definition: &ProviderToolDefinition) -> String {

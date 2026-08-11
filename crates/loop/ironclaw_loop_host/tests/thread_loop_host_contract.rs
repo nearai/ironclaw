@@ -155,6 +155,37 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
 }
 
 #[tokio::test]
+async fn thread_context_port_uses_documented_ascii_token_rate() {
+    let fixture = ThreadFixture::new_with_user_content(&"a".repeat(40)).await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(10, 0, 0));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.messages.len(), 1);
+    assert_eq!(
+        bundle.messages[0]
+            .compaction
+            .as_ref()
+            .expect("budget-admitted message should retain compaction metadata")
+            .estimated_tokens,
+        10
+    );
+}
+
+#[tokio::test]
 async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
     let fixture = ThreadFixture::new_with_user_content("message 1").await;
     for sequence in 2..=17 {
