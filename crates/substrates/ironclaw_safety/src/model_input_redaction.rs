@@ -193,6 +193,16 @@ mod tests {
             "The upstream service returned invalid API key.",
             "surface sha256:269cc57b4d0c4368d8b02738ab709c810adb6212729b24bbdc34efb539a3ed07",
             "/etc/passwd",
+            "password: redacted",
+            "password: redacted_secret",
+            "password: placeholder",
+            "password: example",
+            "password: token",
+            "password: value",
+            "password: key",
+            "Authorization: Bearer your-token",
+            "Authorization: Bearer your_token",
+            "password: ghp_abc...xyz",
         ] {
             let redaction = redact_model_input_text(input);
 

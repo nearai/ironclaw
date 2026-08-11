@@ -185,6 +185,27 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
         tool_result_content: None,
         image_parts: Vec::new(),
     });
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: "tool password: swordfish".to_string(),
+        content_ref: LoopMessageRef::new("msg:tool-secret").unwrap(),
+        tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
+            provider_id: STATIC_PROVIDER_ID.to_string(),
+            provider_model_id: "host-selected-model".to_string(),
+            provider_turn_id: "turn_secret".to_string(),
+            provider_call_id: "call_secret".to_string(),
+            provider_tool_name: provider_name("demo__secret"),
+            capability_id: CapabilityId::new("demo.secret").unwrap(),
+            arguments: serde_json::json!({"message": "hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+        tool_result_content: Some(HostManagedToolResultContent::Resolved {
+            safe_summary: ToolResultSafeSummary::new("tool failed").unwrap(),
+        }),
+        image_parts: Vec::new(),
+    });
 
     gateway.stream_model(request).await.unwrap();
 
@@ -195,10 +216,10 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    for secret in ["letmein", "abcdef", "hunter2"] {
+    for secret in ["letmein", "abcdef", "hunter2", "swordfish"] {
         assert!(!provider_text.contains(secret), "provider saw {secret:?}");
     }
-    assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 3);
+    assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 4);
 }
 
 #[tokio::test]
@@ -216,6 +237,14 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
         serde_json::json!("api key = abcdef");
     capability_port.definitions[0].parameters["properties"]["password: hunter2"] =
         serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_firstsecretvalue123"] =
+        serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_secondsecretvalue456"] =
+        serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["required"] = serde_json::json!([
+        "Authorization: Bearer ghp_firstsecretvalue123",
+        "Authorization: Bearer ghp_secondsecretvalue456"
+    ]);
 
     gateway
         .stream_model_with_capabilities(
@@ -230,9 +259,30 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
     assert!(!tool.description.contains("letmein"));
     assert!(tool.description.contains("[REDACTED_SECRET]"));
     let schema = tool.parameters.to_string();
-    assert!(!schema.contains("abcdef"));
-    assert!(!schema.contains("hunter2"));
+    for secret in [
+        "abcdef",
+        "hunter2",
+        "ghp_firstsecretvalue123",
+        "ghp_secondsecretvalue456",
+    ] {
+        assert!(!schema.contains(secret), "provider schema saw {secret:?}");
+    }
     assert!(schema.contains("[REDACTED_SECRET]"));
+    let properties = tool.parameters["properties"]
+        .as_object()
+        .expect("tool properties remain an object");
+    assert_eq!(properties.len(), 4, "redacted keys must not overwrite");
+    let redacted_required = tool.parameters["required"]
+        .as_array()
+        .expect("required remains an array");
+    assert_eq!(redacted_required.len(), 2);
+    for required in redacted_required {
+        let required = required.as_str().expect("required entries are strings");
+        assert!(
+            properties.contains_key(required),
+            "required reference {required:?} must follow its renamed property"
+        );
+    }
 }
 
 #[traced_test]

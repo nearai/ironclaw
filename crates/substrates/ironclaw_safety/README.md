@@ -53,6 +53,7 @@ material itself.
 - **No raw secret values in findings** — a safety finding must never log or
   return the material it detected.
 - **Model-input findings redact, never reject** — callers apply the transform
+  at model-input boundaries: memory admission of model-visible content and
   immediately before provider dispatch. Structural validation and injection
   containment remain separate policies.
 - Consumption boundaries are enforced from the consumer side (e.g. the

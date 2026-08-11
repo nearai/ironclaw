@@ -1723,18 +1723,116 @@ fn redact_json_string_values(value: &mut serde_json::Value) -> usize {
         serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
             count.saturating_add(redact_json_string_values(value))
         }),
-        serde_json::Value::Object(values) => {
-            let original = std::mem::take(values);
-            original
-                .into_iter()
-                .fold(0usize, |count, (mut key, mut value)| {
-                    let field_count = redact_string(&mut key)
-                        .saturating_add(redact_json_string_values(&mut value));
-                    values.insert(key, value);
-                    count.saturating_add(field_count)
-                })
-        }
+        serde_json::Value::Object(values) => redact_json_object(values).0,
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+    }
+}
+
+fn redact_json_object(
+    values: &mut serde_json::Map<String, serde_json::Value>,
+) -> (usize, HashMap<String, String>) {
+    let original = std::mem::take(values);
+    let mut entries = original
+        .into_iter()
+        .map(|(original_key, value)| {
+            let mut redacted_key = original_key.clone();
+            let key_redaction_count = redact_string(&mut redacted_key);
+            (original_key, redacted_key, key_redaction_count, value)
+        })
+        .collect::<Vec<_>>();
+
+    // Reserve unchanged names first. A pre-existing placeholder-shaped key
+    // must not be displaced by a secret-bearing key that redacts to the same
+    // text, and no member may be lost to Map::insert replacement.
+    let mut used_keys = entries
+        .iter()
+        .filter(|(_, _, key_redaction_count, _)| *key_redaction_count == 0)
+        .map(|(_, redacted_key, _, _)| redacted_key.clone())
+        .collect::<HashSet<_>>();
+    for (_, redacted_key, key_redaction_count, _) in &mut entries {
+        if *key_redaction_count > 0 {
+            *redacted_key = collision_safe_json_key(redacted_key, &mut used_keys);
+        }
+    }
+
+    let key_mapping = entries
+        .iter()
+        .map(|(original_key, redacted_key, _, _)| (original_key.clone(), redacted_key.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut redaction_count = entries.iter().fold(0usize, |count, (_, _, key_count, _)| {
+        count.saturating_add(*key_count)
+    });
+
+    // JSON Schema's `required` entries refer to keys in the sibling
+    // `properties` object. Capture that object's exact collision-safe mapping
+    // before visiting the references so the provider receives a valid schema.
+    let mut property_key_mapping = None;
+    if let Some((_, _, _, properties)) = entries
+        .iter_mut()
+        .find(|(original_key, _, _, _)| original_key == "properties")
+    {
+        let (count, mapping) = match properties {
+            serde_json::Value::Object(properties) => redact_json_object(properties),
+            _ => (redact_json_string_values(properties), HashMap::new()),
+        };
+        redaction_count = redaction_count.saturating_add(count);
+        property_key_mapping = Some(mapping);
+    }
+
+    for (original_key, redacted_key, _, mut value) in entries {
+        if original_key != "properties" {
+            let count = if original_key == "required" {
+                match property_key_mapping.as_ref() {
+                    Some(mapping) => redact_json_property_references(&mut value, mapping),
+                    None => redact_json_string_values(&mut value),
+                }
+            } else {
+                redact_json_string_values(&mut value)
+            };
+            redaction_count = redaction_count.saturating_add(count);
+        }
+        values.insert(redacted_key, value);
+    }
+
+    (redaction_count, key_mapping)
+}
+
+fn collision_safe_json_key(base: &str, used_keys: &mut HashSet<String>) -> String {
+    if used_keys.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut discriminator = 2usize;
+    loop {
+        let candidate = format!("{base}#{discriminator}");
+        if used_keys.insert(candidate.clone()) {
+            return candidate;
+        }
+        discriminator = discriminator.saturating_add(1);
+    }
+}
+
+fn redact_json_property_references(
+    value: &mut serde_json::Value,
+    key_mapping: &HashMap<String, String>,
+) -> usize {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
+            let field_count = match value {
+                serde_json::Value::String(reference) => {
+                    let original = reference.clone();
+                    let redaction = redact_model_input_text(&original);
+                    let finding_count = redaction.redaction_count();
+                    *reference = key_mapping
+                        .get(&original)
+                        .cloned()
+                        .unwrap_or_else(|| redaction.into_text());
+                    finding_count
+                }
+                _ => redact_json_string_values(value),
+            };
+            count.saturating_add(field_count)
+        }),
+        _ => redact_json_string_values(value),
     }
 }
 
@@ -2995,16 +3093,76 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[test]
-    fn provider_bound_redaction_covers_stop_sequences() {
+    #[derive(Default)]
+    struct StopSequenceRecordingProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StopSequenceRecordingProvider {
+        fn model_name(&self) -> &str {
+            "stop-sequence-recording-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the stop-sequence test has no tool surface")
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_model_request_redacts_stop_sequences_before_provider_dispatch() {
+        let provider = StopSequenceRecordingProvider::default();
         let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
         request.stop_sequences = Some(vec!["password: swordfish".to_string()]);
+        let replay_identity =
+            ProviderReplayIdentity::new("stop-sequence-recording-provider", provider.model_name())
+                .unwrap();
 
-        let count = redact_completion_request(&mut request);
+        complete_model_request(
+            &provider,
+            request,
+            None,
+            None,
+            None,
+            ProviderRequestContext::new(replay_identity, None),
+            None,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(count, 1);
+        let requests = provider
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(requests.len(), 1);
         assert_eq!(
-            request.stop_sequences,
+            requests[0].stop_sequences,
             Some(vec!["password: [REDACTED_SECRET]".to_string()])
         );
     }

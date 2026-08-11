@@ -1508,14 +1508,22 @@ async fn instruction_bundle_allows_trusted_skill_credential_shaped_value() {
 #[tokio::test]
 async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
     // Authorization content reaches the source-independent final redactor.
+    let body = "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ".to_string();
     let context = claimed_run_context().await;
-    InstructionBundleBuilder::new(context)
+    let bundle = InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
-            "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
+            body.clone(),
             "GitHub skill",
             SkillTrustLevel::Trusted,
         ))
         .expect("credential content must not reject prompt construction");
+
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == body)
+    );
 }
 
 #[tokio::test]
@@ -1592,6 +1600,18 @@ async fn instruction_bundle_defers_all_skill_secret_redaction_to_provider_bounda
         .expect("skill credential content must not reject prompt construction");
 
     assert_eq!(bundle.materialized_messages.len(), 2);
+    for body in [
+        "Use Authorization: Bearer ghp_trustedparent123",
+        "Use Authorization: Bearer ghp_companionvalue456",
+    ] {
+        assert!(
+            bundle
+                .materialized_messages
+                .iter()
+                .any(|message| message.model_content == body),
+            "materialized prompt must preserve {body:?} for final redaction"
+        );
+    }
 }
 
 #[tokio::test]
