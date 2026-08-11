@@ -1270,29 +1270,37 @@ ironclaw_memory::memory_service_contract_full!(
 );
 
 // ---------------------------------------------------------------------------
-// The always-on curated lane (#7185)
+// The always-on curated prefix of the long-term lane (#7185)
 // ---------------------------------------------------------------------------
-// The lane itself is host-composed (`ironclaw_host_runtime::memory_context`):
-// there is no provider "curated" hook, just the ordinary document read this
-// provider already serves as the `ironclaw.memory.read` tool. What the provider
-// owes the lane is pinned here — that `read_document` reaches the standing
-// `MEMORY.md` the model was told to write to, reports absence the way the host
-// reads as "absent", and stays scoped to the invocation user.
+// There is no separate host lane and no provider "curated" hook: this provider
+// serves its standing `MEMORY.md` as the head of the `read_long_term` lane the
+// host already asks for. What that owes the caller is pinned here — the
+// document the write guidance names is the document the lane serves, it is
+// served regardless of the turn's query, absence degrades to search-only, and
+// it stays scoped to the invocation user.
 
-/// The document the always-on lane reads is the one the memory protocol tells
-/// the model to write: the reserved `memory` write target and the lane's
-/// `MEMORY.md` read path must name the SAME document, or a guided save is
-/// never recalled.
-#[tokio::test]
-async fn native_guided_memory_write_is_readable_as_the_standing_document() {
-    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
-    let invocation = invocation();
+/// A context request with a query chosen to match nothing in the seeded data,
+/// so anything the lane returns arrived through the curated prefix rather than
+/// through full-text search.
+fn unrelated_query_request(max_snippets: usize) -> MemoryServiceContextRequest {
+    MemoryServiceContextRequest {
+        query: "zzz unrelated vocabulary".to_string(),
+        max_snippets,
+        context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+    }
+}
+
+async fn save_standing_fact(
+    service: &NativeMemoryService,
+    invocation: &MemoryInvocation,
+    fact: &str,
+) {
     service
         .write(
             invocation.clone(),
             MemoryServiceWriteRequest {
                 target: "memory".to_string(),
-                content: "the user prefers metric units".to_string(),
+                content: fact.to_string(),
                 append: true,
                 old_string: None,
                 new_string: None,
@@ -1303,79 +1311,150 @@ async fn native_guided_memory_write_is_readable_as_the_standing_document() {
         )
         .await
         .expect("curated write");
-
-    let document = service
-        .read_document(
-            invocation,
-            MemoryServiceReadRequest {
-                path: "MEMORY.md".to_string(),
-            },
-        )
-        .await
-        .expect("the standing document must be readable");
-
-    assert_eq!(document.path, "MEMORY.md");
-    assert!(document.content.contains("the user prefers metric units"));
 }
 
-/// A user who has never saved anything has no `MEMORY.md`. The provider reports
-/// that as `Input` — the kind the host's curated lane normalizes to an empty
-/// lane WITHOUT logging, since absence is a normal state rather than a fault.
+/// The whole point of the curated prefix: a fact saved through the reserved
+/// `memory` write target comes back on the long-term lane even when the turn's
+/// query shares no vocabulary with it. Full-text search cannot satisfy this —
+/// that is the #7185 bug — so a hit here can only have come from the standing
+/// document.
 #[tokio::test]
-async fn native_absent_standing_document_reports_input_not_operation() {
+async fn native_long_term_lane_serves_the_standing_document_for_an_unrelated_query() {
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, "the user prefers metric units").await;
 
-    let error = service
-        .read_document(
-            invocation(),
-            MemoryServiceReadRequest {
-                path: "MEMORY.md".to_string(),
-            },
-        )
+    let snippets = service
+        .read_long_term(invocation, unrelated_query_request(10))
         .await
-        .expect_err("an absent document is reported, not invented");
+        .expect("long-term lane retrieval");
 
     assert_eq!(
-        error.kind(),
-        MemoryServiceErrorKind::Input,
-        "the host distinguishes absent (Input) from a backend failure, and only \
-         logs the latter"
+        snippets[0].relative_path, "MEMORY.md",
+        "the standing document must lead the lane, ahead of any search hit"
+    );
+    assert!(
+        snippets[0].text.contains("the user prefers metric units"),
+        "the guided save must be what the lane serves back: {:?}",
+        snippets[0].text
     );
 }
 
-/// The memory protocol tells the model to save each durable fact as its own
-/// one-line append, and the curated lane splits `MEMORY.md` on line boundaries
-/// — so two guided saves must land as two lines. The backend append is
-/// byte-exact, so without a service-side terminator "likes tea" then "lives in
-/// Berlin" persists as `likes tealives in Berlin` and both facts are surfaced
-/// to later turns as one corrupted fact.
+/// The curated prefix is a prefix, not a replacement: a search hit for the
+/// turn's actual query still reaches the model behind the standing document.
+#[tokio::test]
+async fn native_long_term_lane_keeps_search_hits_behind_the_standing_document() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, "the user prefers metric units").await;
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "notes/launch".to_string(),
+                content: "the launch checklist lives in the shared drive".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("searchable write");
+
+    let snippets = service
+        .read_long_term(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "launch checklist".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("long-term lane retrieval");
+
+    assert_eq!(snippets[0].relative_path, "MEMORY.md");
+    assert!(
+        snippets
+            .iter()
+            .any(|snippet| snippet.relative_path.contains("launch")),
+        "the query's own search hit must still be admitted: {:?}",
+        snippets
+            .iter()
+            .map(|snippet| snippet.relative_path.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A user who has never saved anything has no `MEMORY.md`. That is the normal
+/// state, not a fault: the lane degrades to search-only rather than failing, so
+/// a fresh install still gets ordinary retrieval.
+#[tokio::test]
+async fn native_absent_standing_document_degrades_the_lane_to_search_only() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "notes/launch".to_string(),
+                content: "the launch checklist lives in the shared drive".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("searchable write");
+
+    let snippets = service
+        .read_long_term(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "launch checklist".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("an absent standing document must not fail the lane");
+
+    assert!(
+        snippets
+            .iter()
+            .all(|snippet| snippet.relative_path != "MEMORY.md"),
+        "no standing document exists, so nothing may be invented for it"
+    );
+    assert!(
+        !snippets.is_empty(),
+        "the search half of the lane must still work"
+    );
+}
+
+/// The memory guidance tells the model to save each durable fact as its own
+/// one-line append, and the curated prefix splits `MEMORY.md` on line
+/// boundaries — so two guided saves must land as two lines. The backend append
+/// is byte-exact, so without a service-side terminator "drinks tea" then "lives
+/// in Berlin" persists as `drinks tealives in Berlin` and both facts reach
+/// later turns as one corrupted fact.
 #[tokio::test]
 async fn native_consecutive_curated_appends_stay_separate_facts() {
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
     let invocation = invocation();
     // Deliberately no trailing newline on either entry — this is exactly the
-    // shape the protocol's "one concise self-contained line" produces.
-    for content in ["the user drinks tea", "the user lives in Berlin"] {
-        service
-            .write(
-                invocation.clone(),
-                MemoryServiceWriteRequest {
-                    target: "memory".to_string(),
-                    content: content.to_string(),
-                    append: true,
-                    old_string: None,
-                    new_string: None,
-                    replace_all: false,
-                    metadata: None,
-                    timezone: None,
-                },
-            )
-            .await
-            .expect("curated append");
+    // shape the guidance's "one concise self-contained line" produces.
+    for fact in ["the user drinks tea", "the user lives in Berlin"] {
+        save_standing_fact(&service, &invocation, fact).await;
     }
 
     let document = service
-        .read_document(
+        .read(
             invocation,
             MemoryServiceReadRequest {
                 path: "MEMORY.md".to_string(),
@@ -1397,42 +1476,64 @@ async fn native_consecutive_curated_appends_stay_separate_facts() {
     );
 }
 
-/// The standing document is scoped like every other memory read: another user's
-/// `MEMORY.md` is not reachable from this user's invocation. This is what makes
-/// the always-on lane safe to run for every user without a per-user gate.
+/// The curated prefix is scoped like every other memory read: another user's
+/// standing document never reaches this user's lane. This is what makes the
+/// prefix safe to serve for every user with no per-user gate.
 #[tokio::test]
 async fn native_standing_document_is_scoped_to_the_invocation_user() {
-    let filesystem = Arc::new(InMemoryBackend::new());
-    let service = NativeMemoryService::from_filesystem(filesystem, None);
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
     let owner = invocation();
-    service
-        .write(
-            owner,
-            MemoryServiceWriteRequest {
-                target: "memory".to_string(),
-                content: "the owner's standing fact".to_string(),
-                append: false,
-                old_string: None,
-                new_string: None,
-                replace_all: false,
-                metadata: None,
-                timezone: None,
-            },
-        )
-        .await
-        .expect("curated write");
+    save_standing_fact(&service, &owner, "the owner's standing fact").await;
 
     let mut other = invocation();
     other.scope.user_id = UserId::new("user-native-memory-other").unwrap();
-    let error = service
-        .read_document(
-            other,
-            MemoryServiceReadRequest {
-                path: "MEMORY.md".to_string(),
-            },
-        )
+    let snippets = service
+        .read_long_term(other, unrelated_query_request(10))
         .await
-        .expect_err("another user's standing document must not be readable");
+        .expect("another user's lane still resolves");
 
-    assert_eq!(error.kind(), MemoryServiceErrorKind::Input);
+    assert!(
+        snippets.is_empty(),
+        "another user's standing document must never reach this lane: {:?}",
+        snippets
+            .iter()
+            .map(|snippet| snippet.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The standing document cannot consume the caller's whole snippet allowance:
+/// a large `MEMORY.md` is capped, and the last admitted chunk says so, or a
+/// clipped document reads as a complete one.
+#[tokio::test]
+async fn native_oversized_standing_document_is_capped_and_marked_truncated() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    for index in 0..200 {
+        save_standing_fact(
+            &service,
+            &invocation,
+            &format!("standing fact number {index} about the user and their long running work"),
+        )
+        .await;
+    }
+
+    let snippets = service
+        .read_long_term(invocation, unrelated_query_request(10))
+        .await
+        .expect("long-term lane retrieval");
+
+    assert_eq!(
+        snippets.len(),
+        4,
+        "the standing document is capped at its own budget, not the caller's"
+    );
+    assert!(
+        snippets
+            .last()
+            .expect("capped lane is non-empty")
+            .text
+            .ends_with(" (truncated)"),
+        "a clipped document must say so"
+    );
 }

@@ -18,17 +18,15 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
-    MemoryServiceError, MemoryServiceReadRequest, MemoryServiceReadResponse,
+    MemoryServiceError,
 };
 
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 
-/// Per-lane behavior for the mock's two query-driven SEARCH lanes.
-/// `load_memory_snippets` queries the provider's lane METHODS
-/// (`read_short_term` / `read_long_term`) with the same invocation; the mock
-/// returns lane-specific snippets (or errors) so each lane can be driven
-/// independently. The always-on curated lane is NOT a provider lane — see
-/// [`DocumentBehavior`].
+/// Per-lane behavior for the mock. `load_memory_snippets` queries the
+/// provider's two lane METHODS (`read_short_term` / `read_long_term`) with the
+/// same invocation; the mock returns lane-specific snippets (or errors) so
+/// each lane can be driven independently.
 #[derive(Clone)]
 enum LaneBehavior {
     Snippets(Vec<MemoryServiceContextSnippet>),
@@ -42,59 +40,19 @@ enum Lane {
     LongTerm,
 }
 
-/// Behavior of the mock's `read_document` — the ordinary document read the
-/// host composes the always-on curated lane out of. There is no curated
-/// provider hook: the host asks for a document by path like any other caller,
-/// so the states a real provider can report are exactly these three.
-#[derive(Clone)]
-enum DocumentBehavior {
-    /// The document exists with this content.
-    Content(String),
-    /// No document at that path. Both bundled providers report absence as
-    /// `Input` (native: nothing at the path; mem0: no memory tagged with it),
-    /// which the host must read as "absent", not as a failure.
-    Absent,
-    /// The provider's document store is unreachable, or the provider has none
-    /// (the `read_document` trait default).
-    Error,
-}
-
 struct MockMemoryService {
     short_term: LaneBehavior,
     long_term: LaneBehavior,
-    document: DocumentBehavior,
     captured: Mutex<Vec<(Lane, MemoryInvocation, MemoryServiceContextRequest)>>,
-    document_reads: Mutex<Vec<(MemoryInvocation, MemoryServiceReadRequest)>>,
 }
 
 impl MockMemoryService {
     fn new(short_term: LaneBehavior, long_term: LaneBehavior) -> Self {
-        Self::with_document(short_term, long_term, DocumentBehavior::Absent)
-    }
-
-    fn with_document(
-        short_term: LaneBehavior,
-        long_term: LaneBehavior,
-        document: DocumentBehavior,
-    ) -> Self {
         Self {
             short_term,
             long_term,
-            document,
             captured: Mutex::new(Vec::new()),
-            document_reads: Mutex::new(Vec::new()),
         }
-    }
-
-    /// Curated-lane tests: the standing document holds `content` and both
-    /// query-driven search lanes return nothing, so anything admitted can only
-    /// have come from the curated lane.
-    fn with_curated_only(content: &str) -> Self {
-        Self::with_document(
-            LaneBehavior::Snippets(Vec::new()),
-            LaneBehavior::Snippets(Vec::new()),
-            DocumentBehavior::Content(content.to_string()),
-        )
     }
 
     /// Single-lane pipeline tests: the provider returns `snippets` for the
@@ -108,11 +66,7 @@ impl MockMemoryService {
     }
 
     fn with_error() -> Self {
-        Self::with_document(
-            LaneBehavior::Error,
-            LaneBehavior::Error,
-            DocumentBehavior::Error,
-        )
+        Self::new(LaneBehavior::Error, LaneBehavior::Error)
     }
 
     /// Two-lane tests: drive the short-term and long-term lanes with distinct
@@ -129,11 +83,6 @@ impl MockMemoryService {
 
     fn captured(&self) -> Vec<(Lane, MemoryInvocation, MemoryServiceContextRequest)> {
         self.captured.lock().unwrap().clone()
-    }
-
-    /// Every `read_document` call the host made, with the path it asked for.
-    fn document_reads(&self) -> Vec<(MemoryInvocation, MemoryServiceReadRequest)> {
-        self.document_reads.lock().unwrap().clone()
     }
 
     fn lane(
@@ -175,26 +124,6 @@ impl MemoryService for MockMemoryService {
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
         self.lane(Lane::ShortTerm, invocation, request)
     }
-
-    async fn read_document(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceReadRequest,
-    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
-        self.document_reads
-            .lock()
-            .unwrap()
-            .push((invocation, request.clone()));
-        match &self.document {
-            DocumentBehavior::Content(content) => Ok(MemoryServiceReadResponse {
-                path: request.path,
-                word_count: content.split_whitespace().count(),
-                content: content.clone(),
-            }),
-            DocumentBehavior::Absent => Err(MemoryServiceError::input()),
-            DocumentBehavior::Error => Err(MemoryServiceError::unavailable()),
-        }
-    }
 }
 
 fn test_request(
@@ -218,10 +147,8 @@ fn test_request(
     }
 }
 
-/// A service over a provider declaring BOTH query-driven search lanes (the
-/// native shape); lane-gating tests use [`make_service_with_lifecycle`]
-/// instead. The always-on curated lane is host-composed and takes no lifecycle
-/// declaration, so it runs under every service built here.
+/// A service over a provider declaring BOTH retrieval lanes (the native
+/// shape); lane-gating tests use [`make_service_with_lifecycle`] instead.
 fn make_service(memory_service: Arc<MockMemoryService>) -> ProductionMemoryPromptContextService {
     make_service_with_lifecycle(
         memory_service,
@@ -236,7 +163,13 @@ fn make_service_with_lifecycle(
     memory_service: Arc<MockMemoryService>,
     lifecycle: Vec<MemoryLifecycleHook>,
 ) -> ProductionMemoryPromptContextService {
-    ProductionMemoryPromptContextService::new(memory_service, MemoryDescriptor { lifecycle })
+    ProductionMemoryPromptContextService::new(
+        memory_service,
+        MemoryDescriptor {
+            lifecycle,
+            ..MemoryDescriptor::default()
+        },
+    )
 }
 
 /// A raw provider candidate scoped to `(tenant-a, user-x)` with no agent/project,
@@ -375,9 +308,9 @@ async fn unavailable_memory_service_degrades_both_lanes_to_empty() {
 }
 
 #[tokio::test]
-async fn host_derived_scope_is_passed_to_every_lane() {
-    // Every declared lane METHOD is queried exactly once, and all receive the
-    // SAME host-derived invocation — tenant/user/agent/project AND the active
+async fn host_derived_scope_is_passed_to_both_lanes() {
+    // Both lane METHODS are queried exactly once, and both receive the SAME
+    // host-derived invocation — tenant/user/agent/project AND the active
     // thread. Lane semantics (what each lane includes) belong to the provider
     // method, not to scope shape.
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![]));
@@ -395,11 +328,7 @@ async fn host_derived_scope_is_passed_to_every_lane() {
         .unwrap();
 
     let captured = memory_service.captured();
-    assert_eq!(
-        captured.len(),
-        2,
-        "every declared lane method must be queried"
-    );
+    assert_eq!(captured.len(), 2, "both lane methods must be queried");
     for (_, invocation, request) in &captured {
         assert_eq!(invocation.scope.tenant_id.as_str(), "tenant-a");
         assert_eq!(invocation.scope.user_id.as_str(), "user-x");
@@ -414,7 +343,7 @@ async fn host_derived_scope_is_passed_to_every_lane() {
         assert_eq!(
             invocation.scope.thread_id.as_ref().map(|id| id.as_str()),
             Some("thread-1"),
-            "every lane receives the full host scope including the active thread"
+            "both lanes receive the full host scope including the active thread"
         );
         assert_eq!(request.query, "test query");
         assert_eq!(request.max_snippets, 10);
@@ -426,25 +355,6 @@ async fn host_derived_scope_is_passed_to_every_lane() {
     assert!(
         lanes.contains(&Lane::ShortTerm) && lanes.contains(&Lane::LongTerm),
         "exactly one call per lane method: {lanes:?}"
-    );
-    // The host-composed curated lane rides the SAME host-derived invocation, so
-    // the scope assertions above cover it too — but it is a document read, not a
-    // lane query, so it is captured separately.
-    let reads = memory_service.document_reads();
-    assert_eq!(reads.len(), 1, "one standing-document read per run");
-    assert_eq!(reads[0].1.path, "MEMORY.md");
-    assert_eq!(
-        reads[0].0.scope.thread_id.as_ref().map(|id| id.as_str()),
-        Some("thread-1"),
-        "the document read receives the full host scope, like every lane"
-    );
-    assert_eq!(
-        reads[0].0.scope.agent_id.as_ref().map(|id| id.as_str()),
-        Some("agent-1")
-    );
-    assert_eq!(
-        reads[0].0.scope.project_id.as_ref().map(|id| id.as_str()),
-        Some("project-1")
     );
 }
 
@@ -465,7 +375,7 @@ async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
         .await
         .unwrap();
 
-    // Every declared lane method was queried exactly once.
+    // Both lane methods were queried exactly once.
     let captured = memory_service.captured();
     assert_eq!(captured.len(), 2);
     let lanes: Vec<Lane> = captured.iter().map(|(lane, ..)| *lane).collect();
@@ -516,16 +426,14 @@ async fn undeclared_short_term_lane_is_not_queried() {
     assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
 }
 
-/// A provider declaring NO retrieval lanes is never queried on one — but the
-/// always-on curated lane is host-composed, not a declared hook, so the host
-/// still reads the standing document. Lifecycle gates the SEARCH lanes only.
+/// A provider declaring NO retrieval lanes is never queried at all: the
+/// memory block is empty and the provider sees zero lane calls.
 #[tokio::test]
-async fn empty_lifecycle_issues_no_lane_queries_but_still_reads_the_document() {
-    let memory_service = Arc::new(MockMemoryService::with_document(
-        LaneBehavior::Snippets(vec![raw_snippet("notes/a.md", "must not surface")]),
-        LaneBehavior::Snippets(vec![raw_snippet("notes/b.md", "must not surface")]),
-        DocumentBehavior::Content("the user prefers metric units".to_string()),
-    ));
+async fn empty_lifecycle_issues_no_retrieval_queries() {
+    let memory_service = Arc::new(MockMemoryService::with_snippets(vec![raw_snippet(
+        "notes/a.md",
+        "must not surface",
+    )]));
     let service = make_service_with_lifecycle(memory_service.clone(), Vec::new());
 
     let snippets = service
@@ -533,23 +441,11 @@ async fn empty_lifecycle_issues_no_lane_queries_but_still_reads_the_document() {
         .await
         .unwrap();
 
+    assert!(snippets.is_empty());
     assert!(
         memory_service.captured().is_empty(),
-        "an empty lifecycle must issue no provider retrieval-LANE calls"
+        "an empty lifecycle must issue no provider retrieval calls"
     );
-    let reads = memory_service.document_reads();
-    assert_eq!(
-        reads.len(),
-        1,
-        "the host-composed curated lane reads the standing document regardless of lifecycle"
-    );
-    assert_eq!(reads[0].1.path, "MEMORY.md");
-    assert_eq!(
-        snippets.len(),
-        1,
-        "only the curated document may be admitted with no lane declared"
-    );
-    assert_eq!(snippets[0].snippet_ref, expected_ref("MEMORY.md"));
 }
 
 #[tokio::test]
@@ -811,322 +707,5 @@ async fn adapter_caps_aggregate_safe_summary_bytes() {
         snippets.len() < 20,
         "aggregate byte budget must cap snippets before max_snippets, got {}",
         snippets.len()
-    );
-}
-
-// ---------------------------------------------------------------------------
-// The always-on curated lane (#7185)
-// ---------------------------------------------------------------------------
-// A fact saved in conversation A only reached conversation B when B's opening
-// message happened to share vocabulary with it, because both retrieval lanes
-// are full-text search over the turn's query. The curated lane is read on every
-// run regardless of the query, so these tests drive the caller with a query
-// that matches NOTHING and assert the standing document still arrives.
-//
-// The lane is HOST-COMPOSED: there is no provider "curated" hook, just the
-// ordinary document read (`read_document`) every document-backed provider
-// already serves, so these tests configure the mock's document rather than a
-// lane.
-
-/// The load-bearing regression: no query overlap at all, and the curated
-/// document still reaches the prompt.
-#[tokio::test]
-async fn curated_lane_is_injected_without_any_search_match() {
-    let memory_service = Arc::new(MockMemoryService::with_curated_only(
-        "the user prefers metric units",
-    ));
-    let service = make_service(memory_service.clone());
-
-    // A query with no word in common with the stored fact: both FTS lanes
-    // return nothing (the mock's search lanes are empty), so anything admitted
-    // can only have come from the always-on lane.
-    let mut request = test_request("tenant-a", "user-x", None, None, 10);
-    request.query = "what time does the ferry leave".to_string();
-
-    let snippets = service.load_memory_snippets(request).await.unwrap();
-
-    assert_eq!(snippets.len(), 1, "curated document must be admitted");
-    assert_eq!(snippets[0].snippet_ref, expected_ref("MEMORY.md"));
-    assert_eq!(
-        snippets[0].model_content, "Untrusted memory content: the user prefers metric units",
-        "the curated document gets the same untrusted-envelope treatment as a search hit"
-    );
-    // The lane is composed from a document read, with the host choosing the
-    // path and passing the same host-derived invocation the search lanes get.
-    let reads = memory_service.document_reads();
-    assert_eq!(reads.len(), 1, "exactly one standing-document read per run");
-    assert_eq!(reads[0].1.path, "MEMORY.md");
-    assert_eq!(reads[0].0.scope.tenant_id.as_str(), "tenant-a");
-    assert_eq!(reads[0].0.scope.user_id.as_str(), "user-x");
-}
-
-/// The curated document is admitted BEFORE the search lanes, so it survives
-/// aggregate-budget pressure that the query-driven lanes create.
-#[tokio::test]
-async fn curated_lane_is_admitted_before_the_search_lanes() {
-    let memory_service = Arc::new(MockMemoryService::with_document(
-        LaneBehavior::Snippets(vec![raw_snippet(
-            "threads/thread-1/scratch.md",
-            "active thread note",
-        )]),
-        LaneBehavior::Snippets(vec![raw_snippet("notes/long-term.md", "long term note")]),
-        DocumentBehavior::Content("standing user fact".to_string()),
-    ));
-    let service = make_service(memory_service);
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .unwrap();
-
-    let refs: Vec<&str> = snippets
-        .iter()
-        .map(|snippet| snippet.snippet_ref.as_str())
-        .collect();
-    assert_eq!(
-        refs,
-        vec![
-            expected_ref("MEMORY.md"),
-            expected_ref("threads/thread-1/scratch.md"),
-            expected_ref("notes/long-term.md"),
-        ],
-        "curated first, then short-term, then long-term"
-    );
-}
-
-/// No curated document is a normal state for a user who has never saved
-/// anything: an empty lane, not an error and not a placeholder snippet.
-///
-/// Absence arrives as the `Input` error both bundled providers report for a
-/// path that names nothing, so this pins that the host reads that specific kind
-/// as "absent" rather than as a lane failure.
-#[tokio::test]
-async fn absent_curated_document_contributes_nothing() {
-    let memory_service = Arc::new(MockMemoryService::with_document(
-        LaneBehavior::Snippets(Vec::new()),
-        LaneBehavior::Snippets(Vec::new()),
-        DocumentBehavior::Absent,
-    ));
-    let service = make_service(memory_service.clone());
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .expect("an absent curated document must not error the call");
-
-    assert!(snippets.is_empty());
-    assert_eq!(
-        memory_service.document_reads().len(),
-        1,
-        "the host still attempts the read; absence is the provider's answer"
-    );
-}
-
-/// An EMPTY standing document is the same non-event as an absent one: no
-/// snippet, no envelope wrapping a blank body.
-#[tokio::test]
-async fn blank_curated_document_contributes_nothing() {
-    let memory_service = Arc::new(MockMemoryService::with_curated_only("   \n\n  "));
-    let service = make_service(memory_service);
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .expect("a blank curated document must not error the call");
-
-    assert!(snippets.is_empty());
-}
-
-/// A memory-disabled context profile must reach NO lane, including the
-/// always-on one — otherwise the curated lane would be a privacy hole that
-/// bypasses the disabled profile.
-#[tokio::test]
-async fn memory_disabled_profile_does_not_read_the_curated_lane() {
-    let memory_service = Arc::new(MockMemoryService::with_curated_only("must not surface"));
-    let service = make_service(memory_service.clone());
-
-    let mut request = test_request("tenant-a", "user-x", None, None, 10);
-    request.context_profile_id = ContextProfileId::new("memory_disabled").unwrap();
-
-    let snippets = service.load_memory_snippets(request).await.unwrap();
-
-    assert!(snippets.is_empty());
-    assert!(
-        memory_service.captured().is_empty(),
-        "a memory-disabled profile must not call any retrieval lane"
-    );
-    assert!(
-        memory_service.document_reads().is_empty(),
-        "a memory-disabled profile must not read the standing document either — \
-         the host gate runs before every provider call, so the always-on lane \
-         cannot become a way around a disabled profile"
-    );
-}
-
-/// A provider with no document store at all reports `read_document`'s
-/// fail-closed default (`Unavailable`); the lane degrades to empty and the
-/// declared search lanes are unaffected. Binding such a backend changes
-/// nothing about the rest of the turn.
-#[tokio::test]
-async fn provider_without_document_read_support_degrades_the_curated_lane() {
-    let memory_service = Arc::new(MockMemoryService::with_document(
-        LaneBehavior::Snippets(Vec::new()),
-        LaneBehavior::Snippets(vec![raw_snippet("notes/long-term.md", "long term note")]),
-        DocumentBehavior::Error,
-    ));
-    let service = make_service_with_lifecycle(
-        memory_service.clone(),
-        vec![MemoryLifecycleHook::ReadLongTerm],
-    );
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .expect("a provider with no document store must not error the call");
-
-    let lanes: Vec<Lane> = memory_service
-        .captured()
-        .iter()
-        .map(|(lane, ..)| *lane)
-        .collect();
-    assert_eq!(lanes, vec![Lane::LongTerm]);
-    assert_eq!(snippets.len(), 1);
-    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
-}
-
-/// A curated lane failure degrades to empty like any other lane, and must not
-/// take the search lanes down with it.
-#[tokio::test]
-async fn curated_lane_failure_degrades_without_dropping_the_search_lanes() {
-    let memory_service = Arc::new(MockMemoryService::with_document(
-        LaneBehavior::Snippets(Vec::new()),
-        LaneBehavior::Snippets(vec![raw_snippet(
-            "notes/long-term.md",
-            "long term survives",
-        )]),
-        DocumentBehavior::Error,
-    ));
-    let service = make_service(memory_service);
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .expect("a curated-lane outage must not error the whole call");
-
-    assert_eq!(snippets.len(), 1);
-    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
-}
-
-/// A standing document longer than a single snippet is admitted as SEVERAL
-/// line-aligned snippets — more than a search hit's 512 bytes in total — but is
-/// capped at half the aggregate so the search lanes still get room, and the
-/// model is told the document was clipped.
-#[tokio::test]
-async fn oversized_curated_document_spans_snippets_and_leaves_room_for_search_lanes() {
-    // A realistic one-fact-per-line MEMORY.md, far longer than the curated
-    // lane's budget.
-    let document = (0..60)
-        .map(|index| format!("- the user prefers option number {index} for planning work"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let memory_service = Arc::new(MockMemoryService::with_document(
-        LaneBehavior::Snippets(vec![raw_snippet(
-            "threads/thread-1/scratch.md",
-            "active thread note",
-        )]),
-        LaneBehavior::Snippets(Vec::new()),
-        DocumentBehavior::Content(document),
-    ));
-    let service = make_service(memory_service);
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .unwrap();
-
-    let curated: Vec<_> = snippets
-        .iter()
-        .filter(|snippet| snippet.snippet_ref == expected_ref("MEMORY.md"))
-        .collect();
-    assert!(
-        curated.len() > 1,
-        "a long standing document must span several snippets, got {}",
-        curated.len()
-    );
-    let curated_bytes: usize = curated
-        .iter()
-        .map(|snippet| snippet.safe_summary.len())
-        .sum();
-    assert!(
-        curated_bytes > 512,
-        "the curated lane must carry more than one search hit's worth of the \
-         document, got {curated_bytes}"
-    );
-    assert!(
-        curated_bytes <= 2 * 1024,
-        "curated lane must fit its 2 KiB sub-budget, got {curated_bytes}"
-    );
-    // The document is line-aligned, so the first fact survives intact.
-    assert!(
-        curated[0]
-            .model_content
-            .contains("the user prefers option number 0"),
-        "curated chunks must be cut on line boundaries: {}",
-        curated[0].model_content
-    );
-    assert!(
-        curated
-            .last()
-            .expect("curated lane is non-empty")
-            .model_content
-            .contains("truncated"),
-        "a clipped standing document must be marked as truncated"
-    );
-    assert!(
-        snippets
-            .iter()
-            .any(|snippet| snippet.snippet_ref == expected_ref("threads/thread-1/scratch.md")),
-        "the curated sub-budget must leave the search lanes room in the aggregate budget"
-    );
-    let total_bytes: usize = snippets
-        .iter()
-        .map(|snippet| snippet.safe_summary.len())
-        .sum();
-    assert!(total_bytes <= 4 * 1024);
-}
-
-/// Cross-scope isolation for the always-on lane, at its actual seam.
-///
-/// The host — not the provider — chooses both the scope and the path it reads,
-/// and stamps the requesting scope onto the resulting snippet, so there is no
-/// provider-supplied scope claim that could name another user. This pins the
-/// property that makes that true: the document read is issued under the
-/// REQUESTING user's scope, and the admitted snippet's reference is that user's.
-/// (The downstream drop filter is still in the path for a future curated source
-/// that carries its own scope; it is unit-tested directly in
-/// `memory_context.rs`, since no provider response can reach it from here.)
-#[tokio::test]
-async fn curated_lane_reads_and_stamps_the_requesting_scope() {
-    let memory_service = Arc::new(MockMemoryService::with_curated_only("standing user fact"));
-    let service = make_service(memory_service.clone());
-
-    let snippets = service
-        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
-        .await
-        .unwrap();
-
-    let reads = memory_service.document_reads();
-    assert_eq!(reads.len(), 1);
-    assert_eq!(
-        reads[0].0.scope.user_id.as_str(),
-        "user-x",
-        "the standing document is read under the requesting user's scope, so a \
-         provider is never asked for another user's document"
-    );
-    assert_eq!(snippets.len(), 1);
-    assert_eq!(
-        snippets[0].snippet_ref,
-        expected_ref("MEMORY.md"),
-        "the admitted snippet carries the requesting scope's reference"
     );
 }

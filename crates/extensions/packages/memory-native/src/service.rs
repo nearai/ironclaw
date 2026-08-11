@@ -45,6 +45,42 @@ const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
 const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 const MAX_MEMORY_PATCH_RETRIES: usize = 8;
 
+/// Snippets of the standing [`MEMORY_PATH`] document this provider prepends to
+/// its own long-term lane, ahead of the full-text hits (#7185).
+///
+/// The lane's job is "the user's general, durable memory", and full-text search
+/// can only answer that when the current message happens to share vocabulary
+/// with the stored fact — open a new chat on an unrelated subject and a saved
+/// preference is invisible. The curated document is what the write guidance
+/// tells the model to maintain, so this provider serves it unconditionally as
+/// part of the same lane rather than making the host know about document paths.
+/// Capped so the standing document cannot consume the caller's whole
+/// `max_snippets` allowance and starve the search hits behind it.
+const MAX_CURATED_SNIPPETS: usize = 4;
+
+/// Raw bytes per curated chunk, before the host sanitizes and wraps it.
+///
+/// The host caps a model-visible snippet at 512 bytes and runs the prompt
+/// denylist there, so a whole standing document admitted as one wide snippet
+/// would be denylist-checked only at its head. Splitting into chunks this size
+/// leaves room for the untrusted envelope inside that cap, so every byte the
+/// model sees passes the same check a search hit passes — and a line carrying a
+/// denylisted secret is dropped on its own instead of taking the document with
+/// it.
+const CURATED_CHUNK_RAW_BYTES: usize = 400;
+
+/// Appended to the last admitted curated chunk when the standing document did
+/// not fit [`MAX_CURATED_SNIPPETS`], so the model can tell a clipped document
+/// from a complete one. Bracket and delimiter characters are rejected by the
+/// host's prompt safe-summary rule, so the marker is plain words.
+const CURATED_TRUNCATION_MARKER: &str = " (truncated)";
+
+/// Joins the lines inside one curated chunk. A raw newline is a control
+/// character and is stripped when the host sanitizes the snippet, which would
+/// run two facts together into one, so lines are joined with a visible
+/// separator instead.
+const CURATED_LINE_SEPARATOR: &str = "; ";
+
 pub struct NativeMemoryService {
     backend: Arc<dyn MemoryBackend>,
 }
@@ -359,20 +395,44 @@ impl MemoryService for NativeMemoryService {
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
+    /// Long-term lane: the standing memory document first, then the full-text
+    /// hits for this turn's query.
+    ///
+    /// The curated prefix is query-independent by design — that is the whole
+    /// point. Search can only surface a saved fact when the current message
+    /// shares words with it, so a preference stated in one conversation is
+    /// invisible in the next one that opens on an unrelated subject. Serving
+    /// the document the write guidance tells the model to maintain closes that
+    /// gap inside the lane the host already asks for, with no new host call and
+    /// no lane-specific provider contract.
     async fn read_long_term(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
-        let Some(mut results) = self.ranked_in_scope_results(&invocation, &request).await? else {
+        // Checked here as well as inside `ranked_in_scope_results`, because the
+        // curated read must not happen either: a memory-disabled context
+        // profile means no memory reaches the prompt, not "no search results".
+        if request.max_snippets == 0 || memory_context_disabled(request.context_profile_id.as_str())
+        {
             return Ok(Vec::new());
+        }
+        let mut snippets = self
+            .curated_standing_snippets(&invocation, request.max_snippets)
+            .await;
+        let remaining = request.max_snippets.saturating_sub(snippets.len());
+        if remaining == 0 {
+            return Ok(snippets);
+        }
+        let Some(mut results) = self.ranked_in_scope_results(&invocation, &request).await? else {
+            return Ok(snippets);
         };
-        // Long-term lane: the user's general/durable memory — exclude every
-        // per-thread short-term scratch subtree, regardless of whether the
-        // invocation carries an active thread, so the two lanes stay disjoint
-        // when the host concatenates them into one memory block.
+        // Exclude every per-thread short-term scratch subtree, regardless of
+        // whether the invocation carries an active thread, so the two lanes
+        // stay disjoint when the host concatenates them into one memory block.
         results.retain(|result| !is_thread_scoped_path(result.path.relative_path()));
-        Ok(rank_and_truncate(results, request.max_snippets))
+        snippets.extend(rank_and_truncate(results, remaining));
+        Ok(snippets)
     }
 
     async fn read_short_term(
@@ -394,17 +454,6 @@ impl MemoryService for NativeMemoryService {
         let prefix = thread_memory_prefix(&thread_id);
         results.retain(|result| path_has_thread_prefix(result.path.relative_path(), &prefix));
         Ok(rank_and_truncate(results, request.max_snippets))
-    }
-
-    async fn read_document(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceReadRequest,
-    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
-        // The same document read this provider already serves as the
-        // `ironclaw.memory.read` tool — one implementation, two callers (the
-        // model through the tool handler, the host through the trait).
-        self.read(invocation, request).await
     }
 
     async fn record_interaction(
@@ -490,6 +539,70 @@ impl NativeMemoryService {
             .map_err(MemoryServiceError::unavailable_from)?;
         results.retain(|result| result.path.scope() == context.scope() && result.score.is_finite());
         Ok(Some(results))
+    }
+
+    /// The standing [`MEMORY_PATH`] document, split into snippet-sized chunks
+    /// for the head of the long-term lane. Empty when there is nothing saved.
+    ///
+    /// Absence is the NORMAL state — a user who has never saved anything — and
+    /// [`NativeMemoryService::read`] reports it as an `Input` error, so this
+    /// degrades to no curated prefix rather than failing the lane. A backend
+    /// fault degrades the same way, with a `debug!`: memory is best-effort
+    /// context and must never take a turn down with it.
+    async fn curated_standing_snippets(
+        &self,
+        invocation: &MemoryInvocation,
+        max_snippets: usize,
+    ) -> Vec<MemoryServiceContextSnippet> {
+        let budget = max_snippets.min(MAX_CURATED_SNIPPETS);
+        if budget == 0 {
+            return Vec::new();
+        }
+        let (scope, context) = match self.scoped_context(invocation) {
+            Ok(resolved) => resolved,
+            Err(_) => return Vec::new(),
+        };
+        let path = match document_path(&scope, MEMORY_PATH) {
+            Ok(path) => path,
+            Err(_) => return Vec::new(),
+        };
+        let document = match self.backend.read_document(&context, &path).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "standing memory document read failed; long-term lane degrades to search only"
+                );
+                return Vec::new();
+            }
+        };
+        let Ok(text) = String::from_utf8(document) else {
+            tracing::debug!("standing memory document is not valid UTF-8; skipping curated prefix");
+            return Vec::new();
+        };
+        // Split to one past the budget: that extra chunk is what proves the
+        // document did not fit, which is all the truncation marker needs. It
+        // also bounds the WORK — the document is user-controlled and re-read on
+        // every run, so an arbitrarily large one must not be fully chunked just
+        // to be discarded.
+        let mut chunks = split_curated_text(&text, CURATED_CHUNK_RAW_BYTES, budget + 1);
+        let truncated = chunks.len() > budget;
+        chunks.truncate(budget);
+        if truncated && let Some(last) = chunks.last_mut() {
+            mark_curated_truncation(last);
+        }
+        chunks
+            .into_iter()
+            .map(|text| MemoryServiceContextSnippet {
+                tenant_id: scope.tenant_id().to_string(),
+                user_id: scope.user_id().to_string(),
+                agent_id: scope.agent_id().map(ToString::to_string),
+                project_id: scope.project_id().map(ToString::to_string),
+                relative_path: path.relative_path().to_string(),
+                text,
+            })
+            .collect()
     }
 
     /// Write `content` to the reserved `threads/` namespace, bypassing the
@@ -824,6 +937,65 @@ fn format_interaction(messages: &[MemoryInteractionMessage]) -> String {
             None => format!("## {}\n{}\n", message.role.as_str(), message.content),
         })
         .collect()
+}
+
+/// Split the standing memory document into at most `max_chunks` chunks of at
+/// most `max_raw_bytes` each, preferring line boundaries so a one-fact-per-line
+/// `MEMORY.md` is never cut mid-fact. A single line longer than the byte budget
+/// becomes its own chunk and is truncated by the host's sanitizer. Blank lines
+/// are dropped.
+///
+/// `max_chunks` bounds the work, not just the result: the caller passes its
+/// admission budget plus one, so an arbitrarily large user-controlled document
+/// is never fully materialized just to be discarded.
+fn split_curated_text(text: &str, max_raw_bytes: usize, max_chunks: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    if max_chunks == 0 {
+        return chunks;
+    }
+    let mut current = String::new();
+    for line in text.lines() {
+        if chunks.len() >= max_chunks {
+            return chunks;
+        }
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !current.is_empty()
+            && current.len() + CURATED_LINE_SEPARATOR.len() + line.len() > max_raw_bytes
+        {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str(CURATED_LINE_SEPARATOR);
+        }
+        current.push_str(line);
+        if current.len() >= max_raw_bytes {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() && chunks.len() < max_chunks {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// Append the truncation marker to the last admitted chunk, making room for it
+/// first so the chunk still fits [`CURATED_CHUNK_RAW_BYTES`]. Without the
+/// reservation a full chunk would grow past the size the host's per-snippet cap
+/// was sized for, and the sanitizer would clip the marker back off — leaving a
+/// clipped document indistinguishable from a complete one.
+fn mark_curated_truncation(chunk: &mut String) {
+    let room = CURATED_CHUNK_RAW_BYTES.saturating_sub(CURATED_TRUNCATION_MARKER.len());
+    if chunk.len() > room {
+        let mut end = room;
+        while end > 0 && !chunk.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunk.truncate(end);
+    }
+    chunk.push_str(CURATED_TRUNCATION_MARKER);
 }
 
 fn map_search_result_to_snippet(result: MemorySearchResult) -> MemoryServiceContextSnippet {

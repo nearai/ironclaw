@@ -2,10 +2,9 @@
 //!
 //! This adapter bridges the memory service into the agent loop context
 //! pipeline. It derives the host-resolved memory invocation scope from the
-//! request's [`TurnScope`] and [`TurnActor`], queries the provider's declared
-//! query-driven retrieval lanes (`read_short_term` / `read_long_term`) and
-//! composes the always-on curated lane itself out of an ordinary document read,
-//! all with the same invocation, and owns the ENTIRE prompt-safety pipeline for whatever comes
+//! request's [`TurnScope`] and [`TurnActor`], queries the provider's two
+//! retrieval lanes (`read_short_term` / `read_long_term`) with the same
+//! invocation, and owns the ENTIRE prompt-safety pipeline for whatever comes
 //! back: the [`ExpectedScope`] cross-scope drop filter, control-stripping +
 //! truncation + the untrusted-memory envelope, the per-snippet and aggregate
 //! model-visible byte budgets, the loop prompt-content denylist, and
@@ -31,7 +30,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
-    MemoryServiceReadRequest, MemoryServiceReadResponse, memory_context_disabled,
+    memory_context_disabled,
 };
 use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_with_limit};
 
@@ -40,53 +39,10 @@ use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_wit
 /// here where the two reads are concatenated.
 const MAX_MEMORY_CONTEXT_TOTAL_BYTES: usize = 4 * 1024;
 
-/// Per-snippet model-visible byte budget for the two SEARCH lanes. The
-/// untrusted-envelope wrapper caps a single wrapped snippet at this size;
-/// `truncate_to_char_boundary` trims the raw body so the wrapped result fits.
+/// Per-snippet model-visible byte budget. The untrusted-envelope wrapper caps a
+/// single wrapped snippet at this size; `truncate_to_char_boundary` trims the raw
+/// body so the wrapped result fits.
 const MAX_MEMORY_CONTEXT_SNIPPET_BYTES: usize = 512;
-
-/// Model-visible byte budget for the always-on curated lane as a whole — half
-/// the aggregate, so a long standing document can never starve the search lanes
-/// (and, being admitted first, is never starved by them).
-///
-/// The curated document is a whole standing note rather than a search excerpt,
-/// so it is admitted as SEVERAL snippets rather than one clipped snippet: a
-/// snippet's model-visible text is validated as a `LoopSafeSummary`, which is
-/// capped at 512 bytes and is where the prompt denylist runs, so widening the
-/// per-snippet cap would mean denylist-checking only the head of the document.
-/// Splitting on line boundaries keeps every byte the model sees inside the same
-/// per-snippet safety contract as a search hit.
-const MAX_CURATED_MEMORY_BYTES: usize = 2 * 1024;
-
-/// Maximum snippets the curated lane may contribute — the count counterpart of
-/// [`MAX_CURATED_MEMORY_BYTES`], so the standing document cannot consume the
-/// caller's whole `max_snippets` allowance either.
-const MAX_CURATED_SNIPPETS: usize = 4;
-
-/// Raw bytes per curated chunk before sanitization. Leaves room for the
-/// untrusted envelope inside [`MAX_MEMORY_CONTEXT_SNIPPET_BYTES`], so a chunk
-/// built at this size is not re-truncated by the sanitizer.
-const CURATED_CHUNK_RAW_BYTES: usize = 400;
-
-/// Appended to the last admitted curated chunk when the standing document did
-/// not fit its budget, so the model can tell a clipped document from a complete
-/// one. Bracket/delimiter characters are rejected by the prompt safe-summary
-/// rule, so the marker is plain words.
-const CURATED_TRUNCATION_MARKER: &str = " (truncated)";
-
-/// Joins the lines inside one curated chunk. A raw newline would be stripped by
-/// the control-character filter during sanitization, running two facts
-/// together, so lines are joined with a visible separator instead.
-const CURATED_LINE_SEPARATOR: &str = "; ";
-
-/// The standing document the always-on lane reads on every run.
-///
-/// The host names the document because the LANE is host-composed: there is no
-/// provider-supplied "curated context" hook to defer to, just the ordinary
-/// document read every document-backed provider already serves. This is the
-/// same path the memory protocol tells the model to write to (native's reserved
-/// `memory` write target resolves here).
-const CURATED_MEMORY_DOCUMENT: &str = "MEMORY.md";
 
 /// Production adapter that loads memory snippets through IronClaw memory.
 pub struct ProductionMemoryPromptContextService {
@@ -137,6 +93,9 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         // degrades to empty in `admit_lane`.
         let query_long = self.lifecycle.declares(MemoryLifecycleHook::ReadLongTerm);
         let query_short = self.lifecycle.declares(MemoryLifecycleHook::ReadShortTerm);
+        if !query_long && !query_short {
+            return Ok(Vec::new());
+        }
         let invocation = invocation_for_context_request(&request);
         let expected = ExpectedScope::from_scope(&invocation.scope);
         let lane_request = MemoryServiceContextRequest {
@@ -144,7 +103,7 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             max_snippets: request.max_snippets,
             context_profile_id,
         };
-        let (long_term, short_term, curated) = tokio::join!(
+        let (long_term, short_term) = tokio::join!(
             async {
                 if query_long {
                     Some(
@@ -167,20 +126,6 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
                     None
                 }
             },
-            // The always-on curated lane, composed HERE rather than delegated to
-            // a provider hook: it is query-INDEPENDENT (read every run so a fact
-            // saved in an earlier conversation still reaches a later one whose
-            // opening message shares none of its vocabulary — #7185), so there
-            // is nothing provider-specific to decide. Reading the standing
-            // document is the ordinary document read every document-backed
-            // provider already serves, so this needs no new provider contract
-            // and no manifest declaration.
-            self.memory_service.read_document(
-                invocation.clone(),
-                MemoryServiceReadRequest {
-                    path: CURATED_MEMORY_DOCUMENT.to_string(),
-                },
-            ),
         );
         let short_term = short_term
             .map(|lane| admit_lane(&expected, lane, request.max_snippets, "short_term"))
@@ -188,28 +133,14 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         let long_term = long_term
             .map(|lane| admit_lane(&expected, lane, request.max_snippets, "long_term"))
             .unwrap_or_default();
-        let curated = admit_curated_lane(
-            &expected,
-            curated_documents(&invocation, curated),
-            request.max_snippets,
-        );
 
-        // Lane priority: the always-on curated document first (it is the one
-        // lane that does not depend on the current message matching anything),
-        // then short-term before long-term so active-thread memory keeps
+        // Concatenate short-term before long-term so active-thread memory keeps
         // priority under the shared count + aggregate byte budget. The prompt
         // renderer preserves host order for memory snippets, so this is the lane
         // priority boundary.
         let mut admitted = Vec::new();
         let mut total_bytes = 0usize;
-        let mut curated_bytes = 0usize;
-        let lanes = curated.into_iter().map(|snippet| (true, snippet)).chain(
-            short_term
-                .into_iter()
-                .chain(long_term)
-                .map(|snippet| (false, snippet)),
-        );
-        for (is_curated, snippet) in lanes {
+        for snippet in short_term.into_iter().chain(long_term) {
             if admitted.len() >= request.max_snippets {
                 break;
             }
@@ -217,15 +148,6 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
                 continue;
             };
             let snippet_bytes = loop_snippet.safe_summary.len();
-            // The curated lane spends at most its own sub-budget: skip (do not
-            // break) once it is exhausted so an over-long curated lane cannot
-            // consume the aggregate budget the search lanes still need.
-            if is_curated {
-                if curated_bytes.saturating_add(snippet_bytes) > MAX_CURATED_MEMORY_BYTES {
-                    continue;
-                }
-                curated_bytes = curated_bytes.saturating_add(snippet_bytes);
-            }
             if total_bytes.saturating_add(snippet_bytes) > MAX_MEMORY_CONTEXT_TOTAL_BYTES {
                 break;
             }
@@ -250,7 +172,7 @@ fn admit_lane(
     match lane {
         Ok(raw) => raw
             .into_iter()
-            .filter_map(|snippet| sanitize_context_snippet(expected, snippet, None))
+            .filter_map(|snippet| sanitize_context_snippet(expected, snippet))
             .take(max_snippets)
             .collect(),
         Err(error) => {
@@ -262,149 +184,6 @@ fn admit_lane(
             Vec::new()
         }
     }
-}
-
-/// Turn the always-on document read into the raw lane [`admit_curated_lane`]
-/// consumes, normalizing "no such document" into an EMPTY lane.
-///
-/// Absence is the NORMAL state — a user who has never saved anything — and both
-/// bundled providers report it as [`MemoryServiceErrorKind::Input`] (native: no
-/// document at the path; mem0: no memory tagged with it). Debug-logging that on
-/// every run would make a normal state read as a fault, so only the unexpected
-/// kinds are logged: `Operation` (a backend failure) and `Unavailable` (a
-/// provider with no document store at all, which is why `read_document`'s trait
-/// default fails closed rather than reporting an empty document).
-///
-/// The snippet carries the HOST's invocation scope, because the host chose both
-/// the scope and the path: the provider resolved the document under that same
-/// scope, so there is no provider-supplied scope claim to disagree with. The
-/// downstream [`ExpectedScope`] filter therefore cannot fire for this lane
-/// today; it is left in the path as a structural invariant, so a future curated
-/// source that DOES carry its own scope is filtered like any other.
-fn curated_documents(
-    invocation: &MemoryInvocation,
-    read: Result<MemoryServiceReadResponse, MemoryServiceError>,
-) -> Vec<MemoryServiceContextSnippet> {
-    let response = match read {
-        Ok(response) => response,
-        Err(error) if error.kind() == MemoryServiceErrorKind::Input => return Vec::new(),
-        Err(error) => {
-            tracing::debug!(
-                lane = "curated",
-                kind = ?error.kind(),
-                "curated memory document read failed; degrading lane to empty"
-            );
-            return Vec::new();
-        }
-    };
-    if response.content.trim().is_empty() {
-        return Vec::new();
-    }
-    let scope = &invocation.scope;
-    vec![MemoryServiceContextSnippet {
-        tenant_id: scope.tenant_id.as_str().to_string(),
-        user_id: scope.user_id.as_str().to_string(),
-        agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
-        project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
-        relative_path: response.path,
-        text: response.content,
-    }]
-}
-
-/// Host admission for the always-on curated lane.
-///
-/// Same scope/sanitize contract as [`admit_lane`], plus the split that
-/// makes a whole standing document admissible: the raw document is cut on line
-/// boundaries into per-snippet-sized chunks, so each chunk carries its own
-/// untrusted envelope and passes the same prompt denylist a search hit does —
-/// rather than the document being clipped to its first 512 bytes with the
-/// denylist never seeing the rest. A line carrying a denylisted secret is
-/// dropped on its own; the remaining facts still reach the model.
-fn admit_curated_lane(
-    expected: &ExpectedScope,
-    raw: Vec<MemoryServiceContextSnippet>,
-    max_snippets: usize,
-) -> Vec<MemoryServiceContextSnippet> {
-    // `MEMORY.md` is user-controlled content re-read on every run, so the
-    // admission budget bounds the WORK, not just the output: stop splitting at
-    // `budget + 1` chunks. The one extra chunk is what proves there was more
-    // document than we admitted, which is all `truncated` needs — without it a
-    // large standing document would allocate a `String` and a snippet clone per
-    // ~400 bytes on the retrieve-before-run path and then discard nearly all of
-    // them.
-    let budget = max_snippets.min(MAX_CURATED_SNIPPETS);
-    let split_limit = budget.saturating_add(1);
-    // Scope-check BEFORE splitting: another user's standing document must not
-    // even be chunked, let alone admitted.
-    let mut chunks: Vec<MemoryServiceContextSnippet> = Vec::new();
-    'documents: for snippet in raw {
-        if !expected.matches(&snippet) {
-            tracing::debug!("dropping out-of-scope curated memory document");
-            continue;
-        }
-        for text in split_curated_text(&snippet.text, CURATED_CHUNK_RAW_BYTES, split_limit) {
-            chunks.push(MemoryServiceContextSnippet {
-                text,
-                ..snippet.clone()
-            });
-            if chunks.len() >= split_limit {
-                break 'documents;
-            }
-        }
-    }
-    let truncated = chunks.len() > budget;
-    chunks.truncate(budget);
-    if truncated && let Some(last) = chunks.last_mut() {
-        last.text.push_str(CURATED_TRUNCATION_MARKER);
-    }
-    chunks
-        .into_iter()
-        .filter_map(|snippet| {
-            sanitize_context_snippet(expected, snippet, Some(CURATED_TRUNCATION_MARKER))
-        })
-        .collect()
-}
-
-/// Split a curated standing document into at most `max_chunks` chunks of at
-/// most `max_raw_bytes` each, preferring line boundaries so a one-fact-per-line
-/// `MEMORY.md` is never cut mid-fact. A single line longer than the byte budget
-/// becomes its own chunk and is truncated (with the marker) by the sanitizer.
-/// Blank lines are dropped.
-///
-/// `max_chunks` bounds the work, not just the result: the caller passes its
-/// admission budget plus one, so an arbitrarily large user-controlled document
-/// is never fully materialized just to be discarded.
-fn split_curated_text(text: &str, max_raw_bytes: usize, max_chunks: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    if max_chunks == 0 {
-        return chunks;
-    }
-    let mut current = String::new();
-    for line in text.lines() {
-        if chunks.len() >= max_chunks {
-            return chunks;
-        }
-        let line = line.trim_end();
-        if line.trim().is_empty() {
-            continue;
-        }
-        if !current.is_empty()
-            && current.len() + CURATED_LINE_SEPARATOR.len() + line.len() > max_raw_bytes
-        {
-            chunks.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push_str(CURATED_LINE_SEPARATOR);
-        }
-        current.push_str(line);
-        if current.len() >= max_raw_bytes {
-            chunks.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() && chunks.len() < max_chunks {
-        chunks.push(current);
-    }
-    chunks
 }
 
 /// The tenant/user/agent/project the retrieval was scoped to. Drops any provider
@@ -444,32 +223,29 @@ impl ExpectedScope {
 fn sanitize_context_snippet(
     expected: &ExpectedScope,
     snippet: MemoryServiceContextSnippet,
-    truncation_marker: Option<&str>,
 ) -> Option<MemoryServiceContextSnippet> {
     if !expected.matches(&snippet) {
         tracing::debug!("dropping out-of-scope memory context snippet");
         return None;
     }
-    let text = sanitize_snippet_text(&snippet.text, truncation_marker)?;
+    let text = sanitize_snippet_text(&snippet.text)?;
     Some(MemoryServiceContextSnippet { text, ..snippet })
 }
 
 /// Sanitize raw provider snippet text into untrusted-wrapped, size-capped,
 /// model-safe content (or drop it): strip control characters, truncate so the
-/// wrapped result fits the per-snippet budget (appending `truncation_marker`
-/// when it did not fit), then wrap in the untrusted-memory
+/// wrapped result fits the per-snippet budget, then wrap in the untrusted-memory
 /// envelope (which also rejects instruction-hijack markers). Re-wrapping is
 /// unconditional, so text that already begins with the untrusted prefix is wrapped
 /// again rather than trusted. The model-prompt content denylist is applied by
 /// [`to_loop_context_snippet`] as a separate prompt-layer policy.
-fn sanitize_snippet_text(raw: &str, truncation_marker: Option<&str>) -> Option<String> {
-    const SNIPPET_BUDGET: usize = MAX_MEMORY_CONTEXT_SNIPPET_BYTES;
+fn sanitize_snippet_text(raw: &str) -> Option<String> {
     const PROBE_BODY: &str = "x";
     let probe = wrap_untrusted_with_limit(
         EnvelopeSource::Memory,
         EnvelopeTrust::Untrusted,
         PROBE_BODY,
-        SNIPPET_BUDGET,
+        MAX_MEMORY_CONTEXT_SNIPPET_BYTES,
     )
     .ok()?;
     let prefix_len = probe.byte_len().saturating_sub(PROBE_BODY.len());
@@ -480,26 +256,17 @@ fn sanitize_snippet_text(raw: &str, truncation_marker: Option<&str>) -> Option<S
         return None;
     }
 
-    let max_payload_bytes = SNIPPET_BUDGET.saturating_sub(prefix_len);
-    let body = if cleaned.len() <= max_payload_bytes {
-        cleaned.to_string()
-    } else {
-        // Reserve room for the marker so the wrapped result still fits the
-        // budget; without a marker this is the plain truncation path.
-        let marker = truncation_marker.unwrap_or("");
-        let truncated =
-            truncate_to_char_boundary(cleaned, max_payload_bytes.saturating_sub(marker.len()));
-        if truncated.is_empty() {
-            return None;
-        }
-        format!("{truncated}{marker}")
-    };
+    let max_payload_bytes = MAX_MEMORY_CONTEXT_SNIPPET_BYTES.saturating_sub(prefix_len);
+    let truncated = truncate_to_char_boundary(cleaned, max_payload_bytes);
+    if truncated.is_empty() {
+        return None;
+    }
 
     wrap_untrusted_with_limit(
         EnvelopeSource::Memory,
         EnvelopeTrust::Untrusted,
-        &body,
-        SNIPPET_BUDGET,
+        truncated,
+        MAX_MEMORY_CONTEXT_SNIPPET_BYTES,
     )
     .ok()
     .map(|envelope| envelope.into_string())
@@ -610,19 +377,6 @@ mod tests {
         }
     }
 
-    /// Search-lane sanitization: no truncation marker, matching what
-    /// `admit_lane` applies to the two query-driven lanes.
-    fn sanitize_snippet_text(raw: &str) -> Option<String> {
-        super::sanitize_snippet_text(raw, None)
-    }
-
-    fn sanitize_search_lane_snippet(
-        expected: &ExpectedScope,
-        snippet: MemoryServiceContextSnippet,
-    ) -> Option<MemoryServiceContextSnippet> {
-        sanitize_context_snippet(expected, snippet, None)
-    }
-
     fn expected(tenant: &str, user: &str) -> ExpectedScope {
         ExpectedScope {
             tenant_id: tenant.to_string(),
@@ -630,76 +384,6 @@ mod tests {
             agent_id: None,
             project_id: None,
         }
-    }
-
-    /// The curated lane keeps the cross-scope drop filter even though the host
-    /// stamps its own invocation scope onto the document it read, so no
-    /// provider response can currently reach it out of scope. Pinned directly
-    /// at the seam: if a future curated source ever carries its own scope, a
-    /// foreign document is dropped before it is chunked, not after.
-    #[test]
-    fn admit_curated_lane_drops_a_foreign_scoped_document() {
-        let foreign = MemoryServiceContextSnippet {
-            relative_path: "MEMORY.md".to_string(),
-            ..scoped_snippet("tenant-a", "user-other", "another user's standing fact")
-        };
-        assert!(
-            admit_curated_lane(&expected("tenant-a", "user-x"), vec![foreign], 10).is_empty(),
-            "another user's standing document must never be admitted"
-        );
-    }
-
-    /// The absent case the always-on lane depends on: both bundled providers
-    /// report "no such document" as `Input`, and the host must read that as an
-    /// empty lane rather than a failure — otherwise every run for a user who
-    /// has saved nothing would log a fault.
-    #[test]
-    fn curated_documents_treats_absence_as_an_empty_lane() {
-        let invocation = MemoryInvocation {
-            scope: ResourceScope::system(),
-            correlation_id: CorrelationId::new(),
-        };
-        assert!(curated_documents(&invocation, Err(MemoryServiceError::input())).is_empty());
-        assert!(curated_documents(&invocation, Err(MemoryServiceError::unavailable())).is_empty());
-        assert!(
-            curated_documents(
-                &invocation,
-                Ok(MemoryServiceReadResponse {
-                    path: "MEMORY.md".to_string(),
-                    content: "   \n\n ".to_string(),
-                    word_count: 0,
-                }),
-            )
-            .is_empty(),
-            "a blank document is the same non-event as an absent one"
-        );
-    }
-
-    /// A present document is stamped with the HOST's invocation scope — the
-    /// scope it issued the read under — so the model-visible reference cannot
-    /// be forged by a provider echoing back a different one.
-    #[test]
-    fn curated_documents_stamps_the_invocation_scope() {
-        let invocation = MemoryInvocation {
-            scope: ResourceScope::system(),
-            correlation_id: CorrelationId::new(),
-        };
-        let documents = curated_documents(
-            &invocation,
-            Ok(MemoryServiceReadResponse {
-                path: "MEMORY.md".to_string(),
-                content: "the user prefers metric units".to_string(),
-                word_count: 5,
-            }),
-        );
-        assert_eq!(documents.len(), 1);
-        assert_eq!(
-            documents[0].tenant_id,
-            invocation.scope.tenant_id.as_str(),
-            "the snippet carries the scope the host read under"
-        );
-        assert_eq!(documents[0].user_id, invocation.scope.user_id.as_str());
-        assert_eq!(documents[0].relative_path, "MEMORY.md");
     }
 
     // --- sanitize_snippet_text: control-strip + truncate + untrusted envelope ---
@@ -763,89 +447,11 @@ mod tests {
         );
     }
 
-    // --- split_curated_text: line-aligned chunking of the standing document ---
-
-    /// Effectively-uncapped split, for the cases about chunk SHAPE rather than
-    /// the chunk cap (which `split_curated_stops_at_the_chunk_cap` covers).
-    fn split_curated(text: &str, max_raw_bytes: usize) -> Vec<String> {
-        split_curated_text(text, max_raw_bytes, usize::MAX)
-    }
-
-    /// A short document is one chunk and keeps every fact, joined by a visible
-    /// separator (a raw newline would be stripped as a control character during
-    /// sanitization, silently running two facts together).
-    #[test]
-    fn split_curated_keeps_a_short_document_in_one_chunk() {
-        let chunks = split_curated("likes tea\nworks in Berlin\n", CURATED_CHUNK_RAW_BYTES);
-        assert_eq!(chunks, vec!["likes tea; works in Berlin".to_string()]);
-    }
-
-    /// Blank lines carry no fact and must not consume chunk budget.
-    #[test]
-    fn split_curated_drops_blank_lines() {
-        let chunks = split_curated("likes tea\n\n   \nworks in Berlin", CURATED_CHUNK_RAW_BYTES);
-        assert_eq!(chunks, vec!["likes tea; works in Berlin".to_string()]);
-    }
-
-    /// A document longer than one chunk is cut BETWEEN lines, never mid-fact.
-    #[test]
-    fn split_curated_cuts_on_line_boundaries() {
-        let lines: Vec<String> = (0..10)
-            .map(|index| format!("fact number {index}"))
-            .collect();
-        let chunks = split_curated(&lines.join("\n"), 40);
-        assert!(chunks.len() > 1, "document must span several chunks");
-        for chunk in &chunks {
-            assert!(chunk.len() <= 40, "chunk over budget: {chunk:?}");
-            for fact in chunk.split(CURATED_LINE_SEPARATOR) {
-                assert!(
-                    lines.iter().any(|line| line == fact),
-                    "chunk boundary split a fact: {fact:?}"
-                );
-            }
-        }
-    }
-
-    /// A single line longer than the chunk budget still becomes a chunk (the
-    /// sanitizer truncates it) rather than being dropped.
-    #[test]
-    fn split_curated_keeps_an_overlong_single_line() {
-        let chunks = split_curated(&"a".repeat(1000), CURATED_CHUNK_RAW_BYTES);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), 1000);
-    }
-
-    /// `MEMORY.md` is user-controlled and re-read every run, so the chunk cap
-    /// has to bound the WORK, not just the admitted output: a document far
-    /// larger than the budget must stop being split at the cap rather than
-    /// being fully materialized and then discarded.
-    #[test]
-    fn split_curated_stops_at_the_chunk_cap() {
-        let lines: Vec<String> = (0..10_000)
-            .map(|index| format!("fact number {index}"))
-            .collect();
-        let chunks = split_curated_text(&lines.join("\n"), 40, 5);
-        assert_eq!(
-            chunks.len(),
-            5,
-            "splitting must stop at the cap instead of chunking the whole document"
-        );
-        // The head of the document survives, so the cap keeps the
-        // highest-priority content rather than an arbitrary window.
-        assert!(chunks[0].starts_with("fact number 0"));
-    }
-
-    /// Degenerate cap: no chunks requested, no work done.
-    #[test]
-    fn split_curated_with_a_zero_cap_yields_nothing() {
-        assert!(split_curated_text("likes tea\nworks in Berlin", 40, 0).is_empty());
-    }
-
     // --- sanitize_context_snippet: host-owned scope check (defense in depth) ---
 
     #[test]
     fn sanitize_context_keeps_in_scope_snippet() {
-        let kept = sanitize_search_lane_snippet(
+        let kept = sanitize_context_snippet(
             &expected("tenant-a", "user-x"),
             scoped_snippet("tenant-a", "user-x", "ordinary planning note"),
         )
@@ -856,7 +462,7 @@ mod tests {
     #[test]
     fn sanitize_context_drops_cross_tenant_snippet() {
         assert!(
-            sanitize_search_lane_snippet(
+            sanitize_context_snippet(
                 &expected("tenant-a", "user-x"),
                 scoped_snippet("tenant-b", "user-x", "cross-tenant leak"),
             )
@@ -867,7 +473,7 @@ mod tests {
     #[test]
     fn sanitize_context_drops_cross_user_snippet() {
         assert!(
-            sanitize_search_lane_snippet(
+            sanitize_context_snippet(
                 &expected("tenant-a", "user-x"),
                 scoped_snippet("tenant-a", "user-y", "cross-user leak"),
             )
@@ -880,7 +486,7 @@ mod tests {
         let mut in_scope = scoped_snippet("tenant-a", "user-x", "note");
         in_scope.agent_id = Some(String::new());
         in_scope.project_id = Some(String::new());
-        assert!(sanitize_search_lane_snippet(&expected("tenant-a", "user-x"), in_scope).is_some());
+        assert!(sanitize_context_snippet(&expected("tenant-a", "user-x"), in_scope).is_some());
     }
 
     // --- to_loop_context_snippet: loop denylist drop-filter + reference ---

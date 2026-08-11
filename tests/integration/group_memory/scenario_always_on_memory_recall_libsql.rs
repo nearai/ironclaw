@@ -2,12 +2,19 @@
 //! conversation reaches a LATER conversation whose opening message shares no
 //! content word with it.
 //!
-//! This is the case the query-driven lanes cannot cover. Both proactive lanes
-//! are full-text search over the current turn's query, so recall used to depend
-//! on the reader's first message happening to reuse the writer's vocabulary.
-//! Here the reader asks something deliberately unrelated, makes NO memory tool
-//! call, and the fact must still be in its system prompt — which only the
-//! always-on curated `MEMORY.md` lane can do.
+//! This is the case full-text retrieval cannot cover. Both proactive lanes used
+//! to be nothing but search over the current turn's query, so recall depended on
+//! the reader's first message happening to reuse the writer's vocabulary. Here
+//! the reader asks something deliberately unrelated, makes NO memory tool call,
+//! and the fact must still be in its system prompt — which only the standing
+//! `MEMORY.md` the native provider serves at the head of its long-term lane can
+//! do.
+//!
+//! Deliberately blind to HOW that happens: this scenario asserts the user-facing
+//! property through real composition, so it is the behavior-neutrality proof
+//! across reworks of the mechanism (the curated read moved from a host-composed
+//! third lane into the provider's own `read_long_term` without touching a line
+//! of it).
 //!
 //! Two further properties ride along, because both are ways this could "pass"
 //! while being wrong: the writer saves in APPEND mode without the user asking
@@ -65,8 +72,8 @@ pub async fn run() -> HarnessResult<()> {
     drop(writer);
 
     // Negative control: the SAME curated document path under a different user
-    // on the one libSQL composite. The always-on lane reads `MEMORY.md`
-    // unconditionally, so a scope-blind read would surface this.
+    // on the one libSQL composite. The standing document is read on every run
+    // regardless of query, so a scope-blind read would surface this.
     let other_user = UserId::new("reborn-always-on-other-scope-user")?;
     let other_scope = ResourceScope {
         tenant_id: canonical_binding.tenant_id.clone(),
@@ -103,8 +110,8 @@ pub async fn run() -> HarnessResult<()> {
     }
 
     // Conversation B. The opening message shares no content word with the
-    // saved fact, and the script makes no memory tool call — so a search lane
-    // cannot be what puts the fact in the prompt.
+    // saved fact, and the script makes no memory tool call — so full-text
+    // retrieval cannot be what puts the fact in the prompt.
     let reader = group
         .thread("conv-always-on-reader")
         .script([RebornScriptedReply::text("answered")])
