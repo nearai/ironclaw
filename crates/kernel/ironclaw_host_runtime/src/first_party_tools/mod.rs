@@ -289,6 +289,19 @@ fn append_user_sandbox_shell_guidance(
 ) -> Result<(), ExtensionError> {
     const GUIDANCE: &str = " Runs inside a per-user sandbox with a writable persistent `/workspace` and a read-only system filesystem. Install Python packages under `/workspace`, preferably with `python3 -m venv /workspace/.venv`, then use `/workspace/.venv/bin/python` and `/workspace/.venv/bin/pip` in later calls because shell process state does not persist between calls.";
 
+    append_builtin_shell_guidance(package, GUIDANCE)
+}
+
+pub fn append_builtin_shell_guidance(
+    package: &mut ExtensionPackage,
+    guidance: &str,
+) -> Result<(), ExtensionError> {
+    let guidance = guidance.trim();
+    if guidance.is_empty() {
+        return Err(ExtensionError::InvalidManifest {
+            reason: "built-in shell guidance must not be empty".to_string(),
+        });
+    }
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
     let descriptor = package
         .capabilities
@@ -305,8 +318,12 @@ fn append_user_sandbox_shell_guidance(
         .ok_or_else(|| ExtensionError::InvalidManifest {
             reason: format!("built-in first-party manifest is missing capability {capability_id}"),
         })?;
-    descriptor.description.push_str(GUIDANCE);
-    manifest.description.push_str(GUIDANCE);
+    for description in [&mut descriptor.description, &mut manifest.description] {
+        if !description.ends_with(' ') {
+            description.push(' ');
+        }
+        description.push_str(guidance);
+    }
     Ok(())
 }
 

@@ -5,6 +5,8 @@
 //! loop-facing adapter wiring.
 #![forbid(unsafe_code)]
 
+pub const RAILWAY_SHELL_CAPABILITY_GUIDANCE: &str = include_str!("../prompts/railway_shell.md");
+
 pub mod coding;
 mod gsuite;
 mod latency;

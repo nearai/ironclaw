@@ -342,6 +342,7 @@ pub(super) async fn build_backend_production(
         wiring_config,
         production_wiring,
         local_process_port,
+        supplemental_builtin_shell_guidance,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -512,8 +513,11 @@ pub(super) async fn build_backend_production(
     }
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
-    let extension_registry =
-        production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?;
+    let extension_registry = production_builtin_extension_registry(
+        process_backend,
+        supplemental_builtin_shell_guidance,
+        resolved_memory.package.as_ref(),
+    )?;
     let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,

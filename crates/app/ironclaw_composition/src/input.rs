@@ -181,6 +181,7 @@ pub struct RebornHostBindings {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
+    pub(crate) supplemental_builtin_shell_guidance: Option<&'static str>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
@@ -349,6 +350,12 @@ impl RebornHostBindings {
             RebornStorageInput::LocalFilesystem { root, .. } => Some(root),
             _ => None,
         }
+    }
+
+    /// Test-support accessor for the opaque supplemental built-in shell guidance.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn supplemental_builtin_shell_guidance_for_test(&self) -> Option<&'static str> {
+        self.supplemental_builtin_shell_guidance
     }
 
     /// The deployment axes this build assembles from.
@@ -816,6 +823,13 @@ impl RebornHostBindings {
         self
     }
 
+    /// Carry host-selected supplemental shell guidance to the built-in package.
+    /// Composition transports this opaque text without interpreting it.
+    pub fn with_supplemental_builtin_shell_guidance(mut self, guidance: &'static str) -> Self {
+        self.supplemental_builtin_shell_guidance = Some(guidance);
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.deployment.require_runtime_http_egress = true;
         self
@@ -991,6 +1005,7 @@ impl RebornHostBindings {
             production_trust_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
+            supplemental_builtin_shell_guidance: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]

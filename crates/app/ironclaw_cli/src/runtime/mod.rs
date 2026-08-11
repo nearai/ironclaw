@@ -937,21 +937,25 @@ fn build_sandboxed_local_runtime_services_input(
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let process_binding = match runtime_profile {
+    let (process_binding, supplemental_builtin_shell_guidance) = match runtime_profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
             let workspace_root =
                 local_runtime_storage_root(config, storage_profile).join(SANDBOX_WORKSPACES_SUBDIR);
-            block_on_cli(
-                ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
+            (
+                block_on_cli(
+                    ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
+                )
+                .map_err(|error| SandboxProcessBootError::DockerUnreachable {
+                    profile: runtime_profile,
+                    reason: error.to_string(),
+                })?,
+                None,
             )
-            .map_err(|error| SandboxProcessBootError::DockerUnreachable {
-                profile: runtime_profile,
-                reason: error.to_string(),
-            })?
         }
-        RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            railway_preview_process_binding_from_env()?
-        }
+        RebornProfile::HostedSingleTenantVolumeSandboxedRailway => (
+            railway_preview_process_binding_from_env()?,
+            Some(ironclaw_extension_support::RAILWAY_SHELL_CAPABILITY_GUIDANCE),
+        ),
         _ => {
             return Err(SandboxProcessBootError::UnsupportedProfile {
                 profile: runtime_profile,
@@ -966,7 +970,11 @@ fn build_sandboxed_local_runtime_services_input(
         config,
         options,
     )?;
-    Ok(services_input.with_runtime_process_binding(process_binding))
+    let services_input = services_input.with_runtime_process_binding(process_binding);
+    Ok(match supplemental_builtin_shell_guidance {
+        Some(guidance) => services_input.with_supplemental_builtin_shell_guidance(guidance),
+        None => services_input,
+    })
 }
 
 fn build_standalone_local_runtime_services_input(
@@ -2772,6 +2780,11 @@ regex_activation_enabled = false
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
         );
         assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+        assert!(
+            services
+                .supplemental_builtin_shell_guidance_for_test()
+                .is_some_and(|guidance| guidance.contains("Railway Sandbox"))
+        );
     }
 
     #[test]
@@ -2829,6 +2842,12 @@ regex_activation_enabled = false
                 .services_input
                 .local_filesystem_storage_root_for_test(),
             Some(reborn_home.join("hosted-single-tenant-volume").as_path())
+        );
+        assert!(
+            runtime_services
+                .services_input
+                .supplemental_builtin_shell_guidance_for_test()
+                .is_some_and(|guidance| guidance.contains("Railway Sandbox"))
         );
     }
 
@@ -2910,6 +2929,10 @@ regex_activation_enabled = false
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
         );
         assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+        assert_eq!(
+            services.supplemental_builtin_shell_guidance_for_test(),
+            None
+        );
     }
 
     #[test]

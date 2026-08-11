@@ -66,7 +66,7 @@ use ironclaw_host_runtime::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, ToolCallHttpEgress,
     TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    WRITE_FILE_CAPABILITY_ID, append_builtin_shell_guidance, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
@@ -471,6 +471,7 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
         .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("user-sandbox shell manifest");
     assert_eq!(manifest_shell.description, shell.description);
+    assert!(!shell.description.contains("Railway"));
     for effect in [
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
@@ -494,6 +495,32 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
         .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("local-host shell descriptor");
     assert!(!host_shell.description.contains("/workspace/.venv"));
+    assert!(!host_shell.description.contains("Railway"));
+
+    let mut guided_package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
+    append_builtin_shell_guidance(
+        &mut guided_package,
+        "Additional provider-specific shell guidance.",
+    )
+    .unwrap();
+    let guided_shell = guided_package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("guided shell descriptor");
+    let guided_manifest_shell = guided_package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("guided shell manifest");
+    assert!(
+        guided_shell
+            .description
+            .contains("Additional provider-specific shell guidance.")
+    );
+    assert_eq!(guided_manifest_shell.description, guided_shell.description);
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {

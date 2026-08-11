@@ -1126,15 +1126,23 @@ fn insert_bound_memory_package(
 
 fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
+    supplemental_builtin_shell_guidance: Option<&str>,
     memory_package: Option<&ironclaw_extension_registry::ExtensionPackage>,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = ExtensionRegistry::new();
-    let package =
+    let mut package =
         builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("built-in first-party package is invalid: {error}"),
             }
         })?;
+    if let Some(guidance) = supplemental_builtin_shell_guidance {
+        ironclaw_host_runtime::append_builtin_shell_guidance(&mut package, guidance).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("supplemental built-in shell guidance is invalid: {error}"),
+            },
+        )?;
+    }
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension lifecycle package is invalid: {error}"),

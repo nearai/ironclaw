@@ -50,6 +50,37 @@ use crate::{
 use ironclaw_extension_contracts::state::InstallationState;
 
 #[test]
+fn supplemental_shell_guidance_is_input_specific() {
+    let baseline =
+        production_builtin_extension_registry(ProcessBackendKind::UserSandbox, None, None)
+            .expect("baseline registry builds");
+    let guided = production_builtin_extension_registry(
+        ProcessBackendKind::UserSandbox,
+        Some("Railway Sandbox guidance keeps this separate from the IronClaw workspace."),
+        None,
+    )
+    .expect("guided registry builds");
+    let shell_id = CapabilityId::new("builtin.shell").expect("valid shell capability id");
+
+    assert!(
+        !baseline
+            .get_capability(&shell_id)
+            .expect("baseline shell capability")
+            .description
+            .contains("Railway Sandbox")
+    );
+    let guided_shell = guided
+        .get_capability(&shell_id)
+        .expect("guided shell capability");
+    assert!(guided_shell.description.contains("Railway Sandbox"));
+    assert!(
+        guided_shell
+            .description
+            .contains("separate from the IronClaw workspace")
+    );
+}
+
+#[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
     assert!(ensure_libsql_resource_governor_authority_for_build(true).is_ok());
     assert!(matches!(

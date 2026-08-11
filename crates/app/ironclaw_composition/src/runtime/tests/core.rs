@@ -1097,19 +1097,30 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
             .map_err(model_capability_error)?;
         let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
             .expect("shell capability id");
-        assert!(
-            surface
-                .descriptors
-                .iter()
-                .any(|descriptor| descriptor.capability_id == shell_id),
-            "builtin shell must be visible for a sandboxed hosted profile"
-        );
+        let shell = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id == shell_id)
+            .expect("builtin shell must be visible for Railway sandbox profile");
+        for clause in [
+            "fresh workers inside a Railway Sandbox",
+            "Outbound internet uses Railway NAT",
+            "Railway credentials and host-control tooling are not available",
+            "separate from the IronClaw workspace",
+            "do not automatically appear in both locations",
+        ] {
+            assert!(
+                shell.safe_description.contains(clause),
+                "missing {clause:?}"
+            );
+        }
         let shell_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
             .find(|definition| definition.capability_id == shell_id)
             .expect("shell provider tool definition");
+        assert_eq!(shell.safe_description, shell_tool.description);
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
@@ -3317,7 +3328,10 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
         )
         .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
             ironclaw_host_runtime::UserSandboxProcessPort::new(sandbox_transport.clone()),
-        ))),
+        )))
+        .with_supplemental_builtin_shell_guidance(
+            ironclaw_extension_support::RAILWAY_SHELL_CAPABILITY_GUIDANCE,
+        ),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-railway-shell-tenant".to_string(),

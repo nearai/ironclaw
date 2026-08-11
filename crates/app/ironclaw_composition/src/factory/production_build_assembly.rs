@@ -12,6 +12,7 @@ pub(super) async fn build_production_shaped(
         // Compatibility input; the build mints one shared scheduler channel.
         turn_run_wake_notifier: _,
         runtime_process_binding,
+        supplemental_builtin_shell_guidance,
         product_auth_ports,
         native_extension_factories,
         channel_extension_bindings,
@@ -75,6 +76,7 @@ pub(super) async fn build_production_shaped(
         wiring_config,
         production_wiring,
         local_process_port: None,
+        supplemental_builtin_shell_guidance,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -363,6 +365,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     pub(super) production_wiring: RebornProductionWiring,
     pub(super) local_process_port: Option<HostProcessPort>,
+    pub(super) supplemental_builtin_shell_guidance: Option<&'static str>,
     pub(super) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(super) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(super) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
