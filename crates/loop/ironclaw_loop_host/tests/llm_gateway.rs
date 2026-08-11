@@ -187,10 +187,13 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
     });
     request.messages.push(HostManagedModelMessage {
         role: HostManagedModelMessageRole::ToolResult,
-        content: r#"{
-  "marker": "attachment-context",
-  "password": "swordfish"
-}"#
+        content: (serde_json::json!({
+            "content": "     1│ {\n     2│   \"marker\": \"attachment-context\",\n     3│   \"password\": \"swordfish\"\n     4│ }",
+            "total_lines": 4,
+            "lines_shown": 4,
+            "truncated": false,
+            "path": "attachments/attachment.json",
+        }))
         .to_string(),
         content_ref: LoopMessageRef::new("msg:tool-secret").unwrap(),
         tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {

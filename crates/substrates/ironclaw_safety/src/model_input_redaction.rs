@@ -5,6 +5,7 @@ use regex::Regex;
 use crate::LeakDetector;
 
 const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+const MAX_JSON_REDACTION_DEPTH: usize = 16;
 
 static LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 static LABELED_SECRET_PATTERNS: LazyLock<Result<Vec<Regex>, regex::Error>> = LazyLock::new(|| {
@@ -59,6 +60,10 @@ impl ModelInputRedaction {
 /// formats are handled by [`LeakDetector`]; the label-aware pass catches weak
 /// values that have no distinctive shape, such as `password: letmein`.
 pub fn redact_model_input_text(value: &str) -> ModelInputRedaction {
+    redact_model_input_text_at_depth(value, 0)
+}
+
+fn redact_plain_text(value: &str) -> ModelInputRedaction {
     let Ok(patterns) = LABELED_SECRET_PATTERNS.as_ref() else {
         // The expressions are compile-time literals, but a future edit can still
         // make one invalid. Fail closed at the model boundary without rejecting
@@ -89,6 +94,57 @@ pub fn redact_model_input_text(value: &str) -> ModelInputRedaction {
     ModelInputRedaction {
         text,
         redaction_count,
+    }
+}
+
+// Tool results often wrap their model-visible text in one or more JSON string
+// fields. Scan those fields after decoding so escaped labels such as
+// `\"password\": \"value\"` cannot bypass the ordinary label-aware pass.
+fn redact_model_input_text_at_depth(value: &str, encoded_depth: usize) -> ModelInputRedaction {
+    let mut json_redaction_count = 0usize;
+    let mut json_redacted = None;
+    if encoded_depth < MAX_JSON_REDACTION_DEPTH
+        && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(value)
+    {
+        json_redaction_count =
+            redact_json_string_values(&mut json, encoded_depth.saturating_add(1));
+        if json_redaction_count > 0 {
+            match serde_json::to_string(&json) {
+                Ok(text) => json_redacted = Some(text),
+                Err(_) => {
+                    return ModelInputRedaction {
+                        text: REDACTED_SECRET.to_string(),
+                        redaction_count: json_redaction_count.saturating_add(1),
+                    };
+                }
+            }
+        }
+    }
+
+    let plain = redact_plain_text(json_redacted.as_deref().unwrap_or(value));
+    ModelInputRedaction {
+        text: plain.text,
+        redaction_count: json_redaction_count.saturating_add(plain.redaction_count),
+    }
+}
+
+fn redact_json_string_values(value: &mut serde_json::Value, encoded_depth: usize) -> usize {
+    match value {
+        serde_json::Value::String(text) => {
+            let redaction = redact_model_input_text_at_depth(text, encoded_depth);
+            let count = redaction.redaction_count();
+            if count > 0 {
+                *text = redaction.into_text();
+            }
+            count
+        }
+        serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
+            count.saturating_add(redact_json_string_values(value, encoded_depth))
+        }),
+        serde_json::Value::Object(values) => values.values_mut().fold(0usize, |count, value| {
+            count.saturating_add(redact_json_string_values(value, encoded_depth))
+        }),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
     }
 }
 
@@ -195,6 +251,34 @@ mod tests {
     }
 
     #[test]
+    fn redacts_credentials_inside_json_encoded_tool_preview() {
+        let secret = "railway-test-fake-neutral-credential-encoded";
+        let input = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "detail": {
+                "kind": "result_reference",
+                "preview": serde_json::json!({
+                    "marker": "attachment-context",
+                    "password": secret,
+                })
+                .to_string(),
+            },
+        })
+        .to_string();
+
+        let redaction = redact_model_input_text(&input);
+        let repeated = redact_model_input_text(redaction.text());
+
+        assert!(redaction.was_modified());
+        assert!(!redaction.text().contains(secret));
+        assert!(redaction.text().contains("attachment-context"));
+        assert!(redaction.text().contains("[REDACTED_SECRET]"));
+        assert_eq!(repeated.text(), redaction.text());
+        assert!(!repeated.was_modified());
+    }
+
+    #[test]
     fn keeps_security_prose_and_paths_unchanged() {
         for input in [
             "The report documents an authorization flow and API key rotation.",
@@ -210,6 +294,7 @@ mod tests {
             "password: value",
             "password: key",
             r#"{"password":"example"}"#,
+            r#"{"password":"","token":null}"#,
             "Authorization: Bearer your-token",
             "Authorization: Bearer your_token",
             r#"{"Authorization":"Bearer your-token"}"#,
