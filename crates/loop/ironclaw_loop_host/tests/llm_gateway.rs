@@ -187,7 +187,11 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
     });
     request.messages.push(HostManagedModelMessage {
         role: HostManagedModelMessageRole::ToolResult,
-        content: "tool password: swordfish".to_string(),
+        content: r#"{
+  "marker": "attachment-context",
+  "password": "swordfish"
+}"#
+        .to_string(),
         content_ref: LoopMessageRef::new("msg:tool-secret").unwrap(),
         tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
             provider_id: STATIC_PROVIDER_ID.to_string(),
@@ -219,6 +223,7 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
     for secret in ["letmein", "abcdef", "hunter2", "swordfish"] {
         assert!(!provider_text.contains(secret), "provider saw {secret:?}");
     }
+    assert!(provider_text.contains("attachment-context"));
     assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 4);
 }
 

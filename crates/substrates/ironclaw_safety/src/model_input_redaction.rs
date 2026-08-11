@@ -12,12 +12,13 @@ static LABELED_SECRET_PATTERNS: LazyLock<Result<Vec<Regex>, regex::Error>> = Laz
         concat!(
             r"(?i)\b(?:access[ _-]?token|api[ _-]?key|api[ _-]?secret|client[ _-]?secret|",
             r"password|passwd|secret[ _-]?(?:key|token)|shared[ _-]?secret)\b",
+            r#"[\"'`]?"#,
             r"(?:\s*(?::|=)\s*|\s+is\s+set\s+to\s+|\s+(?:is|was|equals)\s+)",
             r"(?:(?:token|value)\s+)?",
             r"(?P<value>[^\s,;]+)"
         ),
         concat!(
-            r"(?i)\bauthorization\b\s*(?::|=)?\s*",
+            r#"(?i)\bauthorization\b[\"'`]?\s*(?::|=)?\s*[\"'`]?"#,
             r"(?:basic|bearer|digest|negotiate|oauth|token)\s+",
             r"(?:(?:token|value)\s+)?(?P<value>[^\s,;]+)"
         ),
@@ -171,6 +172,14 @@ mod tests {
             ("password was hunter2", "hunter2"),
             ("password is set to swordfish", "swordfish"),
             ("api key = abcdef", "abcdef"),
+            (
+                r#"{"password":"railway-test-fake-neutral-credential-7509"}"#,
+                "railway-test-fake-neutral-credential-7509",
+            ),
+            (
+                r#"{"Authorization":"Bearer ghp_structuredsecret123"}"#,
+                "ghp_structuredsecret123",
+            ),
             ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
             (
                 "Authorization: Bearer token ghp_secretvalue123",
@@ -200,8 +209,10 @@ mod tests {
             "password: token",
             "password: value",
             "password: key",
+            r#"{"password":"example"}"#,
             "Authorization: Bearer your-token",
             "Authorization: Bearer your_token",
+            r#"{"Authorization":"Bearer your-token"}"#,
             "password: ghp_abc...xyz",
         ] {
             let redaction = redact_model_input_text(input);
