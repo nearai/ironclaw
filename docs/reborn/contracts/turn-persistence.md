@@ -49,8 +49,8 @@ not persist a parallel turn snapshot.
 - Active-lock key is the canonical `TurnScope`: tenant, agent, optional project, and thread.
 - The key excludes `TurnActor.user_id`, channel IDs, source binding refs, and reply binding refs.
 - A lock stores the current owning `TurnRunId`, explicit `TurnStatus`, monotonically increasing `TurnLockVersion`, `acquired_at`, and `updated_at`.
-- Queued, running, cancel-requested, blocked, and recovery-required runs keep the lock.
-- Terminal runs release the lock exactly once.
+- Queued, running, cancel-requested, and blocked runs keep the lock.
+- Terminal runs, including legacy `RecoveryRequired` records, release the lock exactly once.
 - Runner claim/resume/block/cancel-request transitions update the lock status/version while keeping ownership with the same run.
 
 ---
