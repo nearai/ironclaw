@@ -1,0 +1,231 @@
+use std::{ops::Range, sync::LazyLock};
+
+use regex::Regex;
+
+use crate::LeakDetector;
+
+const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+
+static LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
+static LABELED_SECRET_PATTERNS: LazyLock<Result<Vec<Regex>, regex::Error>> = LazyLock::new(|| {
+    [
+        concat!(
+            r"(?i)\b(?:access[ _-]?token|api[ _-]?key|api[ _-]?secret|client[ _-]?secret|",
+            r"password|passwd|secret[ _-]?(?:key|token)|shared[ _-]?secret)\b",
+            r"(?:\s*(?::|=)\s*|\s+is\s+set\s+to\s+|\s+(?:is|was|equals)\s+)",
+            r"(?:(?:token|value)\s+)?",
+            r"(?P<value>[^\s,;]+)"
+        ),
+        concat!(
+            r"(?i)\bauthorization\b\s*(?::|=)?\s*",
+            r"(?:basic|bearer|digest|negotiate|oauth|token)\s+",
+            r"(?:(?:token|value)\s+)?(?P<value>[^\s,;]+)"
+        ),
+    ]
+    .into_iter()
+    .map(Regex::new)
+    .collect()
+});
+
+/// A model-visible text field after deterministic secret redaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInputRedaction {
+    text: String,
+    redaction_count: usize,
+}
+
+impl ModelInputRedaction {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
+    pub fn redaction_count(&self) -> usize {
+        self.redaction_count
+    }
+
+    pub fn was_modified(&self) -> bool {
+        self.redaction_count > 0
+    }
+}
+
+/// Redact detected secret values while preserving the surrounding model context.
+///
+/// This is deliberately infallible for valid Rust strings. Known credential
+/// formats are handled by [`LeakDetector`]; the label-aware pass catches weak
+/// values that have no distinctive shape, such as `password: letmein`.
+pub fn redact_model_input_text(value: &str) -> ModelInputRedaction {
+    let (known_redacted, known_modified) = LEAK_DETECTOR.redact_all_secrets(value);
+    let Ok(patterns) = LABELED_SECRET_PATTERNS.as_ref() else {
+        // The expressions are compile-time literals, but a future edit can still
+        // make one invalid. Fail closed at the model boundary without rejecting
+        // the turn or exposing the input.
+        return ModelInputRedaction {
+            text: REDACTED_SECRET.to_string(),
+            redaction_count: 1,
+        };
+    };
+    let ranges = labeled_secret_ranges(&known_redacted, patterns);
+    let redaction_count = usize::from(known_modified).saturating_add(ranges.len());
+    let text = apply_redactions(&known_redacted, &ranges);
+    ModelInputRedaction {
+        text,
+        redaction_count,
+    }
+}
+
+fn labeled_secret_ranges(value: &str, patterns: &[Regex]) -> Vec<Range<usize>> {
+    let mut ranges = patterns
+        .iter()
+        .flat_map(|pattern| pattern.captures_iter(value))
+        .filter_map(|captures| captures.name("value"))
+        .filter_map(|candidate| trimmed_candidate_range(value, candidate.range()))
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+    merge_ranges(ranges)
+}
+
+fn trimmed_candidate_range(value: &str, range: Range<usize>) -> Option<Range<usize>> {
+    let candidate = value.get(range.clone())?;
+    let trimmed_start = candidate.trim_start_matches(['\'', '"', '`', '(', '[', '{', '<']);
+    let start = range.start + candidate.len().saturating_sub(trimmed_start.len());
+    let trimmed =
+        trimmed_start.trim_end_matches(['\'', '"', '`', '.', ':', '!', '?', ')', ']', '}', '>']);
+    let end = start + trimmed.len();
+    if start >= end || is_redaction_marker(trimmed) {
+        return None;
+    }
+    Some(start..end)
+}
+
+fn is_redaction_marker(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "redacted"
+            | "redacted_secret"
+            | "placeholder"
+            | "example"
+            | "token"
+            | "value"
+            | "key"
+            | "your-token"
+            | "your_token"
+    ) || value.contains("...")
+}
+
+fn merge_ranges(ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(previous) if range.start <= previous.end => {
+                previous.end = previous.end.max(range.end);
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+fn apply_redactions(value: &str, ranges: &[Range<usize>]) -> String {
+    if ranges.is_empty() {
+        return value.to_string();
+    }
+    let mut redacted = String::with_capacity(value.len());
+    let mut cursor = 0;
+    for range in ranges {
+        redacted.push_str(&value[cursor..range.start]);
+        redacted.push_str(REDACTED_SECRET);
+        cursor = range.end;
+    }
+    redacted.push_str(&value[cursor..]);
+    redacted
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::redact_model_input_text;
+
+    #[test]
+    fn redacts_labeled_values_without_dropping_surrounding_context() {
+        for (input, secret) in [
+            ("password: letmein", "letmein"),
+            ("password was hunter2", "hunter2"),
+            ("password is set to swordfish", "swordfish"),
+            ("api key = abcdef", "abcdef"),
+            ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+            (
+                "Authorization: Bearer token ghp_secretvalue123",
+                "ghp_secretvalue123",
+            ),
+        ] {
+            let redaction = redact_model_input_text(input);
+
+            assert!(redaction.was_modified(), "expected redaction for {input:?}");
+            assert!(!redaction.text().contains(secret));
+            assert!(redaction.text().contains("[REDACTED_SECRET]"));
+        }
+    }
+
+    #[test]
+    fn keeps_security_prose_and_paths_unchanged() {
+        for input in [
+            "The report documents an authorization flow and API key rotation.",
+            "Read /Users/alice/.config/token before reviewing the report.",
+            "The upstream service returned invalid API key.",
+            "/etc/passwd",
+        ] {
+            let redaction = redact_model_input_text(input);
+
+            assert!(
+                !redaction.was_modified(),
+                "unexpected redaction for {input:?}"
+            );
+            assert_eq!(redaction.text(), input);
+        }
+    }
+
+    #[test]
+    fn redacts_known_detector_patterns_and_is_idempotent() {
+        let input = "token: ghp_012345678901234567890123456789012345";
+        let once = redact_model_input_text(input);
+        let twice = redact_model_input_text(once.text());
+
+        assert!(once.was_modified());
+        assert!(
+            !once
+                .text()
+                .contains("ghp_012345678901234567890123456789012345")
+        );
+        assert_eq!(twice.text(), once.text());
+        assert!(!twice.was_modified());
+    }
+
+    #[test]
+    fn redacts_multibyte_labeled_value_on_valid_utf8_boundaries() {
+        let redaction = redact_model_input_text("password: 秘密です; keep this context");
+
+        assert_eq!(
+            redaction.text(),
+            "password: [REDACTED_SECRET]; keep this context"
+        );
+    }
+
+    #[test]
+    fn large_security_prose_near_miss_stays_bounded() {
+        let input = "The API key rotation policy documents authorization flow.\n".repeat(2_000);
+        let started = Instant::now();
+        let redaction = redact_model_input_text(&input);
+
+        assert!(!redaction.was_modified());
+        assert_eq!(redaction.text(), input);
+        assert!(
+            started.elapsed().as_millis() < crate::REDOS_SCAN_BUDGET_MS,
+            "model-input redaction exceeded the catastrophic-backtracking budget"
+        );
+    }
+}

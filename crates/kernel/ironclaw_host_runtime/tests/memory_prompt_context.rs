@@ -592,9 +592,9 @@ async fn adapter_enforces_max_snippets_after_memory_service_returns() {
 }
 
 #[tokio::test]
-async fn adapter_retains_security_prose_and_paths_but_drops_credentials_and_injection() {
+async fn adapter_retains_security_prose_and_paths_redacts_credentials_and_drops_injection() {
     // Content safety is host-owned: ordinary security prose and paths survive,
-    // while credential values and instruction-hijack snippets are dropped.
+    // credential values are redacted, and instruction-hijack snippets are dropped.
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![
         raw_snippet("notes/clean.md", "ordinary visible note"),
         raw_snippet(
@@ -619,7 +619,7 @@ async fn adapter_retains_security_prose_and_paths_but_drops_credentials_and_inje
         .await
         .unwrap();
 
-    assert_eq!(snippets.len(), 2);
+    assert_eq!(snippets.len(), 5);
     assert_eq!(snippets[0].snippet_ref, expected_ref("notes/clean.md"));
     assert_eq!(
         snippets[0].model_content,
@@ -634,6 +634,30 @@ async fn adapter_retains_security_prose_and_paths_but_drops_credentials_and_inje
         )
     );
     assert_eq!(snippets[1].safe_summary, "memory context snippet");
+    assert_eq!(snippets[2].snippet_ref, expected_ref("secrets/key.md"));
+    assert_eq!(
+        snippets[2].model_content,
+        "Untrusted memory content: api key: [REDACTED_SECRET]"
+    );
+    assert_eq!(
+        snippets[3].model_content,
+        "Untrusted memory content: api key is [REDACTED_SECRET]"
+    );
+    assert_eq!(
+        snippets[4].model_content,
+        "Untrusted memory content: Authorization: Bearer token [REDACTED_SECRET]"
+    );
+    let model_text = snippets
+        .iter()
+        .map(|snippet| snippet.model_content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in ["abc123def456", "ghp_secretvalue123"] {
+        assert!(
+            !model_text.contains(secret),
+            "model context retained {secret:?}"
+        );
+    }
 }
 
 #[tokio::test]

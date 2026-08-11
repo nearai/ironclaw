@@ -28,6 +28,9 @@ material itself.
   `display_redaction`/`redaction` (modules: `sanitizer`, `validator`,
   `leak_detector`, `policy`, `prompt_validation`, `provider_validation`,
   `credential_detect`, `sensitive_paths`, `display_redaction`, `redaction`).
+- `redact_model_input_text` — an infallible, source-independent model-view
+  transform that combines known credential formats with labeled weak values
+  such as `password: letmein`, preserving surrounding context.
 
 ## Depends on / consumed by
 
@@ -49,6 +52,9 @@ material itself.
   `fuzz/` guards the parsers (see `fuzz/README.md`).
 - **No raw secret values in findings** — a safety finding must never log or
   return the material it detected.
+- **Model-input findings redact, never reject** — callers apply the transform
+  immediately before provider dispatch. Structural validation and injection
+  containment remain separate policies.
 - Consumption boundaries are enforced from the consumer side (e.g. the
   `ironclaw_webui` `BoundaryRule` forbids direct `ironclaw_safety` use);
   the same-layer edges into this crate are inventoried in

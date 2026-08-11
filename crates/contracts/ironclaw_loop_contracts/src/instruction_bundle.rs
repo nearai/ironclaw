@@ -717,10 +717,7 @@ fn push_visible_surface(
                 tracing::warn!(
                     capability_id = descriptor.capability_id.as_str(),
                     field = error.field,
-                    matched_pattern = error
-                        .rejection
-                        .matched_pattern()
-                        .unwrap_or("structural prompt-text check"),
+                    check = "structural prompt-text check",
                     error_safe_summary = %error.rejection.host_error().safe_summary,
                     "capability omitted from model prompt because its descriptor is not model-safe"
                 );
@@ -1165,9 +1162,8 @@ mod tests {
             .clone()
     }
 
-    /// Host-verified descriptions legitimately mention auth flows
-    /// ("browser authorization-code flow"); the credential denylist must not
-    /// silently drop them from the prompt's capability surface.
+    /// Host-verified descriptions legitimately mention auth flows and remain
+    /// intact until the source-independent provider-bound redaction pass.
     #[test]
     fn verified_catalog_descriptions_with_auth_vocabulary_stay_on_the_surface() {
         let summary = surface_summary_for(
@@ -1195,18 +1191,18 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_descriptions_with_credential_values_are_omitted_from_the_surface() {
+    fn untrusted_descriptions_with_credential_values_reach_final_redaction_boundary() {
         let summary = surface_summary_for(
             CapabilityDescriptionTrust::Untrusted,
             "Use Authorization: Bearer ghp_secretvalue123.",
         );
         assert!(
-            !summary.contains("builtin.extension_register_hosted_mcp"),
-            "credential-bearing description must be omitted from the prompt surface: {summary}"
+            summary.contains("builtin.extension_register_hosted_mcp"),
+            "credential content must not remove the capability from the prompt surface: {summary}"
         );
         assert!(
-            summary.contains("(none)"),
-            "an all-omitted surface must render the empty marker: {summary}"
+            summary.contains("ghp_secretvalue123"),
+            "the contract preserves source data for the provider-bound redaction pass: {summary}"
         );
     }
 

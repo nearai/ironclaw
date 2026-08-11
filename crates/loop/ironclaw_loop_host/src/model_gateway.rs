@@ -37,9 +37,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
-    FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
-    recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
+    FinishReason, ImageUrl, LlmError, LlmProvider, ReasoningDetail, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
+    contains_codex_text_tool_call_syntax, recover_codex_text_tool_calls_from_tool_names,
+    vision_models::is_vision_model,
 };
 use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_loop_contracts::{
@@ -53,6 +54,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
+    redact_model_input_text,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::HostManagedLoopPromptPort;
@@ -1361,7 +1363,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 )]
 async fn complete_model_request<P>(
     provider: &P,
-    completion: CompletionRequest,
+    mut completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
@@ -1375,6 +1377,13 @@ where
         replay_identity,
         next_fallback_index,
     } = request_context;
+    let redaction_count = redact_completion_request(&mut completion);
+    if redaction_count > 0 {
+        debug!(
+            redaction_count,
+            "reborn model gateway redacted provider-bound message content"
+        );
+    }
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
@@ -1405,13 +1414,20 @@ where
             let unavailable_capability_guard =
                 unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
-            let llm_tool_definitions = tool_definitions
+            let mut llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
                     recovery_tool_names.push(definition.name.as_str().to_string());
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions);
+            if tool_redaction_count > 0 {
+                debug!(
+                    redaction_count = tool_redaction_count,
+                    "reborn model gateway redacted provider-bound tool metadata"
+                );
+            }
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
@@ -1496,6 +1512,14 @@ where
                             &response,
                             error.safe_summary.as_str(),
                         ));
+                    let repair_redaction_count =
+                        redact_tool_completion_request(&mut repair_request);
+                    if repair_redaction_count > 0 {
+                        debug!(
+                            redaction_count = repair_redaction_count,
+                            "reborn model gateway redacted provider-bound repair content"
+                        );
+                    }
                     let rejected_response = response;
                     let retry_started_at = live_latency_started_at();
                     let response = match provider.complete_with_tools(repair_request).await {
@@ -1624,6 +1648,103 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
+}
+
+fn redact_completion_request(request: &mut CompletionRequest) -> usize {
+    redact_chat_messages(&mut request.messages)
+        .saturating_add(redact_optional_strings(&mut request.stop_sequences))
+}
+
+fn redact_tool_completion_request(request: &mut ToolCompletionRequest) -> usize {
+    redact_chat_messages(&mut request.messages)
+        .saturating_add(redact_tool_definitions(&mut request.tools))
+        .saturating_add(redact_optional_strings(&mut request.stop_sequences))
+}
+
+fn redact_optional_strings(values: &mut Option<Vec<String>>) -> usize {
+    values.as_mut().map_or(0, |values| {
+        values.iter_mut().fold(0usize, |count, value| {
+            count.saturating_add(redact_string(value))
+        })
+    })
+}
+
+fn redact_chat_messages(messages: &mut [ChatMessage]) -> usize {
+    messages.iter_mut().fold(0usize, |count, message| {
+        count.saturating_add(redact_chat_message(message))
+    })
+}
+
+fn redact_chat_message(message: &mut ChatMessage) -> usize {
+    let mut count = redact_string(&mut message.content);
+    for part in &mut message.content_parts {
+        if let ContentPart::Text { text } = part {
+            count = count.saturating_add(redact_string(text));
+        }
+    }
+    if let Some(reasoning) = message.reasoning.as_mut() {
+        count = count.saturating_add(redact_string(reasoning));
+    }
+    if let Some(details) = message.reasoning_details.as_mut() {
+        for detail in &mut details.content {
+            match detail {
+                ReasoningDetail::Text { text, .. } | ReasoningDetail::Summary(text) => {
+                    count = count.saturating_add(redact_string(text));
+                }
+                ReasoningDetail::Encrypted(_) | ReasoningDetail::Redacted { .. } => {}
+            }
+        }
+    }
+    if let Some(tool_calls) = message.tool_calls.as_mut() {
+        for tool_call in tool_calls {
+            count = count.saturating_add(redact_json_string_values(&mut tool_call.arguments));
+            if let Some(reasoning) = tool_call.reasoning.as_mut() {
+                count = count.saturating_add(redact_string(reasoning));
+            }
+            if let Some(parse_error) = tool_call.arguments_parse_error.as_mut() {
+                count = count.saturating_add(redact_string(parse_error));
+            }
+        }
+    }
+    count
+}
+
+fn redact_tool_definitions(definitions: &mut [ToolDefinition]) -> usize {
+    definitions.iter_mut().fold(0usize, |count, definition| {
+        count
+            .saturating_add(redact_string(&mut definition.description))
+            .saturating_add(redact_json_string_values(&mut definition.parameters))
+    })
+}
+
+fn redact_json_string_values(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => redact_string(text),
+        serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
+            count.saturating_add(redact_json_string_values(value))
+        }),
+        serde_json::Value::Object(values) => {
+            let original = std::mem::take(values);
+            original
+                .into_iter()
+                .fold(0usize, |count, (mut key, mut value)| {
+                    let field_count = redact_string(&mut key)
+                        .saturating_add(redact_json_string_values(&mut value));
+                    values.insert(key, value);
+                    count.saturating_add(field_count)
+                })
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+    }
+}
+
+fn redact_string(value: &mut String) -> usize {
+    let redaction = redact_model_input_text(value);
+    let count = redaction.redaction_count();
+    if count > 0 {
+        *value = redaction.into_text();
+    }
+    count
 }
 
 fn accumulate_tool_response_usage(
@@ -2873,6 +2994,20 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn provider_bound_redaction_covers_stop_sequences() {
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.stop_sequences = Some(vec!["password: swordfish".to_string()]);
+
+        let count = redact_completion_request(&mut request);
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            request.stop_sequences,
+            Some(vec!["password: [REDACTED_SECRET]".to_string()])
+        );
+    }
 
     #[derive(Default)]
     struct RecordingSafeTextSink {

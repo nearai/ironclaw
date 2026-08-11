@@ -165,6 +165,76 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages[1].content, "hello model");
 }
 
+#[tokio::test]
+async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.messages[0].content = "system password: letmein".to_string();
+    request.messages[1].content = "user api key = abcdef".to_string();
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::Assistant,
+        content: "assistant password was hunter2".to_string(),
+        content_ref: LoopMessageRef::new("msg:assistant-secret").unwrap(),
+        tool_result_provider_call: None,
+        tool_result_content: None,
+        image_parts: Vec::new(),
+    });
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    let provider_text = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in ["letmein", "abcdef", "hunter2"] {
+        assert!(!provider_text.contains(secret), "provider saw {secret:?}");
+    }
+    assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 3);
+}
+
+#[tokio::test]
+async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply("done"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut capability_port = GatewayCapabilityPort::with_tool_surface();
+    capability_port.definitions[0].description = "Use password: letmein".to_string();
+    capability_port.definitions[0].parameters["properties"]["message"]["default"] =
+        serde_json::json!("api key = abcdef");
+    capability_port.definitions[0].parameters["properties"]["password: hunter2"] =
+        serde_json::json!({"type": "string"});
+
+    gateway
+        .stream_model_with_capabilities(
+            model_request(interactive_model()),
+            Arc::new(capability_port),
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    let tool = &requests[0].tools[0];
+    assert!(!tool.description.contains("letmein"));
+    assert!(tool.description.contains("[REDACTED_SECRET]"));
+    let schema = tool.parameters.to_string();
+    assert!(!schema.contains("abcdef"));
+    assert!(!schema.contains("hunter2"));
+    assert!(schema.contains("[REDACTED_SECRET]"));
+}
+
 #[traced_test]
 #[tokio::test]
 async fn gateway_records_prompt_cache_break_within_a_run() {
@@ -1471,6 +1541,39 @@ async fn gateway_repairs_malformed_provider_tool_arguments_before_registration()
         repair_tool_result.content.contains(parse_error),
         "repair prompt must carry the parse failure without executing the call"
     );
+}
+
+#[tokio::test]
+async fn gateway_redacts_secret_echoed_into_provider_tool_repair_prompt() {
+    let parse_error = concat!(
+        "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3\n",
+        "password was hunter2"
+    );
+    let provider = malformed_args_repair_provider(parse_error, "Finished after safe repair.");
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    gateway
+        .stream_model_with_capabilities(
+            model_request(interactive_model()),
+            Arc::new(GatewayCapabilityPort::with_tool_surface()),
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    let repair_messages = repair_request_messages(&requests);
+    let provider_text = repair_messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!provider_text.contains("hunter2"));
+    assert!(provider_text.contains("password was [REDACTED_SECRET]"));
 }
 
 #[tokio::test]

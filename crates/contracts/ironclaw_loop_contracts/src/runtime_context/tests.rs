@@ -543,7 +543,7 @@ fn connected_channel_name_with_security_vocabulary_remains_usable() {
 }
 
 #[test]
-fn connected_channel_name_with_credential_value_degrades_to_placeholder() {
+fn connected_channel_name_with_credential_value_reaches_final_redaction_boundary() {
     let ctx = LoopRuntimeContext {
         loop_started_at_utc: stamp(),
         communication: Some(CommunicationRuntimeContext {
@@ -562,12 +562,14 @@ fn connected_channel_name_with_credential_value_degrades_to_placeholder() {
     };
     let text = ctx.render_model_content();
     assert!(
-        !text.contains("ghp_secretvalue123"),
-        "credential value must not survive into the slice: {text}"
+        text.contains("ghp_secretvalue123"),
+        "the contract preserves source data until the provider-bound redaction pass: {text}"
     );
     assert!(
-        text.contains("Connected channels: a connected channel (authenticated, active)."),
-        "credential-bearing label degrades to placeholder: {text}"
+        text.contains(
+            "Connected channels: Authorization: Bearer ghp_secretvalue123 (authenticated, active)."
+        ),
+        "credential content must not remove the connected channel: {text}"
     );
 }
 
