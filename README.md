@@ -303,6 +303,12 @@ ironclaw repl
 ironclaw run --message "hello"
 ```
 
+### IdentyClaw Passport
+
+IronClaw can use [IdentyClaw](https://api.identyclaw.com) Passport through the
+built-in `builtin.idcp` capability and a host-side helper (keys and JWTs never
+reach the model). Practitioner setup: [docs/internal/identyclaw-passport.md](docs/internal/identyclaw-passport.md).
+
 ## Development
 
 ```bash

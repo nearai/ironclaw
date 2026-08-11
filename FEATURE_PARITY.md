@@ -903,5 +903,6 @@ IronClaw intentionally differs from OpenClaw in these ways:
 7. **Tinfoil private inference**: IronClaw-only provider for private/encrypted inference
 8. **GitHub WASM tool**: Native GitHub integration as WASM tool
 9. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
+10. **IdentyClaw Passport (`builtin.idcp`)**: IronClaw-only host-mediated identity federation; Passport keys/JWTs stay on a host helper, never in extension runtime (see `docs/internal/identyclaw-passport.md`)
 
 These are intentional architectural choices, not gaps to be filled.
