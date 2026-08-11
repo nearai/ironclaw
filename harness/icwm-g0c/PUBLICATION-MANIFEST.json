@@ -1,5 +1,5 @@
 {
-  "aggregate_sha256": "284106c11fdb5419f611932a6572c14665aacde8ef98875b8cc1b7d5590520d9",
+  "aggregate_sha256": "d2876ba196f2109a8fc9bc677a41accca68750406111d410a8c86eb7392acb72",
   "algorithm": "sha256 of UTF-8 lines `<file-sha256><two spaces><relative-path>\\n`, entries sorted bytewise by relative path",
   "approved_ignored_common_aggregate_sha256": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b",
   "authority": "contribution_grade_not_gate_or_adr_acceptance",
@@ -16,9 +16,9 @@
       "sha256": "971d3f9c08cb3d53c557f2cfcd72a8ccb02bdb58e24d95a38610df144388001a"
     },
     {
-      "bytes": 2924,
+      "bytes": 3219,
       "path": "../../docs/internal/research/icwm-g0c/complement-live-tier.md",
-      "sha256": "ca858ad7d8bef20933bda19967ff0bda3aa6059126012d2763dad6ab245e0d93"
+      "sha256": "2e6cfce77ae83c97a4b14fdb8a9dae4706edbd6c8bc414b101c68a6c204f7892"
     },
     {
       "bytes": 12286,
@@ -36,9 +36,9 @@
       "sha256": "291d8261349e16571d7c0ce34e1ab65c76718e465b762035d4d8ae0901cbb415"
     },
     {
-      "bytes": 5793,
+      "bytes": 7478,
       "path": "README.md",
-      "sha256": "7ea2ea81678a5791ccec3a609392c81f026f2ac3126e7e7fef422e6d4b17b9c3"
+      "sha256": "696973004623719e5fd819d2cb37bf90275d2a83d8f27e14947850bd3b50d457"
     },
     {
       "bytes": 5180,
@@ -58,7 +58,7 @@
     {
       "bytes": 3330,
       "path": "fixtures/CONTROL-RESULT.json",
-      "sha256": "46c14abccfc7d9f2fbac963623f9d7cb907f6f646c98fdb34b69e38efcc808b9"
+      "sha256": "e2bb500f078db340eee91e8b3b4b97e14f9766e188cd815ee2715b8d1e4e8529"
     },
     {
       "bytes": 977,
@@ -76,19 +76,19 @@
       "sha256": "2422a729df9b88f8005f34e35fe2794248412b05cdca50d0d83edeb1c4193878"
     },
     {
-      "bytes": 53737,
+      "bytes": 54771,
       "path": "src/lib.rs",
-      "sha256": "76023706c5fb4bbd1c8eea1c7df9f78c596f557ff31256621ae36cde7df66f23"
+      "sha256": "9f680f2ca2c34c3893590a1691992491ce7895af6a5d7340f90328dc710b6f33"
     },
     {
-      "bytes": 40395,
+      "bytes": 43498,
       "path": "tests/contracts.rs",
-      "sha256": "5762f0df30c3610987018dd939673a91453937fac56812f78849be1ec191f762"
+      "sha256": "bc3b86f9fbeb664c13a3d092d234cded1fb327371699160f50dec519103f48a1"
     },
     {
-      "bytes": 7240,
+      "bytes": 7722,
       "path": "verify-publication.py",
-      "sha256": "948aeee6b95db70cff484700acdc66f39222424c5d264028e2a6caf15f2d04dc"
+      "sha256": "da95ab49ef9d5f820e1799daf44ac7deb3ef06c44ff1ad83b7a75023acaf372b"
     }
   ],
   "exclusions": [

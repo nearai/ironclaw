@@ -41,9 +41,13 @@ outside the Matrix channel cannot erase their underlying backup, Olm-wedge,
 history, and room-event behaviors; those behaviors require neutral substitute
 scenarios.
 
-Runtime result vocabulary is closed to `supported`, `failed`, `infeasible`,
-and `not_applicable`. Planning `deferred` is never emitted as a runtime result.
-Every adopted scenario must receive a neutral scenario hash before execution.
+Runtime result vocabulary is closed to `supported`, `failed`, `uncertain`,
+`infeasible`, and `not_applicable`. `uncertain` is required when response loss
+or a crash crosses a commit/acknowledgement boundary and retained evidence
+cannot prove whether the candidate consumed or durably applied the response;
+it must not be promoted to `supported` or collapsed into an ordinary failed
+assertion. Planning `deferred` is never emitted as a runtime result. Every
+adopted scenario must receive a neutral scenario hash before execution.
 
 Any future live runner must record immutable server images/configuration, independent
 client provenance, both encryption directions, sanitized MITM receipts, exact

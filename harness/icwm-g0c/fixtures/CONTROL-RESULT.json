@@ -36,7 +36,7 @@
   "crashes": [],
   "response_losses": [],
   "evidence_hashes": {
-    "tested_harness_source": "76023706c5fb4bbd1c8eea1c7df9f78c596f557ff31256621ae36cde7df66f23",
+    "tested_harness_source": "9f680f2ca2c34c3893590a1691992491ce7895af6a5d7340f90328dc710b6f33",
     "approved_ignored_common_aggregate": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b"
   },
   "capabilities": {

@@ -237,6 +237,23 @@ pub enum Failpoint {
     StaleWriterAfterTakeover,
 }
 
+impl Failpoint {
+    fn is_uncertain(self) -> bool {
+        matches!(
+            self,
+            Self::LedgerAfterCryptoStoreAppend
+                | Self::LedgerUnknownCryptoStoreAppend
+                | Self::LedgerAfterIngressAppend
+                | Self::LedgerUnknownIngressAppend
+                | Self::CandidateAfterCommitBeforeAcknowledge
+                | Self::ProcessAfterEffectAppend
+                | Self::ResponseAfterCommitBeforeAcknowledge
+                | Self::AfterPreparedCiphertextHandoff
+                | Self::StaleWriterAfterTakeover
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestartReason {
@@ -1115,6 +1132,7 @@ pub struct Harness<A: CandidateAdapter> {
     required_failpoints: BTreeSet<Failpoint>,
     run_plan: RunPlan,
     terminal_errors: Vec<(String, bool)>,
+    execution_started: bool,
 }
 
 impl<A: CandidateAdapter> Harness<A> {
@@ -1124,12 +1142,12 @@ impl<A: CandidateAdapter> Harness<A> {
         scripted_responses: Vec<ScriptedResponse>,
     ) -> Result<Self, HarnessError> {
         scenario.validate_identity()?;
-        Ok(Self::new(
+        Self::new(
             adapter,
             scenario.expected_effects.clone(),
             scripted_responses,
         )
-        .with_required_failpoints(scenario.failpoints.clone()))
+        .with_required_failpoints(scenario.failpoints.clone())
     }
 
     pub fn new(
@@ -1150,10 +1168,14 @@ impl<A: CandidateAdapter> Harness<A> {
             required_failpoints: BTreeSet::new(),
             run_plan: RunPlan::default(),
             terminal_errors: Vec::new(),
+            execution_started: false,
         }
     }
 
     pub fn with_run_plan(mut self, run_plan: RunPlan) -> Result<Self, HarnessError> {
+        if self.execution_started {
+            return Err(HarnessError::RunPlanAfterExecutionStarted);
+        }
         if !matches!(
             run_plan.predeclared_disposition,
             None | Some(ResultDisposition::Infeasible | ResultDisposition::NotApplicable)
@@ -1196,19 +1218,26 @@ impl<A: CandidateAdapter> Harness<A> {
         self.armed_failpoint = Some(failpoint);
     }
 
-    pub fn with_required_failpoints(mut self, failpoints: Vec<Failpoint>) -> Self {
+    pub fn with_required_failpoints(
+        mut self,
+        failpoints: Vec<Failpoint>,
+    ) -> Result<Self, HarnessError> {
+        if self.execution_started {
+            return Err(HarnessError::RequiredFailpointsAfterExecutionStarted);
+        }
         self.required_failpoints = failpoints.into_iter().collect();
-        self
+        Ok(self)
     }
 
     pub fn drive(&mut self, input: MatrixInput) -> Result<(), HarnessError> {
+        self.execution_started = true;
         let result = self.drive_inner(input);
         if let Err(error) = &result {
-            let uncertain = matches!(
-                error,
-                HarnessError::InjectedFailpoint { .. }
-                    | HarnessError::ResponseLostAfterAdapterHandling
-            );
+            let uncertain = match error {
+                HarnessError::InjectedFailpoint { failpoint } => failpoint.is_uncertain(),
+                HarnessError::ResponseLostAfterAdapterHandling => true,
+                _ => false,
+            };
             self.terminal_errors.push((error.to_string(), uncertain));
         }
         result
@@ -1281,20 +1310,18 @@ impl<A: CandidateAdapter> Harness<A> {
     }
 
     pub fn crash(&mut self) -> Result<CrashRecord, HarnessError> {
-        let reached = self.armed_failpoint.take();
-        if let Some(failpoint) = reached {
-            self.record_failpoint(failpoint);
-        }
-        self.adapter.crash(reached)?;
+        self.execution_started = true;
+        self.adapter.crash(None)?;
         let record = CrashRecord {
             at_ms: self.clock.now_ms(),
-            reached,
+            reached: None,
         };
         self.crashes.push(record.clone());
         Ok(record)
     }
 
     pub fn restart(&mut self, reason: RestartReason) -> Result<(), HarnessError> {
+        self.execution_started = true;
         self.adapter.restart(reason)
     }
 
@@ -1530,6 +1557,8 @@ pub enum HarnessError {
         capability: String,
     },
     InvalidPredeclaredDisposition,
+    RunPlanAfterExecutionStarted,
+    RequiredFailpointsAfterExecutionStarted,
     MissingActor,
     InjectedFailpoint {
         failpoint: Failpoint,

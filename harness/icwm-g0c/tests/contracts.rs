@@ -131,13 +131,98 @@ fn crash_and_restart_hooks_preserve_ledger_and_reset_volatile_state() {
         vec![],
     );
     harness.drive(MatrixInput::Emit(expected)).unwrap();
-    harness.arm_failpoint(Failpoint::ProcessAfterEffectAppend);
 
     let crash = harness.crash().unwrap();
-    assert_eq!(crash.reached, Some(Failpoint::ProcessAfterEffectAppend));
+    assert_eq!(crash.reached, None);
     harness.restart(RestartReason::CrashRecovery).unwrap();
     assert_eq!(harness.adapter().restart_count(), 1);
     assert_eq!(harness.finish().unwrap().effects.len(), 1);
+}
+
+#[test]
+fn explicit_crash_does_not_credit_an_untraversed_armed_failpoint() {
+    let required = Failpoint::CandidateBeforePrepare;
+    let mut harness = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![],
+        vec![],
+    )
+    .with_required_failpoints(vec![required])
+    .unwrap();
+    harness.arm_failpoint(required);
+    assert_eq!(harness.crash().unwrap().reached, None);
+    let report = harness.finish().unwrap();
+    assert!(report.failpoints_reached.is_empty());
+    assert_eq!(report.crashes.len(), 1);
+    let reason = report.disposition_reason.unwrap();
+    assert!(reason.contains("UnreachedFailpoints { count: 1 }"));
+    assert!(reason.contains("ArmedFailpointUnreached"));
+
+    let operation_id = StableId::derive("traversed-required-failpoint", &[]);
+    let mut traversed = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![],
+        vec![],
+    )
+    .with_required_failpoints(vec![required])
+    .unwrap();
+    traversed.arm_failpoint(required);
+    assert!(matches!(
+        traversed.drive(MatrixInput::BeginOperation { operation_id }),
+        Err(HarnessError::InjectedFailpoint { failpoint }) if failpoint == required
+    ));
+    let report = traversed.finish().unwrap();
+    assert_eq!(report.failpoints_reached, vec![required]);
+    assert_eq!(report.crashes.len(), 1);
+    assert!(
+        !report
+            .disposition_reason
+            .as_deref()
+            .unwrap()
+            .contains("UnreachedFailpoints")
+    );
+}
+
+#[test]
+fn run_plan_cannot_be_applied_after_execution_starts() {
+    let operation_id = StableId::derive("run-plan-before-execution", &[]);
+    let mut harness = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![],
+        vec![],
+    );
+    harness
+        .drive(MatrixInput::BeginOperation { operation_id })
+        .unwrap();
+    assert!(matches!(
+        harness.with_run_plan(icwm_g0c_harness::RunPlan::default()),
+        Err(HarnessError::RunPlanAfterExecutionStarted)
+    ));
+
+    let mut restarted = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![],
+        vec![],
+    );
+    restarted.restart(RestartReason::CleanRestart).unwrap();
+    assert!(matches!(
+        restarted.with_run_plan(icwm_g0c_harness::RunPlan::default()),
+        Err(HarnessError::RunPlanAfterExecutionStarted)
+    ));
+
+    let operation_id = StableId::derive("required-after-execution", &[]);
+    let mut started = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![],
+        vec![],
+    );
+    started
+        .drive(MatrixInput::BeginOperation { operation_id })
+        .unwrap();
+    assert!(matches!(
+        started.with_required_failpoints(vec![]),
+        Err(HarnessError::RequiredFailpointsAfterExecutionStarted)
+    ));
 }
 
 #[test]
@@ -653,10 +738,6 @@ fn published_control_scenario_deserializes_and_drives_the_control_adapter() {
         vec![ScriptedResponse::matrix(200, b"{}".to_vec())],
     )
     .unwrap();
-    harness.clock_mut().advance_ms(25).unwrap();
-    for input in scenario.inputs {
-        harness.drive(input).unwrap();
-    }
     let capabilities = BTreeMap::from([
         ("ordered_effect_ledger".into(), true),
         ("scripted_response_consumption".into(), true),
@@ -702,6 +783,10 @@ fn published_control_scenario_deserializes_and_drives_the_control_adapter() {
             ..Default::default()
         })
         .unwrap();
+    harness.clock_mut().advance_ms(25).unwrap();
+    for input in scenario.inputs {
+        harness.drive(input).unwrap();
+    }
     let execution = harness.finish().unwrap();
     assert_eq!(
         execution.disposition,
@@ -1009,10 +1094,14 @@ fn armed_response_failpoints_execute_and_publish_crashes() {
             Err(HarnessError::InjectedFailpoint { failpoint: reached }) if reached == failpoint
         ));
         let execution = harness.finish().unwrap();
-        assert_eq!(
-            execution.disposition,
-            icwm_g0c_harness::ResultDisposition::Uncertain
-        );
+        let expected_disposition = match failpoint {
+            Failpoint::ResponseBeforePrepare => icwm_g0c_harness::ResultDisposition::Failed,
+            Failpoint::ResponseAfterCommitBeforeAcknowledge => {
+                icwm_g0c_harness::ResultDisposition::Uncertain
+            }
+            _ => unreachable!("test enumerates the paired response boundaries"),
+        };
+        assert_eq!(execution.disposition, expected_disposition);
         assert_eq!(execution.failpoints_reached, vec![failpoint]);
         assert_eq!(execution.crashes.len(), 1);
         assert!(execution.response_losses.is_empty());

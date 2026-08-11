@@ -22,10 +22,29 @@ ADR-006, a production dependency, store, or runtime placement.
   an unimplemented applicable test.
 - Candidate adapters must expose prepare, commit, and acknowledge boundaries.
   The neutral harness does not claim candidate-store atomicity.
-- The control adapter proves only the common contracts.
+- The control adapter exercises only bounded common contracts; it does not
+  prove candidate-store atomicity, crash recovery, or live interoperability.
 
-Identifier differential tests use the exact crates.io `ruma-common 0.19.0`
-parser layer. That is the current release observed during the 2026-08-11
+At the harness layer, `ledger_unknown_*` is label-distinct but currently
+state-equivalent to the matching `ledger_after_*` boundary: the normalized
+effect has already been appended before either crash is recorded. Only a real
+candidate/store adapter can supply the durable-state observation that makes
+the unknown boundary semantically different. This is a contribution-grade gap,
+not production proof of an ambiguity protocol.
+
+The current deterministic suite does not execute the
+`ledger_unknown_crypto_store_append`, any ingress-ledger boundary,
+`candidate_after_prepare`, `process_before_effect_append`, or either prepared-
+ciphertext-handoff failpoint. It also does not execute `ingress_disposition` or
+`prepared_ciphertext` effect kinds. The published control result is narrower
+still: it contains one `matrix_request` effect and reaches no failpoint. These
+omissions remain required candidate/live-tier work and cannot be inferred from
+the existence of enum variants or schemas.
+
+Identifier differential tests use only the exact crates.io `ruma-common
+0.19.0` identifier parse layer. They do not invoke Ruma strict or historical
+validation modes and make no claim about those validators. This is the current
+release observed during the 2026-08-11
 recapture and the same `ruma-common` version resolved through the Matrix SDK
 0.18 candidate graph. It is a test-only oracle, not a production dependency or
 an architectural selection of the full SDK. The corpus records oracle parsing,
@@ -86,6 +105,13 @@ manifest and detached digest themselves plus local `target`, `__pycache__`, and
 payload files and manifest entries outside those roots. Raw retained evidence
 is outside these roots under the separately access-controlled `.work` tree; it
 is not silently excluded from an otherwise authoritative payload directory.
+Generated-directory exclusions apply only when an actual directory entry has
+one of those exact basenames. A regular file named `target`, `__pycache__`, or
+`.pytest_cache`, or a file merely nested below some differently named path,
+remains payload and must be listed. This distinction makes the completeness
+check resistant to hiding an added payload file behind a reserved-looking
+filename; symlinked files and directories fail closed rather than being
+treated as generated output.
 
 In result fixtures, the legacy field name `harness_commit` means the tested
 IronClaw source baseline, not the commit that contains this standalone harness.

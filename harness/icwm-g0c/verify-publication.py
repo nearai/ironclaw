@@ -64,24 +64,33 @@ def enumerate_payload_files() -> set[str]:
     for payload_root in PAYLOAD_ROOTS:
         if not payload_root.is_dir():
             raise SystemExit(f"declared payload root is missing: {payload_root}")
-        for path in payload_root.rglob("*"):
-            relative_to_payload_root = path.relative_to(payload_root)
-            if any(
-                part in EXCLUDED_GENERATED_DIRECTORIES
-                for part in relative_to_payload_root.parts
-            ):
-                continue
-            if path.is_symlink():
-                raise SystemExit(
-                    f"publication payload contains unsupported symlink: "
-                    f"{payload_relative_path(path)}"
-                )
-            if not path.is_file():
-                continue
-            relative = payload_relative_path(path)
-            if payload_root == ROOT and relative in EXCLUDED_PAYLOAD_FILES:
-                continue
-            files.add(relative)
+        for current, directory_names, file_names in os.walk(
+            payload_root, topdown=True, followlinks=False
+        ):
+            current_path = Path(current)
+            for directory_name in tuple(directory_names):
+                directory = current_path / directory_name
+                if directory.is_symlink():
+                    raise SystemExit(
+                        f"publication payload contains unsupported symlink: "
+                        f"{payload_relative_path(directory)}"
+                    )
+            directory_names[:] = [
+                name
+                for name in directory_names
+                if name not in EXCLUDED_GENERATED_DIRECTORIES
+            ]
+            for file_name in file_names:
+                path = current_path / file_name
+                if path.is_symlink():
+                    raise SystemExit(
+                        f"publication payload contains unsupported symlink: "
+                        f"{payload_relative_path(path)}"
+                    )
+                relative = payload_relative_path(path)
+                if payload_root == ROOT and relative in EXCLUDED_PAYLOAD_FILES:
+                    continue
+                files.add(relative)
     return files
 
 
