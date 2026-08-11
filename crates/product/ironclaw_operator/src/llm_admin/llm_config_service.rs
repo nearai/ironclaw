@@ -356,10 +356,11 @@ impl RebornLlmConfigService {
             .clone()
             .filter(|model| !model.trim().is_empty())
             .unwrap_or_default();
+        let is_nearai_protocol = protocol == ProviderProtocol::NearAi;
 
         let definition = custom_definition(&request.provider_id, protocol, base_url.clone(), model);
         let registry = ProviderRegistry::new(vec![definition]);
-        let stored_key_allowed = self.probe_matches_persisted_provider(request).await?;
+        let persisted_endpoint_matches = self.probe_matches_persisted_provider(request).await?;
         let selection = LlmSlotSelection {
             provider_id: Some(request.provider_id.clone()),
             model: request
@@ -379,9 +380,10 @@ impl RebornLlmConfigService {
         // Prefer the request's inline key. Stored operator credentials are only
         // safe when the probe targets the persisted provider endpoint; otherwise
         // a caller-controlled base_url could exfiltrate that key.
+        let mut runtime_nearai_session = None;
         if let Some(key) = request.api_key.as_ref() {
             apply_stored_api_key(&mut config, key.clone());
-        } else if stored_key_allowed {
+        } else if persisted_endpoint_matches {
             if let Some(stored) = self
                 .keys
                 .read(&request.provider_id)
@@ -389,6 +391,11 @@ impl RebornLlmConfigService {
                 .map_err(|_| LlmConfigServiceError::Unavailable)?
             {
                 apply_stored_api_key(&mut config, stored);
+            } else if is_nearai_protocol {
+                // NEAR AI account login writes into the runtime session manager,
+                // not the generic operator key store. Reuse that exact manager
+                // only when the probe targets the persisted/default endpoint.
+                runtime_nearai_session = self.nearai_session.clone();
             }
         } else if self
             .keys
@@ -404,12 +411,25 @@ impl RebornLlmConfigService {
                 reason: "inline api_key is required when probing an overridden provider endpoint"
                     .to_string(),
             });
+        } else if is_nearai_protocol {
+            // A fresh SessionManager can load a NEAR AI token from disk or the
+            // environment. Never construct one for a caller-overridden endpoint,
+            // because doing so could send ambient session authority off-host.
+            return Err(LlmConfigServiceError::InvalidRequest {
+                field: Some("api_key".to_string()),
+                reason: "inline api_key is required when probing an overridden NEAR AI endpoint"
+                    .to_string(),
+            });
         }
         // Otherwise there is neither an inline key nor a stored key to protect,
         // so probe keyless — local OpenAI-compatible endpoints (e.g. Ollama)
         // need no auth and must not be blocked behind a phantom key requirement.
 
-        let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+        let session = if let Some(session) = runtime_nearai_session {
+            session
+        } else {
+            ironclaw_llm::create_session_manager(config.session.clone()).await
+        };
         ironclaw_llm::build_static_provider_chain(&config, session)
             .await
             .map_err(|_| LlmConfigServiceError::Unavailable)
@@ -433,9 +453,29 @@ impl RebornLlmConfigService {
         let Some(protocol) = parse_adapter(&request.adapter) else {
             return Ok(false);
         };
-        Ok(protocol == definition.protocol
-            && normalized_endpoint(request.base_url.as_deref())
-                == normalized_endpoint(definition.default_base_url.as_deref()))
+        if protocol != definition.protocol {
+            return Ok(false);
+        }
+
+        let nearai_default = || {
+            default_nearai_base_url(ironclaw_common::env_helpers::env_or_override(
+                "NEARAI_BASE_URL",
+            ))
+        };
+        let persisted_base_url = definition
+            .default_base_url
+            .clone()
+            .or_else(|| (protocol == ProviderProtocol::NearAi).then(&nearai_default));
+        let requested_base_url = request
+            .base_url
+            .clone()
+            .filter(|base_url| !base_url.trim().is_empty())
+            .or_else(|| (protocol == ProviderProtocol::NearAi).then(nearai_default));
+
+        Ok(
+            normalized_probe_endpoint(protocol, requested_base_url.as_deref())
+                == normalized_probe_endpoint(protocol, persisted_base_url.as_deref()),
+        )
     }
 
     async fn admin_list_async(
@@ -1081,6 +1121,19 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
         .map(|value| value.trim_end_matches('/').to_string())
 }
 
+fn normalized_probe_endpoint(protocol: ProviderProtocol, value: Option<&str>) -> Option<String> {
+    let endpoint = normalized_endpoint(value)?;
+    if protocol == ProviderProtocol::NearAi {
+        return Some(
+            endpoint
+                .strip_suffix("/v1")
+                .unwrap_or(&endpoint)
+                .to_string(),
+        );
+    }
+    Some(endpoint)
+}
+
 /// Build a transient provider from a not-yet-persisted provider/key/model
 /// combination and list its models — used by
 /// [`crate::RebornProviderAdmin::probe_candidate`] (onboard's pre-write
@@ -1512,6 +1565,107 @@ mod tests {
             model: Some("acme-1".to_string()),
             api_key: api_key.map(SecretString::from),
         }
+    }
+
+    fn nearai_probe_request(base_url: &str) -> LlmProbeRequest {
+        LlmProbeRequest {
+            provider_id: "nearai".to_string(),
+            adapter: "nearai".to_string(),
+            base_url: Some(base_url.to_string()),
+            model: Some("nearai/test-model".to_string()),
+            api_key: None,
+        }
+    }
+
+    fn nearai_upsert_request(base_url: &str) -> UpsertLlmProviderRequest {
+        UpsertLlmProviderRequest {
+            id: "nearai".to_string(),
+            client_action_id: None,
+            name: Some("NEAR AI".to_string()),
+            adapter: "nearai".to_string(),
+            base_url: Some(base_url.to_string()),
+            default_model: Some("nearai/test-model".to_string()),
+            api_key: None,
+            set_active: false,
+            model: Some("nearai/test-model".to_string()),
+        }
+    }
+
+    async fn runtime_nearai_session(
+        session_path: std::path::PathBuf,
+    ) -> Arc<ironclaw_llm::SessionManager> {
+        let session = Arc::new(ironclaw_llm::SessionManager::new(
+            ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path,
+            },
+        ));
+        session
+            .set_token(SecretString::from("runtime-session-token"))
+            .await;
+        session
+    }
+
+    async fn spawn_nearai_models_server() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind model server");
+        let base_url = format!("http://{}/v1", listener.local_addr().expect("local addr"));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut tx = Some(tx);
+            for _ in 0..4 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::with_capacity(1024);
+                let mut chunk = [0_u8; 1024];
+                while request.len() < 8192 {
+                    let remaining = 8192 - request.len();
+                    let read_len = remaining.min(chunk.len());
+                    let Ok(n) = socket.read(&mut chunk[..read_len]).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..n]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_string();
+                let body = if request.starts_with("GET /v1/models ") {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(request);
+                    }
+                    serde_json::json!({
+                        "data": [
+                            { "id": "anthropic/claude-test" },
+                            { "model": "openai/gpt-test" }
+                        ]
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({ "data": [] }).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                if tx.is_none() {
+                    break;
+                }
+            }
+        });
+
+        (base_url, rx)
     }
 
     /// An unknown adapter (validated locally, not via the network) must
@@ -2006,6 +2160,146 @@ mod tests {
             store.call_count(OperatorSecretValueOp::Contains),
             0,
             "snapshot must not probe stored keys one provider at a time"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearai_model_list_reuses_runtime_session_for_persisted_endpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let (base_url, observed_request) = spawn_nearai_models_server().await;
+        let session = runtime_nearai_session(temp.path().join("runtime-session.json")).await;
+        let service = RebornLlmConfigService::new(boot, key_store()).with_nearai_session(session);
+        service
+            .upsert_provider(caller(), nearai_upsert_request(&base_url))
+            .await
+            .expect("persist NEAR AI endpoint");
+
+        let result = service
+            .list_models(caller(), nearai_probe_request(&base_url))
+            .await
+            .expect("model probe should complete");
+
+        assert!(result.ok, "model probe should succeed: {result:?}");
+        assert_eq!(
+            result.models,
+            vec![
+                "anthropic/claude-test".to_string(),
+                "openai/gpt-test".to_string()
+            ]
+        );
+
+        let request = tokio::time::timeout(Duration::from_secs(2), observed_request)
+            .await
+            .expect("models endpoint should be requested")
+            .expect("request observer should complete");
+        assert!(
+            request.lines().any(
+                |line| line.eq_ignore_ascii_case("authorization: Bearer runtime-session-token")
+            ),
+            "persisted NEAR AI model probe must use the runtime session token; request was {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearai_model_list_does_not_send_runtime_session_to_overridden_endpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let (persisted_base_url, _) = spawn_nearai_models_server().await;
+        let session = runtime_nearai_session(temp.path().join("runtime-session.json")).await;
+        let service = RebornLlmConfigService::new(boot, key_store()).with_nearai_session(session);
+        service
+            .upsert_provider(caller(), nearai_upsert_request(&persisted_base_url))
+            .await
+            .expect("persist NEAR AI endpoint");
+        let (overridden_base_url, observed_request) = spawn_nearai_models_server().await;
+
+        let error = service
+            .list_models(caller(), nearai_probe_request(&overridden_base_url))
+            .await
+            .expect_err("overridden NEAR AI endpoint must require an inline key");
+
+        assert!(
+            matches!(
+                error,
+                LlmConfigServiceError::InvalidRequest {
+                    field: Some(ref field),
+                    ref reason,
+                } if field == "api_key" && reason.contains("overridden NEAR AI endpoint")
+            ),
+            "overridden endpoint should fail before provider construction: {error:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), observed_request)
+                .await
+                .is_err(),
+            "overridden endpoint must not receive the runtime NEAR AI session token"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearai_model_list_uses_inline_key_for_overridden_endpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let (persisted_base_url, _) = spawn_nearai_models_server().await;
+        let session = runtime_nearai_session(temp.path().join("runtime-session.json")).await;
+        let service = RebornLlmConfigService::new(boot, key_store()).with_nearai_session(session);
+        service
+            .upsert_provider(caller(), nearai_upsert_request(&persisted_base_url))
+            .await
+            .expect("persist NEAR AI endpoint");
+        let (overridden_base_url, observed_request) = spawn_nearai_models_server().await;
+        let mut request = nearai_probe_request(&overridden_base_url);
+        request.api_key = Some(SecretString::from("inline-override-key"));
+
+        let result = service
+            .list_models(caller(), request)
+            .await
+            .expect("inline-key probe should complete");
+
+        assert!(result.ok, "inline-key probe should succeed: {result:?}");
+        let request = tokio::time::timeout(Duration::from_secs(2), observed_request)
+            .await
+            .expect("overridden endpoint should be requested")
+            .expect("request observer should complete");
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer inline-override-key")),
+            "overridden endpoint must receive only the inline key; request was {request}"
+        );
+        assert!(
+            !request.contains("runtime-session-token"),
+            "overridden endpoint must not receive the runtime session token"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearai_default_endpoint_matches_the_builtin_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+        let expected_base_url = default_nearai_base_url(
+            ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
+        );
+
+        let request_base_url = if expected_base_url.trim_end_matches('/').ends_with("/v1") {
+            expected_base_url
+        } else {
+            format!("{}/v1", expected_base_url.trim_end_matches('/'))
+        };
+        let matches = service
+            .probe_matches_persisted_provider(&nearai_probe_request(&request_base_url))
+            .await
+            .expect("provider match should resolve");
+
+        assert!(
+            matches,
+            "equivalent NEAR AI base URLs with or without `/v1` must be eligible for the runtime session"
         );
     }
 
