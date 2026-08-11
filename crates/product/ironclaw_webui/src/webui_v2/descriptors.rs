@@ -2013,18 +2013,15 @@ fn stream_rate_limit() -> RateLimitPolicy {
     // request-rate window here is just for burst protection against
     // reconnect storms.
     //
-    // Set to 30/60s — the SSE route additionally accepts `?token=…`
-    // because `EventSource` can't set headers, which leaks the
-    // bearer into browser history, server access logs, and proxy
-    // logs. Keeping the request rate higher than necessary widens
-    // the replay surface for a logged token, so the budget is capped
-    // at 2x a worst-case exponential-backoff reconnect cycle (≈ 1,
-    // 2, 4, 8, 16, 32s per minute = 6 opens) rather than parity with
-    // the mutation budget. The WS route doesn't carry the same
-    // URL-token risk (headers + `WebSocketOriginPolicy::SameOriginRequired`),
-    // but the lower limit costs it nothing — the same reconnect-storm
-    // math applies, the same concurrency cap is the real load gate,
-    // and using one helper for both keeps the descriptors aligned.
+    // Set to 30/60s. The SPA's one-owner reconnect policy opens at most
+    // seven streams per minute for one continuously failing tab (1, 2, 4,
+    // 8, 16, then 30-second bounded backoff). Three legitimate tabs therefore
+    // stay below this budget with headroom for reload and network transitions.
+    // The route also retains the `?token=…` compatibility escape hatch, so a
+    // materially higher budget would widen the replay surface for a token
+    // captured from browser history or proxy logs. The concurrency cap remains
+    // the primary bound on healthy long-lived streams; this request-rate window
+    // bounds churn from broken or hostile clients.
     rate_limit_per_caller(30, 60)
 }
 

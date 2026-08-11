@@ -276,6 +276,16 @@ async fn sse_capacity_429_burst_past_refund_limit_drains_budget_to_middleware_42
         StatusCode::TOO_MANY_REQUESTS,
         "attempt 8 must still be a 429"
     );
+    let retry_after = middleware_rejected
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("429 must expose a numeric retry delay");
+    assert!(
+        (1..=60).contains(&retry_after),
+        "retry delay must be bounded by the configured 60-second window"
+    );
     let body = to_bytes(middleware_rejected.into_body(), usize::MAX)
         .await
         .expect("read middleware-rejected body");

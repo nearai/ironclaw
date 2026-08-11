@@ -20,7 +20,7 @@
 use ironclaw_config::BudgetDefaults;
 use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
-use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
+use ironclaw_loop_contracts::{BatchPolicyKind, LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
 use ironclaw_threads::SessionThreadService as _;
@@ -1076,6 +1076,36 @@ impl RebornIntegrationHarness {
         }
         Err(format!(
             "expected model recovery class {expected:?} and no {forbidden:?}; saw {classes:?}"
+        )
+        .into())
+    }
+
+    /// Assert the loop's caller-visible policy for a capability batch of the
+    /// specified size. The policy controls whether execution may proceed in
+    /// parallel and whether a suspension stops the remaining batch.
+    pub async fn assert_capability_batch_policy(
+        &self,
+        call_count: u32,
+        expected: BatchPolicyKind,
+    ) -> HarnessResult<()> {
+        let policies = self
+            .loop_milestones()
+            .into_iter()
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::CapabilityBatchStarted {
+                    call_count: actual_count,
+                    policy,
+                    ..
+                } if actual_count == call_count => Some(policy),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if policies.contains(&expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "no CapabilityBatchStarted milestone for a {call_count}-call batch classified \
+             {expected:?}; saw {policies:?}"
         )
         .into())
     }
