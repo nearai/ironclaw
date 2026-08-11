@@ -136,11 +136,40 @@ pub struct TriggerFailedFireSettlement {
     pub reason: TriggerPollerFailureReason,
 }
 
+/// A previously-accepted fire whose run reached a terminal *failure* state
+/// observed by the active-cleanup sweep. Carries enough identity to let an
+/// observer correlate it back to the originating fire for automation-health
+/// telemetry without re-deriving it from display strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerRunFailureSettlement {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+}
+
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
+    /// The worker invokes these hooks **inline** while processing poller
+    /// work: `on_accepted_fire_settled` from the per-fire submit path,
+    /// `on_failed_fire_settled` from the claim-time failure path, and
+    /// `on_run_failure_settled` from the active-cleanup sweep. Implementors
+    /// MUST be cheap and non-blocking; any heavy work (delivery, telemetry
+    /// egress) must be detached internally (for example a bounded spawn, as
+    /// the composition `PostSubmitHookObserver` does for accepted-fire
+    /// delivery) rather than awaited through this call.
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
 
     async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
+
+    /// A previously-accepted fire settled into a terminal failure state.
+    ///
+    /// Implementors must handle this explicitly so production composition
+    /// cannot silently discard the automation-health signal. The callback is
+    /// strictly observational — it must not mint runs or mutate trigger state.
+    /// Invoked inline from the active-cleanup sweep; see the trait contract
+    /// above: keep this implementation cheap and non-blocking.
+    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement);
 }
 
 #[derive(Debug, Default)]
@@ -149,6 +178,8 @@ pub struct NoopTriggerFireSettlementObserver;
 #[async_trait]
 impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
     async fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
+
+    async fn on_run_failure_settled(&self, _event: TriggerRunFailureSettlement) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

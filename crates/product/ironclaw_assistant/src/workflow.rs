@@ -12,7 +12,7 @@ use ironclaw_product_contracts::command::ProductCommandContext;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, ProductTriggerReason};
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::product_adapter::{
@@ -291,6 +291,15 @@ fn build_channel_envelope(
     )?;
     let payload = match request.classification {
         Some(classification) => ProductInboundPayload::from(classification),
+        // A shared-channel run is invoked ONLY by an explicit @mention, which
+        // arrives as its own `BotMention` event. A plain thread reply
+        // (`ReplyToBot`) that is not a gate resolution or command (those are the
+        // `Some(_)` arm above) is bystander chatter — ack it durably and drop it
+        // as a NoOp, never spawning a run. Direct messages (`DirectChat`) and
+        // mentions (`BotMention`) still run.
+        None if request.message.trigger == ProductTriggerReason::ReplyToBot => {
+            ProductInboundPayload::NoOp
+        }
         None => ProductInboundPayload::UserMessage(
             UserMessagePayload::new(
                 request.message.text.clone(),
@@ -2033,13 +2042,15 @@ fn rejection_kind_for_approval_interaction(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
     use ironclaw_extension_contracts::external::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId,
     };
     use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
     use ironclaw_product_contracts::inbound::{
-        ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+        ChannelInboundClassification, InboundCommandPayload, ParsedProductInbound,
+        ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductSourceChannel,
         TrustedInboundContext,
     };
     use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
@@ -2130,6 +2141,93 @@ mod tests {
             ActionDispatchKind::UserMessageTurn {
                 run_id: rejected_run_id
             }
+        );
+    }
+
+    fn channel_request(
+        trigger: ProductTriggerReason,
+        classification: Option<ChannelInboundClassification>,
+    ) -> ChannelInboundSurfaceRequest {
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("install");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            installation_id.as_str(),
+        );
+        ChannelInboundSurfaceRequest {
+            adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),
+            source_channel: ProductSourceChannel::new("test_adapter").expect("source channel"),
+            installation_id,
+            evidence,
+            received_at: Utc::now(),
+            message: NormalizedInboundMessage {
+                actor: ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+                conversation: ExternalConversationRef::new(None, "conv1", None, None)
+                    .expect("conversation"),
+                event_id: ExternalEventId::new("evt:1").expect("event"),
+                text: "hey team".to_string(),
+                trigger,
+                attachments: Vec::new(),
+                reply_context: None,
+            },
+            classification,
+            channel_context: None,
+        }
+    }
+
+    /// Regression (#7397 shared-channel UX): in a shared channel the bot is
+    /// invoked ONLY by an explicit mention. A plain thread reply that carries no
+    /// reserved classification is bystander chatter and must be dropped as a
+    /// NoOp — never spawning a run (which previously re-ran the same instruction
+    /// once per follow-up message). Mentions, DMs, and classified replies
+    /// (approve/deny, commands) are unaffected.
+    #[test]
+    fn shared_channel_plain_thread_reply_is_dropped_but_mentions_dms_and_gates_run() {
+        let reply = build_channel_envelope(channel_request(ProductTriggerReason::ReplyToBot, None))
+            .expect("envelope");
+        assert!(
+            matches!(reply.payload(), ProductInboundPayload::NoOp),
+            "a non-mention thread reply must be a NoOp (no run), got {:?}",
+            reply.payload()
+        );
+
+        let mention =
+            build_channel_envelope(channel_request(ProductTriggerReason::BotMention, None))
+                .expect("envelope");
+        assert!(
+            matches!(mention.payload(), ProductInboundPayload::UserMessage(_)),
+            "an explicit @mention must spawn a run, got {:?}",
+            mention.payload()
+        );
+
+        let dm = build_channel_envelope(channel_request(ProductTriggerReason::DirectChat, None))
+            .expect("envelope");
+        assert!(
+            matches!(dm.payload(), ProductInboundPayload::UserMessage(_)),
+            "a direct message must spawn a run without a mention, got {:?}",
+            dm.payload()
+        );
+
+        // A classified reply (here a command; approvals take the same `Some(_)`
+        // arm) is preserved — the mention-only drop applies only to unclassified
+        // ordinary messages, so approve/deny replies keep resolving gates.
+        let command = build_channel_envelope(channel_request(
+            ProductTriggerReason::ReplyToBot,
+            Some(ChannelInboundClassification::Command(
+                InboundCommandPayload::new(
+                    "status".to_string(),
+                    String::new(),
+                    ProductTriggerReason::ReplyToBot,
+                )
+                .expect("command"),
+            )),
+        ))
+        .expect("envelope");
+        assert!(
+            matches!(command.payload(), ProductInboundPayload::Command(_)),
+            "a classified thread reply must be preserved, got {:?}",
+            command.payload()
         );
     }
 

@@ -635,7 +635,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // flag. Contract vocabulary only — the fetch impl lives in the slack
         // package, the flag is consumed by the channel workflow. Count read from
         // this test's failure on the rebased base.
-        ("ironclaw_extension_contracts", 7_851),
+        // 7_851 -> 7_885 (2026-08-10, rich working indicator #7446): the
+        // `OutboundPart::React` variant plus the neutral `RunReaction` /
+        // `ReactionAction` enums for run-lifecycle reactions on the triggering
+        // message. Contract vocabulary only — vendor reaction rendering (Slack
+        // reactions.add/remove, Telegram setMessageReaction) lives in the channel
+        // packages and the reaction lifecycle in the delivery observer. Count
+        // read from this test's failure message.
+        ("ironclaw_extension_contracts", 7_885),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -699,14 +706,33 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // hand-synced now lives once on the contract type (its callers in
         // composition and loop_host DELETED their copies). Reason recorded
         // in the PR body; count read from this test's failure message.
-        // 13_107 -> 13_205 (2026-08-10, prompt recovery hardening): the
+        // 13_107 -> 13_112 (2026-08-09, ephemeral-per-ping remodel): +5 lines
+        // reframing the `acting_user_id`/`acting_resource_scope` docs to the
+        // single "the run's user" model (owner-vs-actor divergence retired).
+        // Vocabulary/comment change only — the actor-first ladder itself is
+        // preserved (WebChat=actor, trigger=creator, system=fallback). Count
+        // read from this test's own failure message.
+        // 13_112 -> 13_172 (2026-08-10, #7247 truthful connection context):
+        // `PendingExtensionAuthState` (the per-caller "installed but not
+        // authenticated for this user" DTO) + its bounded, sanitized render
+        // arm beside the existing connected-channels line. Declaration and
+        // rendering vocabulary only — the per-caller verdict computation
+        // lives in ironclaw_assistant (`caller_extension_auth`), the ports in
+        // composition. Count read from this test's own failure message.
+        // 13_172 -> 13_306 (2026-08-10, #7294 recalled-memory framing,
+        // batch-merged with #7247): the instruction bundle's recall-framing
+        // message (`memory_recall_framing.md` include + its render wiring)
+        // lands in the same crate as #7247's raise; each fix measured the
+        // ceiling alone against main, so the batch branch re-measures the
+        // union — the #7147 parallel-baseline lesson applied. Framing/render
+        // vocabulary only — scope filtering stays in the memory providers
+        // and host runtime. Count read from this test's own failure message.
+        // 13_306 -> 13_399 (2026-08-10, prompt recovery hardening): the
         // contract-owned prompt validator now recognizes decoded Basic auth
         // credentials, and `LoopContextSnippet::from_untrusted_memory` keeps
-        // memory admission on that same credential-value policy. This also
-        // includes the 5-line ephemeral-per-ping acting-user documentation
-        // remodel merged from main. Runtime retrieval, sanitization, and
-        // budgeting remain in host_runtime.
-        ("ironclaw_loop_contracts", 13_205),
+        // memory admission on that same credential-value policy. Runtime
+        // retrieval, sanitization, and budgeting remain in host_runtime.
+        ("ironclaw_loop_contracts", 13_399),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
