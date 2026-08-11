@@ -282,13 +282,15 @@ pub struct TraceLlm {
     /// Total non-error calls served, regardless of which step they returned.
     calls_served: AtomicUsize,
     hint_mismatches: AtomicUsize,
-    captured_requests: Mutex<Vec<Vec<ChatMessage>>>,
-    /// Captured `tools` argument from each `complete_with_tools` call. Lets
-    /// Tier B tests assert what tool surface the dispatcher / worker shipped
-    /// to the model on each iteration (used for runtime-policy filtering
-    /// caller-tier coverage). Captured in lock-step with `captured_requests`
-    /// — same index = same call.
-    captured_tool_definitions: Mutex<Vec<Option<Vec<ToolDefinition>>>>,
+    /// Messages and tools captured atomically so one index always describes
+    /// one model call, even when calls overlap.
+    captured_requests: Mutex<Vec<CapturedModelRequest>>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedModelRequest {
+    messages: Vec<ChatMessage>,
+    tools: Option<Vec<ToolDefinition>>,
 }
 
 /// One request whose cached prompt prefix churned with no surface change.
@@ -370,6 +372,87 @@ mod prompt_cache_tests {
             tool_surface_signature(None),
             tool_surface_signature(Some(&vec![]))
         );
+    }
+
+    #[test]
+    fn concurrent_request_and_tool_capture_stays_aligned() {
+        fn trace_with_steps(count: usize) -> TraceLlm {
+            TraceLlm::from_trace(LlmTrace {
+                model_name: "capture-test".to_string(),
+                turns: vec![TraceTurn {
+                    user_input: "capture".to_string(),
+                    steps: (0..count)
+                        .map(|_| TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::Text {
+                                content: "ok".to_string(),
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        })
+                        .collect(),
+                    expects: TraceExpects::default(),
+                }],
+                memory_snapshot: Vec::new(),
+                http_exchanges: Vec::new(),
+                expects: TraceExpects::default(),
+                steps: Vec::new(),
+            })
+        }
+
+        let llm = std::sync::Arc::new(trace_with_steps(16));
+        let threads = (0..16)
+            .map(|index| {
+                let llm = std::sync::Arc::clone(&llm);
+                std::thread::spawn(move || {
+                    let tag = format!("call-{index}");
+                    let messages = vec![
+                        ChatMessage::system(format!("system {tag}")),
+                        ChatMessage::user(tag.clone()),
+                    ];
+                    let tools = vec![tool(&tag, serde_json::json!({"type": "object"}))];
+                    llm.next_step(&messages, Some(&tools))
+                        .expect("concurrent trace step is available");
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().expect("capture thread completes");
+        }
+
+        let captures = llm.captured_requests.lock().unwrap().clone();
+        assert_eq!(captures.len(), 16);
+        for capture in captures {
+            let user = capture
+                .messages
+                .iter()
+                .find(|message| message.role == Role::User)
+                .expect("capture carries its user tag");
+            assert_eq!(capture.tools.as_ref().unwrap()[0].description, user.content);
+        }
+
+        let sequential = trace_with_steps(2);
+        let stable_tools = vec![tool("stable", serde_json::json!({"type": "object"}))];
+        sequential
+            .next_step(
+                &[
+                    ChatMessage::system("system before"),
+                    ChatMessage::user("first"),
+                ],
+                Some(&stable_tools),
+            )
+            .expect("first trace step is available");
+        sequential
+            .next_step(
+                &[
+                    ChatMessage::system("system after"),
+                    ChatMessage::user("second"),
+                ],
+                Some(&stable_tools),
+            )
+            .expect("second trace step is available");
+        assert_eq!(sequential.prompt_cache_prefix_churn().len(), 1);
     }
 }
 
@@ -550,7 +633,6 @@ impl TraceLlm {
             calls_served: AtomicUsize::new(0),
             hint_mismatches: AtomicUsize::new(0),
             captured_requests: Mutex::new(Vec::new()),
-            captured_tool_definitions: Mutex::new(Vec::new()),
         }
     }
 
@@ -572,7 +654,12 @@ impl TraceLlm {
 
     /// Clone of all captured request message lists.
     pub fn captured_requests(&self) -> Vec<Vec<ChatMessage>> {
-        self.captured_requests.lock().unwrap().clone()
+        self.captured_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|capture| capture.messages.clone())
+            .collect()
     }
 
     /// Requests whose provider-cached prompt prefix changed without a
@@ -588,21 +675,16 @@ impl TraceLlm {
     /// extension really does rewrite the capability list), so it is excluded.
     /// Mirrors the `_observe_cache_prefix` gate in `tests/e2e/mock_llm.py`.
     pub fn prompt_cache_prefix_churn(&self) -> Vec<PromptCachePrefixChurn> {
-        let requests = self.captured_requests();
-        let surfaces = self.captured_tool_definitions.lock().unwrap().clone();
+        let captures = self.captured_requests.lock().unwrap().clone();
         let mut churn = Vec::new();
-        for index in 1..requests.len() {
-            let before = leading_system_block(&requests[index - 1]);
-            let after = leading_system_block(&requests[index]);
+        for index in 1..captures.len() {
+            let before = leading_system_block(&captures[index - 1].messages);
+            let after = leading_system_block(&captures[index].messages);
             if before == after {
                 continue;
             }
-            let before_surface = surfaces
-                .get(index - 1)
-                .and_then(|surface| tool_surface_signature(surface.as_ref()));
-            let after_surface = surfaces
-                .get(index)
-                .and_then(|surface| tool_surface_signature(surface.as_ref()));
+            let before_surface = tool_surface_signature(captures[index - 1].tools.as_ref());
+            let after_surface = tool_surface_signature(captures[index].tools.as_ref());
             if before_surface.is_none() || after_surface.is_none() {
                 continue;
             }
@@ -621,11 +703,11 @@ impl TraceLlm {
     /// model. Index `i` matches the `i`-th `captured_requests()` entry.
     /// Empty for `complete()`-only calls (text-only paths).
     pub fn captured_tool_definitions(&self) -> Vec<Vec<ToolDefinition>> {
-        self.captured_tool_definitions
+        self.captured_requests
             .lock()
             .unwrap()
             .iter()
-            .map(|tools| tools.clone().unwrap_or_default())
+            .map(|capture| capture.tools.clone().unwrap_or_default())
             .collect()
     }
 
@@ -651,17 +733,13 @@ impl TraceLlm {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<TraceStep, LlmError> {
-        // Capture the request messages for inspection-based assertions.
         self.captured_requests
             .lock()
             .unwrap()
-            .push(messages.to_vec());
-        // Capture the `tools` argument in lock-step. Preserve `None` so
-        // text-only calls are not mistaken for capability-surface changes.
-        self.captured_tool_definitions
-            .lock()
-            .unwrap()
-            .push(tools.map(|t| t.to_vec()));
+            .push(CapturedModelRequest {
+                messages: messages.to_vec(),
+                tools: tools.map(|tools| tools.to_vec()),
+            });
 
         let last_user_content: Option<String> = messages
             .iter()

@@ -456,7 +456,7 @@ entries.
 | Every lifecycle state-machine claim names executable evidence, with zero gaps | `test_state_machine_coverage.py` (12) |
 | The product-surface coverage report can't pass vacuously or hide lost evidence | `test_product_surface_coverage.py` (7) |
 | Playwright diagnostic artifacts stay bounded | `test_reborn_webui_harness_artifacts.py` (10) |
-| No mock-LLM test may churn the provider-cached prompt prefix — the `assert_prompt_cache_reuse` autouse fixture applies this to EVERY such test, and these self-tests prove the gate itself catches the regression, permits a tool-surface change, documents its conservative history-rewrite blind spot, and does not false-positive across conversations | `test_prompt_cache_gate.py` (13) |
+| Long conversations keep reusing the provider-cached prompt prefix, while a changed tool surface remains a valid cache-invalidation boundary | `test_prompt_cache_gate.py` (13) |
 
 > These gates fail loudly when coverage regresses. Prefer adding a row to one of their
 > registries over adding a line to §7.
