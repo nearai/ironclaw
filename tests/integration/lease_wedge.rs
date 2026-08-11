@@ -133,5 +133,47 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
         .await
         .expect("the resumed run's reply is the one persisted");
 
+    // Release the abandoned worker and let it run to the end of its turn. Its
+    // lease is gone, so every transition it attempts must be refused — the
+    // recovered result is the only one the user may ever see.
     gate.release();
+
+    // The strongest deterministic signal the harness offers that the stale
+    // worker got that far: it consumed the second scripted reply, so the
+    // parked model call has returned "stale worker output" into it. (The
+    // refusal itself is not observable at any seam — a refused transition
+    // writes nothing by definition.)
+    let stale_worker_reached_its_reply = tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.scripted_llm.captured_requests().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    stale_worker_reached_its_reply.expect("the released stale worker consumes its scripted reply");
+
+    let state = harness
+        .run_state(run_id)
+        .await
+        .expect("the recovered run's state is readable");
+    assert_eq!(
+        state.status,
+        TurnStatus::Completed,
+        "a stale worker must not move a run the journal already completed"
+    );
+    assert!(
+        state.failure.is_none(),
+        "a stale worker must not stamp a failure on a completed run, got {:?}",
+        state.failure
+    );
+    // The transcript is the seam the user actually reads: a worker whose lease
+    // the journal already reclaimed must not be able to append a second,
+    // unattributed answer next to the recovered one.
+    harness
+        .assert_conversation_history_lacks("stale worker output")
+        .await
+        .expect("the stale worker's output must never reach the transcript");
+    harness
+        .assert_reply_contains("recovered and finished")
+        .await
+        .expect("the recovered reply survives the stale worker");
 }

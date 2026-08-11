@@ -541,6 +541,37 @@ impl ProcessJournalMaterializedState {
                         None,
                     )
                 } else if reclaimable && claim_count < MAX_CRASH_RECOVERY_RECLAIMS {
+                    // Requeuing here does not ask whether the old executor is
+                    // alive. Two windows bound how long it could still have been
+                    // heartbeating: `budget * (heartbeat interval + heartbeat
+                    // timeout) <= lease TTL`, enforced by the turn scheduler
+                    // capping both the interval and the budget against the TTL,
+                    // plus one further full TTL of grace before this branch runs,
+                    // enforced by [`Self::requeue_awaits_grace`].
+                    //
+                    // That is half the guarantee, and it proves only that the
+                    // old worker has stopped *heartbeating* — not that it has
+                    // given the run up. Time-based fencing can never be total: a
+                    // worker whose heartbeat loop died or was starved while its
+                    // main task stayed blocked in a model or capability call
+                    // (the Postgres pool-starvation shape) can wake after the
+                    // grace window and still try to write.
+                    //
+                    // The other half, equally necessary, is that such a worker
+                    // discovers it lost the run at its next lease-fenced write:
+                    // run transitions carry the lease token and `ensure_lease`
+                    // refuses them, and transcript finalization asks the journal
+                    // for the claimed run's lease before appending
+                    // (`ironclaw_loop_host`'s `ThreadBackedLoopTranscriptPort`
+                    // fence, wired by the turn runner's loop-driver host).
+                    // Neither half alone is sufficient — the write-seam fence is
+                    // the missing half of this branch's safety, not optional
+                    // hardening. Regression:
+                    // `run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed`
+                    // in `tests/integration/lease_wedge.rs`.
+                    //
+                    // The journal is the only authority on ownership; do not add
+                    // a runtime liveness probe.
                     (
                         ProcessLifecycleStatus::Queued,
                         ProcessJournalKind::Resumed,

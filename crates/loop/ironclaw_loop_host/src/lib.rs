@@ -226,7 +226,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
     ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
-use ironclaw_turns::{LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnLeaseToken, TurnRunId,
+    TurnScope,
+};
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
@@ -778,9 +781,29 @@ where
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
+    run_lease_fence: Option<RunLeaseFence>,
     // Only successful milestone publications are recorded here: if best-effort
     // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
+}
+
+/// The claimed lease this transcript adapter writes under, plus the authority
+/// that can say whether it is still the live one.
+///
+/// Unlike a journal transition, a transcript append carries no lease of its
+/// own, so nothing stops a worker whose lease recovery already reclaimed from
+/// appending a second assistant message beside the replacement worker's. The
+/// fence closes that by asking the journal — the only authority on ownership —
+/// immediately before the write.
+///
+/// Production always installs one
+/// (`RebornLoopDriverHostFactory::build_text_only_host_with_capabilities`).
+/// It is optional only because adapters constructed outside a claimed run
+/// (crate tests) have no lease to check.
+#[derive(Clone)]
+struct RunLeaseFence {
+    runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+    lease_token: TurnLeaseToken,
 }
 
 const TRANSCRIPT_WRITE_MAX_ATTEMPTS: usize = 3;
@@ -801,6 +824,7 @@ where
             run_context,
             milestone_sink: None,
             reply_attachment_intent_port: None,
+            run_lease_fence: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -817,6 +841,7 @@ where
             run_context,
             milestone_sink: Some(milestone_sink),
             reply_attachment_intent_port: None,
+            run_lease_fence: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -827,6 +852,71 @@ where
     ) -> Self {
         self.reply_attachment_intent_port = Some(port);
         self
+    }
+
+    /// Fence transcript finalization on `lease_token` still being the run's
+    /// live lease. See [`RunLeaseFence`].
+    #[must_use]
+    pub fn with_run_lease_fence(
+        mut self,
+        runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+        lease_token: TurnLeaseToken,
+    ) -> Self {
+        self.run_lease_fence = Some(RunLeaseFence {
+            runtime,
+            lease_token,
+        });
+        self
+    }
+
+    /// Refuse the caller when the journal no longer records this adapter's
+    /// lease as the run's live one.
+    ///
+    /// One bounded, exact-key journal read per call — cheap at today's call
+    /// rates. If `update_assistant_draft` ever becomes a per-token streaming
+    /// path, revisit whether the draft paths should keep paying it.
+    ///
+    /// Fails closed on both answers that are not "yes": a stale lease and a
+    /// backend error that leaves ownership unknown. The refusal is explicit —
+    /// the model output is not dropped silently, it is returned to the agent
+    /// loop as a transcript-write failure, which the loop carries into its exit
+    /// claim; that exit is itself lease-fenced by the journal, so a stale
+    /// worker's failure can never land on the run the replacement completed.
+    async fn ensure_run_lease_is_current(&self) -> Result<(), AgentLoopHostError> {
+        let Some(fence) = self.run_lease_fence.as_ref() else {
+            return Ok(());
+        };
+        // Bounded, exact-key journal read — the journal is the only authority
+        // on who holds the lease. A run that recovery reclaimed carries either
+        // no lease (requeued, not yet re-claimed) or the replacement worker's
+        // token; both compare unequal, which is exactly the answer wanted.
+        let record = fence
+            .runtime
+            .get_run_record(&self.run_context.scope, self.run_context.run_id)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    run_id = %self.run_context.run_id,
+                    %error,
+                    "run lease ownership check failed; refusing the transcript write"
+                );
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::TranscriptWriteFailed,
+                    "run lease ownership could not be verified",
+                )
+            })?;
+        // A missing run (or one outside this scope) is not ours to write for.
+        if record.is_some_and(|record| record.lease_token == Some(fence.lease_token)) {
+            return Ok(());
+        }
+        tracing::debug!(
+            run_id = %self.run_context.run_id,
+            "run lease was reclaimed by recovery; refusing this worker's transcript write"
+        );
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::TranscriptWriteFailed,
+            "run lease was reclaimed; this worker no longer owns the run",
+        ))
     }
 }
 
@@ -849,6 +939,7 @@ where
         request: BeginAssistantDraft,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         let draft = self
             .thread_service
             .append_assistant_draft(AppendAssistantDraftRequest {
@@ -867,6 +958,7 @@ where
         request: UpdateAssistantDraft,
     ) -> Result<(), AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         let message_id = message_id_from_ref(&request.message_ref)?;
         self.load_current_run_message(message_id).await?;
         self.thread_service
@@ -886,6 +978,11 @@ where
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        // Ownership before durability: a worker whose lease recovery already
+        // reclaimed must not append a second answer beside the replacement's.
+        // Every transcript write on this adapter carries the same fence — a
+        // zombie must not reach the transcript through any of its four doors.
+        self.ensure_run_lease_is_current().await?;
         let reply_content = self.finalized_reply_content(request.reply.content).await?;
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendFinalizedAssistantMessageRequest {
@@ -935,6 +1032,7 @@ where
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         // Fail soft on a summary that trips either strict validator: the
         // summary is only the inline label for the result reference (the model
         // sees the real output via the result ref / observation), so a
