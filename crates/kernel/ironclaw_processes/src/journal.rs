@@ -1313,6 +1313,71 @@ mod tests {
         }
     }
 
+    /// A snapshot written by a build that knows more checkpoint kinds than this
+    /// one must still load. The unknown kind degrades to `None` — "unknown
+    /// kind" — which lease recovery already treats as side-effecting, so an
+    /// older host fails closed instead of failing the whole read.
+    #[test]
+    fn an_unrecognized_or_absent_checkpoint_kind_degrades_to_none() {
+        let snapshot = JournaledProcessSnapshot {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::Internal,
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant-lenient").expect("tenant"),
+                user_id: UserId::new("user-lenient").expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+            },
+            status: ProcessLifecycleStatus::Running,
+            suspension: None,
+            checkpoint_ref: Some(ProcessCheckpointRef::from_trusted("checkpoint:lenient")),
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            input_ref: None,
+            failure: None,
+            journal_cursor: ProcessJournalCursor(1),
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: chrono::Utc::now(),
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: Value::Null,
+        };
+        let mut encoded =
+            serde_json::to_value(&snapshot).expect("serialize journaled process snapshot");
+        let object = encoded.as_object_mut().expect("snapshot object");
+
+        assert_eq!(
+            object.get("checkpoint_kind").and_then(Value::as_str),
+            Some("before_model"),
+            "a known kind must round-trip on the wire"
+        );
+
+        object.insert(
+            "checkpoint_kind".to_string(),
+            Value::String("before_tool_disclosure".to_string()),
+        );
+        let unknown: JournaledProcessSnapshot = serde_json::from_value(encoded.clone())
+            .expect("an unrecognized checkpoint kind must not fail the whole snapshot");
+        assert_eq!(unknown.checkpoint_kind, None);
+        assert_eq!(
+            unknown.checkpoint_ref, snapshot.checkpoint_ref,
+            "the rest of the snapshot must survive the degraded field"
+        );
+
+        encoded
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("checkpoint_kind");
+        let absent: JournaledProcessSnapshot =
+            serde_json::from_value(encoded).expect("a snapshot written before the kind existed");
+        assert_eq!(absent.checkpoint_kind, None);
+    }
+
     #[test]
     fn opaque_refs_reject_empty_oversized_and_control_values() {
         assert!(ProcessCheckpointRef::new("").is_err());

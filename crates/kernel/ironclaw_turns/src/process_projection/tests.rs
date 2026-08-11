@@ -910,7 +910,11 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
                 .expect("checkpoint payload"),
             created_at: Utc::now(),
             link_to_process: true,
-            kind: None,
+            // Production always derives the kind from the loop kind
+            // (`put_loop_checkpoint`), so the fixture must too — a checkpoint
+            // whose metadata says `BeforeModel` while the snapshot kind is
+            // absent is not a state the system can produce.
+            kind: Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
             metadata: serde_json::json!({
                 "source": "retry-test",
                 "kind": ironclaw_loop_contracts::LoopCheckpointKind::BeforeModel,
@@ -963,6 +967,13 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         })
         .await
         .expect("retried snapshot");
+    assert_eq!(
+        retried_snapshot.checkpoint_kind,
+        Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
+        "the retried run must inherit the source checkpoint's kind — lease \
+         recovery reads it off the process snapshot to decide whether the run \
+         may be requeued"
+    );
     let rebound_ref = retried_snapshot
         .checkpoint_ref
         .expect("retry checkpoint reference");

@@ -3388,11 +3388,12 @@ async fn expired_before_model_checkpoint_is_requeued_after_the_grace_window() {
         "the recorded checkpoint kind must survive a store reopen"
     );
 
-    // Just expired: a worker starved of heartbeats may still be running, so the
-    // sweep must leave the process alone.
+    // Strictly past expiry — the sweep does select this process as expired — but
+    // well inside the grace window: a worker starved of heartbeats may still be
+    // running, so the grace hold must leave the process alone.
     let held = store
         .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
-            now: expires_at,
+            now: expires_at + chrono::Duration::seconds(1),
             scope_filter: Some(scope.clone()),
             process_kind_filter: Some(ProcessKind::Internal),
         })
