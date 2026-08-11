@@ -11,14 +11,19 @@ use ironclaw_agent_loop::{
 /// Builtin family means adding its factory here; the framework crate exports
 /// family factories but does not decide which ones are bound in production.
 pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
-    build_loop_family_registry_with_overrides(None, None, ToolBatchStrategy::default())
+    build_loop_family_registry_with_overrides(None, None, false)
 }
 
 pub fn build_loop_family_registry_with_overrides(
     default_iteration_limit: Option<NonZeroU32>,
     model_availability_attempts: Option<NonZeroU32>,
-    tool_batch_strategy: ToolBatchStrategy,
+    parallel_tool_batches: bool,
 ) -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
+    let tool_batch_strategy = if parallel_tool_batches {
+        ToolBatchStrategy::BoundedParallel
+    } else {
+        ToolBatchStrategy::HostBatch
+    };
     // `default_with_overrides` returns the pure-default composition (static
     // replay digest included) when no override is set.
     let default_family = families::default_with_overrides(families::FamilyOverrides {
@@ -80,12 +85,8 @@ mod tests {
 
         // Bounded-parallel strategy: both families carry a configuration-
         // specific identity for the same family ids.
-        let bounded = build_loop_family_registry_with_overrides(
-            None,
-            None,
-            ToolBatchStrategy::BoundedParallel,
-        )
-        .expect("valid production registry");
+        let bounded = build_loop_family_registry_with_overrides(None, None, true)
+            .expect("valid production registry");
         for id in [LoopFamilyId::DEFAULT, LoopFamilyId::SUBAGENT] {
             let family = bounded.get(&id).expect("bound family");
             assert_ne!(family.version().digest, DEFAULT_FAMILY_DIGEST);
@@ -93,12 +94,8 @@ mod tests {
         }
 
         // The digest is a pure function of the selected strategy.
-        let bounded_again = build_loop_family_registry_with_overrides(
-            None,
-            None,
-            ToolBatchStrategy::BoundedParallel,
-        )
-        .expect("valid production registry");
+        let bounded_again = build_loop_family_registry_with_overrides(None, None, true)
+            .expect("valid production registry");
         for id in [LoopFamilyId::DEFAULT, LoopFamilyId::SUBAGENT] {
             assert_eq!(
                 bounded_again

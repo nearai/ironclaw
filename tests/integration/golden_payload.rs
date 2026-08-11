@@ -138,7 +138,7 @@ async fn golden_context_surfacing() {
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
-        .with_builtin_http_tools()
+        .with_durable_capability_io_file_tools()
         .with_parallel_tool_batches()
         .script([
             RebornScriptedReply::tool_call(
@@ -151,11 +151,11 @@ async fn golden_parallel_tool_calls() {
             RebornScriptedReply::tool_calls([
                 (
                     "builtin.read_file",
-                    json!({"path": "/workspace/parallel.txt", "offset": 0, "limit": 5}),
+                    json!({"path": "/workspace/parallel.txt", "offset": 1, "limit": 1}),
                 ),
                 (
                     "builtin.read_file",
-                    json!({"path": "/workspace/parallel.txt", "offset": 6, "limit": 6}),
+                    json!({"path": "/workspace/parallel.txt", "offset": 2, "limit": 1}),
                 ),
             ]),
             RebornScriptedReply::text("read both"),

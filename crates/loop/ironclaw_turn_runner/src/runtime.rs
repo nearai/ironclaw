@@ -2,7 +2,6 @@
 
 use std::{error::Error, fmt, sync::Arc};
 
-use ironclaw_agent_loop::families::ToolBatchStrategy;
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
@@ -135,14 +134,9 @@ impl ParallelToolBatchMode {
             }
         }
     }
-}
 
-impl From<ParallelToolBatchMode> for ToolBatchStrategy {
-    fn from(mode: ParallelToolBatchMode) -> Self {
-        match mode {
-            ParallelToolBatchMode::Off => Self::HostBatch,
-            ParallelToolBatchMode::On => Self::BoundedParallel,
-        }
+    fn enables_parallel_batches(self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
@@ -602,7 +596,7 @@ where
     let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
         parts.config.planned_model_availability_retry_attempts,
-        parts.config.parallel_tool_batch.into(),
+        parts.config.parallel_tool_batch.enables_parallel_batches(),
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
@@ -1000,7 +994,6 @@ mod tests {
         scheduler_permit_count,
     };
     use async_trait::async_trait;
-    use ironclaw_agent_loop::families::ToolBatchStrategy;
     use ironclaw_host_api::{
         capability_surface::CapabilitySurfacePolicy,
         ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
@@ -1043,12 +1036,7 @@ mod tests {
             ParallelToolBatchMode::from_raw(Some("off")),
             ParallelToolBatchMode::Off
         );
-        // Off selects the family boundary's host-batch strategy directly —
-        // never flattened to a bool.
-        assert_eq!(
-            ToolBatchStrategy::from(ParallelToolBatchMode::Off),
-            ToolBatchStrategy::HostBatch
-        );
+        assert!(!ParallelToolBatchMode::Off.enables_parallel_batches());
     }
 
     #[test]
@@ -1059,10 +1047,7 @@ mod tests {
                 ParallelToolBatchMode::On
             );
         }
-        assert_eq!(
-            ToolBatchStrategy::from(ParallelToolBatchMode::On),
-            ToolBatchStrategy::BoundedParallel
-        );
+        assert!(ParallelToolBatchMode::On.enables_parallel_batches());
     }
 
     #[test]
