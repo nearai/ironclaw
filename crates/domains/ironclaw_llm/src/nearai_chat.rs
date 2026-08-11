@@ -651,14 +651,12 @@ impl NearAiChatProvider {
 
     async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = self.api_url("models");
-        let token = self.resolve_bearer_token().await?;
 
         tracing::debug!("Fetching models from: {}", url);
 
         let response = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
             .map_err(|e| LlmError::RequestFailed {
@@ -1804,6 +1802,50 @@ mod tests {
 
     fn test_session() -> Arc<SessionManager> {
         Arc::new(SessionManager::new(SessionConfig::default()))
+    }
+
+    #[tokio::test]
+    async fn list_models_does_not_require_authentication() {
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept models request");
+            let (headers, _) = read_http_request_body(&mut socket).await;
+            headers_tx.send(headers).expect("capture request headers");
+            write_http_json_response(
+                &mut socket,
+                serde_json::json!({ "data": [{ "id": "nearai/test-model" }] }),
+            )
+            .await;
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_nearai_config(&base_url);
+        config.api_key = None;
+        let session = Arc::new(SessionManager::new(SessionConfig {
+            auth_base_url: "http://127.0.0.1:1".to_string(),
+            session_path: temp.path().join("missing-session.json"),
+        }));
+        let provider = NearAiChatProvider::new(config, session).expect("provider");
+
+        let models = provider
+            .list_models_full()
+            .await
+            .expect("public model catalog should not require authentication");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "nearai/test-model");
+        let headers = headers_rx.await.expect("models request headers");
+        assert!(
+            !headers
+                .lines()
+                .any(|line| line.to_ascii_lowercase().starts_with("authorization:")),
+            "public model discovery must not send credentials: {headers}"
+        );
     }
 
     async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> (String, String) {
