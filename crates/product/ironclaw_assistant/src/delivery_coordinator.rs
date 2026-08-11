@@ -241,15 +241,19 @@ pub enum CoordinatedDeliveryOutcome {
     Failed {
         attempt: OutboundDeliveryAttempt,
         failure_kind: DeliveryFailureKind,
+        /// Whether any part reached the vendor during THIS invocation. Kept
+        /// separate from refs because a successful accept may return no ref.
+        vendor_reached: bool,
         /// Vendor refs for parts THIS invocation confirmed sent before the
-        /// terminal failure. Non-empty only for the partial-multipart case
+        /// terminal failure. Populated only for the partial-multipart case
         /// (OUT-7): an adapter may split one `OutboundPart` into several
         /// vendor-level chunks (`ChannelAdapter::deliver` owns splitting —
         /// Slack and Telegram both chunk oversized text), so a single-part
         /// envelope can still fail after an earlier chunk reached the
-        /// vendor. Empty whenever nothing reached the vendor, including the
-        /// claim-miss path (`outcome_for_claimed_delivery`), which has no
-        /// egress evidence of its own to report.
+        /// vendor. May still be empty when an accepted chunk returned no ref;
+        /// `vendor_reached` is the authoritative reachability evidence. Also
+        /// empty on the claim-miss path (`outcome_for_claimed_delivery`),
+        /// which has no egress evidence of its own to report.
         vendor_message_refs: Vec<String>,
     },
 }
@@ -753,6 +757,7 @@ impl DeliveryCoordinator {
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_reached: any_sent,
                             vendor_message_refs: sent_refs,
                         });
                     }
@@ -767,6 +772,7 @@ impl DeliveryCoordinator {
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_reached: any_sent,
                             vendor_message_refs: sent_refs,
                         });
                     }
@@ -781,6 +787,7 @@ impl DeliveryCoordinator {
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_reached: false,
                             vendor_message_refs: Vec::new(),
                         });
                     }
@@ -799,6 +806,7 @@ impl DeliveryCoordinator {
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_reached: false,
                             vendor_message_refs: Vec::new(),
                         });
                     }
@@ -852,6 +860,7 @@ impl DeliveryCoordinator {
                 Ok(CoordinatedDeliveryOutcome::Failed {
                     attempt: existing,
                     failure_kind,
+                    vendor_reached: false,
                     // The persisted row does not retain vendor refs, and this
                     // invocation never drove the send that produced this row
                     // — there is no partial-egress evidence to report here.
@@ -862,6 +871,7 @@ impl DeliveryCoordinator {
                 Ok(CoordinatedDeliveryOutcome::Failed {
                     attempt: existing,
                     failure_kind: DeliveryFailureKind::Unknown,
+                    vendor_reached: false,
                     vendor_message_refs: Vec::new(),
                 })
             }

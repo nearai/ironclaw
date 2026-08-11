@@ -842,6 +842,7 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
             CoordinatedDeliveryOutcome::Failed {
                 attempt: sample_attempt(),
                 failure_kind: kind,
+                vendor_reached: false,
                 vendor_message_refs: Vec::new(),
             },
         );

@@ -2722,6 +2722,60 @@ async fn observer_connect_nudge_holds_reservation_when_a_multipart_notice_partia
     );
 }
 
+/// A partial multipart send remains vendor egress even when the accepted
+/// chunk has no provider reference. Reachability and retractability are
+/// separate facts: the missing handle must not release the nudge reservation.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_a_ref_less_chunk_partially_sends() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![
+                PartDeliveryOutcome::Sent {
+                    vendor_message_ref: None,
+                },
+                PartDeliveryOutcome::Retryable {
+                    reason: "rate limited".to_string(),
+                },
+            ],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-no-ref-1"),
+            rejected.clone(),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-no-ref-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "a ref-less partial send must hold the reservation, not release it for a duplicate: {texts:?}"
+    );
+}
+
 #[tokio::test]
 async fn observer_connect_nudge_saturation_does_not_evict_in_flight_reservations() {
     const RESERVATION_CAP: usize = 1024;

@@ -233,9 +233,8 @@ impl NoticeEgress {
 /// outcome VARIANT first: for `Delivered`/`DeliveredUnconfirmed`/
 /// `AlreadyDelivered`, an empty `vendor_message_refs` is NOT evidence that
 /// nothing was sent (those variants are only reached once the vendor
-/// accepted something). `Failed` is the one variant where ref emptiness
-/// itself is the signal: an empty list means no chunk ever reached the
-/// vendor, a non-empty one means a partial multipart send did.
+/// accepted something). `Failed` carries reachability separately because an
+/// accepted chunk may have no vendor reference.
 pub(crate) fn notice_egress_from_outcome(outcome: &CoordinatedDeliveryOutcome) -> NoticeEgress {
     match outcome {
         CoordinatedDeliveryOutcome::Delivered { .. } => NoticeEgress::Sent {
@@ -263,21 +262,17 @@ pub(crate) fn notice_egress_from_outcome(outcome: &CoordinatedDeliveryOutcome) -
         // text into several vendor-level posts, and manifest-provided
         // notice copy (e.g. `connect_required`) has no length bound. So
         // `Failed` can still follow an earlier chunk that reached the
-        // vendor — `vendor_message_refs` carries that evidence when it
-        // exists. Empty refs means genuinely nothing went out. This mapping
-        // is notice-path-specific; do not lift it to a general outcome
-        // classifier without revisiting that.
-        CoordinatedDeliveryOutcome::Failed {
-            vendor_message_refs,
-            ..
-        } => {
-            if vendor_message_refs.is_empty() {
-                NoticeEgress::NotSent
-            } else {
+        // vendor. `vendor_reached` carries that evidence even when an
+        // accepted chunk returned no ref. This mapping is notice-path-specific;
+        // do not lift it to a general outcome classifier without revisiting that.
+        CoordinatedDeliveryOutcome::Failed { vendor_reached, .. } => {
+            if *vendor_reached {
                 NoticeEgress::Sent {
                     durably_recorded: false,
                     message: None,
                 }
+            } else {
+                NoticeEgress::NotSent
             }
         }
     }
@@ -766,6 +761,7 @@ mod notice_egress_tests {
         let failed = CoordinatedDeliveryOutcome::Failed {
             attempt: test_attempt(OutboundDeliveryStatus::Failed),
             failure_kind: DeliveryFailureKind::TransportUnavailable,
+            vendor_reached: false,
             vendor_message_refs: Vec::new(),
         };
         assert_eq!(
@@ -784,6 +780,7 @@ mod notice_egress_tests {
         let partial_failed = CoordinatedDeliveryOutcome::Failed {
             attempt: test_attempt(OutboundDeliveryStatus::Failed),
             failure_kind: DeliveryFailureKind::Rejected,
+            vendor_reached: true,
             vendor_message_refs: vec!["ts-partial-1".to_string()],
         };
         assert_eq!(
@@ -793,6 +790,21 @@ mod notice_egress_tests {
                 message: None,
             },
             "a partial multipart send must hold the reservation, not release it"
+        );
+
+        let ref_less_partial_failed = CoordinatedDeliveryOutcome::Failed {
+            attempt: test_attempt(OutboundDeliveryStatus::Failed),
+            failure_kind: DeliveryFailureKind::Rejected,
+            vendor_reached: true,
+            vendor_message_refs: Vec::new(),
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&ref_less_partial_failed),
+            NoticeEgress::Sent {
+                durably_recorded: false,
+                message: None,
+            },
+            "a ref-less partial send must use reachability evidence, not ref presence"
         );
     }
 
