@@ -87,7 +87,60 @@ fn auth_surface_view(record: &ExtensionManifestRecord) -> Vec<(String, &'static 
     surfaces
 }
 
+/// Capability ids a package has gained SINCE its v2 snapshot was frozen, in
+/// manifest order, appended after the v2-era set.
+///
+/// This suite pins the v2->v3 *rewrite*, not the manifest forever: a package
+/// that later grows a genuinely new tool would otherwise have to falsify its
+/// historical v2 fixture (recording tools that never existed in v2) to stay
+/// green, which would destroy the very baseline the gate exists to compare
+/// against. Declaring the additions here keeps the original claim intact —
+/// every v2-era tool still projects identically, positionally — while making
+/// each addition an explicit, reviewable line rather than a relaxed
+/// assertion. An addition also has to earn its own per-package test pinning
+/// what it declares (`slack_v3_appends_the_remaining_standard_ops`).
+///
+/// Scopes work the same way: `[auth.<vendor>]` is a union ceiling over the
+/// per-tool scope lists, so a new tool needing a new scope necessarily widens
+/// it. The additions' scope delta is declared per package and asserted to be
+/// exactly what the live union added.
+struct PackageAdditions {
+    /// Capability ids appended after the v2-era set, in manifest order.
+    tool_ids: &'static [&'static str],
+    /// Scopes the live auth union has gained, sorted.
+    added_scopes: &'static [&'static str],
+}
+
+const NO_ADDITIONS: PackageAdditions = PackageAdditions {
+    tool_ids: &[],
+    added_scopes: &[],
+};
+
+/// Slack completed its coverage of the 16 core standard messaging operations
+/// after the v2 freeze. Order matches the `[[tools]]` order in
+/// `crates/extensions/packages/slack/manifest.toml`.
+const SLACK_ADDITIONS: PackageAdditions = PackageAdditions {
+    tool_ids: &[
+        "slack.edit_message",
+        "slack.delete_message",
+        "slack.add_reaction",
+        "slack.remove_reaction",
+        "slack.open_dm",
+        "slack.get_message",
+        "slack.resolve_user",
+        "slack.list_members",
+    ],
+    // The reaction pair and open_dm are the only additions needing a scope
+    // the v2-era grant did not already hold; the four read-side additions
+    // reuse the existing read scopes, and edit/delete reuse chat:write.
+    added_scopes: &["im:write", "reactions:read", "reactions:write"],
+};
+
 fn assert_static_projection_parity(dir: &str) {
+    assert_projection_parity_with_additions(dir, &NO_ADDITIONS);
+}
+
+fn assert_projection_parity_with_additions(dir: &str, additions: &PackageAdditions) {
     let v2 = parse(&v2_fixture(dir));
     let v3 = parse(&live_asset(dir));
 
@@ -142,15 +195,51 @@ fn assert_static_projection_parity(dir: &str) {
             })
             .collect::<Vec<_>>()
     };
+    // Non-tool surfaces (auth, ...) must still match exactly and in order.
+    // Tool surfaces are compared by count, because a declared addition adds
+    // one; with no additions this is the same assertion as before.
+    let tool_kind = ironclaw_extension_contracts::surface::CapabilitySurfaceKind::Tool;
+    let without_tools = |record: &ExtensionManifestRecord| {
+        non_channel_kinds(record)
+            .into_iter()
+            .filter(|kind| *kind != tool_kind)
+            .collect::<Vec<_>>()
+    };
+    let tool_surfaces = |record: &ExtensionManifestRecord| {
+        non_channel_kinds(record)
+            .into_iter()
+            .filter(|kind| *kind == tool_kind)
+            .count()
+    };
     assert_eq!(
-        non_channel_kinds(&v2),
-        non_channel_kinds(&v3),
-        "{dir}: derived surface kinds"
+        without_tools(&v2),
+        without_tools(&v3),
+        "{dir}: derived non-tool surface kinds"
+    );
+    assert_eq!(
+        tool_surfaces(&v3),
+        tool_surfaces(&v2) + additions.tool_ids.len(),
+        "{dir}: tool surface count (v2 baseline plus {} declared addition(s))",
+        additions.tool_ids.len()
     );
 
-    // Tool-by-tool parity.
+    // Tool-by-tool parity. The v2-era tools are compared positionally, so an
+    // addition must be APPENDED — reordering or interleaving one fails here,
+    // which is what keeps the historical comparison meaningful.
     let (v2_tools, v3_tools) = (&v2.manifest().capabilities, &v3.manifest().capabilities);
-    assert_eq!(v2_tools.len(), v3_tools.len(), "{dir}: tool count");
+    assert_eq!(
+        v3_tools.len(),
+        v2_tools.len() + additions.tool_ids.len(),
+        "{dir}: tool count"
+    );
+    let appended = v3_tools[v2_tools.len().min(v3_tools.len())..]
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        appended, additions.tool_ids,
+        "{dir}: tools appended since the v2 freeze must be declared in PackageAdditions"
+    );
     for (a, b) in v2_tools.iter().zip(v3_tools.iter()) {
         let id = a.id.as_str();
         assert_eq!(a.id, b.id, "{dir}: capability id order");
@@ -278,11 +367,51 @@ fn assert_static_projection_parity(dir: &str) {
     }
 
     // Union-level auth surface parity (vendor, setup kind, sorted scopes).
-    assert_eq!(
-        auth_surface_view(&v2),
-        auth_surface_view(&v3),
-        "{dir}: derived auth surfaces"
-    );
+    // With no declared additions this is exact equality, unchanged. With
+    // additions, the vendor and setup kind still must match exactly and the
+    // scope union may only GROW, by exactly the declared delta — a scope
+    // silently disappearing from the ceiling would narrow every existing
+    // tool's grant, so the subset direction is asserted too.
+    let (v2_auth, v3_auth) = (auth_surface_view(&v2), auth_surface_view(&v3));
+    if additions.added_scopes.is_empty() {
+        assert_eq!(v2_auth, v3_auth, "{dir}: derived auth surfaces");
+    } else {
+        assert_eq!(
+            v2_auth
+                .iter()
+                .map(|(vendor, setup, _)| (vendor, setup))
+                .collect::<Vec<_>>(),
+            v3_auth
+                .iter()
+                .map(|(vendor, setup, _)| (vendor, setup))
+                .collect::<Vec<_>>(),
+            "{dir}: derived auth vendors and setup kinds"
+        );
+        let baseline_scopes = v2_auth
+            .iter()
+            .flat_map(|(_, _, scopes)| scopes.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let live_scopes = v3_auth
+            .iter()
+            .flat_map(|(_, _, scopes)| scopes.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let dropped = baseline_scopes
+            .difference(&live_scopes)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            dropped.is_empty(),
+            "{dir}: the auth scope ceiling may only grow; these v2 scopes are gone: {dropped:?}"
+        );
+        let added = live_scopes
+            .difference(&baseline_scopes)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            added, additions.added_scopes,
+            "{dir}: scopes gained since the v2 freeze must be declared in PackageAdditions"
+        );
+    }
 
     // v3 records must carry a recipe for every vendor.
     for auth in &v3.resolved().auth {
@@ -434,8 +563,129 @@ static_parity!(google_docs_v3_projects_identically, "google-docs");
 static_parity!(google_drive_v3_projects_identically, "google-drive");
 static_parity!(google_sheets_v3_projects_identically, "google-sheets");
 static_parity!(google_slides_v3_projects_identically, "google-slides");
-static_parity!(slack_v3_projects_identically, "slack");
+/// Slack is the one package with declared post-freeze additions: its v2-era
+/// eight tools still project identically, and the eight standard ops appended
+/// since are pinned by `slack_v3_appends_the_remaining_standard_ops`.
+#[test]
+fn slack_v3_projects_identically() {
+    assert_projection_parity_with_additions("slack", &SLACK_ADDITIONS);
+}
 static_parity!(web_access_v3_projects_identically, "web-access");
+
+/// The eight standard messaging operations Slack gained after the v2 freeze.
+/// `slack_v3_projects_identically` proves they were APPENDED without
+/// disturbing the v2-era eight; this proves each one is a real standard-op
+/// binding rather than a bespoke tool wearing a canonical id.
+///
+/// The registry's own parse-time rules (reserved ops, id shape, absent schema
+/// refs, the write effects floor, one binding per op) already fail the
+/// manifest at install time — these assertions pin the *projection* those
+/// rules produce, which is what the host resolves schemas and gates writes
+/// from at dispatch.
+#[test]
+fn slack_v3_appends_the_remaining_standard_ops() {
+    use ironclaw_host_api::messaging::StandardMessagingOp;
+
+    let v3 = parse(&live_asset("slack"));
+    let bound: Vec<(&str, StandardMessagingOp)> = v3
+        .manifest()
+        .capabilities
+        .iter()
+        .filter_map(|capability| {
+            capability
+                .standard_op
+                .map(|op| (capability.id.as_str(), op))
+        })
+        .collect();
+
+    // Slack binds every core operation exactly once — the whole point of the
+    // change, and the property that keeps the model from meeting a vendor
+    // with half a messaging vocabulary.
+    assert_eq!(
+        bound.len(),
+        16,
+        "slack must bind all 16 core standard messaging operations, got {bound:?}"
+    );
+    let core: std::collections::BTreeSet<&str> = StandardMessagingOp::ALL
+        .iter()
+        .filter(|op| op.contract().is_some())
+        .map(|op| op.op_name())
+        .collect();
+    let slack_ops: std::collections::BTreeSet<&str> =
+        bound.iter().map(|(_, op)| op.op_name()).collect();
+    assert_eq!(
+        slack_ops, core,
+        "slack's bound ops must be exactly the core set"
+    );
+
+    for (id, op) in &bound {
+        // The binding rule fixes a bound tool's id; a drift here would make
+        // the guest's capability-id dispatch table unreachable.
+        assert_eq!(
+            *id,
+            format!("slack.{}", op.op_name()),
+            "standard op tool id must be slack.<op_name>"
+        );
+
+        let capability = v3
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == *id)
+            .expect("capability just enumerated");
+
+        // Host-canonical schemas on both directions: the output half is what
+        // makes a send that cannot produce a message_ref a failure instead of
+        // a silent pass-through.
+        assert_eq!(
+            capability.input_schema_ref.as_str(),
+            format!("standard:messaging/{}.input.v1", op.op_name())
+        );
+        assert_eq!(
+            capability
+                .output_schema_ref
+                .as_ref()
+                .map(|schema_ref| schema_ref.as_str()),
+            Some(format!("standard:messaging/{}.output.v1", op.op_name()).as_str())
+        );
+
+        // Write ops must declare external_write (spec §6 rule 4) — this is
+        // what routes them through the approval path reads skip.
+        if op.is_write() {
+            assert!(
+                capability
+                    .effects
+                    .contains(&ironclaw_host_api::capability::EffectKind::ExternalWrite),
+                "{id}: write op must declare the external_write effect"
+            );
+        }
+
+        // Every bound tool keeps a package-owned vendor addendum; without one
+        // the model gets the extension-neutral core text with no Slack
+        // dialect notes (emoji names, mrkdwn, id shapes).
+        let prompt_doc_ref = capability
+            .prompt_doc_ref
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id}: standard op must ship a vendor addendum"));
+        assert_eq!(
+            prompt_doc_ref.as_str(),
+            format!("prompts/slack/{}.md", op.op_name()),
+            "{id}: addendum path is derived from the op name"
+        );
+
+        // Every tool runs on the user token, never the bot's.
+        let handles = capability
+            .runtime_credentials
+            .iter()
+            .map(|credential| credential.handle.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            handles,
+            ["slack_user_token"],
+            "{id}: standard ops act as the connected user"
+        );
+    }
+}
 
 /// DEL-5 removed `ironclaw.product_adapter/v1`, so the v2 slack baseline can
 /// no longer carry its channel surface — this presence pin replaces the byte

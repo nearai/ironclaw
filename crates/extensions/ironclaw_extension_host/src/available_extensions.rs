@@ -1878,27 +1878,42 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
         assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
-        assert!(matches!(
-            &requirement.setup,
-            LifecycleExtensionCredentialSetup::OAuth { scopes }
-                if scopes.iter().cloned().collect::<BTreeSet<_>>()
-                    == [
-                        "channels:history",
-                        "channels:read",
-                        "chat:write",
-                        "groups:history",
-                        "groups:read",
-                        "im:history",
-                        "im:read",
-                        "mpim:history",
-                        "mpim:read",
-                        "search:read",
-                        "users:read",
-                    ]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<BTreeSet<_>>()
-        ));
+        // This is the exact set the user is asked to consent to at connect
+        // time, so it is pinned rather than merely sampled. `assert_eq!` on
+        // the sorted set, not `assert!(matches!(...))`: a mismatch has to
+        // print WHICH scope moved, or the next person to widen the grant gets
+        // a bare "assertion failed" and no delta.
+        let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+            panic!("slack projects an OAuth setup, got {:?}", requirement.setup);
+        };
+        assert_eq!(
+            scopes.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                // Reads: history and metadata for conversations and people.
+                "channels:history",
+                "channels:read",
+                "groups:history",
+                "groups:read",
+                "im:history",
+                "im:read",
+                "mpim:history",
+                "mpim:read",
+                "search:read",
+                "users:read",
+                // Writes, one per acting-as-the-user operation family:
+                // send/edit/delete, the reaction pair (read included, because
+                // removing "my reactions" has to see them first), and
+                // opening a DM.
+                "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>(),
+            "the Slack connect grant is the union of every tool's scopes"
+        );
     }
 
     #[test]
