@@ -3434,24 +3434,39 @@ async fn parallel_batch_stops_launching_new_calls_after_cancelled_resolution() {
         4,
         "a typed cancelled result must close the launch window before replacement calls start"
     );
+    assert_eq!(
+        host.appended_result_refs()
+            .into_iter()
+            .map(|request| request.result_ref)
+            .collect::<Vec<_>>(),
+        (1..4)
+            .map(|index| {
+                LoopResultRef::new(format!("result:parallel-cancel-window-{index}")).expect("valid")
+            })
+            .collect::<Vec<_>>(),
+        "the cancelled prefix must drain every launched sibling into durable state"
+    );
+    assert_eq!(
+        host.checkpoint_kinds()
+            .into_iter()
+            .filter(|kind| *kind == LoopCheckpointKind::Final)
+            .count(),
+        1,
+        "the drained cancellation must stage one authoritative Final checkpoint"
+    );
 }
 
 #[tokio::test]
 async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_gate() {
-    // Independent gate-raising outcomes in the same bounded-parallel window —
-    // TWO Approval gates (first in input order, second a same-kind sibling),
-    // a later DependentRun sibling, plus a completed call. Handling the first
-    // gate exit must not silently discard the later siblings: every launched
-    // call stays durably represented — signature, result refs, and the later
-    // approval's model-visible "pending" safe-summary ref in the single
-    // BeforeBlock checkpoint — while the DependentRun sibling persists its
-    // CONCRETE result ref (not a pending summary), and the first input-order
-    // gate controls the exit.
+    // Two Approval gates, one completed call, and one retry-fated failure share
+    // a bounded-parallel window. The first gate controls the exit, while every
+    // sibling remains durable and the failure is surfaced without dispatching
+    // a replacement call. The later approval becomes a model-visible pending
+    // result because only one gate can own the BeforeBlock checkpoint.
     let first_approval_request_id = ApprovalRequestId::new();
     let first_gate_ref =
         LoopGateRef::new(format!("gate:approval-{first_approval_request_id}")).expect("valid");
     let second_gate_ref = LoopGateRef::new("gate:parallel-sibling-approval-2").expect("valid");
-    let dependent_gate_ref = LoopGateRef::new("gate:parallel-sibling-dependent").expect("valid");
     let first_approval_resume = CapabilityApprovalResume {
         approval_request_id: first_approval_request_id,
         resume_token: CapabilityResumeToken::new("resume-token:parallel-sibling-approval")
@@ -3460,7 +3475,7 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         input_ref: CapabilityInputRef::new("input:sibling-approval-1").expect("valid"),
     };
     let completed_ref = LoopResultRef::new("result:parallel-sibling-completed").expect("valid");
-    let dependent_ref = LoopResultRef::new("result:parallel-sibling-dependent").expect("valid");
+    let failed_ref = LoopResultRef::new("result:provider-error-turn_4-call_4").expect("valid");
     // The later approval call carries provider replay metadata so its merged
     // "approval gate pending" safe-summary ref materializes through the
     // existing safe-summary persistence (which no-ops without replay).
@@ -3513,9 +3528,20 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
                 activity_id: CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
-                input_ref: CapabilityInputRef::new("input:sibling-dependent").expect("valid"),
+                input_ref: CapabilityInputRef::new("input:sibling-failed").expect("valid"),
                 effective_capability_ids: vec![capability_id()],
-                provider_replay: None,
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    provider_turn_id: "turn_4".to_string(),
+                    provider_call_id: "call_4".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
+                    arguments: serde_json::json!({"message": "failed sibling"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                }),
             },
         ]),
         effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
@@ -3544,14 +3570,11 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
             None,
         )
         .resolution,
-        resolution::await_dependent_run(
-            dependent_gate_ref.clone(),
-            dependent_ref.clone(),
-            "dependent run sibling result".to_string(),
-            4_096,
-            None,
-        )
-        .resolution,
+        resolution::failed(
+            FailureKind::Network,
+            "retry-fated sibling failed".to_string(),
+            diagnostic_failure_detail("retry-fated sibling failed"),
+        ),
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -3573,11 +3596,14 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         "the first input-order gate must control the exit"
     );
 
-    // Every launched call is dispatched exactly once; the completed sibling's
-    // result ref, the later approval's "pending" summary ref, and the later
-    // dependent run's CONCRETE result ref are all durable before the gate
-    // exit.
-    assert_eq!(host.single_invocations().len(), 4);
+    // Every launched call is dispatched exactly once. In particular, the
+    // retry-fated failure is made model-visible without a replacement dispatch
+    // while the first gate is deferred.
+    assert_eq!(
+        host.single_invocations().len(),
+        4,
+        "gate drain must not dispatch a replacement for the failed sibling"
+    );
     let appended = host.appended_result_refs();
     assert_eq!(
         appended
@@ -3587,7 +3613,7 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         vec![
             completed_ref.clone(),
             pending_ref.clone(),
-            dependent_ref.clone()
+            failed_ref.clone()
         ]
     );
     assert_eq!(
@@ -3595,8 +3621,12 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         "the later approval must be durably model-visible as a pending gate"
     );
     assert_eq!(
-        appended[2].safe_summary, "dependent run sibling result",
-        "the later dependent run must persist its concrete result, not a pending summary"
+        appended[2]
+            .model_observation
+            .as_ref()
+            .expect("failed sibling must remain model-visible")
+            .status,
+        ToolObservationStatus::Error
     );
 
     // ONE coherent BeforeBlock checkpoint: the exit's own — a resumer reading
@@ -3633,7 +3663,7 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
         .expect("signature"),
         CapabilityCallSignature::from_call(
             capability_id(),
-            &serde_json::json!({ "input_ref": "input:sibling-dependent" }),
+            &serde_json::json!({ "message": "failed sibling" }),
         )
         .expect("signature"),
     ];
@@ -3648,8 +3678,8 @@ async fn parallel_batch_persists_sibling_gates_and_exits_on_first_input_order_ga
     );
     assert_eq!(
         before_block_state.result_refs,
-        vec![completed_ref, pending_ref, dependent_ref],
-        "the exit checkpoint must retain the completed result, the later approval's pending summary, and the dependent run's concrete result"
+        vec![completed_ref, pending_ref, failed_ref],
+        "the gate checkpoint must retain completed, pending-gate, and failed sibling results"
     );
     assert_eq!(
         before_block_state.last_gate.as_ref(),
@@ -3759,6 +3789,73 @@ async fn parallel_batch_persists_completed_sibling_before_terminal_port_error() 
         final_staged_state(&host).result_refs,
         vec![completed_ref],
         "the terminal path checkpoint must retain the launched sibling result"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_error_truncates_launch_window_and_drains_launched_siblings() {
+    let completed_refs = (1..4)
+        .map(|index| {
+            LoopResultRef::new(format!("result:parallel-terminal-window-{index}")).expect("valid")
+        })
+        .collect::<Vec<_>>();
+    let mut results = vec![Err(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "first launched call failed terminally",
+    )
+    .with_detail("terminal launch-window regression"))];
+    results.extend(
+        completed_refs
+            .iter()
+            .enumerate()
+            .map(|(index, result_ref)| {
+                Ok(resolution::completed(
+                    result_ref.clone(),
+                    format!("completed sibling {}", index + 1),
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ))
+            }),
+    );
+    let host = MockHost::new(vec![calls_response_with_count(6)])
+        .with_single_results(results)
+        .with_single_invoke_delays(vec![
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(75),
+            std::time::Duration::from_millis(75),
+        ]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("terminal capability failure must end the run");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics { .. }
+            | AgentLoopExecutorError::HostUnavailable { .. }
+    ));
+    assert_eq!(
+        host.single_invocations().len(),
+        4,
+        "a terminal host error must close the launch window before replacements start"
+    );
+    assert_eq!(
+        host.appended_result_refs()
+            .into_iter()
+            .map(|request| request.result_ref)
+            .collect::<Vec<_>>(),
+        completed_refs,
+        "every sibling launched before the terminal error must be drained"
     );
 }
 
@@ -4367,6 +4464,120 @@ async fn parallel_batch_rebuilds_pre_gate_terminal_exit_against_merged_checkpoin
             .collect::<Vec<_>>(),
         expected_signatures,
         "every launched call's signature must survive in the rebuilt exit's checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn coalesced_dependent_gate_precedes_later_terminal_sibling() {
+    let gate_ref = LoopGateRef::new("gate:coalesced-before-terminal").expect("valid");
+    let host = MockHost::new(vec![calls_response_with_count(3), reply_response()])
+        .with_single_outcomes(vec![
+            resolution::await_dependent_run(
+                gate_ref.clone(),
+                LoopResultRef::new("result:coalesced-terminal-a").expect("valid"),
+                "first dependent result".to_string(),
+                0,
+                None,
+            )
+            .resolution,
+            resolution::await_dependent_run(
+                gate_ref.clone(),
+                LoopResultRef::new("result:coalesced-terminal-b").expect("valid"),
+                "second dependent result".to_string(),
+                0,
+                None,
+            )
+            .resolution,
+            resolution::failed(
+                FailureKind::OperationFailed,
+                "later sibling failed".to_string(),
+                diagnostic_failure_detail("later sibling failure"),
+            ),
+        ]);
+    let planner = DefaultPlanner::compose_default()
+        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
+        .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
+    let family = LoopFamily::new(
+        LoopFamilyId::new("coalesced-gate-terminal-order-test").expect("valid test family id"),
+        ComponentIdentity::from_static(
+            "coalesced-gate-terminal-order-test",
+            ComponentDigest([23; 32]),
+        ),
+        Arc::new(planner),
+    );
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &family,
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("execute");
+
+    let LoopExit::Blocked(blocked) = exit else {
+        panic!("earlier coalesced gate must control the exit");
+    };
+    assert_eq!(blocked.gate_ref, gate_ref);
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert_eq!(
+        before_block_state.result_refs.len(),
+        2,
+        "the gate checkpoint must retain both coalesced dependent results"
+    );
+    assert!(
+        before_block_state
+            .recent_failure_kinds
+            .iter()
+            .any(|kind| *kind == LoopFailureKind::CapabilityProtocolError),
+        "the gate checkpoint must retain the later terminal sibling's failure bookkeeping"
+    );
+}
+
+#[tokio::test]
+async fn coalesced_dependent_gate_suppresses_sibling_retry_dispatch() {
+    let gate_ref = LoopGateRef::new("gate:coalesced-suppresses-retry").expect("valid");
+    let host = MockHost::new(vec![calls_response_with_count(3)]).with_single_outcomes(vec![
+        resolution::await_dependent_run(
+            gate_ref.clone(),
+            LoopResultRef::new("result:coalesced-retry-a").expect("valid"),
+            "first dependent result".to_string(),
+            0,
+            None,
+        )
+        .resolution,
+        resolution::await_dependent_run(
+            gate_ref.clone(),
+            LoopResultRef::new("result:coalesced-retry-b").expect("valid"),
+            "second dependent result".to_string(),
+            0,
+            None,
+        )
+        .resolution,
+        resolution::failed(
+            FailureKind::Network,
+            "retry-fated sibling failed".to_string(),
+            diagnostic_failure_detail("retry-fated sibling failure"),
+        ),
+    ]);
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("execute");
+
+    let LoopExit::Blocked(blocked) = exit else {
+        panic!("coalesced dependent gate must block the run");
+    };
+    assert_eq!(blocked.gate_ref, gate_ref);
+    assert_eq!(
+        host.single_invocations().len(),
+        3,
+        "a retry-fated sibling must not dispatch again while a coalesced gate is pending"
     );
 }
 
@@ -8699,6 +8910,11 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
     };
+    state
+        .pending_auth_resume
+        .as_mut()
+        .expect("seeded auth resume")
+        .activity_id = call.activity_id;
     let gate_ref = LoopGateRef::new("gate:auth-skip-stale").expect("valid");
 
     let step = GateStage
@@ -8762,6 +8978,11 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
     };
+    state
+        .pending_auth_resume
+        .as_mut()
+        .expect("seeded auth resume")
+        .activity_id = call.activity_id;
     let gate_ref = LoopGateRef::new("gate:resource-abort").expect("valid");
 
     let step = GateStage
@@ -8883,6 +9104,47 @@ async fn stale_surface_batch_failure_is_recoverable() {
     assert!(
         matches!(exit, LoopExit::Completed(_)),
         "run must complete after a StaleSurface batch error; got {exit:?}"
+    );
+}
+
+#[tokio::test]
+async fn aborting_stale_surface_batch_error_writes_final_checkpoint() {
+    let host = MockHost::new(vec![calls_response(), reply_response()])
+        .fail_batch_with(AgentLoopHostErrorKind::StaleSurface);
+    let planner = DefaultPlanner::compose_default()
+        .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
+    let family = LoopFamily::new(
+        LoopFamilyId::new("stale-surface-abort-checkpoint-test").expect("valid test family id"),
+        ComponentIdentity::from_static(
+            "stale-surface-abort-checkpoint-test",
+            ComponentDigest([29; 32]),
+        ),
+        Arc::new(planner),
+    );
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &family,
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("execute");
+
+    let LoopExit::Failed(failed) = exit else {
+        panic!("aborting recovery must fail the run");
+    };
+    assert!(
+        failed.checkpoint_id.is_some(),
+        "a direct batch-error terminal path must carry its Final checkpoint"
+    );
+    assert_eq!(
+        host.checkpoint_kinds()
+            .into_iter()
+            .filter(|kind| *kind == LoopCheckpointKind::Final)
+            .count(),
+        1,
+        "the direct batch-error terminal path must stage exactly one Final checkpoint"
     );
 }
 
@@ -9373,33 +9635,25 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     );
 }
 
-// ── auth-resume slot consumed on first batch match (batch duplicate guard) ──
+// ── auth-resume slot follows activity identity within a duplicate-capability batch ──
 
 #[tokio::test]
-async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_call() {
-    // Regression test: pending_auth_resume must be consumed on the FIRST batch
-    // call whose capability_id matches, not shared across all matching calls.
+async fn auth_resume_slot_targets_matching_activity_not_first_capability_match() {
+    // Two calls can share one capability id. The resume slot belongs only to
+    // the parked activity and must not be attached to, or cleared by, an
+    // ordinary sibling that happens to use the same capability.
     //
-    // Before the fix `pending_auth_resume` was accessed via `as_ref().filter(…)`
-    // (non-consuming), so two calls to the same capability_id in one batch would
-    // BOTH receive the same auth_resume — reusing one resume_token/invocation_id
-    // across distinct calls (correctness + security bug).
-    //
-    // After the fix `pending_auth_resume` uses `take_if` (consuming on first
-    // match), so only the FIRST matching call carries auth_resume; the second is
-    // a normal dispatch (auth_resume = None).
-    //
-    // We drive CapabilityStage directly (rather than the full executor) because
-    // when pending_auth_resume is set the executor routes through the single-call
-    // ResumeAuth prompt path — the two-call batch can only be exercised at the
-    // CapabilityStage boundary where the mapping loop lives.
+    // Drive CapabilityStage directly because the prompt stage normally emits
+    // the one parked resume call by itself.
     let approval_request_id = ApprovalRequestId::new();
     let resume_token =
         CapabilityResumeToken::new("resume-token:batch-dup-guard").expect("valid token");
     let correlation_id = CorrelationId::new();
     let input_ref = CapabilityInputRef::new("input:batch-dup-guard").expect("valid");
 
-    // Two outcomes for the two calls; both complete so no suspension complicates things.
+    // The ordinary sibling completes first; the resumed sibling then returns a
+    // retry-fated backend failure. Clearing by capability id would erase the
+    // resume origin and incorrectly dispatch a replacement call.
     let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
@@ -9412,14 +9666,10 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                     None,
                     None,
                 ),
-                resolution::completed(
-                    LoopResultRef::new("result:second").expect("valid"),
-                    "second done".to_string(),
-                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
-                    false,
-                    0,
-                    None,
-                    None,
+                resolution::failed(
+                    FailureKind::Backend,
+                    "resumed sibling failed".to_string(),
+                    diagnostic_failure_detail("resumed sibling failed"),
                 ),
             ],
             stopped_on_suspension: false,
@@ -9455,6 +9705,11 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         ParentLoopOutput::CapabilityCalls(calls) => calls,
         ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
     };
+    state
+        .pending_auth_resume
+        .as_mut()
+        .expect("seeded auth resume")
+        .activity_id = calls[1].activity_id;
 
     let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
         &host,
@@ -9495,30 +9750,117 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
     let invocations = &batch_invocations[0].invocations;
     assert_eq!(invocations.len(), 2, "batch must have two calls");
 
-    // First call: auth_resume is set (slot consumed here).
-    let first_auth = invocations[0]
-        .auth_resume
-        .as_ref()
-        .expect("first batch call must carry auth_resume (pre-fix: both carried it)");
     assert_eq!(
-        first_auth.resume_token.as_ref(),
-        Some(&resume_token),
-        "first call auth_resume.resume_token must match"
-    );
-    let first_pa = first_auth
-        .prior_approval
-        .as_ref()
-        .expect("first call auth_resume.prior_approval must be set");
-    assert_eq!(
-        first_pa.approval_request_id, approval_request_id,
-        "first call auth_resume.prior_approval.approval_request_id must match"
+        invocations[0].auth_resume, None,
+        "the ordinary first call must not consume a sibling activity's resume slot"
     );
 
-    // Second call: auth_resume must be None — slot was consumed by the first call.
+    let second_auth = invocations[1]
+        .auth_resume
+        .as_ref()
+        .expect("the matching second activity must carry auth_resume");
     assert_eq!(
-        invocations[1].auth_resume, None,
-        "second batch call must NOT carry auth_resume — slot must be consumed on first match \
-         (pre-fix: was Some, reusing the same resume_token)"
+        second_auth.resume_token.as_ref(),
+        Some(&resume_token),
+        "second call auth_resume.resume_token must match"
+    );
+    let second_prior_approval = second_auth
+        .prior_approval
+        .as_ref()
+        .expect("second call auth_resume.prior_approval must be set");
+    assert_eq!(
+        second_prior_approval.approval_request_id, approval_request_id,
+        "second call auth_resume.prior_approval.approval_request_id must match"
+    );
+    assert!(
+        host.single_invocations().is_empty(),
+        "the resumed sibling failure must remain resume-origin and suppress retry"
+    );
+}
+#[tokio::test]
+async fn truncated_batch_gate_preserves_unlaunched_sibling_auth_resume() {
+    // Distinct from the full-batch case above: the host reports only the first
+    // call's gate, so the second same-capability activity has not run yet.
+    // Staging that first gate must not overwrite the second activity's parked
+    // auth token.
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:truncated-sibling").expect("valid token");
+    let gate_ref = LoopGateRef::new("gate:truncated-prefix-auth").expect("valid gate ref");
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![
+                resolution::auth_required(
+                    gate_ref,
+                    Vec::new(),
+                    "prefix needs auth".to_string(),
+                    None,
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let calls = match two_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
+    };
+    let parked_activity_id = calls[1].activity_id;
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: LoopGateRef::new("gate:parked-sibling-auth").expect("valid gate ref"),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:parked-sibling-auth").expect("valid input"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+        resume_token: Some(resume_token.clone()),
+        activity_id: parked_activity_id,
+        prior_approval: None,
+        disposition: None,
+    });
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface,
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+    let TurnCompletedStep::Continue { state, .. } = step else {
+        panic!("the prefix gate must become model-visible without replacing the parked slot");
+    };
+    let surviving = state
+        .pending_auth_resume
+        .as_ref()
+        .expect("unlaunched sibling resume must survive");
+    assert_eq!(surviving.activity_id, parked_activity_id);
+    assert_eq!(surviving.resume_token.as_ref(), Some(&resume_token));
+
+    let invocations = host.batch_invocations();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].invocations.len(), 2);
+    assert_eq!(invocations[0].invocations[0].auth_resume, None);
+    assert_eq!(
+        invocations[0].invocations[1]
+            .auth_resume
+            .as_ref()
+            .and_then(|resume| resume.resume_token.as_ref()),
+        Some(&resume_token)
     );
 }
 
