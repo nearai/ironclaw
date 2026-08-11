@@ -105,10 +105,7 @@ pub(crate) async fn resolve_effective_notification_channels(
         channels.push(EffectiveNotificationChannel::LegacyUnresolvable { reply_ref });
     }
     for target_id in effective_ids {
-        match targets
-            .resolve_outbound_delivery_target(scope, &target_id)
-            .await
-        {
+        match targets.resolve_notification_target(scope, &target_id).await {
             Ok(Some(entry)) => channels.push(EffectiveNotificationChannel::Resolved(entry)),
             Ok(None) => channels.push(EffectiveNotificationChannel::Missing { target_id }),
             Err(error) => match lookup_errors {

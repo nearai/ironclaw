@@ -566,6 +566,8 @@ fn resolved_binding_from_resolution(
         thread_id: resolution.turn_scope.thread_id,
         agent_id: resolution.turn_scope.agent_id,
         project_id: resolution.turn_scope.project_id,
+        source_binding_ref: resolution.source_binding_ref,
+        reply_target_binding_ref: resolution.reply_target_binding_ref,
     })
 }
 

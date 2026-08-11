@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -17,33 +18,37 @@ release = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = release
 SPEC.loader.exec_module(release)
 
-# `release` imports crate_tree as a side effect of exec_module above (it
-# inserts scripts/ci/lib onto sys.path), so this import is safe here without
-# repeating the path insertion.
-import crate_tree  # noqa: E402
-
 VERSION = "1.1.0-rc.1"
 SHA = "a" * 40
 
 
 def _write_candidate_manifest(
-    root: Path, crate_relative_dir: str, version: str
+    root: Path,
+    crate_relative_dir: str,
+    version: str,
+    *,
+    package_name: str = "ironclaw",
 ) -> None:
-    """A candidate checkout fixture: the reborn-cli crate at
-    `crate_relative_dir` plus enough filler crates to clear crate_tree's
-    discovery floor (a realistic-enough tree, not a one-crate stub)."""
+    """Add a package to a minimal candidate Cargo workspace fixture."""
     manifest = root / crate_relative_dir / "Cargo.toml"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
-        f'[package]\nname = "ironclaw"\nversion = "{version}"\n',
+        f'[package]\nname = "{package_name}"\nversion = "{version}"\n'
+        'edition = "2021"\n',
         encoding="utf-8",
     )
-    for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
-        filler = root / "crates" / f"ironclaw_filler_{index}"
-        filler.mkdir(parents=True, exist_ok=True)
-        (filler / "Cargo.toml").write_text(
-            f'[package]\nname = "ironclaw_filler_{index}"\n', encoding="utf-8"
-        )
+    (manifest.parent / "src").mkdir(exist_ok=True)
+    (manifest.parent / "src/lib.rs").write_text("", encoding="utf-8")
+
+    members = sorted(
+        manifest.parent.relative_to(root).as_posix()
+        for manifest in (root / "crates").rglob("Cargo.toml")
+    )
+    rendered_members = ",\n".join(f'  "{member}"' for member in members)
+    (root / "Cargo.toml").write_text(
+        f'[workspace]\nresolver = "2"\nmembers = [\n{rendered_members}\n]\n',
+        encoding="utf-8",
+    )
 
 
 class ReleaseTagTests(unittest.TestCase):
@@ -232,6 +237,13 @@ class ReleaseTagTests(unittest.TestCase):
         )
         self.assertNotIn("candidate/scripts/ci/cut_ironclaw_release.py", workflow)
 
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "python3 scripts/ci/test_cut_ironclaw_release.py", code_style
+        )
+
     def test_candidate_metadata_comes_from_supplied_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
@@ -250,10 +262,8 @@ class ReleaseTagTests(unittest.TestCase):
     def test_candidate_manifest_resolves_through_crate_inventory_when_nested(
         self,
     ) -> None:
-        """WS10: the candidate's ironclaw_cli manifest is found by
-        crate NAME even after the target-architecture family move
-        (crates/<family>/ironclaw_cli, PROPOSAL §5) — this is exactly
-        the shape a release cut against a moved candidate commit hits."""
+        """WS10: the shipping package is found after the target-architecture
+        family move (`crates/<family>/ironclaw_cli`, PROPOSAL §5)."""
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
             _write_candidate_manifest(
@@ -261,24 +271,120 @@ class ReleaseTagTests(unittest.TestCase):
             )
             self.assertEqual(release._manifest_version(candidate_root), VERSION)
 
+    def test_candidate_manifest_resolves_historical_reborn_cli_layout(self) -> None:
+        """Release tooling on main must validate supported release branches
+        without requiring them to adopt main's current crate directory layout."""
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root, "crates/ironclaw_reborn_cli", VERSION
+            )
+            self.assertEqual(release._manifest_version(candidate_root), VERSION)
+
+    def test_candidate_manifest_resolution_uses_package_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root,
+                "crates/ironclaw_cli",
+                VERSION,
+                package_name="not-the-shipping-package",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "exactly one candidate workspace package named 'ironclaw', found 0",
+            ):
+                release._manifest_version(candidate_root)
+
+    def test_candidate_manifest_resolution_rejects_ambiguous_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root, "crates/ironclaw_reborn_cli", VERSION
+            )
+            _write_candidate_manifest(
+                candidate_root, "crates/app/ironclaw_cli", VERSION
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "cannot inventory Cargo workspace.*two packages named `ironclaw`",
+            ):
+                release._manifest_version(candidate_root)
+
+    def test_candidate_manifest_resolution_rejects_non_workspace_package(
+        self,
+    ) -> None:
+        """A filesystem crate excluded from Cargo's workspace cannot identify
+        the package that cargo-dist will release."""
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root,
+                "crates/workspace_member",
+                VERSION,
+                package_name="not-the-shipping-package",
+            )
+            unlisted = candidate_root / "crates/unlisted_ironclaw"
+            (unlisted / "src").mkdir(parents=True)
+            (unlisted / "Cargo.toml").write_text(
+                f'[package]\nname = "ironclaw"\nversion = "{VERSION}"\n'
+                'edition = "2021"\n',
+                encoding="utf-8",
+            )
+            (unlisted / "src/lib.rs").write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "exactly one candidate workspace package named 'ironclaw', found 0",
+            ):
+                release._manifest_version(candidate_root)
+
+    def test_candidate_manifest_resolution_rejects_malformed_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            manifest = candidate_root / "crates/ironclaw_cli/Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('[package\nname = "ironclaw"\n', encoding="utf-8")
+            metadata = {
+                "workspace_members": ["ironclaw-id"],
+                "packages": [
+                    {
+                        "id": "ironclaw-id",
+                        "manifest_path": str(manifest),
+                    }
+                ],
+            }
+            completed = mock.Mock(
+                returncode=0,
+                stdout=json.dumps(metadata),
+                stderr="",
+            )
+
+            with (
+                mock.patch.object(release.subprocess, "run", return_value=completed),
+                self.assertRaisesRegex(
+                    release.ReleaseTagError,
+                    "cannot read candidate manifest.*Expected ']'",
+                ),
+            ):
+                release._manifest_version(candidate_root)
+
     def test_candidate_manifest_resolution_fails_closed_when_crate_missing(
         self,
     ) -> None:
-        """A candidate checkout that cannot resolve ironclaw_cli must
-        refuse loudly, not silently read `manifest_version` as empty/wrong —
-        the WS10 failure mode this whole module guards against."""
+        """A candidate without the shipping package must refuse loudly, not
+        silently read `manifest_version` as empty or wrong."""
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
-            for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
-                filler = candidate_root / "crates" / f"ironclaw_filler_{index}"
-                filler.mkdir(parents=True)
-                (filler / "Cargo.toml").write_text(
-                    f'[package]\nname = "ironclaw_filler_{index}"\n',
-                    encoding="utf-8",
-                )
+            _write_candidate_manifest(
+                candidate_root,
+                "crates/not_ironclaw",
+                VERSION,
+                package_name="not-the-shipping-package",
+            )
             with self.assertRaisesRegex(
                 release.ReleaseTagError,
-                "cannot resolve the ironclaw_cli crate",
+                "exactly one candidate workspace package named 'ironclaw', found 0",
             ):
                 release._manifest_version(candidate_root)
 

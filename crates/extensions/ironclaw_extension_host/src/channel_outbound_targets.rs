@@ -335,6 +335,18 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
         Ok(None)
     }
 
+    async fn resolve_notification_target(
+        &self,
+        caller: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+        // A channel DM is both a final-reply and a notification target; id
+        // resolution is identical, and the registry applies the `notifications`
+        // capability post-filter.
+        self.resolve_outbound_delivery_target(caller, target_id)
+            .await
+    }
+
     async fn resolve_reply_target_binding(
         &self,
         caller: &OutboundDeliveryTargetScope,
@@ -414,6 +426,7 @@ fn full_capabilities() -> DeliveryTargetCapabilities {
         progress: false,
         gate_prompts: true,
         auth_prompts: true,
+        notifications: true,
         modalities: Vec::new(),
     }
 }

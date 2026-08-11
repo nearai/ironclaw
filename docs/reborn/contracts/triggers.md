@@ -406,7 +406,13 @@ and submit-result bookkeeping:
 - `ironclaw_triggers::ClearActiveFireRequest` plus
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
-  has observed a terminal turn outcome.
+  has observed a terminal turn outcome;
+- after an accepted run is durably cleared with `TriggerRunHistoryStatus::Error`,
+  `TriggerFireSettlementObserver::on_run_failure_settled` receives the exact
+  tenant, trigger, fire-slot, and run identities. Successful terminal runs and
+  clear races do not emit this failure settlement. The observer is an
+  automation-health signal only; it does not mint a replacement turn or bypass
+  the normal triggered-run delivery watcher.
 
 The poller treats per-record due-fire processing and active-run terminal lookup
 errors as structured tick report outcomes so one bad record does not block other
@@ -527,7 +533,12 @@ after completion. An omitted selection inherits the sealed source route; an
 explicit target is re-resolved at send time and fails closed if it is removed,
 unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
 persists the result without external egress. Trigger execution itself still
-does not choose, parse, or infer a destination.
+does not choose, parse, or infer a destination. (✎ 2026-08-08: the retired
+in-app "WebApp selection" sentence above describes the pre-#7157 stored-target
+model; under the shipped two-lane model the `web-push` catalog target is a
+real external destination — a routine that should notify the browser pins it
+in the prompt's delivery step like any channel target, and the
+notification-channel set fans gate/auth/failure notices to it when selected.)
 
 ---
 

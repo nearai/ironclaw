@@ -215,6 +215,207 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  libsql-scripted-memory:
+    name: libsql scripted memory matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+      IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+      SECRETS_MASTER_KEY: stress-ci-secret-master-key-0123456789abcdef
+      IRONCLAW_REBORN_RUNNER_WORKER_COUNT: "0"
+      IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER: "0"
+      IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS: "0"
+      IRONCLAW_REBORN_WEBUI_TOKEN: stress-ci-webui-token-0123456789abcdef0123456789abcdef
+      IRONCLAW_REBORN_WEBUI_USER_ID: stress-ci-user
+      LLM_API_KEY: stress-ci-key
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install Node.js for WebUI bundle build
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies
+        run: |
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
+          pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ironclaw-stress-libsql-scripted
+          save-if: ${{ github.event_name == 'schedule' }}
+
+      - name: Build shipping-profile hosted server and stress runner
+        run: |
+          cargo build --locked --profile dist \
+            --package ironclaw \
+            --bin ironclaw
+          cargo build --release --package ironclaw_stress
+
+      - name: Run libsql scripted memory matrix
+        run: |
+          set -euo pipefail
+          mkdir -p target/ironclaw-stress "$RUNNER_TEMP/ironclaw-reborn-home-libsql"
+          cat > "$RUNNER_TEMP/ironclaw-reborn-home-libsql/config.toml" <<'EOF'
+          api_version = "ironclaw.runtime/v1"
+
+          [boot]
+          profile = "hosted-single-tenant-volume"
+
+          [identity]
+          default_owner = "stress-ci-user"
+          tenant = "stress-ci"
+          default_agent = "stress-ci-agent"
+
+          [runner]
+          worker_count = 0
+          max_concurrent_runs_per_user = 0
+          max_concurrent_trigger_runs = 0
+
+          [llm.default]
+          provider_id = "openai"
+          model = "stress-mock"
+          base_url = "http://127.0.0.1:19090/v1"
+          api_key_env = "LLM_API_KEY"
+          EOF
+
+          IRONCLAW_REBORN_HOME="$RUNNER_TEMP/ironclaw-reborn-home-libsql" \
+            target/dist/ironclaw serve \
+              --host 127.0.0.1 \
+              --port 18080 \
+              > target/ironclaw-stress/libsql-scripted-server.log \
+              2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 120); do
+            if curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:18080/api/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "ironclaw-reborn exited before becoming healthy" >&2
+              cat target/ironclaw-stress/libsql-scripted-server.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:18080/api/health >/dev/null
+          for _ in $(seq 1 120); do
+            if curl -fsS --connect-timeout 5 --max-time 10 \
+              -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+              http://127.0.0.1:18080/api/webchat/v2/session >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "ironclaw-reborn exited before WebUI API readiness" >&2
+              cat target/ironclaw-stress/libsql-scripted-server.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+            http://127.0.0.1:18080/api/webchat/v2/session >/dev/null
+
+          # Scripted memory matrix: the server stays alive for the whole
+          # loop; each invocation rebinds the mock LLM sidecar at 19090 (the
+          # server's LLM base_url) and releases it on exit, so the runs are
+          # strictly sequential. `--max-failure-rate 0` is the zero-tolerance
+          # gate: any failed, leaked, missing, or undisclosed scripted verdict
+          # fails the job. A failed invocation must NOT abort the loop under
+          # set -e: the later scripts still run and upload their evidence,
+          # the failure is remembered, and the step exits nonzero after every
+          # script has had its chance.
+          failed=0
+          for script in memory_roundtrip memory_grow memory_mixed; do
+            outdir="target/ironclaw-stress/ironclaw-stress-libsql-scripted-${script}"
+            mkdir -p "${outdir}"
+            target/release/ironclaw_stress \
+              --backend libsql \
+              --scenario api-user-capacity \
+              --api-base-url http://127.0.0.1:18080 \
+              --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
+              --users 6 \
+              --concurrency 3 \
+              --operations 4 \
+              --api-scripted-tool "${script}" \
+              --api-scripted-doc-sizes 4096,32768,131072,1048576 \
+              --api-hot-writers 2 \
+              --mock-llm-bind 127.0.0.1:19090 \
+              --mock-llm-latency-ms 250 \
+              --api-poll-interval-ms 10000 \
+              --api-terminal-timeout-ms 120000 \
+              --progress-interval-seconds 0 \
+              --human-read \
+              --bottleneck-report \
+              --output-jsonl "${outdir}/summary.jsonl" \
+              --max-failure-rate 0 \
+              --max-p95-ms 120000 \
+              > "${outdir}/summary.json" \
+              2> "${outdir}/report.txt" || failed=1
+          done
+          exit "$failed"
+
+      - name: Upload libsql scripted memory_roundtrip artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-libsql-scripted-memory-roundtrip
+          path: |
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_roundtrip/summary.jsonl
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_roundtrip/summary.json
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_roundtrip/report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload libsql scripted memory_grow artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-libsql-scripted-memory-grow
+          path: |
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_grow/summary.jsonl
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_grow/summary.json
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_grow/report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload libsql scripted memory_mixed artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-libsql-scripted-memory-mixed
+          path: |
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_mixed/summary.jsonl
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_mixed/summary.json
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_mixed/report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload libsql scripted server log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-libsql-scripted-server-log
+          path: |
+            target/ironclaw-stress/libsql-scripted-server.log
+          if-no-files-found: error
+          retention-days: 14
+
   postgres-api-capacity:
     name: hosted-single-tenant Postgres API capacity
     runs-on: ubuntu-latest
@@ -383,8 +584,12 @@ jobs:
           # LLM base_url points at. Each operation is a scripted memory
           # write/read-back through the real capability host (issue #7360
           # Phase 1); the scripted summary reports read-back verdicts and
-          # stage latencies per document size. Runs inside this block so
-          # the server stays alive until both workloads complete.
+          # stage latencies per document size. The runner cycles the
+          # doc-size list by operation index, so 4 operations exercise all
+          # four configured sizes (4096/32768/131072/1048576) — the same
+          # small-to-large curve and timing profile (10s poll, 120s
+          # terminal/p95 ceilings) as the libsql matrix. Runs inside this
+          # block so the server stays alive until both workloads complete.
           target/release/ironclaw_stress \
             --backend libsql \
             --scenario api-user-capacity \
@@ -392,18 +597,20 @@ jobs:
             --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
             --users 6 \
             --concurrency 3 \
-            --operations 2 \
+            --operations 4 \
             --api-scripted-tool memory_roundtrip \
             --api-scripted-doc-sizes 4096,32768,131072,1048576 \
             --api-hot-writers 2 \
             --mock-llm-bind 127.0.0.1:19090 \
             --mock-llm-latency-ms 250 \
+            --api-poll-interval-ms 10000 \
+            --api-terminal-timeout-ms 120000 \
             --progress-interval-seconds 0 \
             --human-read \
             --bottleneck-report \
             --output-jsonl target/ironclaw-stress/postgres-api-scripted.jsonl \
-            --max-failure-rate 0.05 \
-            --max-p95-ms 30000 \
+            --max-failure-rate 0 \
+            --max-p95-ms 120000 \
             > target/ironclaw-stress/postgres-api-scripted-summary.json \
             2> target/ironclaw-stress/postgres-api-scripted-report.txt
 
@@ -421,3 +628,15 @@ jobs:
             target/ironclaw-stress/postgres-api-scripted-summary.json
             target/ironclaw-stress/postgres-api-scripted-report.txt
           if-no-files-found: ignore
+
+      - name: Upload Postgres scripted memory roundtrip artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-postgres-scripted-memory-roundtrip
+          path: |
+            target/ironclaw-stress/postgres-api-scripted.jsonl
+            target/ironclaw-stress/postgres-api-scripted-summary.json
+            target/ironclaw-stress/postgres-api-scripted-report.txt
+          if-no-files-found: error
+          retention-days: 14

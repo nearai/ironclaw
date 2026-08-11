@@ -8,6 +8,12 @@ import {
   isFinalAssistantMessage,
   isRunActivityMessage,
 } from "./stream-order-memory";
+import {
+  REQUEST_FAILURE_ID_PREFIX,
+  RUN_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  isRunFailureMessageId,
+} from "./message-types";
 
 function useHistorySourceForTest() {
   const helpers = readFileSync(
@@ -39,7 +45,13 @@ function useHistorySourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${helperLines.join("\n")}\n${lines.join(
+  const messageTypeHelpers = [
+    `const REQUEST_FAILURE_ID_PREFIX = ${JSON.stringify(REQUEST_FAILURE_ID_PREFIX)};`,
+    `const RUN_FAILURE_ID_PREFIX = ${JSON.stringify(RUN_FAILURE_ID_PREFIX)};`,
+    `const STREAM_FAILURE_ID_PREFIX = ${JSON.stringify(STREAM_FAILURE_ID_PREFIX)};`,
+    `const isRunFailureMessageId = ${isRunFailureMessageId.toString()};`,
+  ];
+  return `${helperLines.join("\n")}\n${messageTypeHelpers.join("\n")}\n${lines.join(
     "\n",
   )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh, nextCursorAfterFullRefresh, cursorPageCanMerge };`;
 }
@@ -895,17 +907,118 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   });
 
   // Timeline order is authoritative and the rich tool card replaces the
-  // sparse live one; the client-only err-* bubble is preserved at the end.
+  // sparse live one; the client-only err-* bubble stays at its original
+  // boundary before the later timeline reply.
   assert.equal(
     merged.map((m) => m.id).join(","),
-    "msg-user-1,tool-abc,msg-assistant-1,err-run-1",
+    "msg-user-1,tool-abc,err-run-1,msg-assistant-1",
   );
   const toolCard = merged.find((m) => m.id === "tool-abc");
   assert.equal(toolCard.toolParameters, "{}");
   assert.equal(toolCard.toolResultPreview, "ok");
 });
 
-test("mergeFullRefresh anchors preserved runtime bubbles at their original positions", () => {
+test("mergeFullRefresh keeps run failures beside the prompt that failed", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-user-3", role: "user" },
+    ],
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "thinking-live", role: "thinking", content: "working" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "err-run-1", role: "error", content: "run failed" },
+      { id: "msg-user-2", role: "user" },
+      { id: "err-run-2", role: "error", content: "run failed again" },
+      { id: "msg-user-3", role: "user" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    merged.map((m) => m.id).join(","),
+    "msg-user-1,thinking-live,msg-assistant-1,err-run-1,msg-user-2,err-run-2,msg-user-3",
+  );
+  const firstFailure = merged.findIndex((message) => message.id === "err-run-1");
+  const secondPrompt = merged.findIndex((message) => message.id === "msg-user-2");
+  assert.equal(firstFailure + 1, secondPrompt);
+});
+
+test("mergeFullRefresh keeps a failed request with its client-only prompt", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const failedPrompt = {
+    id: "pending-failed",
+    role: "user",
+    content: "first attempt",
+    isOptimistic: false,
+    status: "error",
+  };
+  const requestFailure = {
+    id: "err-request-pending-failed",
+    role: "error",
+    content: "request failed",
+    requestForMessageId: failedPrompt.id,
+  };
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      failedPrompt,
+      requestFailure,
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,msg-assistant-1,pending-failed,err-request-pending-failed,msg-user-2,msg-assistant-2",
+  );
+
+  const mergedAtStart = mergeFullRefresh(
+    [
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    [
+      failedPrompt,
+      requestFailure,
+      { id: "msg-user-2", role: "user" },
+      { id: "msg-assistant-2", role: "assistant" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    mergedAtStart.map((message) => message.id).join(","),
+    "pending-failed,err-request-pending-failed,msg-user-2,msg-assistant-2",
+  );
+});
+
+test("mergeFullRefresh keeps stream failures at their original boundary", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
@@ -918,9 +1031,12 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
     ],
     [
       { id: "msg-user-1", role: "user" },
-      { id: "thinking-live", role: "thinking", content: "working" },
       { id: "msg-assistant-1", role: "assistant" },
-      { id: "err-run-1", role: "error", content: "run failed" },
+      {
+        id: "err-stream-service_unavailable-terminal-1",
+        role: "error",
+        content: "stream failed",
+      },
       { id: "msg-user-2", role: "user" },
     ],
     {
@@ -929,8 +1045,8 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
   );
 
   assert.equal(
-    merged.map((m) => m.id).join(","),
-    "msg-user-1,thinking-live,msg-assistant-1,msg-user-2,err-run-1",
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,msg-assistant-1,err-stream-service_unavailable-terminal-1,msg-user-2",
   );
 });
 

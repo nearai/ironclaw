@@ -438,6 +438,8 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "logs_level_filter": "[data-testid='logs-level-filter']",
+    "logs_target_filter": "input[placeholder='Filter by target…']",
     "logs_pagination": "[data-testid='logs-pagination']",
     "logs_load_older": "[data-testid='logs-load-older']",
     "logs_load_older_error": "[data-testid='logs-load-older-error']",

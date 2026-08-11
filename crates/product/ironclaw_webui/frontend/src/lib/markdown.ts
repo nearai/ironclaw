@@ -2,7 +2,8 @@ import DOMPurify, {
   type DOMPurify as DOMPurifyInstance,
   type WindowLike,
 } from "dompurify";
-import { marked } from "marked";
+import { nameToEmoji } from "gemoji";
+import { marked, type Token } from "marked";
 import {
   workspaceFileHrefFromPath,
   workspaceFilePathFromHref,
@@ -82,6 +83,15 @@ type RenderMarkdownOptions = {
   workspaceFileLinks?: boolean;
 };
 
+const GEMOJI_SHORTCODE = /:(\+1|[-\w]+):/g;
+
+function renderGemojiShortcodes(token: Token): void {
+  if (token.type !== "text") return;
+  token.text = token.text.replace(GEMOJI_SHORTCODE, (shortcode, name) =>
+    Object.hasOwn(nameToEmoji, name) ? nameToEmoji[name] : shortcode,
+  );
+}
+
 export function renderMarkdown(
   content: string | null | undefined,
   { workspaceFileLinks = false }: RenderMarkdownOptions = {},
@@ -91,6 +101,7 @@ export function renderMarkdown(
     async: false,
     gfm: true,
     breaks: true,
+    walkTokens: renderGemojiShortcodes,
   }) as string;
   const sanitizer = sanitizerForCurrentWindow();
   return String(sanitizer.sanitize(raw, { workspaceFileLinks } as never));

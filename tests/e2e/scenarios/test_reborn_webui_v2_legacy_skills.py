@@ -204,21 +204,15 @@ async def test_reborn_legacy_skills_add_edit_delete(reborn_v2_server, reborn_v2_
         assert update["headers"].get("x-confirm-action") == "true"
         assert "Updated E2E skill" in update["body"]["content"]
 
-        loop = asyncio.get_running_loop()
-        dialog_future = loop.create_future()
-
-        async def handle_dialog(dialog):
-            if not dialog_future.done():
-                dialog_future.set_result(
-                    {"type": dialog.type, "message": dialog.message}
-                )
-            await dialog.accept()
-
-        page.once("dialog", handle_dialog)
+        # Deletion goes through the shared in-app confirmation dialog, not a
+        # native browser dialog (native confirmations were replaced by the
+        # shared modal — see the settings-search suite for the same pattern).
         await card.get_by_role("button", name="Delete").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "markdown-helper" in dialog["message"]
+        confirmation = page.get_by_role(
+            "dialog", name='Delete skill "markdown-helper"?'
+        )
+        await expect(confirmation).to_be_visible()
+        await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
 
         await expect(
             page.locator(SEL_V2["skills_card"]).filter(has_text="markdown-helper")

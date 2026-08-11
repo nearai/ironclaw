@@ -68,6 +68,29 @@ pub(super) fn target_entry_for_channel(
     reply_target: &str,
     final_replies: bool,
 ) -> OutboundDeliveryTargetEntry {
+    // The coincident case (a full channel target is both a final-reply and a
+    // notification target); divergent combinations use `target_entry_with_caps`.
+    target_entry_with_caps(
+        target_id_value,
+        channel,
+        display_name,
+        reply_target,
+        final_replies,
+        final_replies,
+    )
+}
+
+/// Build a target with INDEPENDENT `final_replies` and `notifications`
+/// capabilities. The two are separate concerns: the model-delivery list filters
+/// `final_replies`, the notification picker filters `notifications`.
+pub(super) fn target_entry_with_caps(
+    target_id_value: &str,
+    channel: &str,
+    display_name: &str,
+    reply_target: &str,
+    final_replies: bool,
+    notifications: bool,
+) -> OutboundDeliveryTargetEntry {
     OutboundDeliveryTargetEntry {
         summary: OutboundDeliveryTargetSummary::new(
             outbound_target_id(target_id_value),
@@ -81,6 +104,7 @@ pub(super) fn target_entry_for_channel(
             progress: false,
             gate_prompts: true,
             auth_prompts: true,
+            notifications,
             modalities: Vec::new(),
         },
         destination: reply_ref(reply_target),

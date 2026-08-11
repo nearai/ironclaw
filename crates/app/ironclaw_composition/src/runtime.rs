@@ -75,8 +75,8 @@ use ironclaw_loop_host::{
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
-    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
+    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::operator_llm::ActiveModelReader;
@@ -93,8 +93,8 @@ use ironclaw_turn_runner::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
 use ironclaw_turn_runner::runtime::{
-    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    ProcessRuntimeSystem, build_default_planned_runtime,
+    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeConfigError,
+    DefaultPlannedRuntimeParts, ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_turn_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -508,6 +508,8 @@ pub enum RebornRuntimeError {
     InvalidArgument { reason: String },
     #[error("malformed runtime configuration: {reason}")]
     MalformedConfig { reason: String },
+    #[error("malformed planned-runtime configuration: {0}")]
+    PlannedRuntimeConfig(#[from] DefaultPlannedRuntimeConfigError),
     #[error("llm provider construction failed: {0}")]
     LlmProvider(String),
     #[error("turn-runner worker is no longer running")]
@@ -623,6 +625,7 @@ pub struct RebornRuntime {
         Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
+    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
@@ -1742,28 +1745,13 @@ impl RebornRuntime {
     pub(crate) fn generic_channel_connection_facade(
         &self,
     ) -> Option<Arc<dyn ironclaw_auth::ChannelConnectionService>> {
-        let identity_store = self.channel_identity_store.clone();
-        let installation_store = Some(self.extension_management.installation_store_handle());
-        let credential_cleanup = Some(Arc::clone(&self.product_auth)
-            as Arc<dyn ironclaw_extension_host::channel_connection::ChannelCredentialCleanup>);
-        let account_status_reader = Some(Arc::clone(&self.product_auth)
-            as Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>);
-        Some(Arc::new(
-            ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
-                self.thread_scope.tenant_id.clone(),
-                Vec::new(),
-                installation_store,
-                Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
-                identity_store
-                    as Arc<
-                        dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore,
-                    >,
-                credential_cleanup,
-                account_status_reader,
-                Some(self.channel_dm_target_store.clone()),
-                self.channel_pairing.clone(),
-            ),
+        Some(build_generic_channel_connection_facade(
+            self.thread_scope.tenant_id.clone(),
+            &self.extension_management,
+            &self.channel_identity_store,
+            &self.product_auth,
+            &self.channel_dm_target_store,
+            self.channel_pairing.clone(),
         ))
     }
 
@@ -1843,6 +1831,10 @@ impl RebornRuntime {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    // A registered channel DM is both a final-reply target and a
+                    // notification channel, mirroring the generic channel
+                    // provider's `full_capabilities`.
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
@@ -2931,6 +2923,44 @@ impl RebornRuntime {
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
+/// Assemble the generic per-user channel-connection facade from its stores.
+///
+/// Shared by [`RebornRuntime::generic_channel_connection_facade`] (extensions
+/// card / product surface) and the communication-context provider wiring in
+/// `build_runtime_with_resource_governor` (#7247), so the model-facing
+/// "connected channels" truth and the extensions card consult the same
+/// connection service assembly.
+fn build_generic_channel_connection_facade(
+    tenant_id: ironclaw_host_api::ids::TenantId,
+    extension_management: &Arc<RebornLocalExtensionManagementPort>,
+    channel_identity_store: &Arc<ironclaw_extension_host::FilesystemChannelIdentityStore>,
+    product_auth: &Arc<RebornProductAuthServices>,
+    channel_dm_target_store: &Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
+    channel_pairing: Option<Arc<ChannelPairingRegistry>>,
+) -> Arc<dyn ironclaw_auth::ChannelConnectionService> {
+    let identity_store = Arc::clone(channel_identity_store);
+    let installation_store = Some(extension_management.installation_store_handle());
+    let credential_cleanup = Some(Arc::clone(product_auth)
+        as Arc<dyn ironclaw_extension_host::channel_connection::ChannelCredentialCleanup>);
+    let account_status_reader = Some(Arc::clone(product_auth)
+        as Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>);
+    Arc::new(
+        ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
+            tenant_id,
+            Vec::new(),
+            installation_store,
+            Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            identity_store
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
+            credential_cleanup,
+            account_status_reader,
+            Some(Arc::clone(channel_dm_target_store)),
+            channel_pairing,
+        ),
+    )
+}
+
 pub async fn build_reborn_runtime(
     input: RebornRuntimeInput,
 ) -> Result<RebornRuntime, RebornRuntimeError> {
@@ -3568,11 +3598,32 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 ))
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))
                 .with_channel_config(Arc::clone(&local_runtime.channel_config_service));
+            // Per-caller truth ports (#7247): the same scope-gated credential
+            // status the extensions card and the runtime auth gate resolve
+            // through, plus the same channel-connection facade the product
+            // surface uses. Without them the provider must not — and does not
+            // — claim any credentialed extension or personal-connection
+            // channel is authenticated for the caller.
+            let extension_credentials = Arc::new(
+                ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup::new(
+                    Arc::clone(&local_runtime.product_auth),
+                ),
+            );
+            let channel_connections = build_generic_channel_connection_facade(
+                validated_identity.tenant_id.clone(),
+                &local_runtime.extension_management,
+                &local_runtime.channel_identity_store,
+                &local_runtime.product_auth,
+                &local_runtime.channel_dm_target_store,
+                local_runtime.channel_pairing.clone(),
+            );
             Some(Arc::new(
                 ironclaw_assistant::RuntimeCommunicationContextProvider::new(
                     outbound_preferences_facade,
                 )
-                .with_lifecycle_service(Arc::new(lifecycle_service)),
+                .with_lifecycle_service(Arc::new(lifecycle_service))
+                .with_extension_credentials(extension_credentials)
+                .with_channel_connections(channel_connections),
             )
                 as Arc<
                     dyn ironclaw_loop_contracts::CommunicationContextProvider,
@@ -3584,7 +3635,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // Resolve the disclosure mode once so the runtime config and the system-prompt
     // disclosure-protocol injection agree on a single value.
     let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
-    let default_runtime_config = DefaultPlannedRuntimeConfig::default();
+    let default_runtime_config = DefaultPlannedRuntimeConfig::try_from_env()?;
     // Resolve the bound memory provider once (issue #3537): the
     // profile source, prompt-context lane, and after-turn writer all fan out from
     // this single resolution, so they agree on the bound provider (native, or
@@ -3669,11 +3720,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // filesystem so the model port can build multimodal image parts for
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
-        attachment_read_port: Some(
+        //
+        // Lander and reader share ONE handle so an inbound attachment is read
+        // back from the subtree it landed in. Under a per-caller workspace
+        // policy (`serve` sets it unconditionally) the lander writes to
+        // `/projects/workspace/tenants/{tenant}/users/{user}`, and the shared
+        // read-only `workspace_filesystem` would address the root instead —
+        // the exact regression that dropped every image from the model payload
+        // after #7062 scoped the write lanes. Mirrors the channel-host wiring
+        // in `channel_host_source`.
+        attachment_read_port: crate::runtime_mounts::read_write_workspace_filesystem(
+            &services.extension_filesystem,
+            &services.workspace_mounts,
+        )
+        .map(|filesystem| {
             Arc::new(ironclaw_assistant::ProjectScopedAttachmentReader::new(
-                Arc::clone(&services.workspace_filesystem),
-            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-        ),
+                filesystem,
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
+        }),
         prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
@@ -3714,6 +3778,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
+            tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
@@ -3747,7 +3812,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     DefaultSystemPromptIdentitySource::try_new(
                         standalone_storage_root,
                         default_system_prompt_path,
-                        resolved_tool_disclosure.is_bridged(),
+                        resolved_tool_disclosure.is_enabled(),
                         bool_env_flag("BENCHMARKING_MODE"),
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
@@ -4296,6 +4361,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_ingress: services.extension_ingress.clone(),
         #[cfg(any(test, feature = "test-support"))]
         deployment_channels: services.deployment_channels.clone(),
+        web_push: services.web_push.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
         #[cfg(feature = "test-support")]

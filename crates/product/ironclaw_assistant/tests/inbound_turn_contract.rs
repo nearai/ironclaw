@@ -522,6 +522,10 @@ fn binding_with_user(
         thread_id: ThreadId::new(thread).expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
+        source_binding_ref: SourceBindingRef::new(format!("source:{thread}"))
+            .expect("valid source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply:{thread}"))
+            .expect("valid reply ref"),
     }
 }
 

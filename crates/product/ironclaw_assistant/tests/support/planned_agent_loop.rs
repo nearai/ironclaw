@@ -79,8 +79,9 @@ use ironclaw_turn_runner::{
 };
 use ironclaw_turns::ProcessLoopCheckpointStore;
 use ironclaw_turns::{
-    AgentTurnRuntimePort, CancelRunRequest, IdempotencyKey, LoopResultRef, SanitizedCancelReason,
-    TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
+    AgentTurnRuntimePort, CancelRunRequest, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
+    TurnRunWake, TurnScope, TurnStatus,
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -238,12 +239,17 @@ impl ProductLiveAgentLoopHarness {
     pub async fn new(config: ProductLiveAgentLoopHarnessConfig) -> Self {
         let binding_service = FakeConversationBindingService::new();
         let user_id = UserId::new(config.user_id).expect("valid harness user id");
+        let thread_id_raw = config.thread_id.clone();
         let binding = ResolvedBinding {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
             actor_user_id: user_id,
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
+            source_binding_ref: SourceBindingRef::new(format!("source:{thread_id_raw}"))
+                .expect("valid harness source ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply:{thread_id_raw}"))
+                .expect("valid harness reply ref"),
         };
         let thread_scope = ThreadScope {
             tenant_id: binding.tenant_id.clone(),

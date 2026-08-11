@@ -71,6 +71,69 @@ fn user_message_payload_bounds_requested_model_on_every_path() {
     );
 }
 
+#[test]
+fn user_message_payload_round_trips_and_bounds_channel_context() {
+    let with_context = UserMessagePayload::new("hi", vec![], ProductTriggerReason::BotMention)
+        .unwrap()
+        .with_channel_context(Some("<@U1>: earlier\n<@U2>: hi bot".to_string()));
+    assert_eq!(
+        with_context.channel_context.as_deref(),
+        Some("<@U1>: earlier\n<@U2>: hi bot")
+    );
+    let decoded: UserMessagePayload =
+        serde_json::from_str(&serde_json::to_string(&with_context).unwrap()).unwrap();
+    assert_eq!(decoded.channel_context, with_context.channel_context);
+
+    // Omitted → None, not serialized when absent, and old wire payloads
+    // without the field still deserialize.
+    let without = UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat).unwrap();
+    assert!(without.channel_context.is_none());
+    assert!(
+        !serde_json::to_string(&without)
+            .unwrap()
+            .contains("channel_context")
+    );
+    let legacy: UserMessagePayload = serde_json::from_str(
+        &serde_json::json!({
+            "text": "hi",
+            "attachments": [],
+            "trigger": "direct_chat",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(legacy.channel_context.is_none());
+
+    // Empty context is filtered to None; an over-long context is rejected on
+    // both the builder-validate and wire paths.
+    assert!(
+        UserMessagePayload::new("hi", vec![], ProductTriggerReason::BotMention)
+            .unwrap()
+            .with_channel_context(Some(String::new()))
+            .channel_context
+            .is_none()
+    );
+    let over_limit = "c".repeat(CHANNEL_CONTEXT_MAX_BYTES + 1);
+    assert!(
+        UserMessagePayload::new("hi", vec![], ProductTriggerReason::BotMention)
+            .unwrap()
+            .with_channel_context(Some(over_limit.clone()))
+            .validate()
+            .is_err()
+    );
+    let wire = serde_json::json!({
+        "text": "hi",
+        "attachments": [],
+        "trigger": "bot_mention",
+        "channel_context": over_limit,
+    })
+    .to_string();
+    assert!(
+        serde_json::from_str::<UserMessagePayload>(&wire).is_err(),
+        "an over-long channel_context must be rejected during deserialization"
+    );
+}
+
 fn sample_context() -> TrustedInboundContext {
     let evidence = ProtocolAuthEvidence::test_verified(
         AuthRequirement::SharedSecretHeader {

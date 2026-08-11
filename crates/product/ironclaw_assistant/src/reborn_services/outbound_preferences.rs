@@ -67,7 +67,10 @@ impl OutboundPreferencesProductService for RebornOutboundPreferencesService {
             .await
             .map_err(map_outbound_repository_error)?
             .into_iter()
-            .filter(|entry| entry.capabilities.final_replies)
+            // Base list is the UNION of both capabilities; each consumer narrows
+            // to the one it needs (picker → notifications, model → final_replies),
+            // keeping the two capabilities independent.
+            .filter(|entry| entry.capabilities.final_replies || entry.capabilities.notifications)
             .map(|entry| {
                 Ok(RebornOutboundDeliveryTargetOption {
                     target: reborn_summary_from_outbound(&entry.summary)?,
@@ -140,6 +143,7 @@ fn reborn_capabilities_from_outbound(
         final_replies: capabilities.final_replies,
         gate_prompts: capabilities.gate_prompts,
         auth_prompts: capabilities.auth_prompts,
+        notifications: capabilities.notifications,
     }
 }
 
@@ -256,6 +260,17 @@ mod tests {
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok((self.entry.destination.as_str() == target.as_str()).then(|| self.entry.clone()))
         }
+
+        async fn resolve_notification_target(
+            &self,
+            _caller: &OutboundDeliveryTargetScope,
+            target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Ok(
+                (self.entry.summary.target_id.as_str() == target_id.as_str())
+                    .then(|| self.entry.clone()),
+            )
+        }
     }
 
     struct ResolveFailingTargetProvider;
@@ -284,6 +299,14 @@ mod tests {
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Err(OutboundError::Backend)
         }
+
+        async fn resolve_notification_target(
+            &self,
+            _caller: &OutboundDeliveryTargetScope,
+            _target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Err(OutboundError::Backend)
+        }
     }
 
     struct NullResolvingTargetProvider;
@@ -309,6 +332,14 @@ mod tests {
             &self,
             _caller: &OutboundDeliveryTargetScope,
             _target: &ReplyTargetBindingRef,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Ok(None)
+        }
+
+        async fn resolve_notification_target(
+            &self,
+            _caller: &OutboundDeliveryTargetScope,
+            _target_id: &OutboundDeliveryTargetId,
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(None)
         }
@@ -553,6 +584,72 @@ mod tests {
         assert_eq!(response.targets.len(), 1);
         assert_eq!(response.targets[0].target.target_id.as_str(), "slack-alpha");
         assert!(response.next_cursor.is_none());
+    }
+
+    /// The base list is the UNION of `final_replies` and `notifications`, and the
+    /// two are INDEPENDENT: a final-reply-only target (a model-delivery target,
+    /// not a notification channel) and a notification-only target (a notification
+    /// channel, not a model target — like web-push) both survive the base;
+    /// a target with neither capability is excluded. The picker
+    /// (`build_outbound_delivery_targets_view`) and the model list
+    /// (`list_outbound_delivery_targets_for_model`) then narrow this base to
+    /// their own capability.
+    #[tokio::test]
+    async fn list_targets_returns_the_union_of_final_reply_and_notification_capabilities() {
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+        let provider = Arc::new(FakeTargetProvider::default());
+        provider.insert(
+            "user-alpha",
+            target_entry_with_caps(
+                "final-only",
+                "slack",
+                "Final only",
+                "reply:final-only",
+                true,
+                false,
+            ),
+        );
+        provider.insert(
+            "user-alpha",
+            target_entry_with_caps(
+                "notif-only",
+                "web-push",
+                "Notif only",
+                "reply:notif-only",
+                false,
+                true,
+            ),
+        );
+        provider.insert(
+            "user-alpha",
+            target_entry_with_caps("neither", "slack", "Neither", "reply:neither", false, false),
+        );
+        let service = RebornOutboundPreferencesService::new(store, provider);
+
+        let response = service
+            .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect("target list");
+
+        let ids: Vec<&str> = response
+            .targets
+            .iter()
+            .map(|entry| entry.target.target_id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"final-only"),
+            "a final-reply-only target must survive the union base: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"notif-only"),
+            "a notification-only target must survive the union base: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"neither"),
+            "a target with neither capability must be excluded: {ids:?}"
+        );
+        assert_eq!(response.targets.len(), 2);
     }
 
     /// A notification-channel write resolves ids through the authority

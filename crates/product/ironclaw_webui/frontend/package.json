@@ -24,6 +24,7 @@
     "@tanstack/react-query": "5.87.4",
     "dompurify": "3.4.12",
     "event-source-plus": "0.1.15",
+    "gemoji": "8.0.0",
     "highlight.js": "11.11.1",
     "marked": "17.0.2",
     "qrcode": "1.5.4",
@@ -32,6 +33,7 @@
     "react-hook-form": "7.62.0",
     "react-hot-toast": "2.6.0",
     "react-router": "8.3.0",
+    "remark-gemoji": "8.0.0",
     "streamdown": "2.5.0"
   },
   "devDependencies": {

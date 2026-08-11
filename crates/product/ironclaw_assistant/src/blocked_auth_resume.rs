@@ -31,9 +31,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
 };
-use ironclaw_processes::{
-    ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind,
-};
+use ironclaw_processes::{ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind};
 use ironclaw_turns::{
     IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
@@ -82,7 +80,6 @@ impl BlockedAuthResumeFanout {
                 scope_match: Some(ironclaw_processes::ProcessGateScopeMatch::Owner),
                 owner_user_id: Some(user_id.clone()),
                 gate_ref: None,
-                owner_match: Some(ProcessGateOwnerMatch::Explicit),
                 include_historical: false,
             })
             .await

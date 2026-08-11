@@ -145,9 +145,9 @@ mod tests {
     ///
     /// **Scope.** This pins the port's *shape* — that a resolver is handed
     /// every field unswapped and that the signature admits a different answer
-    /// per route. It does **not** pin that any production resolver reads the
-    /// channel configuration correctly; `ChannelConfigSharedAdmission`'s own
-    /// tests in `ironclaw_extension_host` own that claim.
+    /// per route. It does **not** pin any production resolver's policy;
+    /// `PresenceSharedAdmission`'s own tests in `ironclaw_extension_host`
+    /// own that claim.
     #[tokio::test]
     async fn the_port_is_object_safe_and_answers_differ_by_the_route_it_is_handed() {
         let engineering = request_for("slack-like", "install-1", Some("space-1"), "eng");

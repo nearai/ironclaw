@@ -33,15 +33,13 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnScope, TurnSurfaceType,
+    AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    TurnSurfaceType,
 };
 use uuid::Uuid;
 
-use crate::binding_ref::{
-    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
-    bounded_source_binding_ref,
-};
+use crate::binding_ref::{DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key};
 use crate::error::ProductSurfaceFailure;
 use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
@@ -148,6 +146,7 @@ struct PreparedUserMessage {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     source_binding_id: String,
+    reply_target_binding_id: String,
     submit_idempotency_key: String,
     adapter_id: ProductAdapterId,
     source_channel: ProductSourceChannel,
@@ -653,13 +652,21 @@ where
                 self.binding_service.lookup_binding(binding_request).await?
             }
         };
-        let source_binding_id = product_source_binding_id(envelope, &binding);
+        // The conversation resolution mints a per-event source/reply binding
+        // pair anchored to this event's own (per-ping ephemeral, for shared
+        // routes) thread. Carry both refs verbatim — do NOT re-derive a
+        // per-conversation id — so the accepted message and the submitted run
+        // stay anchored to this event's thread, and a second event in the same
+        // external conversation is not pinned to the first event's thread.
+        let source_binding_id = binding.source_binding_ref.as_str().to_string();
+        let reply_target_binding_id = binding.reply_target_binding_ref.as_str().to_string();
         let submit_idempotency_key = submit_idempotency_key(envelope, &binding);
         let thread_scope = thread_scope_from_binding(&binding)?;
         Ok(PreparedUserMessage {
             binding,
             thread_scope,
             source_binding_id,
+            reply_target_binding_id,
             submit_idempotency_key,
             adapter_id: envelope.adapter_id().clone(),
             source_channel: envelope.source_channel().clone(),
@@ -753,7 +760,7 @@ where
             )
         };
 
-        let reply_target_binding_id = prepared.source_binding_id.clone();
+        let reply_target_binding_id = prepared.reply_target_binding_id.clone();
         let accepted = match self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
@@ -808,6 +815,7 @@ where
                 source_channel: prepared.source_channel,
                 surface_type: prepared.surface_type,
                 requested_model: payload.requested_model.clone(),
+                channel_context: payload.channel_context.clone(),
             }))
             .submit_or_replay(
                 &self.thread_service,
@@ -1093,6 +1101,10 @@ impl ProductInboundTurnHandoff {
                 // idempotent resubmission of an accepted message falls back to the
                 // deployment's active model rather than recovering the original hint.
                 requested_model: None,
+                // Channel conversation context is likewise not persisted in the
+                // message store; an idempotent resubmission degrades to no
+                // context (it is advisory).
+                channel_context: None,
             },
         )))
     }
@@ -1133,12 +1145,15 @@ impl ProductInboundTurnHandoff {
                 thread_scope,
                 message_id,
             } => {
+                // Same rule as the submit path: this message's run is scoped to
+                // the pinger who sent it (owner == actor). The shared transcript
+                // still lives under `thread_scope`.
                 let turn_scope = TurnScope::new_with_owner(
                     binding.tenant_id.clone(),
                     binding.agent_id.clone(),
                     binding.project_id.clone(),
                     binding.thread_id.clone(),
-                    thread_scope.owner_user_id.clone(),
+                    Some(binding.actor_user_id.clone()),
                 );
                 match crate::steering::readmit_queued_steering(
                     turn_coordinator,
@@ -1192,6 +1207,7 @@ struct AcceptedProductInboundTurn {
     source_channel: ProductSourceChannel,
     surface_type: TurnSurfaceType,
     requested_model: Option<String>,
+    channel_context: Option<String>,
 }
 
 impl AcceptedProductInboundTurn {
@@ -1217,32 +1233,37 @@ impl AcceptedProductInboundTurn {
             source_channel,
             surface_type,
             requested_model,
+            channel_context,
         } = self;
+        // The run is scoped to the person who pinged (its actor); owner ==
+        // actor. Each run's gates, approvals, auth, settings, and mounts are
+        // that user's own, while the shared channel transcript lives under
+        // `thread_scope` (below, in `mark_message_submitted`) so the
+        // conversation stays shared.
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
-            thread_scope.owner_user_id.clone(),
+            Some(binding.actor_user_id.clone()),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        let source_binding_ref = bounded_source_binding_ref(
-            "src",
-            &source_binding_id,
-            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-        )
-        .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-            reason: format!("invalid src ref: {e}"),
+        // The source/reply ids are already the canonical per-event binding
+        // refs the conversation resolution minted (`source:…` / `reply:…`) and
+        // that `accept_inbound_message` stored verbatim. Rebuild the refs
+        // directly — do NOT re-wrap with a `bounded_*("src"/"reply", …)`
+        // prefix, which would produce `src:source:…` / `reply:reply:…` and no
+        // longer match the per-event refs anchored to this event's thread.
+        let source_binding_ref = SourceBindingRef::new(source_binding_id).map_err(|e| {
+            ProductSurfaceFailure::TurnSubmissionRejected {
+                reason: format!("invalid src ref: {e}"),
+            }
         })?;
         let accepted_message_ref = accepted_message_ref(message_id)?;
-        let reply_target_binding_ref = bounded_reply_target_binding_ref(
-            "reply",
-            &reply_target_binding_id,
-            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-        )
-        .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-            reason: format!("invalid reply ref: {e}"),
-        })?;
+        let reply_target_binding_ref = ReplyTargetBindingRef::new(reply_target_binding_id)
+            .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
+                reason: format!("invalid reply ref: {e}"),
+            })?;
         let idempotency_key = bounded_idempotency_key(
             "turn",
             &idempotency_key_raw,
@@ -1268,7 +1289,8 @@ impl AcceptedProductInboundTurn {
             Some(run_source_channel),
             Some(surface_type),
             turn_scope.product_owner(&actor),
-        );
+        )
+        .with_channel_context(channel_context);
         let request = SubmitTurnRequest {
             scope: turn_scope.clone(),
             actor,
@@ -1399,53 +1421,30 @@ fn binding_from_replay(
             }
         })?,
     };
+    let source_binding_ref = replay
+        .source_binding_id
+        .as_deref()
+        .and_then(|id| SourceBindingRef::new(id).ok())
+        .unwrap_or_else(|| SourceBindingRef::new("source:replay").expect("valid placeholder ref"));
+    let reply_target_binding_ref = replay
+        .reply_target_binding_id
+        .as_deref()
+        .and_then(|id| ReplyTargetBindingRef::new(id).ok())
+        .unwrap_or_else(|| {
+            ReplyTargetBindingRef::new("reply:replay").expect("valid placeholder ref")
+        });
     Ok(ResolvedBinding {
         tenant_id: replay.scope.tenant_id.clone(),
         actor_user_id,
         thread_id: replay.thread_id.clone(),
         agent_id: Some(replay.scope.agent_id.clone()),
         project_id: replay.scope.project_id.clone(),
+        source_binding_ref,
+        reply_target_binding_ref,
     })
 }
 
-fn thread_scope_from_binding(
-    binding: &ResolvedBinding,
-) -> Result<ThreadScope, ProductSurfaceFailure> {
-    let Some(agent_id) = binding.agent_id.clone() else {
-        return Err(ProductSurfaceFailure::BindingResolutionFailed {
-            reason: "resolved binding missing agent_id required for thread scope".into(),
-        });
-    };
-    Ok(ThreadScope {
-        tenant_id: binding.tenant_id.clone(),
-        agent_id,
-        project_id: binding.project_id.clone(),
-        // A run acts as the user who invoked it: the thread owner is the
-        // binding's actor on every route kind.
-        owner_user_id: Some(binding.actor_user_id.clone()),
-        mission_id: None,
-    })
-}
-
-fn product_source_binding_id(
-    envelope: &ProductInboundEnvelope,
-    binding: &ResolvedBinding,
-) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("adapter", envelope.adapter_id().as_str()),
-        segment("installation", envelope.installation_id().as_str()),
-        segment(
-            "agent",
-            binding.agent_id.as_ref().map_or("", |id| id.as_str())
-        ),
-        segment(
-            "project",
-            binding.project_id.as_ref().map_or("", |id| id.as_str())
-        ),
-        envelope.source_binding_key()
-    )
-}
+use crate::run_delivery::thread_scope_from_binding;
 
 fn submit_idempotency_key(envelope: &ProductInboundEnvelope, binding: &ResolvedBinding) -> String {
     format!(

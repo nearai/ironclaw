@@ -15,6 +15,8 @@ pub(super) async fn build_production_shaped(
         product_auth_ports,
         native_extension_factories,
         channel_extension_bindings,
+        web_push_runtime_slot,
+        web_push_vapid_subject,
         first_party_registrars,
         credential_account_visibility_policy,
         #[cfg(any(test, feature = "test-support"))]
@@ -83,6 +85,8 @@ pub(super) async fn build_production_shaped(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
+        web_push_runtime_slot,
+        web_push_vapid_subject,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -367,6 +371,8 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     pub(super) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    pub(super) web_push_runtime_slot: Option<ironclaw_web_push::WebPushRuntimeSlot>,
+    pub(super) web_push_vapid_subject: Option<String>,
     pub(super) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
     pub(super) first_party_registrars:
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,

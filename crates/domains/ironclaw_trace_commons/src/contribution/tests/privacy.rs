@@ -1,7 +1,9 @@
 //! Policy preflight, deterministic redaction, the privacy-filter adapter and its canary, and per-tool payload redaction.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_llm::recording::{TraceFile, TraceResponse};
