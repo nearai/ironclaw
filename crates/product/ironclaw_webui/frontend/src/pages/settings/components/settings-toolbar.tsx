@@ -4,6 +4,7 @@ import { Icon } from "../../../design-system/icons";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";
+import { useFilePicker } from "../../../hooks/useFilePicker";
 import { NoSupportedSettingsImportError } from "../lib/settings-api";
 
 function downloadJson(filename, data) {
@@ -40,7 +41,6 @@ export function SettingsToolbar({
   canGoBack,
 }) {
   const t = useT();
-  const fileInputRef = React.useRef(null);
   const messageTimerRef = React.useRef(null);
   const [message, setMessage] = React.useState(null);
 
@@ -68,11 +68,7 @@ export function SettingsToolbar({
   }, [settingsExport, showMessage, t]);
 
   const handleImportFile = React.useCallback(
-    async (event) => {
-      const file = event.target.files?.[0];
-      event.currentTarget.value = "";
-      if (!file) return;
-
+    async (file) => {
       try {
         const payload = await readJsonFile(file);
         if (
@@ -99,6 +95,15 @@ export function SettingsToolbar({
     },
     [onImport, showMessage, t]
   );
+  const handleImportSelection = React.useCallback(
+    ([file]) => handleImportFile(file),
+    [handleImportFile]
+  );
+  const [openFilePicker, importInputProps] = useFilePicker({
+    accept: ".json,application/json",
+    disabled: isImporting,
+    onSelect: handleImportSelection,
+  });
 
   return (
     <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3">
@@ -161,7 +166,7 @@ export function SettingsToolbar({
             type="button"
             variant="secondary"
             size="sm"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={openFilePicker}
             disabled={isImporting}
             className="gap-2"
           >
@@ -169,11 +174,7 @@ export function SettingsToolbar({
             {isImporting ? t("settings.importing") : t("settings.import")}
           </Button>
           <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json,application/json"
-            className="hidden"
-            onChange={handleImportFile}
+            {...importInputProps}
           />
         </div>
       </div>

@@ -1021,7 +1021,7 @@ impl RebornIntegrationGroupBuilder {
         // disclosure's synthetic bridge surface, so this is production parity,
         // not a bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure == ToolDisclosureMode::Bridged {
+            if self.tool_disclosure.is_enabled() {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     policy: self
                         .narrowed_bridged_policy
@@ -1241,6 +1241,14 @@ impl RebornIntegrationGroupBuilder {
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
                 parallel_tool_batch: self.parallel_tool_batch,
+                tool_disclosure_profile_pins: std::collections::HashMap::from([(
+                    ironclaw_loop_contracts::CapabilitySurfaceProfileId::new("interactive_tools")
+                        .expect("valid integration capability profile id"),
+                    vec![
+                        ironclaw_host_api::ids::CapabilityId::new("github.search_code")
+                            .expect("valid integration profile pin"),
+                    ],
+                )]),
                 // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
                 // production rides out provider outages for minutes (deep
                 // availability retries with long backoff), which would stall
@@ -1563,6 +1571,8 @@ impl<'g> RebornThreadBuilder<'g> {
             .resolve_binding(binding_request(&probe))
             .await?;
         let thread_scope = thread_scope_from_binding(&binding)?;
+        // The run is scoped to the acting user (the pinger); owner == actor
+        // under ephemeral-per-ping. Mirrors production scope derivation.
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),

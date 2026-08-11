@@ -471,6 +471,12 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
+        self
+    }
+
     /// Exercise the production enum default without making the general
     /// integration harness depend on ambient process configuration.
     pub fn with_tool_disclosure_production_default(mut self) -> Self {
@@ -734,14 +740,7 @@ impl RebornIntegrationHarnessBuilder {
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
-        match self.tool_disclosure {
-            ToolDisclosureMode::Bridged => {
-                group_builder = group_builder.with_tool_disclosure_bridged();
-            }
-            ToolDisclosureMode::Off => {
-                group_builder = group_builder.with_tool_disclosure_off();
-            }
-        }
+        group_builder = group_builder.with_tool_disclosure_mode(self.tool_disclosure);
         if self.parallel_tool_batch == ParallelToolBatchMode::On {
             group_builder = group_builder.with_parallel_tool_batches();
         }
@@ -2523,7 +2522,9 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        // A run acts as the user who invoked it: the actor owns the scope.
+        // The run's thread scope is the acting user (the pinger). Ephemeral
+        // per-ping threads are pinger-owned, so owner == actor; mirrors
+        // production `run_delivery::thread_scope_from_binding`.
         owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })

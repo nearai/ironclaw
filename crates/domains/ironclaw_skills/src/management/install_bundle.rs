@@ -32,6 +32,11 @@ pub struct SkillInstallFile<'a> {
     pub contents: &'a [u8],
 }
 
+/// Validate and canonicalize a package-relative install destination.
+pub fn normalize_install_bundle_relative_path(path: &str) -> Result<String, SkillManagementError> {
+    normalize_install_relative_path(path)
+}
+
 pub(crate) struct SkillBundleSnapshot {
     files: Vec<OwnedSkillBundleFile>,
     source: SkillSource,
@@ -391,6 +396,10 @@ pub(super) fn validate_install_bundle_files(
         ));
     }
     let mut total_bytes = 0usize;
+    let mut destinations = BTreeSet::from([
+        SKILL_FILE_NAME.to_string(),
+        INSTALL_METADATA_FILE_NAME.to_string(),
+    ]);
     for file in files {
         if file.contents.len() > MAX_INSTALL_BUNDLE_FILE_BYTES {
             return Err(SkillManagementError::new(
@@ -405,7 +414,22 @@ pub(super) fn validate_install_bundle_files(
                 SkillManagementErrorKind::Resource,
             ));
         }
-        normalize_install_relative_path(file.relative_path)?;
+        let destination = normalize_install_relative_path(file.relative_path)?;
+        if destinations.iter().any(|existing| {
+            existing == &destination
+                || existing
+                    .strip_prefix(&destination)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || destination
+                    .strip_prefix(existing)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            return Err(SkillManagementError::with_reason(
+                SkillManagementErrorKind::InvalidInput,
+                "skill install bundle contains colliding destination paths",
+            ));
+        }
+        destinations.insert(destination);
     }
     Ok(())
 }
@@ -605,9 +629,30 @@ mod tests {
             "nested/\0file.txt",
             "nested/\nfile.txt",
             "https://example.com/file.txt",
+            SKILL_FILE_NAME,
+            INSTALL_METADATA_FILE_NAME,
         ] {
-            assert!(normalize_install_relative_path(path).is_err());
+            assert!(normalize_install_bundle_relative_path(path).is_err());
         }
+    }
+
+    #[test]
+    fn install_bundle_rejects_duplicate_normalized_destinations() {
+        let files = [
+            SkillInstallFile {
+                relative_path: "scripts/run.py",
+                contents: b"first",
+            },
+            SkillInstallFile {
+                relative_path: "scripts/./run.py",
+                contents: b"second",
+            },
+        ];
+
+        assert!(
+            validate_install_bundle_files(&files).is_err(),
+            "two source paths that normalize to one destination must fail before writes"
+        );
     }
 
     #[test]

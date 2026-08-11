@@ -374,7 +374,7 @@ async function renderExpandedActivity(activity, activeRunId: string | null = nul
   }
 }
 
-test("artifact downloads require the deployment gate and a final assistant reply", async () => {
+test("artifact downloads require the deployment gate, and either a final assistant reply or a failed run", async () => {
   const { MessageBubble } = await import("./message-bubble");
   const render = (isFinalReply: boolean, enabled = false) =>
     renderToStaticMarkup(
@@ -391,6 +391,21 @@ test("artifact downloads require the deployment gate and a final assistant reply
         regressionArtifactExportEnabled: enabled,
       }),
     );
+  const renderError = (enabled: boolean, turnRunId?: string) =>
+    renderToStaticMarkup(
+      React.createElement(MessageBubble, {
+        message: {
+          id: "err-run-1",
+          role: CHAT_MESSAGE_ROLES.ERROR,
+          content:
+            "The run failed because its runner lease expired. Retry the run.",
+          timestamp: "2026-06-02T00:00:00.000Z",
+          turnRunId,
+        },
+        threadId: "thread-1",
+        regressionArtifactExportEnabled: enabled,
+      }),
+    );
 
   assert.doesNotMatch(render(true), /data-testid="download-run-artifact"/);
   assert.doesNotMatch(render(true), /data-testid="download-thread-artifact"/);
@@ -398,6 +413,31 @@ test("artifact downloads require the deployment gate and a final assistant reply
   assert.match(render(true, true), /data-testid="download-thread-artifact"/);
   assert.doesNotMatch(render(false, true), /data-testid="download-run-artifact"/);
   assert.doesNotMatch(render(false, true), /data-testid="download-thread-artifact"/);
+
+  // #7369 — a failed run's error bubble must offer the same run-artifact
+  // download so a user can capture a trace when the agent errors, without
+  // needing a completed assistant reply.
+  assert.match(
+    renderError(true, "run-1"),
+    /data-testid="download-run-artifact"/,
+    "a failed run with a known run id should expose the trace-capture download button",
+  );
+  assert.doesNotMatch(
+    renderError(true, "run-1"),
+    /data-testid="download-thread-artifact"/,
+    "error bubbles should not gain the whole-thread download action",
+  );
+  assert.doesNotMatch(
+    renderError(false, "run-1"),
+    /data-testid="download-run-artifact"/,
+    "the deployment gate must still apply to error bubbles",
+  );
+  assert.doesNotMatch(
+    renderError(true, undefined),
+    /data-testid="download-run-artifact"/,
+    "an error bubble with no known run id yet must not render a button with nothing to fetch",
+  );
+
   assert.match(messageBubbleSource, /fetchRunArtifact\(\{/);
   assert.match(messageBubbleSource, /fetchThreadArtifact\(\{/);
   assert.match(messageBubbleSource, /ironclaw-run-\$\{filenameRunId\}\.json/);

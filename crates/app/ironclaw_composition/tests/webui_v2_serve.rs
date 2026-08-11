@@ -2848,7 +2848,15 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // the deferred JS/e2e scaffold.
     let body = served_bundled_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
-    let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
+    // End the provider segment on the next literal from the i18n module itself
+    // (the `AVAILABLE_LANGUAGES` table that follows the provider) rather than on
+    // an unrelated vendor symbol. `served_bundled_javascript` concatenates every
+    // chunk, so a marker owned by another module made this segment's extent a
+    // function of Rollup's chunk boundaries: a split that merely moved
+    // react-query into the entry chunk deleted the end marker and failed this
+    // i18n guard with no i18n change. String literals survive minification, so
+    // this stays a stable same-module delimiter.
+    let provider_segment = bundle_segment(&body, "createContext({lang:", "Português (Brasil)");
 
     assert!(
         provider_segment.contains(".useState(()=>")
@@ -3507,7 +3515,7 @@ async fn static_automations_run_row_spaces_action_button_icons() {
 }
 
 #[tokio::test]
-async fn static_automations_notification_channels_surface_save_error_and_web_only_helper() {
+async fn static_automations_notification_channels_surface_save_error_and_no_selection_helper() {
     let body = served_bundled_javascript().await;
 
     // Was `e.saveError&&!a` — a minifier-assigned identifier pin that breaks on
@@ -3515,7 +3523,7 @@ async fn static_automations_notification_channels_surface_save_error_and_web_onl
     // rendered through `t("automations.notificationChannels.saveFailed")`
     // (`notification-channels-panel.tsx`); the i18n key is a string literal, so
     // it survives minification — pin that instead, mirroring the retargeted
-    // Task-11 `webOnlyHelper` pin below.
+    // Task-11 `noSelectionHelper` pin below.
     assert!(
         body.contains("automations.notificationChannels.saveFailed"),
         "the notification-channels panel must render the save error instead of swallowing it"
@@ -3526,7 +3534,7 @@ async fn static_automations_notification_channels_surface_save_error_and_web_onl
     // conditional footer is the empty-selection helper — pin that instead. The
     // i18n key is a string literal, so it survives minification.
     assert!(
-        body.contains("automations.notificationChannels.webOnlyHelper"),
+        body.contains("automations.notificationChannels.noSelectionHelper"),
         "the empty-selection helper must be rendered when no channel is selected"
     );
 }

@@ -140,7 +140,7 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/projects/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
+        "/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(
@@ -260,7 +260,7 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/projects/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
+        "/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(

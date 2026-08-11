@@ -77,6 +77,9 @@ IGNORED_PREFIXES = (
     "docs/",
     "openwiki/",
     ".claude/",
+    # IronLoop reads this repository configuration and optional role guidance;
+    # no Reborn crate or test lane consumes it.
+    ".ironloop/",
     ".github/ISSUE_TEMPLATE/",
     # `ISSUE_TEMPLATE/`'s exact sibling: a GitHub UI template that changes no
     # crate, test, or runtime surface (`classify-test-scope.sh` already pairs
@@ -149,6 +152,10 @@ QA_HARNESS_PREFIXES = (
     # every downstream Reborn lane. Same class as the `.claude/` gap this row
     # already records.
     "scripts/reborn_qa_matrix/",
+    # The tool-discovery benchmark is a manual live-model harness. It records
+    # QA evidence across disclosure modes and catalog sizes; no Reborn Rust
+    # lane invokes it.
+    "scripts/tool_discovery_benchmark/",
     # The live Telegram release smoke harness (`run_smoke.py` + config +
     # README): run by hand against a real bot, referenced by no workflow, never
     # by a `Tests (Reborn)` lane. Unclassified until 2026-08-06, when PR
@@ -333,11 +340,18 @@ PR_STATIC_CONTROL_PATHS = {
     #     and additionally has a Code Style self-test
     #     (`scripts/ci/test-build-wasm-extensions.sh`). No Reborn Rust lane
     #     executes it.
+    #   * `e2e-skill-self-creation.sh` drives the skill self-creation e2e
+    #     against a live model, selected by `E2E_PROFILE`. Like
+    #     `run-reborn-webui.sh` it is referenced by no workflow (a search over
+    #     `.github/` finds nothing) and needs credentials no lane has, so no
+    #     lane can be selected for it; it is run by hand per
+    #     `docs/internal/skills/multi_tenant_enablement.md`.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
+    "scripts/e2e-skill-self-creation.sh",
     # `codebase-graph.sh` inspects agent-only graph metadata. It does not
     # execute or select a Reborn product test surface. (Arrived with #7215.)
     "scripts/codebase-graph.sh",
@@ -720,6 +734,7 @@ def build_plan(
     run_qa_replay = True
     run_sandbox_docker = False
     qa_evidence_changed = False
+    nextest_config_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
@@ -746,6 +761,18 @@ def build_plan(
                 reasons.append(
                     "workspace lockfile breadth is deferred to the exhaustive merge-queue gate"
                 )
+            continue
+        if path == ".config/nextest.toml":
+            # Test-runner config: every `Tests (Reborn)` lane executes cargo
+            # nextest with these profiles, so a change to it cannot be
+            # exercised by any narrow lane. It is deliberately NOT static
+            # control — the membership rule for that set is "no Reborn test
+            # lane reads the file", and these lanes read it. Widening to the
+            # exhaustive plan is the safe resolution (a superset can never
+            # under-select). Unclassified until 2026-08-10, when deleting the
+            # dead `live_tests::zizmor_scan*` overrides failed the whole
+            # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
+            nextest_config_changed = True
             continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
@@ -979,6 +1006,12 @@ def build_plan(
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
             raise ValueError(f"unmapped test or CI path: {path}")
         raise ValueError(f"unclassified pull-request path: {path}")
+
+    if nextest_config_changed:
+        return _full_plan(
+            "nextest runner config changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
 
     canonical_set = set(canonical_packages)
     changed_packages = production_packages | direct_test_packages

@@ -8,6 +8,7 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     USER_ID,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_page,  # noqa: F401 - imported fixture
@@ -56,38 +57,7 @@ async def _open_stubbed_approval_thread(
     thread_records = thread_records or default_thread_records
     timelines = timelines or default_timelines
 
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-approval") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200):
         await route.fulfill(
@@ -338,6 +308,10 @@ async def test_reborn_legacy_approval_deny_shows_declined_activity(
         card = page.locator(SEL_V2["approval_card"]).first
         await card.get_by_role("button", name="Deny").click()
         await expect(card).to_be_hidden(timeout=5000)
+
+        # Activity runs stay collapsed (#6876) — expand the run so the declined
+        # tool card is rendered before asserting on it.
+        await page.locator(SEL_V2["activity_run_toggle"]).first.click()
 
         declined_activity = page.locator(
             SEL_V2["tool_activity_card_for"].format(name="shell")

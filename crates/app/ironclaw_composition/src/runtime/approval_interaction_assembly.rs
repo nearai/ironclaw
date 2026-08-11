@@ -62,7 +62,6 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     let capability_leases = &runtime.capability_leases;
     let extension_registry = &runtime.extension_registry;
     let workspace_mounts = &runtime.workspace_mounts;
-    let skill_mounts = &runtime.skill_mounts;
     let memory_mounts = &runtime.memory_mounts;
     let system_extensions_lifecycle_mounts = &runtime.system_extensions_lifecycle_mounts;
     let persistent_approval_policies = &runtime.persistent_approval_policies;
@@ -86,7 +85,6 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
                 builtin_capability_policy,
                 Arc::clone(extension_registry),
                 workspace_mounts.clone(),
-                skill_mounts.clone(),
                 memory_mounts.clone(),
                 system_extensions_lifecycle_mounts.clone(),
                 ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource::new(
@@ -127,7 +125,6 @@ impl ProcessGateApprovalTurnRunLocator {
                 scope_match: None,
                 owner_user_id: Some(scope.user_id.clone()),
                 gate_ref,
-                owner_match: Some(ProcessGateOwnerMatch::ExplicitOrActor),
                 include_historical,
             })
             .await

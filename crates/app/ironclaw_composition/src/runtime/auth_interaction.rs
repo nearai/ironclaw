@@ -12,9 +12,7 @@ use ironclaw_auth::{
     TurnRunRef, flow_matches_turn_gate_query,
 };
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
-use ironclaw_processes::{
-    ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind,
-};
+use ironclaw_processes::{ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind};
 
 use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 
@@ -66,7 +64,6 @@ impl ProcessGateAuthInteractionReadModel {
                 scope_match: None,
                 owner_user_id: Some(scope.user_id.clone()),
                 gate_ref,
-                owner_match: Some(ProcessGateOwnerMatch::Explicit),
                 include_historical,
             })
             .await

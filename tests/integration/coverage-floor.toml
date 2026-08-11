@@ -253,11 +253,15 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_outbound"
-floor_percent = 93.49
-floor_covered_lines = 4105
-captured_total_lines = 4391
-captured_date = "2026-07-30"
-rationale = "Outbound scope authorization and delivery metadata must not cross actors."
+# RECAPTURED 2026-08-10 after #7157 deleted the stored delivery-heuristic and
+# result-handoff paths. Covered/total moved 4105/4391 -> 3519/3761 while the
+# ratio rose 93.49% -> 93.57%, so the absolute floor stopped describing the
+# crate without a coverage regression.
+floor_percent = 93.57
+floor_covered_lines = 3519
+captured_total_lines = 3761
+captured_date = "2026-08-10"
+rationale = "Outbound scope authorization and delivery metadata must not cross actors. Recaptured after #7157 deleted obsolete stored delivery-heuristic and result-handoff paths while measured coverage rose."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -360,12 +364,17 @@ name = "ironclaw_extension_host"
 #    it reds on noise; `tolerance_lines` is raised to 60, sized to the
 #    observed spread with the same headroom ratio the 0.5pp percent tolerance
 #    carries. The percent floor (tolerance 0.5pp) stays the tight guard.
-floor_percent = 88.12
-floor_covered_lines = 21515
+#
+# RECAPTURED 2026-08-10 after #7377 removed shared-route subject binding from
+# this crate under the run-as-invoker model. Covered/total moved
+# 21515/24415 -> 21347/24278; the 0.19pp ratio movement remains inside the
+# measured 0.5pp tolerance, while the absolute numerator alone became stale.
+floor_percent = 87.93
+floor_covered_lines = 21347
 tolerance_lines = 60
-captured_total_lines = 24415
-captured_date = "2026-08-07"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split, the WS2 closeout embed move, the #7143 deletion adjustment, and again 2026-08-07 as the source side of the post-8/04 moves — with tolerance_lines sized to the measured same-commit cross-lane wobble; see the blocks above."
+captured_total_lines = 24278
+captured_date = "2026-08-10"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split, subsequent source-side moves, and #7377's shared-route subject-binding removal; tolerance_lines remains sized to measured same-commit cross-lane wobble."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

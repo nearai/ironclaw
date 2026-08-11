@@ -15,6 +15,8 @@ pub(super) async fn build_production_shaped(
         product_auth_ports,
         native_extension_factories,
         channel_extension_bindings,
+        web_push_runtime_slot,
+        web_push_vapid_subject,
         first_party_registrars,
         credential_account_visibility_policy,
         #[cfg(any(test, feature = "test-support"))]
@@ -83,6 +85,8 @@ pub(super) async fn build_production_shaped(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
+        web_push_runtime_slot,
+        web_push_vapid_subject,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -259,6 +263,9 @@ async fn build_local_storage_production_shaped(
         workspace_root,
         host_home_root,
         runtime_policy_for_local_process,
+        // The shell must scope `/workspace` exactly as the file tools do, or one alias names two
+        // directories and a file written by one is invisible to the other.
+        context.workspace_scoped_per_caller,
     )?;
     let root = &host_access.storage_root;
     let workspace_root = &host_access.workspace_root;
@@ -291,6 +298,10 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
+    // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
+    // agent install) left on the host disk has to be brought across or it is silently lost.
+    crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(root, &filesystem)
+        .await?;
     context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,
@@ -360,6 +371,8 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     pub(super) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    pub(super) web_push_runtime_slot: Option<ironclaw_web_push::WebPushRuntimeSlot>,
+    pub(super) web_push_vapid_subject: Option<String>,
     pub(super) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
     pub(super) first_party_registrars:
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,

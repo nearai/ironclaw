@@ -1,12 +1,10 @@
-//! Group integration test for FIX-5479 / E-MULTIUSER: a second, distinct
-//! actor submitting to its own thread over the group's ONE shared runtime.
-//!
-//! Before the fix, `RebornIntegrationGroupBuilder::into_group`'s shared
-//! runtime resolved every thread through a construction-time-fixed owner
-//! scope (the group's canonical/default actor), so any OTHER actor's turn
-//! failed deterministically with `driver_unavailable` / "unknown thread"
-//! (issue #5479). `with_actor_id` on `RebornThreadBuilder` is the seam that
-//! exercises a second owner over the shared runtime.
+//! Group integration test for multi-user flows over the group's ONE shared
+//! runtime: a Shared-route channel conversation that refuses Direct-route
+//! re-classification and runs as its pinger, plus per-actor isolation of
+//! memory, approvals, turn state, and workspace (E-MULTIUSER / C-MULTIUSER;
+//! issue #5479 is the original shared-runtime owner-scope fix these scenarios
+//! all ride on). Ephemeral-per-ping threading itself is pinned at the
+//! conversations tier and the full-path channel e2e, not here.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
@@ -18,8 +16,8 @@ mod support;
 mod scenario_auto_approve_isolation_across_actors;
 mod scenario_memory_isolation_across_actors;
 mod scenario_scoped_workspace_isolation;
+mod scenario_shared_route_refuses_direct_reclassification;
 mod scenario_turn_state_isolation_across_actors;
-mod scenario_two_actors_own_threads;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -27,15 +25,16 @@ use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 async fn multiuser_group_e2e() {
     let mut report = ScenarioReport::new();
 
-    // Scenario 1 (E-MULTIUSER): two distinct actors complete turns on their
-    // own threads over the shared coordinator (see module doc for the
-    // `with_actor_id` seam).
+    // Scenario 1 (#7377 run-acts-as-invoker): a Shared-route (bot mention)
+    // channel conversation runs as its pinger and refuses a Direct-route probe
+    // of the same conversation. Ephemeral-per-ping threading is pinned at the
+    // conversations tier and the channel e2e, not here.
     let g = RebornIntegrationGroup::builtin_tools()
         .await
         .expect("builtin group builds");
     report.record(
-        "two_actors_own_threads",
-        scenario_two_actors_own_threads::run(&g).await,
+        "shared_route_refuses_direct_reclassification",
+        scenario_shared_route_refuses_direct_reclassification::run(&g).await,
     );
 
     // Scenario 2 (C-MULTIUSER): per-actor memory isolation — see

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import { setAuthScope } from "../../../lib/auth-scope";
 import { ActivityKind } from "./activity-kind";
 import {
-  INSPECTOR_RUN_HISTORY_KEY,
   MAX_INSPECTOR_ACTIVITY_ENTRIES,
+  MAX_INSPECTOR_RUNS_PER_THREAD,
+  inspectorRunHistoryKey,
   reduceInspectorActivity,
   rememberInspectorRun,
 } from "./inspector-activity";
@@ -18,8 +20,17 @@ import {
   writeInspectorPreferences,
 } from "./inspector-state";
 import {
+  inspectorStreamSessionKey,
+  readInspectorStreamCursor,
+  readInspectorStreamMetrics,
+  recordInspectorDiagnosticUpdate,
+  recordInspectorReconnect,
+} from "./inspector-stream-session";
+import {
+  INSPECTOR_DEBUG_ENABLED_KEY,
   inspectorDebugEnabled,
   latestInspectorRunId,
+  persistInspectorDebugPreference,
 } from "./inspector-shell";
 
 function storage(initial: Record<string, string> = {}) {
@@ -31,12 +42,22 @@ function storage(initial: Record<string, string> = {}) {
   };
 }
 
-test("debug activation accepts only the explicit true query value", () => {
-  assert.equal(inspectorDebugEnabled("?debug=true"), true);
-  assert.equal(inspectorDebugEnabled("?foo=1&debug=true"), true);
-  assert.equal(inspectorDebugEnabled("?debug=false"), false);
-  assert.equal(inspectorDebugEnabled("?debug=1"), false);
-  assert.equal(inspectorDebugEnabled(""), false);
+test("debug activation follows explicit query values and persists across routes", () => {
+  const memory = storage();
+  assert.equal(inspectorDebugEnabled("", memory), false);
+
+  assert.equal(inspectorDebugEnabled("?debug=true", memory), true);
+  persistInspectorDebugPreference("?debug=true", memory);
+  assert.equal(memory.dump()[INSPECTOR_DEBUG_ENABLED_KEY], "true");
+  assert.equal(inspectorDebugEnabled("", memory), true);
+
+  assert.equal(inspectorDebugEnabled("?debug=false", memory), false);
+  persistInspectorDebugPreference("?debug=false", memory);
+  assert.equal(memory.dump()[INSPECTOR_DEBUG_ENABLED_KEY], "false");
+  assert.equal(inspectorDebugEnabled("", memory), false);
+
+  assert.equal(inspectorDebugEnabled("?debug=1", memory), false);
+  assert.equal(inspectorDebugEnabled("?foo=1&debug=true", memory), true);
 });
 
 test("debug activation fails closed when query parsing throws", () => {
@@ -277,15 +298,103 @@ test("run navigation history is thread-scoped, deduplicated, and bounded", () =>
   assert.deepEqual(rememberInspectorRun("thread-a", "run-2", memory), ["run-1", "run-2"]);
   assert.deepEqual(rememberInspectorRun("thread-a", "run-1", memory), ["run-2", "run-1"]);
   assert.deepEqual(rememberInspectorRun("thread-b", "run-b", memory), ["run-b"]);
-  const saved = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY]);
+  const saved = JSON.parse(memory.dump()[inspectorRunHistoryKey()]);
   assert.deepEqual(saved["thread-a"], ["run-2", "run-1"]);
   assert.deepEqual(saved["thread-b"], ["run-b"]);
 
-  for (let index = 1; index <= 33; index += 1) {
+  // Bounded to the host's retention depth: navigation must not offer a turn
+  // whose diagnostics the host has already evicted.
+  for (let index = 1; index <= MAX_INSPECTOR_RUNS_PER_THREAD + 1; index += 1) {
     rememberInspectorRun("bounded-thread", `run-${index}`, memory);
   }
-  const bounded = JSON.parse(memory.dump()[INSPECTOR_RUN_HISTORY_KEY])["bounded-thread"];
-  assert.equal(bounded.length, 32);
+  const bounded = JSON.parse(memory.dump()[inspectorRunHistoryKey()])["bounded-thread"];
+  assert.equal(bounded.length, MAX_INSPECTOR_RUNS_PER_THREAD);
   assert.equal(bounded[0], "run-2");
-  assert.equal(bounded.at(-1), "run-33");
+  assert.equal(bounded.at(-1), `run-${MAX_INSPECTOR_RUNS_PER_THREAD + 1}`);
+});
+
+test("stream metrics persist in the browser session without duplicate update counts", () => {
+  const memory = storage();
+  assert.deepEqual(readInspectorStreamMetrics(memory), {
+    reconnectCount: 0,
+    receivedUpdateCount: 0,
+    lastUpdateAt: null,
+  });
+
+  assert.deepEqual(recordInspectorReconnect(memory), {
+    reconnectCount: 1,
+    receivedUpdateCount: 0,
+    lastUpdateAt: null,
+  });
+  const first = recordInspectorDiagnosticUpdate(
+    "thread-a/run-a",
+    "stream-a:1",
+    "2026-08-06T10:00:00.000Z",
+    memory,
+  );
+  assert.equal(first.accepted, true);
+  assert.equal(first.metrics.receivedUpdateCount, 1);
+
+  const duplicate = recordInspectorDiagnosticUpdate(
+    "thread-a/run-a",
+    "stream-a:1",
+    "2026-08-06T10:01:00.000Z",
+    memory,
+  );
+  assert.equal(duplicate.accepted, false);
+  assert.equal(duplicate.metrics.receivedUpdateCount, 1);
+  assert.equal(duplicate.metrics.lastUpdateAt, "2026-08-06T10:00:00.000Z");
+  assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:1");
+  assert.ok(memory.dump()[inspectorStreamSessionKey()]);
+
+  for (let index = 0; index < 40; index += 1) {
+    recordInspectorDiagnosticUpdate(
+      `thread-${index}/run-${index}`,
+      `stream-${index}:1`,
+      "2026-08-06T10:02:00.000Z",
+      memory,
+    );
+  }
+  const bounded = JSON.parse(memory.dump()[inspectorStreamSessionKey()]);
+  assert.equal(bounded.scopeOrder.length, 32);
+  assert.equal(Object.keys(bounded.cursors).length, 32);
+  assert.equal(bounded.scopeOrder[0], "thread-8/run-8");
+});
+
+test("browser-session inspector state is namespaced by the authenticated caller", () => {
+  const memory = storage();
+  try {
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-a" });
+    rememberInspectorRun("thread-a", "run-a", memory);
+    recordInspectorDiagnosticUpdate(
+      "thread-a/run-a",
+      "stream-a:7",
+      "2026-08-08T10:00:00.000Z",
+      memory,
+    );
+    const ownerHistoryKey = inspectorRunHistoryKey();
+    const ownerStreamKey = inspectorStreamSessionKey();
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:7");
+    assert.equal(readInspectorStreamMetrics(memory).receivedUpdateCount, 1);
+
+    // A bearer session change inside one tab must not inherit the previous
+    // caller's observed runs, resume cursors, or observation counters.
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-b" });
+    assert.notEqual(inspectorRunHistoryKey(), ownerHistoryKey);
+    assert.notEqual(inspectorStreamSessionKey(), ownerStreamKey);
+    assert.deepEqual(rememberInspectorRun("thread-a", null, memory), []);
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), null);
+    assert.deepEqual(readInspectorStreamMetrics(memory), {
+      reconnectCount: 0,
+      receivedUpdateCount: 0,
+      lastUpdateAt: null,
+    });
+
+    // Returning to the first caller still finds that caller's own state.
+    setAuthScope({ tenant_id: "tenant-a", user_id: "user-a" });
+    assert.deepEqual(rememberInspectorRun("thread-a", null, memory), ["run-a"]);
+    assert.equal(readInspectorStreamCursor("thread-a/run-a", memory), "stream-a:7");
+  } finally {
+    setAuthScope(null);
+  }
 });

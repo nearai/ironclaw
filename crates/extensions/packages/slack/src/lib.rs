@@ -17,6 +17,7 @@
 
 mod attachment_transfer;
 mod channel;
+mod conversation_context;
 mod delivery;
 mod mrkdwn;
 mod payload;

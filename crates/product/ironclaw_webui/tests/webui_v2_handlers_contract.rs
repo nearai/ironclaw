@@ -2073,6 +2073,7 @@ fn notification_channels_response() -> RebornNotificationChannelsResponse {
                         final_replies: true,
                         gate_prompts: true,
                         auth_prompts: true,
+                        notifications: true,
                     },
                 }),
             },
@@ -2094,6 +2095,7 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
                     final_replies: true,
                     gate_prompts: true,
                     auth_prompts: true,
+                    notifications: true,
                 },
             },
             RebornOutboundDeliveryTargetOption {
@@ -2108,6 +2110,7 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
                     final_replies: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    notifications: false,
                 },
             },
         ],
@@ -3960,6 +3963,34 @@ async fn set_notification_channels_accepts_empty_list() {
     assert!(
         recorded[0].1.target_ids.is_empty(),
         "an empty target_ids list must reach the service, not be rejected as a missing field"
+    );
+}
+
+#[tokio::test]
+async fn set_notification_channels_rejects_missing_target_ids_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/notification-channels")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        services
+            .set_notification_channels_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a missing target_ids field must fail closed before service dispatch"
     );
 }
 
