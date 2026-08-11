@@ -73,6 +73,19 @@ fn redact_plain_text(value: &str) -> ModelInputRedaction {
             redaction_count: 1,
         };
     };
+    // A shell can render file bytes as a character dump (`od -c`), placing
+    // whitespace between every character. The model can reconstruct that
+    // representation, but the ordinary label patterns cannot. Decode only
+    // offset-prefixed dump lines for detection; when the reconstructed text
+    // contains a credential assignment, fail closed for this encoded field.
+    // Returning the decoded text would itself expose the value, and mapping a
+    // decoded byte range back across line offsets is needlessly fragile.
+    if character_dump_contains_labeled_secret(value, patterns) {
+        return ModelInputRedaction {
+            text: REDACTED_SECRET.to_string(),
+            redaction_count: 1,
+        };
+    }
     let labeled_ranges = labeled_secret_ranges(value, patterns);
     let labeled_redacted = apply_redactions(value, &labeled_ranges);
 
@@ -94,6 +107,58 @@ fn redact_plain_text(value: &str) -> ModelInputRedaction {
     ModelInputRedaction {
         text,
         redaction_count,
+    }
+}
+
+fn character_dump_contains_labeled_secret(value: &str, patterns: &[Regex]) -> bool {
+    let mut decoded = String::with_capacity(value.len());
+    let mut dump_lines = 0usize;
+    let mut decoded_tokens = 0usize;
+
+    for line in value.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(offset) = tokens.next() else {
+            continue;
+        };
+        if !is_character_dump_offset(offset) {
+            continue;
+        }
+        dump_lines = dump_lines.saturating_add(1);
+        for token in tokens {
+            let Some(character) = decode_character_dump_token(token) else {
+                continue;
+            };
+            decoded.push(character);
+            decoded_tokens = decoded_tokens.saturating_add(1);
+        }
+    }
+
+    dump_lines > 0 && decoded_tokens >= 8 && !labeled_secret_ranges(&decoded, patterns).is_empty()
+}
+
+fn is_character_dump_offset(token: &str) -> bool {
+    (7..=16).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn decode_character_dump_token(token: &str) -> Option<char> {
+    let mut characters = token.chars();
+    let first = characters.next()?;
+    if characters.next().is_none() {
+        return Some(first);
+    }
+    match token {
+        r"\n" => Some('\n'),
+        r"\r" => Some('\r'),
+        r"\t" => Some('\t'),
+        r"\0" => Some('\0'),
+        r"\\" => Some('\\'),
+        _ => {
+            let octal = token.strip_prefix('\\').unwrap_or(token);
+            if octal.len() != 3 || !octal.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
+                return None;
+            }
+            u8::from_str_radix(octal, 8).ok().map(char::from)
+        }
     }
 }
 
@@ -276,6 +341,45 @@ mod tests {
         assert!(redaction.text().contains("[REDACTED_SECRET]"));
         assert_eq!(repeated.text(), redaction.text());
         assert!(!repeated.was_modified());
+    }
+
+    #[test]
+    fn redacts_character_dump_that_reconstructs_a_labeled_credential() {
+        let secret = "never-before-uploaded-canary-character-dump";
+        let input = concat!(
+            r#"0000000   {  \n   "   m   a   r   k   e   r   "   :   "   s   a   f   e  \n"#,
+            "\n",
+            r#"0000040   "   ,  \n   "   p   a   s   s   w   o   r   d   "   :   "   n   e   v   e   r   -  \n"#,
+            "\n",
+            r#"0000100   b   e   f   o   r   e   -   u   p   l   o   a   d   e   d   -  \n"#,
+            "\n",
+            r#"0000140   c   a   n   a   r   y   -   c   h   a   r   a   c   t   e   r  \n"#,
+            "\n",
+            r#"0000200   -   d   u   m   p   "  \n   }  \n"#,
+            "\n0000211\n",
+        );
+
+        let redaction = redact_model_input_text(input);
+
+        assert!(redaction.was_modified());
+        assert!(!redaction.text().contains(secret));
+        assert_eq!(redaction.text(), "[REDACTED_SECRET]");
+    }
+
+    #[test]
+    fn keeps_benign_character_dump_without_a_credential_assignment() {
+        let input = concat!(
+            r#"0000000   S   e   c   r   e   t   a   r   y       o   f       t   h   e  \n"#,
+            "\n",
+            r#"0000040   T   r   e   a   s   u   r   y  \n"#,
+            "\n",
+            "0000050\n",
+        );
+
+        let redaction = redact_model_input_text(input);
+
+        assert!(!redaction.was_modified());
+        assert_eq!(redaction.text(), input);
     }
 
     #[test]

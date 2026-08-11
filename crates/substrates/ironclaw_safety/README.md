@@ -30,7 +30,9 @@ material itself.
   `credential_detect`, `sensitive_paths`, `display_redaction`, `redaction`).
 - `redact_model_input_text` — an infallible, source-independent model-view
   transform that combines known credential formats with labeled weak values
-  such as `password: letmein`, preserving surrounding context.
+  such as `password: letmein`; it also detects offset-prefixed character dumps
+  that reconstruct a labeled value, preventing shell output from bypassing the
+  model boundary by inserting whitespace between every character.
 
 ## Depends on / consumed by
 

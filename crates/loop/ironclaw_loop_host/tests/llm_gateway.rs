@@ -213,6 +213,37 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
         }),
         image_parts: Vec::new(),
     });
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::json!({
+            "exit_code": 0,
+            "output": concat!(
+                r#"0000000   {  \n   "   p   a   s   s   w   o   r   d   "   :   "   c   h   a   r  \n"#,
+                "\n",
+                r#"0000040   a   c   t   e   r   -   d   u   m   p   -   s   e   c   r   e   t   "  \n"#,
+                "\n0000100\n",
+            ),
+            "success": true,
+        })
+        .to_string(),
+        content_ref: LoopMessageRef::new("msg:tool-character-dump-secret").unwrap(),
+        tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
+            provider_id: STATIC_PROVIDER_ID.to_string(),
+            provider_model_id: "host-selected-model".to_string(),
+            provider_turn_id: "turn_character_dump_secret".to_string(),
+            provider_call_id: "call_character_dump_secret".to_string(),
+            provider_tool_name: provider_name("demo__character_dump_secret"),
+            capability_id: CapabilityId::new("demo.character_dump_secret").unwrap(),
+            arguments: serde_json::json!({"message": "hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+        tool_result_content: Some(HostManagedToolResultContent::Resolved {
+            safe_summary: ToolResultSafeSummary::new("tool completed").unwrap(),
+        }),
+        image_parts: Vec::new(),
+    });
 
     gateway.stream_model(request).await.unwrap();
 
@@ -223,11 +254,17 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    for secret in ["letmein", "abcdef", "hunter2", "swordfish"] {
+    for secret in [
+        "letmein",
+        "abcdef",
+        "hunter2",
+        "swordfish",
+        "character-dump-secret",
+    ] {
         assert!(!provider_text.contains(secret), "provider saw {secret:?}");
     }
     assert!(provider_text.contains("attachment-context"));
-    assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 4);
+    assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 5);
 }
 
 #[tokio::test]
