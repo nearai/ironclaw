@@ -212,7 +212,9 @@ loc_observed_date = "2026-08-10"
 # two injected context-provider ports (`ExtensionCredentialSetupService` +
 # channel-connection facade) wired into the communication-context assembly —
 # genuine dyn seams (implementations live in extension_manager/auth; composition
-# only wires). Effective ceiling equals the observed 831 exactly; no slack.
+# only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
+# two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
+# count exactly, no slack.
 arc_dyn_ceiling = 816
 arc_dyn_tolerance = 15
-arc_dyn_observed = 814
+arc_dyn_observed = 831

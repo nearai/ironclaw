@@ -9,6 +9,7 @@ use crate::{
     RebornOutboundDeliveryTargetStatus,
     reborn_services::{CallerExtensionAuth, caller_extension_auth},
 };
+use futures::StreamExt;
 use ironclaw_auth::{ChannelAuthAccountState, ChannelConnectionService};
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_host_api::ids::ExtensionId;
@@ -300,18 +301,34 @@ async fn classify_installed_extensions(
     let maps = connection_maps
         .as_ref()
         .map(|(connections, account_states)| (connections, account_states));
-    let mut channels: Vec<ConnectedChannelSummary> = Vec::new();
-    let mut pending: Vec<String> = Vec::new();
-    for ext in extensions
+    let candidates: Vec<_> = extensions
         .into_iter()
         .filter(|ext| ext.phase == InstallationState::Active)
-    {
-        let is_channel = extension_is_channel_surface(&ext);
-        if !is_channel && ext.summary.credential_requirements.is_empty() {
-            // Nothing to claim either way; skip the readiness lookup.
-            continue;
-        }
+        .filter(|ext| {
+            // Nothing to claim either way for a credential-free non-channel;
+            // skip the readiness lookup.
+            extension_is_channel_surface(ext) || !ext.summary.credential_requirements.is_empty()
+        })
+        .collect();
+    // Bounded fan-out (#7474 review): serial awaits divided the single
+    // 500 ms context budget by the extension count, starving the whole
+    // communication slice on deployments with several credentialed
+    // extensions. Same cap as the extensions card's readiness fan-out
+    // (`EXTENSION_READINESS_CONCURRENCY` in `reborn_services/extensions.rs`,
+    // kept module-private there); `buffered` preserves input order so the
+    // rendered lists stay deterministic.
+    const EXTENSION_AUTH_FETCH_CONCURRENCY: usize = 8;
+    let verdicts: Vec<_> = futures::stream::iter(candidates.into_iter().map(|ext| async move {
         let verdict = caller_extension_auth(extension_credentials, maps, caller, &ext).await;
+        (ext, verdict)
+    }))
+    .buffered(EXTENSION_AUTH_FETCH_CONCURRENCY)
+    .collect()
+    .await;
+    let mut channels: Vec<ConnectedChannelSummary> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    for (ext, verdict) in verdicts {
+        let is_channel = extension_is_channel_surface(&ext);
         match (is_channel, verdict) {
             (_, CallerExtensionAuth::Unknown) => {
                 tracing::debug!(
@@ -353,6 +370,8 @@ fn extension_is_channel_surface(extension: &crate::LifecycleInstalledExtensionSu
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use ironclaw_auth::ChannelAuthAccountState;
 
     use std::collections::HashMap;
 
@@ -953,15 +972,18 @@ mod tests {
         }
     }
 
-    /// Channel-connection port returning a fixed per-caller connections map.
+    /// Channel-connection port returning a fixed per-caller connections map
+    /// and, optionally, per-channel durable auth-account states.
     struct StaticChannelConnections {
         connections: HashMap<ExtensionId, bool>,
+        account_states: HashMap<ExtensionId, ChannelAuthAccountState>,
     }
 
     impl StaticChannelConnections {
         fn none() -> Self {
             Self {
                 connections: HashMap::new(),
+                account_states: HashMap::new(),
             }
         }
 
@@ -971,7 +993,24 @@ mod tests {
                 ExtensionId::new(extension_id).expect("valid extension id"),
                 true,
             );
-            Self { connections }
+            Self {
+                connections,
+                account_states: HashMap::new(),
+            }
+        }
+
+        /// A caller whose durable account row exists but is not `Configured`
+        /// (expired / refresh-failed): the account-backed unconnected path.
+        fn with_account_state(extension_id: &str, state: ChannelAuthAccountState) -> Self {
+            let mut account_states = HashMap::new();
+            account_states.insert(
+                ExtensionId::new(extension_id).expect("valid extension id"),
+                state,
+            );
+            Self {
+                connections: HashMap::new(),
+                account_states,
+            }
         }
     }
 
@@ -982,6 +1021,13 @@ mod tests {
             _caller: ProductSurfaceCaller,
         ) -> Result<HashMap<ExtensionId, bool>, ProductSurfaceError> {
             Ok(self.connections.clone())
+        }
+
+        async fn caller_channel_account_states(
+            &self,
+            _caller: ProductSurfaceCaller,
+        ) -> Result<HashMap<ExtensionId, ChannelAuthAccountState>, ProductSurfaceError> {
+            Ok(self.account_states.clone())
         }
     }
 
@@ -1148,6 +1194,52 @@ mod tests {
             !channels[0].authenticated,
             "a personal-connection channel with no proof for this caller must read unauthenticated",
         );
+    }
+
+    /// #7474 review: the account-backed unconnected path — a durable account
+    /// row EXISTS for the caller but is not `Configured` (expired /
+    /// refresh-failed). Row existence is not readiness; the channel must
+    /// still read unauthenticated.
+    #[tokio::test]
+    async fn oauth_channel_with_nonconfigured_account_state_reads_unauthenticated() {
+        for status in [
+            ironclaw_auth::CredentialAccountStatus::Expired,
+            ironclaw_auth::CredentialAccountStatus::RefreshFailed,
+        ] {
+            let provider = RuntimeCommunicationContextProvider::new(Arc::new(
+                EmptyNotificationChannelsService,
+            ))
+            .with_lifecycle_service(Arc::new(ChannelListLifecycleService {
+                extensions: vec![oauth_channel_extension("slack")],
+            }))
+            .with_extension_credentials(Arc::new(StaticCredentialService {
+                account_status: None,
+            }))
+            .with_channel_connections(Arc::new(
+                StaticChannelConnections::with_account_state(
+                    "slack",
+                    ChannelAuthAccountState {
+                        account_status: Some(status),
+                        active_flow_status: None,
+                    },
+                ),
+            ));
+            let ctx = provider
+                .begin_communication_context(scope(), Some(actor()))
+                .resolve(false)
+                .await
+                .expect("context");
+            let channels = match ctx.connected_channels {
+                ConnectedChannelsState::Known(channels) => channels,
+                other => panic!("expected Known channels, got {other:?}"),
+            };
+            assert_eq!(channels.len(), 1);
+            assert!(
+                !channels[0].authenticated,
+                "a {status:?} account row must not read authenticated — row \
+                 existence is not readiness",
+            );
+        }
     }
 
     /// #7247 fail-closed: with no credential port wired, a credentialed

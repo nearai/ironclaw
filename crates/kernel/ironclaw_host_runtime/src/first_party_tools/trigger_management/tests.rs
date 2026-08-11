@@ -516,6 +516,60 @@ async fn scheduled_origin_may_still_list_routines() {
     );
 }
 
+/// #7474 review: `limit: 0` would return an empty `triggers` array while
+/// routines exist, and the description tells the model an empty list proves
+/// absence — the exact false-absence claim #7246 exists to prevent. Zero is
+/// rejected as invalid input; a real limit still sees the routine.
+#[tokio::test]
+async fn trigger_list_rejects_a_zero_limit_instead_of_faking_absence() {
+    let handler = origin_test_handler(Arc::new(NoopTriggerCreateHook));
+    dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_CREATE_CAPABILITY_ID,
+        once_create_input("existing-routine"),
+    )
+    .await
+    .expect("seed routine");
+
+    let error = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({"limit": 0}),
+    )
+    .await
+    .expect_err("a zero limit must be rejected, not answered with an empty list");
+    match error {
+        FirstPartyCapabilityError::Dispatch { kind, .. } => {
+            assert_eq!(
+                kind,
+                RuntimeDispatchErrorKind::InputEncode,
+                "zero limit is a model-correctable input error"
+            );
+        }
+        other => panic!("expected input-encode dispatch error, got {other:?}"),
+    }
+
+    let result = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({"limit": 1}),
+    )
+    .await
+    .expect("a real limit lists routines");
+    assert_eq!(
+        result.output["triggers"]
+            .as_array()
+            .expect("triggers array")
+            .len(),
+        1,
+        "the seeded routine must be visible with limit 1 — proving the zero-limit \
+         rejection is what prevented a false absence claim"
+    );
+}
+
 // -- retired stored delivery target -----------------------------------------
 
 #[tokio::test]

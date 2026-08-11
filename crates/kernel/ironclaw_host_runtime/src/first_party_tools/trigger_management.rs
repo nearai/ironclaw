@@ -464,6 +464,12 @@ async fn list_triggers(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    // #7246/#7474 review: `limit: 0` would return an empty list while routines
+    // exist, and the description tells the model an empty list proves absence.
+    // Reject zero (schema declares `minimum: 1`) so empty is always evidence.
+    if input.limit == Some(0) {
+        return Err(input_error());
+    }
     let limit = input
         .limit
         .unwrap_or(TRIGGER_LIST_MAX_LIMIT)

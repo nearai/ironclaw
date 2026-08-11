@@ -2142,15 +2142,19 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
         .unwrap();
     }
 
-    let empty = invoke_with_context(
+    // #7474 review: `limit: 0` used to succeed with an empty list while 101
+    // routines exist — exactly the false-absence result the trigger_list
+    // description forbids the model to fabricate. It is now rejected as
+    // invalid input (schema declares `minimum: 1`), so an empty `triggers`
+    // array is always proof of absence.
+    invoke_with_context(
         &runtime,
         TRIGGER_LIST_CAPABILITY_ID,
         json!({ "limit": 0 }),
         context.clone(),
     )
     .await
-    .unwrap();
-    assert_eq!(empty["triggers"], json!([]));
+    .expect_err("a zero limit must be rejected, not answered with an empty list");
 
     let listed = invoke_with_context(
         &runtime,

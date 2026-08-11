@@ -1705,12 +1705,18 @@ async fn instruction_bundle_preserves_memory_snippet_insertion_order() {
         .unwrap();
 
     // Skip the memory recall-framing header (#7294) — this test pins the
-    // ordering of the snippets themselves.
+    // ordering of the snippets themselves. Keyed by the stable `content_ref`
+    // (not the rendered prose) so prompt-copy edits cannot break it.
     let model_contents: Vec<&str> = bundle
         .materialized_messages
         .iter()
+        .filter(|message| {
+            !message
+                .content_ref
+                .as_str()
+                .starts_with("msg:memory-guidance.memory-recall-framing.")
+        })
         .map(|message| message.model_content.as_str())
-        .filter(|content| !content.starts_with("Recalled memory notice:"))
         .collect();
     assert_eq!(
         model_contents,

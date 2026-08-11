@@ -246,6 +246,40 @@ fn pending_extension_auth_line_is_bounded() {
     assert!(text.contains("(+10 more)"), "remainder folds: {text}");
 }
 
+/// The pending-auth line is also byte-bounded (#7474 review): long names hit
+/// the byte budget before the 20-name count cap, and the byte-truncated
+/// entries fold into the same `+N more` counter. This is the branch that
+/// guards the 4 KiB `SafeSummary` cap — a run-ending failure when breached.
+#[test]
+fn pending_extension_auth_line_is_byte_bounded() {
+    // Ten ~93-byte names: the 512-byte budget truncates after a handful,
+    // well before the 20-name count cap could.
+    let names: Vec<String> = (0..10)
+        .map(|i| format!("{i:02}-{}", "e".repeat(90)))
+        .collect();
+    let ctx = LoopRuntimeContext {
+        loop_started_at_utc: stamp(),
+        communication: Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Unknown,
+            notification_channels: NotificationChannelsState::Unknown,
+            pending_extension_auth: PendingExtensionAuthState::Known(names),
+            delivery_tools_visible: false,
+        }),
+        product_context: None,
+        user_profile: None,
+    };
+    let text = ctx.render_model_content();
+    assert!(text.contains("00-"), "the first name renders: {text}");
+    assert!(
+        !text.contains("09-"),
+        "the last name must be byte-truncated: {text}"
+    );
+    assert!(
+        text.contains(" more)"),
+        "the byte-truncated remainder folds into the +N more counter: {text}"
+    );
+}
+
 // arch-exempt: large_file, mechanical command_prefix ripple from ChannelPresentation gaining a field (PR-3 Task 2), plan #4875
 #[test]
 fn renders_channel_presentation_hint() {
@@ -1018,7 +1052,14 @@ fn worst_case_runtime_context_stays_within_the_prompt_surface_cap() {
     let ctx = LoopRuntimeContext {
         loop_started_at_utc: stamp(),
         communication: Some(CommunicationRuntimeContext {
-            pending_extension_auth: PendingExtensionAuthState::Unknown,
+            // #7474 review: the worst case must exercise the pending-auth
+            // arm too — 20 maximum-length names saturate its byte budget on
+            // top of the saturated channels line.
+            pending_extension_auth: PendingExtensionAuthState::Known(
+                (0..20)
+                    .map(|i| format!("{i:02}-{}", "e".repeat(61)))
+                    .collect(),
+            ),
             connected_channels: ConnectedChannelsState::Known(channels),
             notification_channels: NotificationChannelsState::Known(8),
             // The arm that appends DELIVERY_GUIDANCE.

@@ -944,9 +944,9 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "limit": {
                     "type": "integer",
-                    "minimum": 0,
+                    "minimum": 1,
                     "maximum": 100,
-                    "description": "Maximum triggers to return. Defaults to 100."
+                    "description": "Maximum triggers to return. Defaults to 100. Must be at least 1: a zero limit is rejected, so an empty `triggers` array is always proof that no routines exist rather than an artifact of the limit."
                 },
                 "run_limit": {
                     "type": "integer",
