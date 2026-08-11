@@ -7006,6 +7006,37 @@ heartbeat_interval_secs = 0
 }
 
 #[test]
+fn run_rejects_runner_heartbeat_interval_past_the_lease_ttl_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[runner]
+heartbeat_interval_secs = 60
+"#,
+    )
+    .expect("write config");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "-m", "ping"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    assert!(
+        !output.status.success(),
+        "a heartbeat interval past the lease TTL bound must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("heartbeat_interval_secs") && stderr.contains("must not exceed"),
+        "stderr should explain the lease-TTL bound rejection; got: {stderr}"
+    );
+}
+
+#[test]
 fn run_rejects_zero_runner_poll_interval() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");

@@ -84,6 +84,12 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
 /// standing when its lease lapsed, which is exactly the distinction the
 /// recorded checkpoint kind carries: `BeforeSideEffect` (there) still fails
 /// closed, `BeforeModel` (here) is reclaimed after one full lease TTL of grace.
+///
+/// Reclaim must also fence the stale executor: the replacement never starts
+/// while the abandoned worker is still alive (its heartbeat is definitively
+/// rejected against the requeued process, which cancels it), so the resumed
+/// run completing is itself proof the stale attempt was awaited — and its
+/// "stale worker output" must never appear in the persisted reply.
 #[tokio::test]
 async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed() {
     let gate = ParkingModelGate::new();
@@ -95,8 +101,8 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
         .script([
             // Consumed by the resumed run, which is the reply the user sees.
             RebornScriptedReply::text("recovered and finished"),
-            // Consumed by the abandoned worker once it is released; its
-            // transitions are refused because its lease is gone.
+            // Would be consumed by the abandoned worker if it were ever
+            // released to run again; the fence must prevent that.
             RebornScriptedReply::text("stale worker output"),
         ])
         .build()
@@ -114,9 +120,11 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
 
     // Never released before recovery: the lease lapses under a worker that is
     // still holding the run, which is precisely the ambiguous case the grace
-    // window exists to resolve.
+    // window exists to resolve. The resumed run completes only after the
+    // supervisor has cancelled the stale attempt (the reclaim fence), so the
+    // stale worker is awaited by construction.
     let state = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         harness.wait_for_status(run_id, TurnStatus::Completed),
     )
     .await
@@ -133,5 +141,27 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
         .await
         .expect("the resumed run's reply is the one persisted");
 
+    // Release the gate as the incident would have. The stale attempt was
+    // already cancelled by the fence; give any delayed rejection path time to
+    // land, then prove the run is still Completed and the stale worker's
+    // output never reached the persisted reply.
     gate.release();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Completed)
+        .await
+        .expect("run remains Completed after the stale attempt is released");
+    assert!(
+        state.failure.is_none(),
+        "releasing the stale attempt must not fail the recovered run, got {:?}",
+        state.failure
+    );
+    harness
+        .assert_reply_contains("recovered and finished")
+        .await
+        .expect("the recovered reply is still the persisted one");
+    harness
+        .assert_reply_does_not_contain("stale worker output")
+        .await
+        .expect("the stale worker's output must never be persisted");
 }

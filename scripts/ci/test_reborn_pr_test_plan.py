@@ -1488,9 +1488,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
         `Detect Reborn test scope` and cascaded into `Tests (Reborn)`.
         """
         owner = "crates/app/ironclaw_cli/tests/smoke.rs"
-        self.assertTrue(
-            (ROOT / owner).is_file(),
-            f"the mapped container-config owner must exist: {owner}",
+        # Pin the owner to the actual caller-level behavior rather than the
+        # file's existence: both container-config path literals must reach
+        # `RebornConfigFile::parse_text` inside `smoke.rs`.
+        smoke_source = (ROOT / owner).read_text(encoding="utf-8")
+        for path in (
+            "docker/reborn/config.toml",
+            "docker/reborn/config.production.toml",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    path,
+                    smoke_source,
+                    f"{owner} must read the shipped container config {path}",
+                )
+        self.assertIn(
+            "RebornConfigFile::parse_text",
+            smoke_source,
+            f"{owner} must parse the shipped container configs through "
+            "RebornConfigFile::parse_text",
         )
         for path in (
             "docker/reborn/config.toml",

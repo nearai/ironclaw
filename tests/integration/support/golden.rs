@@ -110,6 +110,17 @@ impl RebornIntegrationHarness {
         Err(format!("finalized reply {actual:?} does not exactly equal {expected:?}").into())
     }
 
+    /// Assert the finalized assistant reply on this thread does NOT contain
+    /// `text` — proves a stale worker's output never replaced or followed the
+    /// recovered run's reply.
+    pub async fn assert_reply_does_not_contain(&self, text: &str) -> HarnessResult<()> {
+        let actual = self.final_reply_text().await?;
+        if actual.contains(text) {
+            return Err(format!("finalized reply {actual:?} must not contain {text:?}").into());
+        }
+        Ok(())
+    }
+
     /// The exact finalized assistant reply text on this thread (last finalized
     /// `Assistant` message). Errors if none is present.
     async fn final_reply_text(&self) -> HarnessResult<String> {

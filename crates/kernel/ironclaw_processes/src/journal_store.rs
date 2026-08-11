@@ -203,6 +203,18 @@ impl<F> ProcessJournalStore<F>
 where
     F: RootFilesystem,
 {
+    /// The lease duration expressed for the journal's millisecond
+    /// representation. The claim, heartbeat, and recovery-sweep paths all need
+    /// the same conversion, so the representation rule (and its error text)
+    /// lives here instead of drifting between the three.
+    fn lease_duration_millis(&self) -> Result<u64, ProcessJournalStoreError> {
+        u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
+            ProcessJournalStoreError::InvalidRequest(
+                "process lease duration exceeds journal representation".to_string(),
+            )
+        })
+    }
+
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
@@ -718,12 +730,7 @@ where
         &self,
         request: ClaimProcessesRequest,
     ) -> Result<Vec<ClaimedProcess>, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let claimed = match self
             .execute(StoredProcessCommand::Claim {
                 request,
@@ -744,12 +751,7 @@ where
         &self,
         request: ProcessLeaseRequest,
     ) -> Result<ProcessJournalCursor, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let snapshot = match self
             .execute(StoredProcessCommand::Heartbeat {
                 request,
@@ -768,12 +770,7 @@ where
         &self,
         request: RecoverExpiredProcessLeasesRequest,
     ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let response = match self
             .execute(StoredProcessCommand::RecoverExpired {
                 request,

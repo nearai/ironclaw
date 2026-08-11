@@ -3389,10 +3389,12 @@ async fn expired_before_model_checkpoint_is_requeued_after_the_grace_window() {
     );
 
     // Just expired: a worker starved of heartbeats may still be running, so the
-    // sweep must leave the process alone.
+    // sweep must leave the process alone. `now` sits strictly past `expires_at`
+    // (not on the boundary), so this asserts the grace-window hold itself, not
+    // the inclusive-vs-strict expiry comparison.
     let held = store
         .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
-            now: expires_at,
+            now: expires_at + chrono::Duration::seconds(1),
             scope_filter: Some(scope.clone()),
             process_kind_filter: Some(ProcessKind::Internal),
         })

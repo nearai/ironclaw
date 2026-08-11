@@ -1322,4 +1322,68 @@ mod tests {
         let checkpoint = ProcessCheckpointRef::new("checkpoint:ok").expect("checkpoint");
         assert_eq!(checkpoint.as_str(), "checkpoint:ok");
     }
+
+    /// The wire boundary lease recovery depends on: a persisted snapshot whose
+    /// checkpoint kind an older or newer build does not recognize must degrade
+    /// to `None` ("unknown kind") instead of failing the whole row, and a row
+    /// with the field absent must read the same way. Recovery treats both as
+    /// side-effecting (`state_tests.rs` pins the `None` → terminal `Failed`
+    /// branch), so the lenient deserializer is what keeps old journals safe on
+    /// this build and this build's journals safe on the next.
+    #[test]
+    fn unknown_and_absent_checkpoint_kind_wire_values_degrade_to_none() {
+        #[derive(Deserialize)]
+        struct SnapshotProbe {
+            #[serde(
+                default,
+                deserialize_with = "deserialize_lenient_checkpoint_kind",
+                skip_serializing_if = "Option::is_none"
+            )]
+            checkpoint_kind: Option<ProcessCheckpointKind>,
+        }
+
+        let unknown: SnapshotProbe = serde_json::from_value(
+            serde_json::json!({ "checkpoint_kind": "before_tool_disclosure" }),
+        )
+        .expect("unknown wire kind must deserialize leniently");
+        assert_eq!(
+            unknown.checkpoint_kind, None,
+            "an unrecognized wire kind must read as unknown, not fail the snapshot"
+        );
+
+        let absent: SnapshotProbe =
+            serde_json::from_value(serde_json::json!({})).expect("absent field must deserialize");
+        assert_eq!(
+            absent.checkpoint_kind, None,
+            "a snapshot written before kinds existed must read as unknown"
+        );
+
+        for (wire, expected) in [
+            ("before_model", ProcessCheckpointKind::BeforeModel),
+            (
+                "before_side_effect",
+                ProcessCheckpointKind::BeforeSideEffect,
+            ),
+            ("before_block", ProcessCheckpointKind::BeforeBlock),
+        ] {
+            let known: SnapshotProbe = serde_json::from_value(serde_json::json!({
+                "checkpoint_kind": wire,
+            }))
+            .expect("known wire kinds must deserialize");
+            assert_eq!(known.checkpoint_kind, Some(expected));
+        }
+
+        // The degraded values take the fail-closed recovery branch: anything
+        // that is not BeforeModel/BeforeBlock replays a side effect.
+        assert!(ProcessCheckpointKind::from_wire("before_tool_disclosure").is_none());
+        assert!(
+            ProcessCheckpointKind::from_wire("before_tool_disclosure")
+                .unwrap_or(ProcessCheckpointKind::BeforeSideEffect)
+                .replays_side_effect()
+        );
+        assert!(
+            None::<ProcessCheckpointKind>.is_none_or(ProcessCheckpointKind::replays_side_effect),
+            "an absent kind must recover like a side-effecting checkpoint"
+        );
+    }
 }

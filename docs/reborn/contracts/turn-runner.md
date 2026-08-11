@@ -28,8 +28,11 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 ## 3. Expired lease recovery
 
 - A reconciler scans runner-owned `Running` and `CancelRequested` leases using durable `lease_expires_at` metadata.
-- Expired `Running` or `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted `RecoveryRequired` event with reason `lease_expired`, and keep the same canonical-thread active lock.
-- `RecoveryRequired` runs are not returned by the normal process-claim path. The system must not auto-retry uncertain side-effecting work. Work parked at a checkpoint that replays no side effect (`BeforeModel`, `BeforeBlock`) is not uncertain in that sense: it is requeued after a full lease TTL of grace, under the same bounded reclaim budget. Side-effect checkpoints are still never re-executed.
+- Recovery transitions expired leases directly, atomically clearing current runner ownership:
+  - a `CancelRequested` lease becomes terminal `Cancelled`;
+  - a `Running` lease whose latest checkpoint replays no side effect (`BeforeModel`, `BeforeBlock`) becomes `Queued` and is re-claimed after one full lease TTL of grace, under the same bounded reclaim budget — the grace fences the zombie case, where the old worker is starved-but-live rather than dead, and the supervisor never starts a replacement while the stale executor is still running;
+  - every other `Running` lease (side-effect checkpoint, unknown kind, or no checkpoint past its reclaim budget) becomes terminal `Failed` with the `lease_expired` category — the system must not auto-retry uncertain side-effecting work.
+- The recovery sweep never emits `RecoveryRequired` for expired leases; the transition table above is applied directly. `RecoveryRequired` remains an explicit runner-side outcome (loop-exit validation), not a lease-expiry state.
 - A duplicate/new submit for the same canonical thread remains `ThreadBusy` while recovery is required.
 - Explicit cancellation of `RecoveryRequired` is terminal `Cancelled` and releases the active lock so a new turn can be submitted.
 
