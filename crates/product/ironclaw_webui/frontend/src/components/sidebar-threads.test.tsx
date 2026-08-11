@@ -109,6 +109,11 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
     React: createReactStub(),
     NavLink: "NavLink",
     Icon: "Icon",
+    MarqueeText: ({ children, className }) => ({
+      type: "span",
+      props: { className },
+      children,
+    }),
     THREAD_STATE: {
       FAILED: "failed",
       NEEDS_ATTENTION: "needs_attention",

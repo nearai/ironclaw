@@ -199,6 +199,30 @@ input:focus, select:focus, textarea:focus {
   50%       { opacity: 0.35; }
 }
 
+@keyframes v2-marquee-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(calc(-1 * var(--marquee-distance))); }
+}
+
+.v2-marquee {
+  display: block;
+  white-space: nowrap;
+}
+
+.v2-marquee-track {
+  display: inline-flex;
+  min-width: 100%;
+  width: max-content;
+}
+
+.v2-marquee-copy {
+  padding-left: 24px;
+}
+
+.v2-marquee[data-marquee-overflow="true"]:hover .v2-marquee-track {
+  animation: v2-marquee-scroll var(--marquee-duration) linear infinite !important;
+}
+
 /* ── Scrollbars ──────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -456,6 +480,9 @@ input:focus, select:focus, textarea:focus {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .v2-marquee[data-marquee-overflow="true"]:hover .v2-marquee-track {
+    animation: none !important;
+  }
   .v2-spin { animation: none !important; }
   .near-process.is-busy .near-process-icon,
   .near-process.is-busy .near-process-icon .near-comet { animation: none !important; }
