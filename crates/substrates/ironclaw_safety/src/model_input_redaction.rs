@@ -112,6 +112,27 @@ pub fn redact_model_input_url(value: &str) -> ModelInputRedaction {
             redaction_count = redaction_count.saturating_add(query_redaction_count);
         }
     }
+    if let Some(fragment) = parsed.fragment() {
+        let mut fragment_redaction_count = 0usize;
+        let pairs = url::form_urlencoded::parse(fragment.as_bytes())
+            .map(|(name, value)| {
+                if crate::credential_detect::query_param_is_credential(&name)
+                    && !is_redaction_marker(&value)
+                {
+                    fragment_redaction_count = fragment_redaction_count.saturating_add(1);
+                    (name.into_owned(), REDACTED_SECRET.to_string())
+                } else {
+                    (name.into_owned(), value.into_owned())
+                }
+            })
+            .collect::<Vec<_>>();
+        if fragment_redaction_count > 0 {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            serializer.extend_pairs(pairs);
+            parsed.set_fragment(Some(&serializer.finish()));
+            redaction_count = redaction_count.saturating_add(fragment_redaction_count);
+        }
+    }
 
     ModelInputRedaction {
         text: if redaction_count == 0 {
@@ -732,13 +753,15 @@ mod tests {
     fn redacts_url_credentials_but_preserves_data_urls() {
         let secret = "url-query-secret";
         let redaction = redact_model_input_url(&format!(
-            "https://user:password@example.test/image.png?size=large&token={secret}"
+            "https://user:password@example.test/image.png?size=large&token={secret}#access_token=fragment-secret&state=visible"
         ));
 
         assert!(redaction.was_modified());
         assert!(!redaction.text().contains(secret));
+        assert!(!redaction.text().contains("fragment-secret"));
         assert!(!redaction.text().contains("user:password"));
         assert!(redaction.text().contains("size=large"));
+        assert!(redaction.text().contains("state=visible"));
         assert!(redaction.text().contains("REDACTED_SECRET"));
 
         let data_url = "data:image/png;base64,cGFzc3dvcmQ6IGxldG1laW4=";

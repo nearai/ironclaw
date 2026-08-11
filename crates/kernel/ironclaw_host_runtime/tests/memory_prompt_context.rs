@@ -630,7 +630,7 @@ async fn adapter_retains_security_prose_and_paths_redacts_credentials_and_drops_
         snippets[1].model_content,
         concat!(
             "Untrusted memory content: The report at ",
-            "/Users/alice/security/report.json documents API key rotation."
+            "[REDACTED_HOST_PATH] documents API key rotation."
         )
     );
     assert_eq!(snippets[1].safe_summary, "memory context snippet");

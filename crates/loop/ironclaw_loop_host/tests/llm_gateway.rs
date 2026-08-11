@@ -319,6 +319,9 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
     capability_port.definitions[0].parameters["properties"]["password"] = serde_json::json!({
         "type": "string",
         "default": "weak schema default secret",
+        "anyOf": [
+            {"type": "string", "const": "nested weak schema secret"}
+        ],
     });
     capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_firstsecretvalue123"] =
         serde_json::json!({"type": "string"});
@@ -346,6 +349,7 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
         "abcdef",
         "hunter2",
         "weak schema default secret",
+        "nested weak schema secret",
         "ghp_firstsecretvalue123",
         "ghp_secondsecretvalue456",
     ] {
@@ -359,6 +363,10 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
     assert_eq!(
         properties["password"]["default"], "[REDACTED_SECRET]",
         "a weak schema default under a sensitive property must be redacted"
+    );
+    assert_eq!(
+        properties["password"]["anyOf"][0]["const"], "[REDACTED_SECRET]",
+        "nested literals under a sensitive schema property must be redacted"
     );
     let redacted_required = tool.parameters["required"]
         .as_array()

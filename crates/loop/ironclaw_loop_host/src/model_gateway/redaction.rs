@@ -229,11 +229,12 @@ fn redact_sensitive_json_value(
         }),
         serde_json::Value::Object(values) if context == JsonRedactionContext::Schema => {
             values.iter_mut().fold(0usize, |count, (key, value)| {
-                let field_count = if is_schema_secret_value_field(key) {
-                    redact_sensitive_json_value(value, context)
-                } else {
-                    redact_json_value(value, context)
-                };
+                let field_count =
+                    if is_schema_secret_value_field(key) || is_schema_composition_field(key) {
+                        redact_sensitive_json_value(value, context)
+                    } else {
+                        redact_json_value(value, context)
+                    };
                 count.saturating_add(field_count)
             })
         }
@@ -260,6 +261,22 @@ fn redact_sensitive_json_value(
 
 fn is_schema_secret_value_field(key: &str) -> bool {
     matches!(key, "const" | "default" | "enum" | "example" | "examples")
+}
+
+fn is_schema_composition_field(key: &str) -> bool {
+    matches!(
+        key,
+        "allOf"
+            | "anyOf"
+            | "oneOf"
+            | "items"
+            | "prefixItems"
+            | "contains"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+    )
 }
 
 fn collision_safe_json_key(base: &str, used_keys: &mut HashSet<String>) -> String {
@@ -337,13 +354,16 @@ mod tests {
                     "type": "string",
                     "description": "Account password supplied by the user",
                     "default": "schema default secret",
-                    "examples": ["first example secret", "second example secret"]
+                    "examples": ["first example secret", "second example secret"],
+                    "anyOf": [
+                        {"type": "string", "const": "nested schema secret"}
+                    ]
                 }
             }
         });
         let schema_count = redact_json_schema(&mut schema);
 
-        assert_eq!(schema_count, 3);
+        assert_eq!(schema_count, 4);
         assert_eq!(schema["properties"]["password"]["type"], "string");
         assert_eq!(
             schema["properties"]["password"]["description"],
@@ -357,6 +377,10 @@ mod tests {
             schema["properties"]["password"]["examples"],
             serde_json::json!(["[REDACTED_SECRET]", "[REDACTED_SECRET]"])
         );
+        assert_eq!(
+            schema["properties"]["password"]["anyOf"][0]["const"],
+            "[REDACTED_SECRET]"
+        );
     }
 
     #[test]
@@ -369,7 +393,7 @@ mod tests {
                 ContentPart::ImageUrl {
                     image_url: ImageUrl {
                         url: format!(
-                            "https://example.test/users/42/avatar.png?size=large&token={secret}"
+                            "https://example.test/users/42/avatar.png?size=large&token={secret}#access_token=fragment-secret&state=visible"
                         ),
                         detail: None,
                     },
@@ -385,14 +409,16 @@ mod tests {
 
         let count = redact_completion_request(&mut request);
 
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
         let ContentPart::ImageUrl { image_url: remote } = &request.messages[0].content_parts[0]
         else {
             panic!("first part must remain an image URL");
         };
         assert!(!remote.url.contains(secret));
+        assert!(!remote.url.contains("fragment-secret"));
         assert!(remote.url.contains("/users/42/avatar.png"));
         assert!(remote.url.contains("size=large"));
+        assert!(remote.url.contains("state=visible"));
         assert!(remote.url.contains("REDACTED_SECRET"));
         let ContentPart::ImageUrl { image_url: data } = &request.messages[0].content_parts[1]
         else {
