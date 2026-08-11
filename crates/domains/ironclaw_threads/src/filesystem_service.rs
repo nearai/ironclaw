@@ -42,7 +42,7 @@ pub use transcript_migration::{LegacyAppendMigrationReport, TranscriptMigrationR
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use async_trait::async_trait;
@@ -164,11 +164,24 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     ready_thread_index_scopes: Mutex<HashSet<String>>,
+    /// Scopes whose required-path repair (migrate-if-needed, else reconcile)
+    /// has already run once in this process. Deliberately separate from
+    /// `ready_thread_index_scopes`: that set only records that the index specs
+    /// were *declared*, which an optional write-path call does too, and the
+    /// durable migration marker it would otherwise be gated on survives across
+    /// process restarts. Without this separate gate, a write that declares the
+    /// scope before the first required listing call short-circuits on the
+    /// already-complete marker and repair never runs for the life of the
+    /// process.
+    reconciled_thread_index_scopes: Mutex<HashSet<String>>,
     /// Mounts whose `/threads`-root index specs are already declared, keyed by
     /// `tenant:user` — the pair the alias resolves through. Keeps thread create
     /// off the index-DDL path after a mount's first thread.
     ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
-    thread_index_declaration_lock: tokio::sync::Mutex<()>,
+    /// Ephemeral admission locks for required migration/reconcile work. The
+    /// declaration path deliberately remains lockless because index
+    /// declaration is idempotent; only per-scope repair needs serialization.
+    thread_index_reconcile_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -195,8 +208,9 @@ where
             filesystem,
             known_thread_index_rows: Mutex::new(HashSet::new()),
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
+            reconciled_thread_index_scopes: Mutex::new(HashSet::new()),
             ready_index_mounts: Mutex::new(HashSet::new()),
-            thread_index_declaration_lock: tokio::sync::Mutex::new(()),
+            thread_index_reconcile_locks: Mutex::new(HashMap::new()),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
     }
