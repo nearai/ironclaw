@@ -410,15 +410,24 @@ cargo test -p ironclaw_architecture_tests
 
 Expected: all tests pass; no forbidden dependency or ownership edge was introduced.
 
-- [ ] **Step 5: Check documentation publication placement**
+- [ ] **Step 5: Validate documentation changes**
 
-Run:
+Run the publication-boundary check:
 
 ```bash
 python3 scripts/ci/docs_publication_boundary.py
 ```
 
 Expected: exit 0; both design artifacts remain under the internal documentation fence.
+
+Test the documentation with Mintlify:
+
+```bash
+cd docs && mint dev
+cd docs && mint broken-links
+```
+
+Expected: the site builds locally and all internal links resolve.
 
 - [ ] **Step 6: Commit design and plan artifacts**
 

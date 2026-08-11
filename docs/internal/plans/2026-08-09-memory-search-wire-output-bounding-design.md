@@ -78,6 +78,7 @@ mem0 provider ───┘              │
 - Run narrow tests for `ironclaw_memory`, `ironclaw_memory_native`, `ironclaw_memory_mem0`, and the handler-owning crate.
 - Run formatting and zero-warning clippy for affected crates.
 - Run `ironclaw_architecture_tests` because the responsibility moves across crate-family boundaries.
+- Run `cd docs && mint dev` and `cd docs && mint broken-links` to validate the documentation changes.
 
 ## Compatibility and Rollback
 
