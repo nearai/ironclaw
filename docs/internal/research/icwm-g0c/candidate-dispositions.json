@@ -5,9 +5,12 @@
   "publication_package_review_status": "pending_exact_head_review",
   "tested_source_baseline": "2d64363101ef0ff062a6345a5573ee855766552f",
   "approved_common_aggregate_sha256": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b",
+  "provenance_index": "evidence-provenance.json",
+  "complement_live_tier_provenance_ref": "evidence-provenance.json#/candidates/complement_live_tier",
   "candidates": [
     {
       "id": "full-matrix-sdk-client-0.18.0",
+      "provenance_ref": "evidence-provenance.json#/candidates/full_matrix_sdk_client_0_18_0",
       "disposition": "infeasible_under_frozen_ownership_envelope",
       "supported_observation": "persistent Client construction and shared clone state",
       "disqualifiers": [
@@ -19,6 +22,7 @@
     },
     {
       "id": "matrix-sdk-base-plus-crypto-0.18.0",
+      "provenance_ref": "evidence-provenance.json#/candidates/matrix_sdk_base_plus_crypto_0_18_0",
       "disposition": "bounded_feasible",
       "supported_observation": "BaseClient activated a managed OlmMachine and enumerated two initial transport-free crypto requests",
       "not_run": [
@@ -31,6 +35,7 @@
     },
     {
       "id": "direct-olm-machine-0.18.0-sqlite-control",
+      "provenance_ref": "evidence-provenance.json#/candidates/direct_olm_machine_0_18_0_sqlite",
       "disposition": "bounded_native_gap",
       "supported_observation": "native store open/reopen, semantic request replay, and bounded lease takeover",
       "adapter_gaps": [

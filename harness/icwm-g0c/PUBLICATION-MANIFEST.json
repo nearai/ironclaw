@@ -1,39 +1,44 @@
 {
-  "aggregate_sha256": "f5915c39f0f541d01bf37c16eb95de60d82f0caa345bddf41576ef3d8a9e7d10",
+  "aggregate_sha256": "3b9a121aeee83fac64e02c6a73e6414ca1faa475de1b29229ccde028c00f5e13",
   "algorithm": "sha256 of UTF-8 lines `<file-sha256><two spaces><relative-path>\\n`, entries sorted bytewise by relative path",
   "approved_ignored_common_aggregate_sha256": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b",
   "authority": "contribution_grade_not_gate_or_adr_acceptance",
   "containing_commit_binding": "external_exact_head_review_and_post_merge_receipt",
   "entries": [
     {
-      "bytes": 2534,
+      "bytes": 4348,
       "path": "../../docs/internal/research/icwm-g0c/README.md",
-      "sha256": "c238a67d2a86e91e6c43ac36459434cad9052bda5ec1b3f3fa93159c664dbf09"
+      "sha256": "65bebd8dd93fbda7a43b13107a511c79f315b357a9ca4ac697c81ce2ac296d06"
     },
     {
-      "bytes": 2031,
+      "bytes": 2473,
       "path": "../../docs/internal/research/icwm-g0c/candidate-dispositions.json",
-      "sha256": "ab18300bcd6314e62425b719108f2b11a8823b4079e21f9804d1f4eb8fd0321d"
+      "sha256": "971d3f9c08cb3d53c557f2cfcd72a8ccb02bdb58e24d95a38610df144388001a"
     },
     {
-      "bytes": 2414,
+      "bytes": 2924,
       "path": "../../docs/internal/research/icwm-g0c/complement-live-tier.md",
-      "sha256": "a56f49c218974901822b88795f520b81d029b9c9922e469373c04fd5c638792f"
+      "sha256": "ca858ad7d8bef20933bda19967ff0bda3aa6059126012d2763dad6ab245e0d93"
     },
     {
-      "bytes": 24506,
+      "bytes": 12026,
+      "path": "../../docs/internal/research/icwm-g0c/evidence-provenance.json",
+      "sha256": "a38e640bc26be0a844711ce45eb1ba3e8cd9106c11ebd50123399f3936e87835"
+    },
+    {
+      "bytes": 23558,
       "path": "Cargo.lock",
-      "sha256": "05f78de0c0d2a30389cebc978752418d5564dbfa7158265e7bc3e61aa2fd3e3d"
+      "sha256": "9c2ffc013c58bea1d6f2c9c5357397d8c7701448e558438a57b4574c35148dd7"
     },
     {
       "bytes": 240,
       "path": "Cargo.toml",
-      "sha256": "2ec9c9eb7588b72a57b73c8315d230d25855c75d50512667c438ac000e36b79d"
+      "sha256": "291d8261349e16571d7c0ce34e1ab65c76718e465b762035d4d8ae0901cbb415"
     },
     {
-      "bytes": 2515,
+      "bytes": 3710,
       "path": "README.md",
-      "sha256": "fb1977c02d866ad95fb83c610da4a42f9644ca8404217437f2403dad2540f3ee"
+      "sha256": "e7a5b9606394fd41f42f45eb0029a5ec065f0ec4b6047097ce0f5dd796a1bbb0"
     },
     {
       "bytes": 4269,
@@ -53,7 +58,7 @@
     {
       "bytes": 2133,
       "path": "fixtures/CONTROL-RESULT.json",
-      "sha256": "d27a6b780f8199b38042897989dd1d84f5336f0f187382ef662dd9d484fd92d2"
+      "sha256": "5841a8559b3e711420ee9614d4a79aeb7eede23b8c6780d378871e4c22d168bb"
     },
     {
       "bytes": 977,
@@ -61,9 +66,9 @@
       "sha256": "4dc447ef48355e832dae27074b40c8283d4874b384ed5cb7885ba3d1192b3056"
     },
     {
-      "bytes": 3063,
+      "bytes": 3250,
       "path": "fixtures/IDENTIFIER-FIXTURE.json",
-      "sha256": "fe0549dd777ede3dfb270a4d505c71feda913cbc693359f673816601fcb84149"
+      "sha256": "0b7c83b10c2d8ce85133cef69b9adb1b922d1e681c1644d36522faac094d8842"
     },
     {
       "bytes": 4164,
@@ -71,14 +76,14 @@
       "sha256": "2422a729df9b88f8005f34e35fe2794248412b05cdca50d0d83edeb1c4193878"
     },
     {
-      "bytes": 41740,
+      "bytes": 45639,
       "path": "src/lib.rs",
-      "sha256": "81686b3f66e62d2d673802a79fb9aa862f08a76898abe7dd3304b73ba69cd815"
+      "sha256": "a691f962b604a8ca4664a1e13cd06c4913648c7a12f54009977a6499a37558c4"
     },
     {
-      "bytes": 27882,
+      "bytes": 31970,
       "path": "tests/contracts.rs",
-      "sha256": "1e22842e1f148b95fb163b87022c9dfcb1119040f34f6905c036589792634e8a"
+      "sha256": "01633a245fd1290ef5f1037b376eb96e693adf5e878f2045e8f450e6c4adc2d8"
     },
     {
       "bytes": 1693,

@@ -308,10 +308,22 @@ fn response_delivery_loss_is_executable() {
     );
     assert!(matches!(
         harness.drive(MatrixInput::ConsumeNextResponse),
-        Err(HarnessError::InjectedFailpoint {
-            failpoint: Failpoint::ResponseBeforePrepare
-        })
+        Err(HarnessError::ResponseLostBeforeCandidate)
     ));
+    assert!(harness.adapter().observed_response_bodies().is_empty());
+    assert_eq!(harness.adapter().restart_count(), 0);
+    harness
+        .drive(MatrixInput::BeginOperation {
+            operation_id: StableId::derive("live-after-response-loss", &[b"before"]),
+        })
+        .unwrap();
+    assert_eq!(harness.adapter().acknowledged_inputs(), 1);
+    let report = harness.finish().unwrap();
+    assert!(report.crashes.is_empty());
+    assert_eq!(
+        report.failpoints_reached,
+        vec![Failpoint::ResponseBeforePrepare]
+    );
 }
 
 #[test]
@@ -341,19 +353,26 @@ fn lost_after_adapter_handling_runs_adapter_then_reports_uncertainty() {
     );
     assert!(matches!(
         harness.drive(MatrixInput::ConsumeNextResponse),
-        Err(HarnessError::InjectedFailpoint {
-            failpoint: Failpoint::ResponseAfterCommitBeforeAcknowledge
-        })
+        Err(HarnessError::ResponseLostAfterAdapterHandling)
     ));
     assert_eq!(
         harness.adapter().observed_response_bodies(),
         &[b"committed".to_vec()]
     );
     assert_eq!(harness.adapter().acknowledged_responses(), 0);
+    assert_eq!(harness.adapter().restart_count(), 0);
     harness
-        .restart(icwm_g0c_harness::RestartReason::CrashRecovery)
+        .drive(MatrixInput::BeginOperation {
+            operation_id: StableId::derive("live-after-response-loss", &[b"after"]),
+        })
         .unwrap();
-    assert_eq!(harness.adapter().acknowledged_responses(), 0);
+    assert_eq!(harness.adapter().acknowledged_inputs(), 1);
+    let report = harness.finish().unwrap();
+    assert!(report.crashes.is_empty());
+    assert_eq!(
+        report.failpoints_reached,
+        vec![Failpoint::ResponseAfterCommitBeforeAcknowledge]
+    );
 }
 
 #[test]
@@ -516,6 +535,93 @@ fn responder_releases_sync_cross_signing_to_device_and_captures_requests() {
 }
 
 #[test]
+fn responder_correlates_key_responses_to_requested_identity_and_algorithm() {
+    fn vector(purpose: &str, body: &[u8]) -> icwm_g0c_harness::RequestVector {
+        let mut vector = icwm_g0c_harness::RequestVector {
+            schema_version: "icwm.g0c.request-vector.v1".into(),
+            vector_id: StableId::derive("placeholder", &[]),
+            purpose: purpose.into(),
+            method: "POST".into(),
+            path: "/_matrix/client/v3/keys/test".into(),
+            credential_free_body: body.to_vec(),
+        };
+        vector.vector_id = vector.derived_id();
+        vector
+    }
+
+    let mut responder = StatefulResponder::default();
+    responder.set_device_key(
+        "@alice:example".into(),
+        "ALICE".into(),
+        b"alice-device".to_vec(),
+    );
+    responder.set_device_key("@bob:example".into(), "BOB".into(), b"bob-device".to_vec());
+    responder.set_cross_signing_keys("@alice:example".into(), b"alice-signing".to_vec());
+    responder.set_cross_signing_keys("@bob:example".into(), b"bob-signing".to_vec());
+    responder.add_one_time_key(
+        "@alice:example".into(),
+        "ALICE".into(),
+        "signed_curve25519".into(),
+        b"alice-otk".to_vec(),
+    );
+    responder.add_one_time_key(
+        "@bob:example".into(),
+        "BOB".into(),
+        "curve25519".into(),
+        b"bob-otk".to_vec(),
+    );
+
+    assert_eq!(
+        responder
+            .respond(&vector(
+                "keys_query",
+                br#"{"device_keys":{"@bob:example":["BOB"]}}"#,
+            ))
+            .unwrap(),
+        b"bob-device"
+    );
+    assert!(matches!(
+        responder.respond(&vector(
+            "keys_query",
+            br#"{"device_keys":{"@bob:example":["NOT-BOB"]}}"#,
+        )),
+        Err(HarnessError::ResponderUnavailable)
+    ));
+    assert_eq!(
+        responder
+            .respond(&vector(
+                "keys_claim",
+                br#"{"one_time_keys":{"@bob:example":{"BOB":"curve25519"}}}"#,
+            ))
+            .unwrap(),
+        b"bob-otk"
+    );
+    assert!(matches!(
+        responder.respond(&vector(
+            "keys_claim",
+            br#"{"one_time_keys":{"@alice:example":{"ALICE":"curve25519"}}}"#,
+        )),
+        Err(HarnessError::ResponderUnavailable)
+    ));
+    assert_eq!(
+        responder
+            .respond(&vector(
+                "cross_signing",
+                br#"{"master_key":{"user_id":"@bob:example"}}"#,
+            ))
+            .unwrap(),
+        b"bob-signing"
+    );
+    assert!(matches!(
+        responder.respond(&vector(
+            "keys_query",
+            br#"{"device_keys":{"@alice:example":[],"@bob:example":[]}}"#,
+        )),
+        Err(HarnessError::ResponderRequestInvalid)
+    ));
+}
+
+#[test]
 fn artifact_report_denies_unknown_policy_fields_and_preserves_known_ones() {
     let source = include_str!("../fixtures/CONTROL-RESULT.json");
     let report: ArtifactReport = serde_json::from_str(source).unwrap();
@@ -658,6 +764,18 @@ fn artifact_reports_are_derived_and_checked_for_all_dispositions() {
             tampered.validate_against_execution(&execution),
             Err(HarnessError::ArtifactExecutionMismatch)
         ));
+        for field in ["name", "version"] {
+            let mut tampered = artifact.clone();
+            if field == "name" {
+                tampered.candidate.name.push_str("-wrong");
+            } else {
+                tampered.candidate.version.push_str("-wrong");
+            }
+            assert!(matches!(
+                tampered.validate_against_execution(&execution),
+                Err(HarnessError::ArtifactExecutionMismatch)
+            ));
+        }
     }
 }
 
@@ -747,16 +865,24 @@ fn identifier_and_admission_fixture_executes_every_case() {
 fn stateful_responder_claims_are_consumptive_and_identifier_bound_is_bytes() {
     let mut responder = StatefulResponder::default();
     responder.set_device_keys("@a:example".into(), b"keys".to_vec());
-    responder.add_one_time_key("@a:example".into(), "D".into(), b"otk".to_vec());
+    responder.add_one_time_key(
+        "@a:example".into(),
+        "D".into(),
+        "signed_curve25519".into(),
+        b"otk".to_vec(),
+    );
     assert_eq!(
         responder.query_device_keys("@a:example"),
         Some(b"keys".as_slice())
     );
     assert_eq!(
-        responder.claim_one_time_key("@a:example", "D"),
+        responder.claim_one_time_key("@a:example", "D", "signed_curve25519"),
         Some(b"otk".to_vec())
     );
-    assert_eq!(responder.claim_one_time_key("@a:example", "D"), None);
+    assert_eq!(
+        responder.claim_one_time_key("@a:example", "D", "signed_curve25519"),
+        None
+    );
     assert!(validate_matrix_identifier(&"a".repeat(255)).is_ok());
     assert!(matches!(
         validate_matrix_identifier(&"é".repeat(128)),

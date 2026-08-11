@@ -1,0 +1,160 @@
+{
+  "schema_version": "icwm.g0c.contribution-provenance.v1",
+  "authority": "contribution_grade_not_gate_or_adr_acceptance",
+  "governing_lighthouse_g0c_status": "Revisions Required",
+  "tested_ironclaw_source": "2d64363101ef0ff062a6345a5573ee855766552f",
+  "common_harness_aggregate_sha256": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b",
+  "ignored_evidence_access": {
+    "repository_relative_root": ".work/evidence/icwm-n-g0c",
+    "retention": "gitignored, access-controlled evidence associated with this worktree; it is not present in an ordinary clone",
+    "transfer_convention": "An authorized reviewer obtains the retained evidence through the project's approved private evidence-transfer channel, places it at the repository-relative root above without modifying it, and confirms the published file and tree digests before reading receipts. The tracked hashes identify bytes but do not grant access or reconstruct missing evidence."
+  },
+  "candidates": {
+    "full_matrix_sdk_client_0_18_0": {
+      "source": {
+        "repository": "https://github.com/matrix-org/matrix-rust-sdk",
+        "release_tag": "matrix-sdk-0.18.0",
+        "annotated_tag_object": "7fdff1495031267028c14e0fea6c5dd77cdefa93",
+        "peeled_commit": "1c44fb66214667c6d00acaf72ab592493653708b",
+        "crate_checksum": "7083d580527511ac5d9369e03b9f2b20902e76949f1b3964051f978e4d3756ae",
+        "surveyed_upstream_main": "15a3ce2369a1e96fcad02cb2b1da3198ef23348a"
+      },
+      "dependency_lock_sha256": "b17dbdf0d7cf95c4f25a10590d53b439e140f184d4ee9d6d818f86782337d452",
+      "ignored_candidate_root": ".work/evidence/icwm-n-g0c/candidates/full-sdk-client",
+      "candidate_source": {
+        "tree_algorithm": "sha256 of UTF-8 lines `<file-sha256><two spaces><candidate-relative-path>\\n`, Cargo.lock, Cargo.toml, and src files sorted bytewise",
+        "tree_sha256": "860de1f0aa7d5faf904b84ba03415b9158924c301e89dc4637036680a511928b",
+        "files": {
+          "Cargo.lock": "b17dbdf0d7cf95c4f25a10590d53b439e140f184d4ee9d6d818f86782337d452",
+          "Cargo.toml": "9a9e3a0e2bc81b371032bbf059cd1dc2b40885313d7e4486d9bea3dcffb261cd",
+          "src/lib.rs": "a1407d87b530f798baaa4edeacc86f44026df36458c48f27af1372ffeaa60c87"
+        }
+      },
+      "retained_receipts": {
+        "normalized_result_sha256": "ba2d31d2f3090fd6a6d93b6d556f0abb3540f81b96ddef5000750a75e10b6a3a",
+        "ownership_inventory_sha256": "4ccf92557e19bd511b5a25de4d08a34bc7efa2655b36738193ff555eb6196386",
+        "supply_chain_evidence_sha256": "5f45049c8ff396b7f79ceb547ed7b2ba8b9a1e5410aacac3b60b5d99134976ea",
+        "provisional_provenance_sha256": "cca62925cf45937fd148e8fd86c524f2a08e147e97a986a11d7692d6f4bd59f6"
+      },
+      "recapture_commands": [
+        "CARGO_TARGET_DIR=<isolated> cargo test --locked --manifest-path .work/evidence/icwm-n-g0c/candidates/full-sdk-client/Cargo.toml",
+        "cargo metadata --locked --format-version 1 --manifest-path .work/evidence/icwm-n-g0c/candidates/full-sdk-client/Cargo.toml",
+        "cargo tree --locked --manifest-path .work/evidence/icwm-n-g0c/candidates/full-sdk-client/Cargo.toml",
+        "cargo audit --json --file .work/evidence/icwm-n-g0c/candidates/full-sdk-client/Cargo.lock"
+      ],
+      "command_provenance": "The retained package did not preserve an immutable verbatim argv transcript for this candidate. These are minimum recapture commands, not a claim about the historical temporary paths or exact argv.",
+      "claim_boundary": "The retained result is an infeasibility result based on missing supported ownership seams; construction proves API consumability only."
+    },
+    "matrix_sdk_base_plus_crypto_0_18_0": {
+      "source": {
+        "repository": "https://github.com/matrix-org/matrix-rust-sdk",
+        "base_tag_object": "2478326227ad08d49d84f9a2b3bfae5fcb28605a",
+        "crypto_tag_object": "2997acfb7c77b21f71654196ac8937cb6e87dd75",
+        "peeled_commit": "1c44fb66214667c6d00acaf72ab592493653708b",
+        "base_crate_checksum": "e09a917eb1f7643d9d9a06b2f131e2ceb39df6910a7b830dac18bfd6db37a1f5",
+        "crypto_crate_checksum": "c54afd2a326f51c13a6ad44ec86315a688fffeb3f1e287fb343e0e1836a3bdaf"
+      },
+      "dependency_lock_sha256": "b57bc012317bd411c7804026f1edab9446bd4631937eec918b18b21290cf787a",
+      "ignored_candidate_root": ".work/evidence/icwm-n-g0c/candidates/base-crypto",
+      "candidate_source": {
+        "tree_algorithm": "sha256 of UTF-8 lines `<file-sha256><two spaces><candidate-relative-path>\\n`, Cargo.lock, Cargo.toml, and src files sorted bytewise",
+        "tree_sha256": "5b303a1092181ee3c72194963a1c4757987a6e3b9725cf17220eaee9096fd098",
+        "files": {
+          "Cargo.lock": "b57bc012317bd411c7804026f1edab9446bd4631937eec918b18b21290cf787a",
+          "Cargo.toml": "249007c803e4cb258a44fd2246ce2745817fd8f183936fc06def4a0c5a2b0b10",
+          "src/main.rs": "9dd4e4dba7b1b1303cc3b2845a2da474ce8d7ab86877e303670a7f3312b333e9"
+        }
+      },
+      "retained_receipts": {
+        "normalized_result_sha256": "a9f154b9e3007a57ce43382526abb4b809654835958db3aabf134153a1f8ae85",
+        "command_receipts_sha256": "2cadec59e4623f0416e5154301fad38d010bd4adca2aa25c33214f1af8724fdd",
+        "source_provenance_sha256": "6e233f231b9abb2c3d9c64a079ba457143dafc5506a18b679c37424574c7b7c0",
+        "scenario_sha256": "d1b0aec8cd656e8157efa2e2807dbe2daf4417be00b2050c4b512c139740dd5b"
+      },
+      "author_command": "CARGO_TARGET_DIR=/tmp/icwm-base-crypto-final.QWVnbf cargo run --locked",
+      "recapture_command": "CARGO_TARGET_DIR=<new-isolated-target> cargo run --locked --manifest-path .work/evidence/icwm-n-g0c/candidates/base-crypto/Cargo.toml",
+      "claim_boundary": "Only BaseClient-managed OlmMachine construction and two initial transport-free requests were observed; sync, encryption, reopen, crash recovery, and multi-writer behavior were not run."
+    },
+    "direct_olm_machine_0_18_0_sqlite": {
+      "source": {
+        "repository": "https://github.com/matrix-org/matrix-rust-sdk",
+        "release_tag": "matrix-sdk-crypto-0.18.0",
+        "annotated_tag_object": "2997acfb7c77b21f71654196ac8937cb6e87dd75",
+        "peeled_commit": "1c44fb66214667c6d00acaf72ab592493653708b",
+        "crypto_crate_checksum": "c54afd2a326f51c13a6ad44ec86315a688fffeb3f1e287fb343e0e1836a3bdaf",
+        "sqlite_crate_checksum": "a49133429271005745f8d5a05362d2ba6567274777250236799927ca30dc0670",
+        "surveyed_upstream_main": "15a3ce2369a1e96fcad02cb2b1da3198ef23348a"
+      },
+      "dependency_lock_sha256": "f7da0ff8e486d17bd316a46ea0a3ecc442f3be8c350a3fec10f6cbcf28db6b0a",
+      "ignored_candidate_root": ".work/evidence/icwm-n-g0c/candidates/olm-machine",
+      "candidate_source": {
+        "tree_algorithm": "sha256 of UTF-8 lines `<file-sha256><two spaces><candidate-relative-path>\\n`, Cargo.lock, Cargo.toml, and src files sorted bytewise",
+        "tree_sha256": "8a2e48e6142a37b2ee725fab2d6f662435ba125032af034db33371ed52ffc702",
+        "files": {
+          "Cargo.lock": "f7da0ff8e486d17bd316a46ea0a3ecc442f3be8c350a3fec10f6cbcf28db6b0a",
+          "Cargo.toml": "8064b820f36053c9e045f8c9e588fd2585509df0017257c0658ceba00f665106",
+          "src/main.rs": "68c7ea4f0d89f52dc98035409f50e1db4c059162296b5a9cbb798c40b7b5d1e0"
+        }
+      },
+      "retained_receipts": {
+        "candidate_evidence_sha256": "9e020e7445ee68d4b1949235d3a822423ae99490ea2fe77cdf16a9e5fb4baa26",
+        "persistent_probe_result_sha256": "cf3199ef202d4af16a270bcc6b4d31b8c5e59a98978ef1f651825f928ec48134",
+        "adapter_gap_sha256": "c09280f104fb8a5cd77c505308bcfafc5a456ded6a744b36558f699692b740a6",
+        "placement_dispositions_sha256": "bcdcbca4571ebe655dd0f06a8d8d55943002f5018035140d3bbbd29de47cd518",
+        "advisory_audit_sha256": "82d01591234dfce5a7f3241dc304dc95322abc358a5cd8038d6f26894e0b2549",
+        "advisory_reachability_sha256": "fb28c2ef8de11bdec72067de8ab1b0bc59ad21ffc86778f766caadf5d5ee6075"
+      },
+      "normalized_author_commands": [
+        "CARGO_TARGET_DIR=/tmp/icwm-olm-machine.<unique> cargo run --locked --offline --manifest-path .work/evidence/icwm-n-g0c/candidates/olm-machine/Cargo.toml",
+        "cargo tree --locked --offline --manifest-path .work/evidence/icwm-n-g0c/candidates/olm-machine/Cargo.toml -i bitmaps",
+        "CARGO_TARGET_DIR=/tmp/icwm-olm-persistent.<unique> cargo check --locked --offline --target wasm32-wasip2 --manifest-path .work/evidence/icwm-n-g0c/candidates/olm-machine/Cargo.toml"
+      ],
+      "command_provenance": "The unique temporary-directory components were normalized before publication; the retained receipt hashes bind the historical outputs, not the normalized placeholders.",
+      "claim_boundary": "Native construction/reopen and bounded probes support a deeper spike; the common adapter, sidecar, live interoperability, and current WASI placement remain unresolved or disqualified as recorded."
+    },
+    "complement_live_tier": {
+      "source": {
+        "complement_crypto_repository": "https://github.com/matrix-org/complement-crypto.git",
+        "complement_crypto_commit": "f884f7535488352af2eef53335fe6d7835626040",
+        "declared_complement_commit": "db8c562a8790cac086c05c4212173fdf2044a9a0",
+        "compatibility_complement_commit": "b6dbb972c99e05c1ebc63d21a27a65b5b53ceb06",
+        "prior_survey_complement_commit": "bcdc64bb61339bd16ebba3508282239d4c8860fd"
+      },
+      "retained_receipts": {
+        "survey_pins_sha256": "8e4ba3897b41a9140b8593d2447eb185d134684f55fc02c76be6b5e6a78c789f",
+        "go_test_inventory_sha256": "9b1be6a158e37effa87fa4b4952072fb58d68b9c6934b7ee730d8d9e7a07e5ae",
+        "test_hitlist_sha256": "fd68c20e0a386c2a0caa2f12882250493e1edca0d69a794da52161dd14fa15a5",
+        "capability_dispositions_sha256": "27ae4520de05df07d647d72982d3e4e22b129597c51ec10ff9283bf3d94c4829"
+      },
+      "recapture_commands": [
+        "git -C <complement-crypto-checkout> checkout --detach f884f7535488352af2eef53335fe6d7835626040",
+        "git -C <complement-checkout> checkout --detach db8c562a8790cac086c05c4212173fdf2044a9a0",
+        "go -C <complement-crypto-checkout> list -m -json all",
+        "go -C <complement-crypto-checkout> test -list . ./..."
+      ],
+      "command_provenance": "The retained package did not preserve an immutable verbatim argv transcript for the survey. These commands recapture the pinned inventory and do not execute the proposed live tier.",
+      "claim_boundary": "These commands recapture survey inventory only. No Complement live execution or G0C interop pass is claimed."
+    }
+  },
+  "intentional_exclusions": [
+    "raw stdout/stderr and command transcripts",
+    "Cargo metadata and dependency-tree streams",
+    "SBOM, advisory, license, and source-list exports",
+    "temporary build targets and cloned dependency trees",
+    "databases and crypto stores",
+    "credentials, access tokens, private keys, ciphertext, message content, and live Matrix state",
+    "MITM, homeserver, container, and process logs"
+  ],
+  "authorized_recapture": {
+    "location": "an access-controlled disposable worktree outside Git",
+    "procedure": [
+      "checkout the exact retained source revisions and verify tag objects, peeled commits, registry checksums, and dependency locks",
+      "materialize the approved common harness aggregate and each candidate source in the access-controlled worktree",
+      "run the listed commands with a new isolated target and no production credentials or live state",
+      "persist machine-readable stdout, metadata, dependency, advisory, license, and result receipts only in the access-controlled evidence area",
+      "redact and reject any receipt containing credentials, private keys, ciphertext, message content, database pages, or live identifiers",
+      "compare retained receipt hashes and explain every mismatch; never overwrite the historical receipt",
+      "publish only a new sanitized hash index after independent semantic review and deterministic verification"
+    ]
+  }
+}

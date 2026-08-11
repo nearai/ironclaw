@@ -606,6 +606,8 @@ impl ArtifactReport {
         execution: &HarnessReport,
     ) -> Result<(), HarnessError> {
         if self.disposition != execution.disposition
+            || self.candidate.name != execution.candidate.name
+            || self.candidate.version != execution.candidate.version
             || self.candidate.stable_id != execution.candidate.stable_id.as_str()
             || self.effects.len() != execution.effects.len()
             || self.disposition_reason != execution.disposition_reason
@@ -816,9 +818,9 @@ pub fn validate_matrix_identifier_bytes(value: &[u8]) -> Result<(), HarnessError
 #[derive(Clone, Debug, Default)]
 pub struct StatefulResponder {
     sync_releases: VecDeque<Vec<u8>>,
-    device_keys: BTreeMap<String, Vec<u8>>,
+    device_keys: BTreeMap<(String, Option<String>), Vec<u8>>,
     cross_signing_keys: BTreeMap<String, Vec<u8>>,
-    one_time_keys: BTreeMap<(String, String), VecDeque<Vec<u8>>>,
+    one_time_keys: BTreeMap<(String, String, String), VecDeque<Vec<u8>>>,
     to_device: BTreeMap<String, VecDeque<Vec<u8>>>,
     captured_requests: Vec<RequestVector>,
 }
@@ -830,27 +832,83 @@ impl StatefulResponder {
             "sync" => self
                 .release_sync()
                 .ok_or(HarnessError::ResponderUnavailable),
-            "keys_query" => self
-                .device_keys
-                .values()
-                .next()
-                .cloned()
-                .ok_or(HarnessError::ResponderUnavailable),
-            "keys_claim" => self
-                .one_time_keys
-                .values_mut()
-                .find_map(VecDeque::pop_front)
-                .ok_or(HarnessError::ResponderUnavailable),
+            "keys_query" => {
+                let body: serde_json::Value = serde_json::from_slice(&request.credential_free_body)
+                    .map_err(|_| HarnessError::ResponderRequestInvalid)?;
+                let (user_id, devices) = body
+                    .get("device_keys")
+                    .and_then(serde_json::Value::as_object)
+                    .filter(|users| users.len() == 1)
+                    .and_then(|users| users.iter().next())
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                let devices = devices
+                    .as_array()
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                let device_id = match devices.as_slice() {
+                    [] => None,
+                    [device] => Some(
+                        device
+                            .as_str()
+                            .ok_or(HarnessError::ResponderRequestInvalid)?
+                            .to_owned(),
+                    ),
+                    _ => return Err(HarnessError::ResponderRequestInvalid),
+                };
+                self.device_keys
+                    .get(&(user_id.clone(), device_id))
+                    .cloned()
+                    .ok_or(HarnessError::ResponderUnavailable)
+            }
+            "keys_claim" => {
+                let body: serde_json::Value = serde_json::from_slice(&request.credential_free_body)
+                    .map_err(|_| HarnessError::ResponderRequestInvalid)?;
+                let users = body
+                    .get("one_time_keys")
+                    .and_then(serde_json::Value::as_object)
+                    .filter(|users| users.len() == 1)
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                let (user_id, devices) = users
+                    .iter()
+                    .next()
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                let devices = devices
+                    .as_object()
+                    .filter(|devices| devices.len() == 1)
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                let (device_id, algorithm) = devices
+                    .iter()
+                    .next()
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                let algorithm = algorithm
+                    .as_str()
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                self.claim_one_time_key(user_id, device_id, algorithm)
+                    .ok_or(HarnessError::ResponderUnavailable)
+            }
             "to_device" => {
                 self.send_to_device("captured".into(), request.credential_free_body.clone());
                 Ok(b"{}".to_vec())
             }
-            "cross_signing" | "signatures_upload" => self
-                .cross_signing_keys
-                .values()
-                .next()
-                .cloned()
-                .ok_or(HarnessError::ResponderUnavailable),
+            "cross_signing" | "signatures_upload" => {
+                let body: serde_json::Value = serde_json::from_slice(&request.credential_free_body)
+                    .map_err(|_| HarnessError::ResponderRequestInvalid)?;
+                let user_id = ["master_key", "self_signing_key", "user_signing_key"]
+                    .iter()
+                    .find_map(|key| body.get(key)?.get("user_id")?.as_str())
+                    .or_else(|| {
+                        body.get("signatures")?.as_object().and_then(|users| {
+                            (users.len() == 1)
+                                .then(|| users.keys().next())
+                                .flatten()
+                                .map(String::as_str)
+                        })
+                    })
+                    .ok_or(HarnessError::ResponderRequestInvalid)?;
+                self.cross_signing_keys
+                    .get(user_id)
+                    .cloned()
+                    .ok_or(HarnessError::ResponderUnavailable)
+            }
             _ => Err(HarnessError::ResponderUnsupported {
                 purpose: request.purpose.clone(),
             }),
@@ -865,11 +923,17 @@ impl StatefulResponder {
     }
 
     pub fn set_device_keys(&mut self, user_id: String, body: Vec<u8>) {
-        self.device_keys.insert(user_id, body);
+        self.device_keys.insert((user_id, None), body);
+    }
+
+    pub fn set_device_key(&mut self, user_id: String, device_id: String, body: Vec<u8>) {
+        self.device_keys.insert((user_id, Some(device_id)), body);
     }
 
     pub fn query_device_keys(&self, user_id: &str) -> Option<&[u8]> {
-        self.device_keys.get(user_id).map(Vec::as_slice)
+        self.device_keys
+            .get(&(user_id.to_owned(), None))
+            .map(Vec::as_slice)
     }
 
     pub fn set_cross_signing_keys(&mut self, user_id: String, body: Vec<u8>) {
@@ -880,16 +944,31 @@ impl StatefulResponder {
         self.cross_signing_keys.get(user_id).map(Vec::as_slice)
     }
 
-    pub fn add_one_time_key(&mut self, user_id: String, device_id: String, key: Vec<u8>) {
+    pub fn add_one_time_key(
+        &mut self,
+        user_id: String,
+        device_id: String,
+        algorithm: String,
+        key: Vec<u8>,
+    ) {
         self.one_time_keys
-            .entry((user_id, device_id))
+            .entry((user_id, device_id, algorithm))
             .or_default()
             .push_back(key);
     }
 
-    pub fn claim_one_time_key(&mut self, user_id: &str, device_id: &str) -> Option<Vec<u8>> {
+    pub fn claim_one_time_key(
+        &mut self,
+        user_id: &str,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Option<Vec<u8>> {
         self.one_time_keys
-            .get_mut(&(user_id.to_owned(), device_id.to_owned()))
+            .get_mut(&(
+                user_id.to_owned(),
+                device_id.to_owned(),
+                algorithm.to_owned(),
+            ))
             .and_then(VecDeque::pop_front)
     }
 
@@ -991,7 +1070,9 @@ impl<A: CandidateAdapter> Harness<A> {
                 .pop_front()
                 .ok_or(HarnessError::MissingScriptedResponse)?;
             if response.delivery == ResponseDelivery::LostBeforeCandidate {
-                return self.trigger(Failpoint::ResponseBeforePrepare);
+                self.failpoints_reached
+                    .push(Failpoint::ResponseBeforePrepare);
+                return Err(HarnessError::ResponseLostBeforeCandidate);
             }
             let lost_after = response.delivery == ResponseDelivery::LostAfterAdapterHandling;
             let response = if response.delivery == ResponseDelivery::Partial {
@@ -1017,7 +1098,9 @@ impl<A: CandidateAdapter> Harness<A> {
             let effects = self.adapter.commit_response(&prepared)?;
             self.append_effects(effects)?;
             if lost_after {
-                return self.trigger(Failpoint::ResponseAfterCommitBeforeAcknowledge);
+                self.failpoints_reached
+                    .push(Failpoint::ResponseAfterCommitBeforeAcknowledge);
+                return Err(HarnessError::ResponseLostAfterAdapterHandling);
             }
             return self.adapter.acknowledge_response(prepared);
         }
@@ -1231,6 +1314,7 @@ pub enum HarnessError {
         operation_id: StableId,
     },
     ResponderUnavailable,
+    ResponderRequestInvalid,
     ResponderUnsupported {
         purpose: String,
     },
@@ -1246,6 +1330,8 @@ pub enum HarnessError {
     InjectedFailpoint {
         failpoint: Failpoint,
     },
+    ResponseLostBeforeCandidate,
+    ResponseLostAfterAdapterHandling,
 }
 
 impl Display for HarnessError {

@@ -24,6 +24,12 @@ ADR-006, a production dependency, store, or runtime placement.
   The neutral harness does not claim candidate-store atomicity.
 - The control adapter proves only the common contracts.
 
+Identifier differential tests use the exact crates.io `ruma-common 0.19.0`
+parser layer. That is the current release observed during the 2026-08-11
+recapture and the same `ruma-common` version resolved through the Matrix SDK
+0.18 candidate graph. It is a test-only oracle, not a production dependency or
+an architectural selection of the full SDK.
+
 ## Reproduce
 
 From the repository root:
@@ -46,6 +52,19 @@ The tested IronClaw source baseline is
 `2d64363101ef0ff062a6345a5573ee855766552f`. The approved ignored-worktree
 common aggregate was
 `e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b`.
+The tracked
+[candidate evidence provenance index](../../docs/internal/research/icwm-g0c/evidence-provenance.json)
+binds candidate conclusions to exact source and dependency identities,
+normalized retained-receipt hashes, and bounded recapture commands. It does
+not publish raw transcripts, graphs, build products, crypto stores, secrets,
+ciphertext, live state, or service logs. Authorized recapture uses an
+access-controlled disposable worktree and compares new hashes without
+overwriting historical receipts. In an authorized retained-evidence checkout,
+the gitignored material is placed at the repository-relative
+`.work/evidence/icwm-n-g0c/candidates/` convention. It is absent from an
+ordinary clone; the index provides per-file and candidate-source-tree digests
+that must be confirmed after approved private transfer and before recapture.
+
 Tracked-path publication changes paths and explanatory material, so
 `PUBLICATION-MANIFEST.json` is the authoritative file manifest for this
 surface. Its detached digest is in `PUBLICATION-MANIFEST.sha256`.

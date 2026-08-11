@@ -1,6 +1,6 @@
 {
   "schema_version":"icwm.g0c.identifier-admission-corpus.v2",
-  "oracle":{"crate":"ruma-common","version":"0.16.0","role":"test-only user/room identifier parser oracle"},
+  "oracle":{"crate":"ruma-common","version":"0.19.0","source":"crates.io","registry_checksum":"2c3b4f00112791b490acce57df1ce3eb3f88899b045bebcff8a29f75369640cc","role":"test-only user/room identifier parser oracle; matches the ruma-common layer resolved by the Matrix SDK 0.18 candidate graph"},
   "cases":[
     {"identifier_kind":"user_id","value":"@alice:example.org","actor":"@alice:example.org","trigger":"direct_chat","expected":"accepted"},
     {"identifier_kind":"room_id","value":"!ops:example.org:8448","actor":"@alice:example.org","trigger":"bot_mention","expected":"accepted"},

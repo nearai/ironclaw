@@ -20,6 +20,14 @@ Survey pins observed on 2026-08-11:
 - Complement `b6dbb972c99e05c1ebc63d21a27a65b5b53ceb06` is a separately named
   compatibility leg and must not silently replace the baseline.
 
+The exact survey pins, normalized inventory receipt hashes, and bounded
+recapture commands are recorded in the
+[evidence provenance index](evidence-provenance.json#/candidates/complement_live_tier).
+Those hashes identify the retained survey artifacts; they are not a substitute
+for the raw bytes and do not claim a live execution. An authorized reviewer
+recaptures the survey in an access-controlled disposable checkout at the listed
+commits and compares new receipts without overwriting historical evidence.
+
 Required live families are baseline encrypted send/decrypt, two-homeserver
 federation, request and response MITM faults, candidate SIGKILL/restart,
 disposable-store lifecycle and corruption, crypto recovery, cancellation and
