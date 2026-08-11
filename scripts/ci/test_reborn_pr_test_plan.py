@@ -171,9 +171,6 @@ def real_owner_metadata() -> dict:
     optional dependency plus a dev-dependency, both in its real manifest),
     which is why routing a package asset to the support crate also schedules
     the host that embeds three of those manifests itself.
-
-    `ironclaw` (the CLI package) is here for the same reason, as the owner
-    `ROOT_FIXTURE_TEST_OWNERS` routes the shipped Docker runtime configs to.
     """
 
     def package(name: str, manifest: str, deps: tuple[str, ...] = ()) -> dict:
@@ -199,6 +196,10 @@ def real_owner_metadata() -> dict:
             "ironclaw_slack_extension",
             "crates/extensions/packages/slack/Cargo.toml",
         ),
+        # Not an asset owner: the crate `DOCKER_RUNTIME_CONFIG_OWNERS` routes
+        # the shipped container configs to, through the same real manifest
+        # paths, so that table is exercised against a real package directory
+        # too.
         package("ironclaw", "crates/app/ironclaw_cli/Cargo.toml"),
     ]
     return {
@@ -1476,34 +1477,37 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertNotEqual(plan["crate_buckets"], [])
 
-    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
-        """The entrypoint and the two parsed configs are decided; the rest are not.
+    def test_shipped_container_configs_select_their_parsing_test(self) -> None:
+        """`docker/reborn/config*.toml` is read by a Reborn Rust lane.
 
-        `docker/` is classified per-file for the same reason repo-root
-        `scripts/` is: a blanket prefix would silently absorb inputs nobody has
-        attributed to a lane. Keep the fail-closed arm proven for the paths that
-        are still undecided — no test parses either hosted-single-tenant config,
-        so neither may inherit the decision made for its siblings.
+        `ironclaw_cli`'s `smoke` test parses both shipped configs through
+        `RebornConfigFile::parse_text` and asserts on the result, so a change to
+        one must select that test — not be waved through as prose, which would
+        under-select the only lane that catches a broken production config.
+        Unclassified until #7471 (2026-08-11), where the fail-closed arm failed
+        `Detect Reborn test scope` and cascaded into `Tests (Reborn)`.
         """
+        owner = "crates/app/ironclaw_cli/tests/smoke.rs"
+        # Pin the owner to the actual caller-level behavior rather than the
+        # file's existence: both container-config path literals must reach
+        # `RebornConfigFile::parse_text` inside `smoke.rs`.
+        smoke_source = (ROOT / owner).read_text(encoding="utf-8")
         for path in (
-            "docker/process-sandbox-entrypoint.sh",
-            "docker/reborn/config.hosted-single-tenant.toml",
-            "docker/reborn/config.hosted-single-tenant-volume.toml",
+            "docker/reborn/config.toml",
+            "docker/reborn/config.production.toml",
         ):
             with self.subTest(path=path):
-                with self.assertRaisesRegex(
-                    ValueError, "unclassified pull-request path"
-                ):
-                    self.plan("pull_request", [path])
-
-    def test_docker_runtime_configs_select_the_test_that_pins_them(self) -> None:
-        """A shipped config change runs the smoke target asserting its contents.
-
-        `smoke.rs` parses both files and pins their boot profile, storage
-        backend and pool sizing, so the honest plan is that exact test target —
-        not static control (which would skip the assertions the edit can break)
-        and not the whole `ironclaw` lane.
-        """
+                self.assertIn(
+                    path,
+                    smoke_source,
+                    f"{owner} must read the shipped container config {path}",
+                )
+        self.assertIn(
+            "RebornConfigFile::parse_text",
+            smoke_source,
+            f"{owner} must parse the shipped container configs through "
+            "RebornConfigFile::parse_text",
+        )
         for path in (
             "docker/reborn/config.toml",
             "docker/reborn/config.production.toml",
@@ -1512,57 +1516,40 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 plan = self.plan_real_owners([path])
                 self.assertEqual(plan["mode"], "selected")
                 self.assertEqual(plan["changed_packages"], ["ironclaw"])
-                self.assertEqual(
-                    plan["crate_buckets"],
-                    [
-                        {
-                            "name": "selected",
-                            "packages": ["ironclaw"],
-                            "exact_targets": [
-                                {
-                                    "package": "ironclaw",
-                                    "kind": "test",
-                                    "name": "smoke",
-                                }
-                            ],
-                        }
-                    ],
-                )
-
-    def test_root_fixture_owners_name_a_file_a_real_test_reads(self) -> None:
-        """The mapping is only correct while both halves still exist.
-
-        A rename on either side turns a routed path back into an unattributed
-        one, which is the failure this table exists to prevent. Pin the fixture,
-        the owning test target, and the reference between them.
-        """
-        for path, (package, target) in planner.ROOT_FIXTURE_TEST_OWNERS.items():
-            with self.subTest(path=path):
-                self.assertTrue(
-                    (ROOT / path).is_file(), f"fixture {path} no longer exists"
-                )
-                directory = next(
-                    (
-                        manifest.parent
-                        for manifest in (ROOT / "crates").rglob("Cargo.toml")
-                        if f'name = "{package}"'
-                        in manifest.read_text(encoding="utf-8")
-                    ),
-                    None,
-                )
-                self.assertIsNotNone(
-                    directory, f"no crate declares package {package}"
-                )
-                source = directory / "tests" / f"{target}.rs"
-                self.assertTrue(
-                    source.is_file(),
-                    f"{package} has no `{target}` test target",
-                )
                 self.assertIn(
-                    path,
-                    source.read_text(encoding="utf-8"),
-                    f"{source} no longer reads {path}",
+                    f"shipped container config parsed by {owner}: {path}",
+                    plan["reasons"],
                 )
+                exact_targets = [
+                    target
+                    for bucket in plan["crate_buckets"]
+                    for target in bucket.get("exact_targets", [])
+                ]
+                self.assertIn(
+                    {"package": "ironclaw", "kind": "test", "name": "smoke"},
+                    exact_targets,
+                )
+
+    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
+        """The entrypoint and configs are decided; their neighbours are not.
+
+        `docker/` is classified per-file for the same reason repo-root
+        `scripts/` is: a blanket prefix would silently absorb paths with no
+        owning lane. Keep the fail-closed arm proven for the ones nobody has
+        decided — the hosted-single-tenant configs are read only by
+        `tests/dockerfile_runtime_home.rs`, which `_root_test_partitions()` does
+        not inventory, so no lane can be selected for them.
+        """
+        for path in (
+            "docker/reborn/config.hosted-single-tenant.toml",
+            "docker/reborn/config.hosted-single-tenant-volume.toml",
+            "docker/process-sandbox-entrypoint.sh",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
 
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.

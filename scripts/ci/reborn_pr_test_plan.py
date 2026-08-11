@@ -439,36 +439,35 @@ PR_STATIC_CONTROL_PATHS = {
     # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
     # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
     # and owns the image build, not the entrypoint's behaviour. `docker/` stays
-    # per-file, never a prefix: `docker/process-sandbox-entrypoint.sh` and the
-    # `config.hosted-single-tenant*.toml` pair have no owning lane and must keep
-    # refusing. The two configs a package test *parses* are decided in
-    # `ROOT_FIXTURE_TEST_OWNERS` below.)
+    # per-file, never a prefix: it mixes classes, and the shipped runtime
+    # configs beside this script belong to a Rust lane instead — see
+    # `DOCKER_RUNTIME_CONFIG_OWNERS` below. `docker/process-sandbox-entrypoint.sh`
+    # has no owning lane and must keep refusing.)
     "docker/reborn/entrypoint.sh",
 }
-# Files outside every package directory that a package's own test reads from the
-# workspace root, mapped to the exact test target that pins them. This is the
-# read-at-test-time counterpart of `EMBEDDED_ASSET_OWNERS` (compiled-in assets):
-# the file is not part of any crate, but a specific test target asserts its
-# contents field by field, so that target *is* the owning lane and a change here
-# must select it.
+# Shipped container configs a Reborn Rust test parses and asserts on, mapped to
+# the test source that owns them. They are NOT static control: the membership
+# rule for that set is "no Reborn test lane reads the file", and
+# `ironclaw_cli`'s `smoke` test reads both of these — it parses each through
+# `ironclaw_config::RebornConfigFile::parse_text` and pins the resulting
+# profile, storage backend and policy (`docker_reborn_production_config_uses_postgres_storage`
+# and its local-config sibling). Calling them prose would silently under-select
+# the one lane that can catch a broken production config.
 #
-# `crates/app/ironclaw_cli/tests/smoke.rs` parses both shipped Docker runtime
-# configs through `ironclaw_config::RebornConfigFile::parse_text` and asserts
-# their boot profile, storage backend, pool sizing and runtime policy
-# (`docker_reborn_config_defaults_to_standalone`,
-# `docker_reborn_production_config_uses_postgres_storage`). Classifying them as
-# static control would be wrong under that set's own membership rule ("no Reborn
-# test lane reads the file") — this lane does read them, and an edit that
-# contradicts the assertions breaks the smoke target. Unclassified until
-# 2026-08-10, when raising the production pool ceiling failed
-# `Detect Reborn test scope` and skipped every downstream Reborn lane.
+# Both were unclassified until 2026-08-11, when #7471's Postgres pool change
+# edited `config.production.toml` and the fail-closed arm failed
+# `Detect Reborn test scope`, cascading into the whole `Tests (Reborn)`
+# roll-up. Classified as the pair they are, rather than one per red run —
+# the same lesson the repo-root metadata block above records.
 #
-# The sibling `config.hosted-single-tenant*.toml` files are deliberately absent:
-# no test parses them (they appear only in a doc comment), so they keep hitting
-# the fail-closed arm until someone decides them.
-ROOT_FIXTURE_TEST_OWNERS: dict[str, tuple[str, str]] = {
-    "docker/reborn/config.toml": ("ironclaw", "smoke"),
-    "docker/reborn/config.production.toml": ("ironclaw", "smoke"),
+# The two `config.hosted-single-tenant*.toml` siblings are deliberately absent:
+# their reader is `tests/dockerfile_runtime_home.rs`, which is not in
+# `_root_test_partitions()` (that inventory covers `tests/reborn_*.rs` only), so
+# no lane here can be selected for them. They keep refusing until that is
+# decided.
+DOCKER_RUNTIME_CONFIG_OWNERS = {
+    "docker/reborn/config.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.production.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
@@ -802,14 +801,23 @@ def build_plan(
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
             continue
-        if path in ROOT_FIXTURE_TEST_OWNERS:
-            package, target = ROOT_FIXTURE_TEST_OWNERS[path]
-            direct_test_packages.add(package)
-            exact_test_targets[package].add(("test", target))
-            reasons.append(
-                f"workspace fixture pinned by {package}'s `{target}` test changed: "
-                f"{path}"
+        if path in DOCKER_RUNTIME_CONFIG_OWNERS:
+            owner = DOCKER_RUNTIME_CONFIG_OWNERS[path]
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
             )
+            if package is None:
+                raise ValueError(
+                    f"container config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"shipped container config parsed by {owner}: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated workflow owns: {path}")

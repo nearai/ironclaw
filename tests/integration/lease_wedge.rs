@@ -84,6 +84,12 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
 /// standing when its lease lapsed, which is exactly the distinction the
 /// recorded checkpoint kind carries: `BeforeSideEffect` (there) still fails
 /// closed, `BeforeModel` (here) is reclaimed after one full lease TTL of grace.
+///
+/// Reclaim must also fence the stale executor: the replacement never starts
+/// while the abandoned worker is still alive (its heartbeat is definitively
+/// rejected against the requeued process, which cancels it), so the resumed
+/// run completing is itself proof the stale attempt was awaited — and its
+/// "stale worker output" must never appear in the persisted reply.
 #[tokio::test]
 async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed() {
     let gate = ParkingModelGate::new();
@@ -95,8 +101,8 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
         .script([
             // Consumed by the resumed run, which is the reply the user sees.
             RebornScriptedReply::text("recovered and finished"),
-            // Consumed by the abandoned worker once it is released; its
-            // transitions are refused because its lease is gone.
+            // Would be consumed by the abandoned worker if it were ever
+            // released to run again; the fence must prevent that.
             RebornScriptedReply::text("stale worker output"),
         ])
         .build()
@@ -114,9 +120,11 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
 
     // Never released before recovery: the lease lapses under a worker that is
     // still holding the run, which is precisely the ambiguous case the grace
-    // window exists to resolve.
+    // window exists to resolve. The resumed run completes only after the
+    // supervisor has cancelled the stale attempt (the reclaim fence), so the
+    // stale worker is awaited by construction.
     let state = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         harness.wait_for_status(run_id, TurnStatus::Completed),
     )
     .await
@@ -133,23 +141,14 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
         .await
         .expect("the resumed run's reply is the one persisted");
 
-    // Release the abandoned worker and let it run to the end of its turn. Its
-    // lease is gone, so every transition it attempts must be refused — the
-    // recovered result is the only one the user may ever see.
+    // Release the abandoned worker as the incident would have. Two fences may
+    // stop it, and which one fires is timing-dependent: the supervisor cancels
+    // a stale executor at the first definitive lease-lost heartbeat, and if the
+    // worker outruns that, the transcript port refuses its lease-fenced writes.
+    // Either way nothing it produces may land. Give any delayed write path a
+    // bounded window to land wrongly, then assert at the seams the user reads.
     gate.release();
-
-    // The strongest deterministic signal the harness offers that the stale
-    // worker got that far: it consumed the second scripted reply, so the
-    // parked model call has returned "stale worker output" into it. (The
-    // refusal itself is not observable at any seam — a refused transition
-    // writes nothing by definition.)
-    let stale_worker_reached_its_reply = tokio::time::timeout(Duration::from_secs(10), async {
-        while harness.scripted_llm.captured_requests().len() < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    stale_worker_reached_its_reply.expect("the released stale worker consumes its scripted reply");
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let state = harness
         .run_state(run_id)

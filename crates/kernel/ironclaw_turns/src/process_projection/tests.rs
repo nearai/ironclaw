@@ -988,6 +988,11 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         .expect("rebound checkpoint");
     assert_eq!(rebound.state_ref, state_ref);
     assert_eq!(rebound.payload.as_bytes(), b"checkpoint payload");
+    assert_eq!(
+        retried_snapshot.checkpoint_kind,
+        Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
+        "a retried run must inherit the resume-safety classification of its source checkpoint"
+    );
 }
 
 #[test]
