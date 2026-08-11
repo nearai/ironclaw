@@ -1624,19 +1624,18 @@ fn runner_settings(
             }
             // A heartbeat costs interval + timeout (the supervisor passes the
             // interval as the timeout), so one attempt costs 2 * interval. Past
-            // half the 90s process lease TTL the lease can expire before the
+            // half the process lease TTL the lease can expire before the
             // worker even records its first failure; the scheduler clamps such
             // intervals to its lease-derived bound, but an operator's explicit
             // configuration should be rejected, not silently rewritten.
-            // Keep the bound in lockstep with
-            // `ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION` (90s).
-            const MAX_RUNNER_HEARTBEAT_INTERVAL_SECS: u64 = 45;
-            if secs > MAX_RUNNER_HEARTBEAT_INTERVAL_SECS {
+            let max_runner_heartbeat_interval_secs =
+                ironclaw_composition::MAX_HEARTBEAT_INTERVAL_WITHIN_LEASE.as_secs();
+            if secs > max_runner_heartbeat_interval_secs {
                 anyhow::bail!(
                     "config file [runner].heartbeat_interval_secs must not exceed {} seconds \
                      so a heartbeat attempt and its failure window fit inside the process \
                      lease TTL",
-                    MAX_RUNNER_HEARTBEAT_INTERVAL_SECS,
+                    max_runner_heartbeat_interval_secs,
                 );
             }
             settings.heartbeat_interval = Duration::from_secs(secs);

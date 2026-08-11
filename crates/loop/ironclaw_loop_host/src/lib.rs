@@ -200,6 +200,7 @@ use tokio::sync::{Mutex, OnceCell};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, RunId};
+use ironclaw_host_api::turn::TurnLeaseToken;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
@@ -227,8 +228,7 @@ use ironclaw_threads::{
     ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnLeaseToken, TurnRunId,
-    TurnScope,
+    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
 };
 use serde::{Deserialize, Serialize};
 

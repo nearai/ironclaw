@@ -6,6 +6,7 @@
 use super::*;
 
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
+use ironclaw_host_api::turn::{TurnId, TurnLeaseToken, TurnRunId, TurnScope};
 use ironclaw_loop_contracts::{
     AssistantReply, FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink,
     InMemoryRunProfileResolver, LoopTranscriptPort, RunProfileResolutionRequest,
@@ -13,7 +14,6 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_threads::{AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent};
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
-use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 /// A model gateway that is never reached — this test never runs a model call.
 struct UnusedGateway;
@@ -27,7 +27,7 @@ impl HostManagedModelGateway for UnusedGateway {
         ironclaw_loop_host::HostManagedModelResponse,
         ironclaw_loop_host::HostManagedModelError,
     > {
-        panic!("this test never dispatches a model call");
+        panic!("this test never dispatches a model call"); // safety: test-only sentinel for an unreachable model call.
     }
 }
 
@@ -161,9 +161,9 @@ fn claimed_run_matching(
             turn_id: run_context.turn_id,
             run_id: run_context.run_id,
             status: TurnStatus::Running,
-            accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("source-web").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").expect("valid"),
+            accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"), // safety: fixed fixture satisfies the bounded-ref grammar.
+            source_binding_ref: SourceBindingRef::new("source-web").expect("valid"), // safety: fixed fixture satisfies the bounded-ref grammar.
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").expect("valid"), // safety: fixed fixture satisfies the bounded-ref grammar.
             // The journal persists the interactive-default alias under the
             // default profile id; `validate_claimed_run_context` compares
             // against that persisted form.
@@ -188,6 +188,6 @@ fn claimed_run_matching(
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
         runner_id: TurnRunnerId::new(),
-        lease_token: ironclaw_turns::TurnLeaseToken::new(),
+        lease_token: TurnLeaseToken::new(),
     }
 }

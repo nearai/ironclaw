@@ -1630,11 +1630,12 @@ where
     .expect("row-native process journal path");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        for entry in filesystem
-            .list_dir(&prefix)
-            .await
-            .expect("list row-native process journal")
-        {
+        let entries = match filesystem.list_dir(&prefix).await {
+            Ok(entries) => entries,
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => Vec::new(),
+            Err(error) => panic!("list row-native process journal: {error}"),
+        };
+        for entry in entries {
             let path = ironclaw_host_api::path::VirtualPath::new(format!(
                 "{}/{}",
                 prefix.as_str(),
