@@ -28,7 +28,6 @@ mod capability_port;
 mod capability_surface_filter;
 mod capability_surface_policy;
 mod compaction_task;
-mod context_shadow;
 mod context_window_cache;
 mod driver_host_port_adapters;
 mod durable_input_queue;
@@ -172,7 +171,8 @@ pub use synthetic_capability::{
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use system_prompt_assets::{
-    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
+    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT,
+    SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
     TOOL_DISCLOSURE_PROTOCOL_PROMPT,
 };
 pub use thread_resolving_model_gateway::{

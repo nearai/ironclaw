@@ -2496,7 +2496,10 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
             page.get_by_text("Slack direct message", exact=True)
         ).to_have_count(0)
         await expect(
-            page.get_by_text("Notifications stay in the web app", exact=True)
+            page.get_by_text(
+                "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
+                exact=True,
+            )
         ).to_be_visible()
 
         _assert_install_requests(

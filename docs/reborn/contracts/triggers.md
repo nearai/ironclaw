@@ -288,6 +288,14 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   project is not a wildcard.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
+- Prompt assembly for `TurnOriginKind::ScheduledTrigger` must append the
+  unattended scheduled-run protocol in memory. That protocol tells the model
+  that no human is present, requires it to perform the stored task instead of
+  ending with a question or menu, permits only bounded assumptions within the
+  stored request, identifies the final reply as the run's recorded output, and
+  preserves host approval, authentication, authorization, and policy gates.
+  The trusted turn origin is the switch; an interactive run must not receive
+  this protocol merely because it shares a run profile or process.
 
 Host-trusted trigger ingress request fields are:
 

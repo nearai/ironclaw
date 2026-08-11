@@ -29,7 +29,9 @@ use crate::{
 const DEFAULT_READ_MIX: &str = "list_threads=50,timeline=45,session=5";
 const BACKGROUND_FLOW_MARKER: &str = "ironclaw-stress-background";
 const MAX_ERROR_BODY_CHARS: usize = 512;
-const MAX_MOCK_LLM_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+// A 1 MiB scripted document is emitted across bounded tool calls, whose
+// arguments and result references coexist in later model requests.
+const MAX_MOCK_LLM_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_READ_WORKER_SLEEP: Duration = Duration::from_secs(3600);
 const MOCK_COMPLETION_CREATED_AT: u64 = 1_700_000_000;
 
@@ -115,6 +117,8 @@ struct ScriptedTaskIdentity {
 struct ScriptedFlowContext {
     key: scripted::ScriptKey,
     identity: ScriptedTaskIdentity,
+    /// Document size for this operation, in bytes.
+    size_bytes: usize,
     expected_tool_results: usize,
     /// Highest message sequence observed in the timeline before this
     /// operation's marker was submitted. Tool results with a sequence above
@@ -303,6 +307,9 @@ struct MockLlmState {
     failure_rate: f64,
     scripted: Option<ScriptKey>,
     scripted_counters: Mutex<ScriptedMockCounters>,
+    /// Bounded stateful scripted driver: per-operation sessions survive
+    /// production context compaction of long sequential plans.
+    scripted_driver: Mutex<scripted::ScriptedDriver>,
     counter: AtomicU64,
     foreground_counter: AtomicU64,
     background_counter: AtomicU64,
@@ -928,9 +935,8 @@ async fn run_virtual_user(
 }
 
 /// A hot writer task: a scripted writer on its own thread of the first user
-/// so several operations run concurrently (no per-thread turn
-/// serialization) while contending on the same per-user durable memory
-/// document.
+/// so several operations overlap (no per-thread turn serialization) while
+/// contending on the same per-user durable memory document.
 async fn run_hot_writer(
     args: &Args,
     operation_namespace: &str,
@@ -999,10 +1005,13 @@ async fn run_virtual_user_with_identity(
         let (flow, mut operation_api_samples, updated_finalized_assistant_count, max_sequence) =
             match (script_key, identity.as_ref()) {
                 (Some(key), Some(identity)) => {
+                    let size_bytes =
+                        scripted::doc_size_for(&args.api_scripted_doc_sizes, operation_index);
                     let flow_context = ScriptedFlowContext {
                         key,
                         identity: identity.clone(),
-                        expected_tool_results: key.expected_tool_results(),
+                        size_bytes,
+                        expected_tool_results: key.expected_tool_results(size_bytes),
                         baseline_sequence: max_sequence_seen,
                     };
                     let (flow, api, finalized, sequence, op_sample) = run_scripted_full_flow(
@@ -1086,10 +1095,13 @@ async fn run_background_user(
         let (flow, mut operation_api_samples, updated_finalized_assistant_count, max_sequence) =
             match (script_key, identity.as_ref()) {
                 (Some(key), Some(identity)) => {
+                    let size_bytes =
+                        scripted::doc_size_for(&args.api_scripted_doc_sizes, operation_index);
                     let flow_context = ScriptedFlowContext {
                         key,
                         identity: identity.clone(),
-                        expected_tool_results: key.expected_tool_results(),
+                        size_bytes,
+                        expected_tool_results: key.expected_tool_results(size_bytes),
                         baseline_sequence: max_sequence_seen,
                     };
                     let (flow, api, finalized, sequence, op_sample) = run_scripted_full_flow(
@@ -1272,7 +1284,7 @@ async fn run_scripted_full_flow(
         key,
         user: flow.identity.marker_user.clone(),
         op: format!("{}{}", flow.identity.op_prefix, operation_index),
-        size_bytes: scripted::doc_size_for(&args.api_scripted_doc_sizes, operation_index),
+        size_bytes: flow.size_bytes,
     };
     let marker = scripted::marker_message(key, &op.user, &op.op, op.size_bytes);
     let body = json!({
@@ -2430,6 +2442,9 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         failure_rate: config.failure_rate,
         scripted: config.scripted,
         scripted_counters: Mutex::new(ScriptedMockCounters::default()),
+        scripted_driver: Mutex::new(scripted::ScriptedDriver::new(
+            scripted::DEFAULT_SCRIPTED_SESSION_CAPACITY,
+        )),
         counter: AtomicU64::new(0),
         foreground_counter: AtomicU64::new(0),
         background_counter: AtomicU64::new(0),
@@ -2589,17 +2604,17 @@ async fn handle_mock_completion(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let decision = scripted_decision_for(&state, &request);
+    let decision = resolve_scripted_decision_for(&state, &request, request_index).await;
     match &decision {
-        ScriptedDecision::ToolCall(call) => {
+        ScriptedDecision::ToolCalls(calls) => {
             if stream_response {
                 let (header, body, done) =
-                    mock_streaming_tool_call_chunks(&state.model, request_index, call);
+                    mock_streaming_tool_call_chunks(&state.model, request_index, calls);
                 let payload =
                     format!("data: {header}\n\ndata: {body}\n\ndata: {done}\n\ndata: [DONE]\n\n");
                 write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
             } else {
-                let response = mock_tool_call_response(&state.model, request_index, call);
+                let response = mock_tool_call_response(&state.model, request_index, calls);
                 write_json_response(stream, 200, &response).await
             }
         }
@@ -2613,6 +2628,9 @@ async fn handle_mock_completion(
                 let response = mock_completion_response(&state.model, request_index, text.clone());
                 write_json_response(stream, 200, &response).await
             }
+        }
+        ScriptedDecision::RetryAfter(_) => {
+            Err("delayed retry decision escaped the mock completion resolver".to_string())
         }
         ScriptedDecision::Placeholder => {
             let text = scripted::PLACEHOLDER_TEXT.to_string();
@@ -2662,18 +2680,44 @@ fn available_tool_names(request: &Value) -> HashSet<String> {
     names
 }
 
-/// Decide the scripted response for a request and record sidecar counters.
-fn scripted_decision_for(state: &MockLlmState, request: &Value) -> ScriptedDecision {
+/// Decide the scripted response for a request through the stateful
+/// [`scripted::ScriptedDriver`] and record sidecar counters. The driver is
+/// the live path: it recovers the operation from user content or the
+/// canonical markers embedded in assistant tool-call arguments, tracks
+/// per-operation emitted/completed steps across compacted requests, and
+/// removes the session once the final verdict is emitted. `request_index`
+/// is the index `handle_mock_completion` already reserved for this
+/// request's response; the call id the response will carry
+/// (`call-stress-<request_index>`) is recorded on the session so the
+/// following request's tool result can be matched exactly. The id is taken
+/// from the passed index, never reloaded from the shared counter — a
+/// concurrent request could increment the counter between the reservation
+/// and a reload, recording an id that differs from the one the response
+/// actually carries.
+fn scripted_decision_for(
+    state: &MockLlmState,
+    request: &Value,
+    request_index: u64,
+) -> ScriptedDecision {
+    scripted_decision_for_inner(state, request, request_index, true)
+}
+
+fn scripted_decision_for_inner(
+    state: &MockLlmState,
+    request: &Value,
+    request_index: u64,
+    count_request: bool,
+) -> ScriptedDecision {
     if state.scripted.is_none() {
         return ScriptedDecision::None;
     }
-    let messages = request
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let available = available_tool_names(request);
-    let (decision, op) = scripted::decide_with_op(&messages, &available);
+    let next_call_id = mock_tool_call_id(request_index);
+    let (decision, op) = state
+        .scripted_driver
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .decide(request, &available, &next_call_id);
     let Some(op) = op else {
         return ScriptedDecision::None;
     };
@@ -2681,17 +2725,20 @@ fn scripted_decision_for(state: &MockLlmState, request: &Value) -> ScriptedDecis
         .scripted_counters
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *counters
-        .requests_seen
-        .entry(op.key.as_str().to_string())
-        .or_insert(0) += 1;
+    if count_request {
+        *counters
+            .requests_seen
+            .entry(op.key.as_str().to_string())
+            .or_insert(0) += 1;
+    }
     match &decision {
-        ScriptedDecision::ToolCall(_) => {
+        ScriptedDecision::ToolCalls(calls) => {
             *counters
                 .tool_calls_emitted
                 .entry(op.key.as_str().to_string())
-                .or_insert(0) += 1;
+                .or_insert(0) += calls.len() as u64;
         }
+        ScriptedDecision::RetryAfter(_) => {}
         ScriptedDecision::Placeholder => {
             counters.placeholder_responses += 1;
         }
@@ -2706,6 +2753,25 @@ fn scripted_decision_for(state: &MockLlmState, request: &Value) -> ScriptedDecis
         ScriptedDecision::None => {}
     }
     decision
+}
+
+/// Resolve provider-directed retry delays inside the current HTTP completion
+/// request. No driver or counter mutex is held while sleeping. Re-evaluation
+/// does not count as another model request, but an emitted retry tool call is
+/// still recorded.
+async fn resolve_scripted_decision_for(
+    state: &MockLlmState,
+    request: &Value,
+    request_index: u64,
+) -> ScriptedDecision {
+    let mut decision = scripted_decision_for(state, request, request_index);
+    loop {
+        let ScriptedDecision::RetryAfter(delay) = decision else {
+            return decision;
+        };
+        tokio::time::sleep(delay).await;
+        decision = scripted_decision_for_inner(state, request, request_index, false);
+    }
 }
 
 fn classify_mock_request(body: &[u8]) -> MockRequestKind {
@@ -2743,18 +2809,45 @@ fn mock_completion_response(model: &str, request_index: u64, content: String) ->
     })
 }
 
-/// Non-streaming chat completion carrying one tool call. The `arguments`
-/// field is a JSON string, matching the rig OpenAI wire shape the server
-/// parses (`Function::arguments` uses `stringified_json`).
+/// Deterministic tool-call id for the single scripted call of a response.
+fn mock_tool_call_id(request_index: u64) -> String {
+    mock_tool_call_id_at(request_index, 0)
+}
+
+/// Deterministic, response-local tool-call id. Preserve the established bare
+/// request id for the first call; suffix later calls with their array index.
+fn mock_tool_call_id_at(request_index: u64, call_index: usize) -> String {
+    if call_index == 0 {
+        format!("call-stress-{request_index}")
+    } else {
+        format!("call-stress-{request_index}-{call_index}")
+    }
+}
+
+/// Non-streaming chat completion carrying the scripted tool call(s). The
+/// `arguments` field is a JSON string, matching the rig OpenAI wire shape
+/// the server parses (`Function::arguments` uses `stringified_json`); the
+/// `tool_calls` array order is the execution order and every id is unique.
+/// Scripted plans emit exactly one call per response.
 fn mock_tool_call_response(
     model: &str,
     request_index: u64,
-    call: &scripted::ToolCallSpec,
+    calls: &[scripted::ToolCallSpec],
 ) -> Value {
-    let arguments = match serde_json::to_string(&call.arguments) {
-        Ok(arguments) => arguments,
-        Err(_) => "{}".to_string(),
-    };
+    let tool_calls = calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            json!({
+                "id": mock_tool_call_id_at(request_index, index),
+                "type": "function",
+                "function": {
+                    "name": call.wire_name,
+                    "arguments": call.arguments.to_string()
+                }
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "id": format!("chatcmpl-stress-{request_index}"),
         "object": "chat.completion",
@@ -2766,14 +2859,7 @@ fn mock_tool_call_response(
             "message": {
                 "role": "assistant",
                 "content": null,
-                "tool_calls": [{
-                    "id": format!("call-stress-{request_index}"),
-                    "type": "function",
-                    "function": {
-                        "name": call.wire_name,
-                        "arguments": arguments
-                    }
-                }],
+                "tool_calls": tool_calls,
                 "refusal": null
             },
             "logprobs": null,
@@ -2788,12 +2874,15 @@ fn mock_tool_call_response(
     })
 }
 
-/// Streaming chat-completion chunks carrying one tool call: a header chunk
-/// with the call id and name, an arguments chunk, and a finish chunk.
+/// Streaming chat-completion chunks carrying the scripted tool call(s): a
+/// header chunk with every call's id and name, an arguments chunk with
+/// every call's arguments, and a finish chunk. Delta tool calls use
+/// distinct 0-based indices and unique ids so the client accumulates each
+/// call independently. Scripted plans emit exactly one call per response.
 fn mock_streaming_tool_call_chunks(
     model: &str,
     request_index: u64,
-    call: &scripted::ToolCallSpec,
+    calls: &[scripted::ToolCallSpec],
 ) -> (Value, Value, Value) {
     let base = json!({
         "id": format!("chatcmpl-stress-{request_index}"),
@@ -2802,36 +2891,46 @@ fn mock_streaming_tool_call_chunks(
         "model": model,
         "system_fingerprint": null,
     });
-    let call_id = format!("call-stress-{request_index}");
+    let header_calls = calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            json!({
+                "index": index,
+                "id": mock_tool_call_id_at(request_index, index),
+                "type": "function",
+                "function": {"name": call.wire_name, "arguments": ""}
+            })
+        })
+        .collect::<Vec<_>>();
     let mut header = base.clone();
     header["choices"] = json!([{
         "index": 0,
         "delta": {
             "role": "assistant",
             "content": null,
-            "tool_calls": [{
-                "index": 0,
-                "id": call_id,
-                "type": "function",
-                "function": {"name": call.wire_name, "arguments": ""}
-            }]
+            "tool_calls": header_calls
         },
         "logprobs": null,
         "finish_reason": null
     }]);
 
-    let arguments = match serde_json::to_string(&call.arguments) {
-        Ok(arguments) => arguments,
-        Err(_) => "{}".to_string(),
-    };
+    let body_calls = calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let arguments = call.arguments.to_string();
+            json!({
+                "index": index,
+                "function": {"arguments": arguments}
+            })
+        })
+        .collect::<Vec<_>>();
     let mut body = base.clone();
     body["choices"] = json!([{
         "index": 0,
         "delta": {
-            "tool_calls": [{
-                "index": 0,
-                "function": {"arguments": arguments}
-            }]
+            "tool_calls": body_calls
         },
         "logprobs": null,
         "finish_reason": null
@@ -3070,10 +3169,22 @@ mod tests {
                 "append": false,
             }),
         };
-        let response = mock_tool_call_response("stress-mock", 7, &call);
+        let second_call = scripted::ToolCallSpec {
+            wire_name: "ironclaw__memory__read".to_string(),
+            arguments: json!({"path": "stress/shared.md"}),
+        };
+        let response = mock_tool_call_response("stress-mock", 7, &[call, second_call]);
 
         assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(response["choices"][0]["message"]["content"], Value::Null);
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call-stress-7"
+        );
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][1]["id"],
+            "call-stress-7-1"
+        );
         let parsed: rig::providers::openai::completion::CompletionResponse =
             serde_json::from_value(response)
                 .expect("stress mock tool call should deserialize as rig-core OpenAI completion");
@@ -3082,7 +3193,9 @@ mod tests {
             rig::providers::openai::Message::Assistant { tool_calls, .. } => tool_calls,
             other => panic!("expected assistant message, got {other:?}"),
         };
-        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "call-stress-7");
+        assert_eq!(tool_calls[1].id, "call-stress-7-1");
         assert_eq!(tool_calls[0].function.name, "ironclaw__memory__write");
         assert_eq!(
             tool_calls[0].function.arguments,
@@ -3100,11 +3213,20 @@ mod tests {
             wire_name: "builtin__write_file".to_string(),
             arguments: json!({"path": "stress/u0__1.txt", "content": "payload"}),
         };
-        let (header, body, done) = mock_streaming_tool_call_chunks("stress-mock", 7, &call);
+        let second_call = scripted::ToolCallSpec {
+            wire_name: "builtin__read_file".to_string(),
+            arguments: json!({"path": "stress/u0__1.txt"}),
+        };
+        let (header, body, done) =
+            mock_streaming_tool_call_chunks("stress-mock", 7, &[call, second_call]);
 
         let header_call = &header["choices"][0]["delta"]["tool_calls"][0];
         assert_eq!(header_call["index"], 0);
+        assert_eq!(header_call["id"], "call-stress-7");
         assert_eq!(header_call["function"]["name"], "builtin__write_file");
+        let second_header_call = &header["choices"][0]["delta"]["tool_calls"][1];
+        assert_eq!(second_header_call["index"], 1);
+        assert_eq!(second_header_call["id"], "call-stress-7-1");
         assert_eq!(header["choices"][0]["delta"]["role"], "assistant");
 
         let body_call = &body["choices"][0]["delta"]["tool_calls"][0];
@@ -3113,6 +3235,391 @@ mod tests {
             serde_json::from_str(body_call["function"]["arguments"].as_str().expect("string"))
                 .expect("arguments json");
         assert_eq!(arguments["path"], "stress/u0__1.txt");
+        assert_eq!(done["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    fn mock_state(scripted: Option<ScriptKey>) -> MockLlmState {
+        MockLlmState {
+            model: "stress-mock".to_string(),
+            latency_ms: 0,
+            background_latency_ms: 0,
+            jitter_ms: 0,
+            output_bytes: 0,
+            failure_rate: 0.0,
+            scripted,
+            scripted_counters: Mutex::new(ScriptedMockCounters::default()),
+            scripted_driver: Mutex::new(scripted::ScriptedDriver::new(
+                scripted::DEFAULT_SCRIPTED_SESSION_CAPACITY,
+            )),
+            counter: AtomicU64::new(0),
+            foreground_counter: AtomicU64::new(0),
+            background_counter: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
+            max_in_flight: AtomicU64::new(0),
+            started_at: Instant::now(),
+            request_latencies: Mutex::new(Vec::new()),
+            foreground_request_latencies: Mutex::new(Vec::new()),
+            background_request_latencies: Mutex::new(Vec::new()),
+            request_start_offsets: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_completion_waits_then_emits_delayed_retry_tool_call() {
+        let state = Arc::new(mock_state(Some(ScriptKey::MemoryRoundtrip)));
+        let marker = scripted::marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
+        let tools = json!([
+            {"type": "function", "function": {"name": "ironclaw__memory__write"}},
+            {"type": "function", "function": {"name": "ironclaw__memory__read"}},
+        ]);
+        let initial_request = json!({
+            "stream": false,
+            "messages": [{"role": "user", "content": marker}],
+            "tools": tools,
+        });
+        let initial_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let ScriptedDecision::ToolCalls(calls) =
+            scripted_decision_for(&state, &initial_request, initial_index)
+        else {
+            panic!("expected initial write call");
+        };
+        let initial_id = mock_tool_call_id(initial_index);
+        let error_observation = r#"{"schema_version":1,"status":"error","summary":"transient","detail":{"kind":"generic_failure","failure_kind":"transient"},"artifacts":[],"recovery":{"same_call_retry":"allowed_after_delay","recovery_hint":"wait_then_retry","retry_after_ms":50},"trust":"untrusted_tool_output"}"#;
+        let retry_request = json!({
+            "stream": false,
+            "messages": [
+                {"role": "user", "content": marker},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": initial_id,
+                        "type": "function",
+                        "function": {
+                            "name": calls[0].wire_name,
+                            "arguments": serde_json::to_string(&calls[0].arguments)
+                                .expect("arguments json"),
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": initial_id,
+                    "content": error_observation,
+                },
+            ],
+            "tools": tools,
+        });
+        let body = serde_json::to_vec(&retry_request).expect("request json");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let (accepted, connected) = tokio::join!(listener.accept(), TcpStream::connect(address));
+        let (mut server, _) = accepted.expect("accept");
+        let mut client = connected.expect("connect");
+        let handler_state = Arc::clone(&state);
+        let handler =
+            tokio::spawn(
+                async move { handle_mock_completion(&mut server, &body, handler_state).await },
+            );
+
+        let mut response = Vec::new();
+        let mut read_response = Box::pin(client.read_to_end(&mut response));
+        tokio::select! {
+            result = &mut read_response => {
+                panic!("a delayed retry responded before 5ms: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+        tokio::time::timeout(Duration::from_millis(500), &mut read_response)
+            .await
+            .expect("delayed retry response timeout")
+            .expect("read delayed retry response");
+        drop(read_response);
+        handler
+            .await
+            .expect("mock handler task")
+            .expect("mock handler response");
+
+        let body_start = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|position| position + 4)
+            .expect("HTTP response body");
+        let payload: Value =
+            serde_json::from_slice(&response[body_start..]).expect("response json");
+        assert_eq!(payload["choices"][0]["finish_reason"], "tool_calls");
+        assert_ne!(
+            payload["choices"][0]["message"]["tool_calls"][0]["id"],
+            initial_id
+        );
+        let counters = state
+            .scripted_counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(counters.requests_seen["memory_roundtrip"], 2);
+        assert_eq!(counters.tool_calls_emitted["memory_roundtrip"], 2);
+    }
+
+    #[test]
+    fn scripted_counters_count_calls_not_responses() {
+        let state = mock_state(Some(ScriptKey::MemoryRoundtrip));
+        const MIB: usize = 1024 * 1024;
+        let marker = scripted::marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", MIB);
+        let request = |messages: Vec<Value>| {
+            json!({
+                "stream": false,
+                "messages": messages,
+                "tools": [
+                    {"type": "function", "function": {"name": "ironclaw__memory__write"}},
+                    {"type": "function", "function": {"name": "ironclaw__memory__read"}},
+                    {"type": "function", "function": {"name": "ironclaw__memory__search"}},
+                ]
+            })
+        };
+        let mut messages = vec![json!({"role": "user", "content": marker})];
+        // Each request emits exactly one scripted call, and the counter
+        // records exactly one emitted call per request: a 1 MiB plan needs
+        // one response per plan step (19 for the roundtrip), never zero
+        // and never more than one. The request index mirrors the
+        // production reservation in `handle_mock_completion`.
+        for emitted in 1..=3 {
+            let request_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
+            match scripted_decision_for(&state, &request(messages.clone()), request_index) {
+                ScriptedDecision::ToolCalls(calls) => {
+                    assert_eq!(calls.len(), 1, "exactly one call per response");
+                }
+                other => panic!("expected a tool call, got {other:?}"),
+            }
+            let counters = state
+                .scripted_counters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(
+                counters.requests_seen["memory_roundtrip"], emitted,
+                "request {emitted}"
+            );
+            assert_eq!(
+                counters.tool_calls_emitted["memory_roundtrip"], emitted,
+                "counter must count calls, not responses"
+            );
+            messages.push(json!({
+                "role": "tool",
+                "content": "Tool ironclaw.memory.write returned: ok"
+            }));
+        }
+    }
+
+    #[test]
+    fn scripted_one_mib_plan_emits_search_checkpoint() {
+        let state = mock_state(Some(ScriptKey::MemoryRoundtrip));
+        const MIB: usize = 1024 * 1024;
+        let marker = scripted::marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", MIB);
+        let request = |messages: Vec<Value>| {
+            json!({
+                "stream": false,
+                "messages": messages,
+                "tools": [
+                    {"type": "function", "function": {"name": "ironclaw__memory__write"}},
+                    {"type": "function", "function": {"name": "ironclaw__memory__read"}},
+                    {"type": "function", "function": {"name": "ironclaw__memory__search"}},
+                ]
+            })
+        };
+        let mut messages = vec![json!({"role": "user", "content": marker})];
+        let mut emitted_writes = 0usize;
+        loop {
+            let request_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
+            match scripted_decision_for(&state, &request(messages.clone()), request_index) {
+                ScriptedDecision::ToolCalls(calls) => {
+                    assert_eq!(
+                        calls.len(),
+                        1,
+                        "one search checkpoint remains after the writes"
+                    );
+                    if emitted_writes < 18 {
+                        assert_eq!(calls[0].wire_name, "ironclaw__memory__write");
+                        emitted_writes += 1;
+                        messages.push(json!({
+                            "role": "tool",
+                            "content": "Tool ironclaw.memory.write returned: ok"
+                        }));
+                    } else {
+                        assert_eq!(calls[0].wire_name, "ironclaw__memory__search");
+                        assert_eq!(calls[0].arguments["query"], scripted::MEMORY_SEARCH_QUERY);
+                        assert_eq!(calls[0].arguments["limit"], scripted::MEMORY_SEARCH_LIMIT);
+                        break;
+                    }
+                }
+                other => panic!("expected a tool call, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scripted_driver_survives_compaction_to_one_mib_confirmed() {
+        // The live mock path with production-style compaction: after the
+        // first request the original user marker is gone and every request
+        // retains only the last assistant/tool pair. The stateful driver
+        // must recover the operation from the embedded marker in the write
+        // call's arguments (and from the recorded call id at the search
+        // checkpoint), advance exactly one step per request, and finalize
+        // with confirmed after 19 singleton calls.
+        let state = mock_state(Some(ScriptKey::MemoryRoundtrip));
+        const MIB: usize = 1024 * 1024;
+        let parsed = scripted::ScriptedOp {
+            key: ScriptKey::MemoryRoundtrip,
+            user: "u0".to_string(),
+            op: "1".to_string(),
+            size_bytes: MIB,
+        };
+        let marker = scripted::marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", MIB);
+        let tools = json!([
+            {"type": "function", "function": {"name": "ironclaw__memory__write"}},
+            {"type": "function", "function": {"name": "ironclaw__memory__read"}},
+            {"type": "function", "function": {"name": "ironclaw__memory__search"}},
+        ]);
+        let mut last_pair: Vec<Value> = vec![json!({"role": "user", "content": marker})];
+        let mut calls = 0usize;
+        loop {
+            // Reserve the request index exactly like the production path,
+            // and echo the same index's call id in the assistant message:
+            // the driver must record the id the response actually carries.
+            let request_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let decision = scripted_decision_for(
+                &state,
+                &json!({ "stream": false, "messages": last_pair.clone(), "tools": tools.clone() }),
+                request_index,
+            );
+            match decision {
+                ScriptedDecision::ToolCalls(call_list) => {
+                    assert_eq!(call_list.len(), 1, "never batched");
+                    calls += 1;
+                    let spec = call_list[0].clone();
+                    let id = mock_tool_call_id(request_index);
+                    let echoed = if spec.wire_name == "ironclaw__memory__search" {
+                        parsed.readback_token()
+                    } else {
+                        "Tool ironclaw.memory.write returned: ok".to_string()
+                    };
+                    last_pair = vec![
+                        json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": spec.wire_name,
+                                    "arguments": serde_json::to_string(&spec.arguments)
+                                        .expect("arguments json")
+                                }
+                            }]
+                        }),
+                        json!({ "role": "tool", "tool_call_id": id, "content": echoed }),
+                    ];
+                }
+                ScriptedDecision::FinalText(text) => {
+                    assert_eq!(text, "ironclaw-stress-tool result u0__1 confirmed");
+                    assert_eq!(calls, 19, "19 singleton calls before the verdict");
+                    break;
+                }
+                other => panic!("round {calls}: unexpected decision {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scripted_records_reserved_call_id_not_counter_reload() {
+        // The regression behind the `request_index` parameter: the recorded
+        // session call id must be the one the response actually carries
+        // (`call-stress-<request_index>`), never a reload of the shared
+        // counter. Under concurrent connections another request can
+        // increment the counter between the reservation in
+        // `handle_mock_completion` and a reload, which would record an id
+        // that differs from the wire id and break the following request's
+        // exact `tool_call_id` matching. Deterministic without threads: set
+        // the counter to a value that differs from the reserved index and
+        // prove the recorded id follows the index, while the counter is
+        // never read by the decision path.
+        let state = mock_state(Some(ScriptKey::MemoryRoundtrip));
+        state.counter.store(5, Ordering::Relaxed);
+        let marker = scripted::marker_message(ScriptKey::MemoryRoundtrip, "u0", "1", 4096);
+        let request = json!({
+            "stream": false,
+            "messages": [{"role": "user", "content": marker}],
+            "tools": [
+                {"type": "function", "function": {"name": "ironclaw__memory__write"}},
+                {"type": "function", "function": {"name": "ironclaw__memory__read"}},
+            ]
+        });
+        let decision = scripted_decision_for(&state, &request, 42);
+        assert!(
+            matches!(decision, ScriptedDecision::ToolCalls(_)),
+            "the first write must be emitted"
+        );
+        let driver = state
+            .scripted_driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let parsed = scripted::ScriptedOp {
+            key: ScriptKey::MemoryRoundtrip,
+            user: "u0".to_string(),
+            op: "1".to_string(),
+            size_bytes: 4096,
+        };
+        assert_eq!(
+            driver.last_call_id_for(&parsed),
+            Some("call-stress-42"),
+            "the recorded id is the reserved request_index's id, not a counter reload"
+        );
+        assert_eq!(
+            state.counter.load(Ordering::Relaxed),
+            5,
+            "the decision path never reloads the shared counter"
+        );
+    }
+
+    #[test]
+    fn mock_serializes_memory_search_tool_call() {
+        let call = scripted::ToolCallSpec {
+            wire_name: "ironclaw__memory__search".to_string(),
+            arguments: json!({
+                "query": scripted::MEMORY_SEARCH_QUERY,
+                "limit": scripted::MEMORY_SEARCH_LIMIT,
+            }),
+        };
+        // Non-streaming shape: the arguments serialize as a JSON string the
+        // rig client parses back into the query/limit pair.
+        let response = mock_tool_call_response("stress-mock", 7, std::slice::from_ref(&call));
+        let parsed: rig::providers::openai::completion::CompletionResponse =
+            serde_json::from_value(response)
+                .expect("search call should deserialize as rig-core OpenAI completion");
+        let message = &parsed.choices[0].message;
+        let tool_calls = match message {
+            rig::providers::openai::Message::Assistant { tool_calls, .. } => tool_calls,
+            other => panic!("expected assistant message, got {other:?}"),
+        };
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "ironclaw__memory__search");
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            json!({
+                "query": scripted::MEMORY_SEARCH_QUERY,
+                "limit": scripted::MEMORY_SEARCH_LIMIT,
+            })
+        );
+        // Streaming shape: the arguments chunk carries the same payload.
+        let (header, body, done) = mock_streaming_tool_call_chunks("stress-mock", 7, &[call]);
+        let header_call = &header["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(header_call["index"], 0);
+        assert_eq!(header_call["function"]["name"], "ironclaw__memory__search");
+        let body_call = &body["choices"][0]["delta"]["tool_calls"][0];
+        let arguments: Value =
+            serde_json::from_str(body_call["function"]["arguments"].as_str().expect("string"))
+                .expect("arguments json");
+        assert_eq!(arguments["query"], scripted::MEMORY_SEARCH_QUERY);
+        assert_eq!(arguments["limit"], scripted::MEMORY_SEARCH_LIMIT);
         assert_eq!(done["choices"][0]["finish_reason"], "tool_calls");
     }
 

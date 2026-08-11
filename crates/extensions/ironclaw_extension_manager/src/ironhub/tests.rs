@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical fixture-path update follows the extension-package colocation with no new test logic, plan #7037
+// arch-exempt: large_file, bundled-skill verification and install regressions reuse the centralized signed-catalog lifecycle fixtures, plan #4088
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
@@ -25,7 +25,12 @@ use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContex
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_skills::ManagedSkillSource;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::Duration;
+use tokio::sync::Barrier;
 
 use super::agent_link::{InstallDelivery, IronhubSharedKey, RegisterChallenge};
 use super::catalog::{
@@ -37,7 +42,7 @@ use super::link_service::{
 };
 use super::model::{
     IronHubArtifact, IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
-    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry,
+    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry, IronHubSkillFile,
 };
 use super::service::{
     IronHubService, RebornIronHubRuntime, clear_test_manifest_cache, configure_test_catalog,
@@ -436,6 +441,200 @@ fn signed_catalog_verification_rejects_bad_signature() {
     assert_eq!(error, "manifest signature verification failed");
 }
 
+fn skill_manifest_with_files(files: Vec<IronHubSkillFile>) -> IronHubManifest {
+    IronHubManifest {
+        version: "1".to_string(),
+        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        release_tag: "test".to_string(),
+        repo: "nearai/ironhub".to_string(),
+        tools: Vec::new(),
+        skills: vec![IronHubSkillEntry {
+            name: "bundled-skill".to_string(),
+            trunk: String::new(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            provenance: IronHubProvenance::Official,
+            skill_md: IronHubArtifact {
+                url: "https://hub.ironclaw.com/bundled-skill/SKILL.md".to_string(),
+                size_bytes: 10,
+                sha256: "a".repeat(64),
+            },
+            files,
+        }],
+    }
+}
+
+fn skill_file(path: &str, sha256: &str) -> IronHubSkillFile {
+    IronHubSkillFile {
+        path: path.to_string(),
+        artifact: IronHubArtifact {
+            url: format!("https://hub.ironclaw.com/bundled-skill/{path}"),
+            size_bytes: 4,
+            sha256: sha256.to_string(),
+        },
+    }
+}
+
+fn bundled_skill_digest(manifest: &IronHubManifest) -> String {
+    let (_, _, digest) = classify_gate_and_digest(
+        manifest,
+        "bundled-skill",
+        Some(IronHubEntryKind::Skill),
+        &IronHubInstallOptions::default(),
+        IronHubManifestSource::Public,
+    )
+    .expect("official skill classifies");
+    digest
+}
+
+#[test]
+fn a_bundled_file_change_moves_the_skill_artifact_digest() {
+    let before = bundled_skill_digest(&skill_manifest_with_files(vec![skill_file(
+        "scripts/run.py",
+        &"1".repeat(64),
+    )]));
+    let changed = bundled_skill_digest(&skill_manifest_with_files(vec![skill_file(
+        "scripts/run.py",
+        &"2".repeat(64),
+    )]));
+    let renamed = bundled_skill_digest(&skill_manifest_with_files(vec![skill_file(
+        "scripts/other.py",
+        &"1".repeat(64),
+    )]));
+    let dropped = bundled_skill_digest(&skill_manifest_with_files(Vec::new()));
+
+    assert_ne!(before, changed);
+    assert_ne!(before, renamed);
+    assert_ne!(before, dropped);
+}
+
+#[test]
+fn bundled_file_order_does_not_change_the_skill_artifact_digest() {
+    let forward = bundled_skill_digest(&skill_manifest_with_files(vec![
+        skill_file("scripts/a.py", &"1".repeat(64)),
+        skill_file("scripts/b.py", &"2".repeat(64)),
+    ]));
+    let reversed = bundled_skill_digest(&skill_manifest_with_files(vec![
+        skill_file("scripts/b.py", &"2".repeat(64)),
+        skill_file("scripts/a.py", &"1".repeat(64)),
+    ]));
+
+    assert_eq!(forward, reversed);
+}
+
+#[test]
+fn a_skill_without_bundled_files_keeps_its_established_digest() {
+    let manifest = skill_manifest_with_files(Vec::new());
+    assert_eq!(
+        bundled_skill_digest(&manifest),
+        format!(
+            "sha256:{}",
+            sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes())
+        )
+    );
+}
+
+#[test]
+fn a_skill_bundled_path_that_escapes_the_package_is_rejected() {
+    let manifest = skill_manifest_with_files(vec![skill_file("../escape.py", &"1".repeat(64))]);
+    assert!(validate_manifest(&manifest).is_err());
+}
+
+#[test]
+fn reserved_skill_bundle_paths_are_rejected_by_catalog_validation() {
+    for path in ["SKILL.md", ".ironclaw-install.json"] {
+        let manifest = skill_manifest_with_files(vec![skill_file(path, &"1".repeat(64))]);
+        assert!(
+            validate_manifest(&manifest).is_err(),
+            "reserved install path {path:?} must be rejected before download"
+        );
+    }
+}
+
+#[test]
+fn duplicate_normalized_skill_bundle_paths_are_rejected_by_catalog_validation() {
+    let manifest = skill_manifest_with_files(vec![
+        skill_file("scripts/run.py", &"1".repeat(64)),
+        skill_file("scripts/./run.py", &"2".repeat(64)),
+    ]);
+
+    assert!(
+        validate_manifest(&manifest).is_err(),
+        "catalog validation must reject paths that install to the same destination"
+    );
+}
+
+#[test]
+fn skill_bundle_file_directory_collisions_are_rejected_by_catalog_validation() {
+    for files in [
+        vec![skill_file("SKILL.md/helper", &"1".repeat(64))],
+        vec![skill_file(".ironclaw-install.json/helper", &"1".repeat(64))],
+        vec![
+            skill_file("scripts", &"1".repeat(64)),
+            skill_file("scripts/run.py", &"2".repeat(64)),
+        ],
+    ] {
+        assert!(
+            validate_manifest(&skill_manifest_with_files(files)).is_err(),
+            "catalog validation must reject destinations that collide as files and directories"
+        );
+    }
+}
+
+#[test]
+fn a_skill_bundle_is_bounded_by_count_and_total_declared_bytes() {
+    let mut too_many = Vec::new();
+    for index in 0..=ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+        too_many.push(skill_file(&format!("scripts/f{index}.py"), &"1".repeat(64)));
+    }
+    assert!(validate_manifest(&skill_manifest_with_files(too_many)).is_err());
+
+    let per_file = u64::try_from(ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES).expect("cap");
+    let mut oversize = skill_file("scripts/big.py", &"1".repeat(64));
+    oversize.artifact.size_bytes = per_file + 1;
+    assert!(validate_manifest(&skill_manifest_with_files(vec![oversize])).is_err());
+
+    let mut total = Vec::new();
+    let total_cap_file_count = ironclaw_skills::MAX_INSTALL_BUNDLE_TOTAL_BYTES
+        / ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES
+        + 1;
+    assert!(
+        total_cap_file_count <= ironclaw_skills::MAX_INSTALL_BUNDLE_FILES,
+        "the total-bytes-cap case must stay under the file-count cap so this rejection is \
+         attributed to the total cap"
+    );
+    for index in 0..total_cap_file_count {
+        let mut file = skill_file(&format!("scripts/g{index}.py"), &"1".repeat(64));
+        file.artifact.size_bytes = per_file;
+        total.push(file);
+    }
+    assert!(validate_manifest(&skill_manifest_with_files(total)).is_err());
+}
+
+#[test]
+fn a_skill_bundle_accepts_each_exact_declared_limit() {
+    let exact_count = (0..ironclaw_skills::MAX_INSTALL_BUNDLE_FILES)
+        .map(|index| skill_file(&format!("scripts/count-{index}.py"), &"1".repeat(64)))
+        .collect();
+    assert!(validate_manifest(&skill_manifest_with_files(exact_count)).is_ok());
+
+    let per_file = u64::try_from(ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES).expect("cap");
+    let mut exact_file = skill_file("scripts/exact-file.py", &"1".repeat(64));
+    exact_file.artifact.size_bytes = per_file;
+    assert!(validate_manifest(&skill_manifest_with_files(vec![exact_file])).is_ok());
+
+    let exact_total_file_count = ironclaw_skills::MAX_INSTALL_BUNDLE_TOTAL_BYTES
+        / ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES;
+    let exact_total = (0..exact_total_file_count)
+        .map(|index| {
+            let mut file = skill_file(&format!("scripts/total-{index}.py"), &"1".repeat(64));
+            file.artifact.size_bytes = per_file;
+            file
+        })
+        .collect();
+    assert!(validate_manifest(&skill_manifest_with_files(exact_total)).is_ok());
+}
+
 #[test]
 fn unverified_entry_requires_non_model_operator_acknowledgement() {
     let manifest = IronHubManifest {
@@ -455,6 +654,7 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
                 size_bytes: 10,
                 sha256: "a".repeat(64),
             },
+            files: Vec::new(),
         }],
     };
 
@@ -894,6 +1094,8 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         b"---\nname: installed-skill\ndescription: Installed by IronHub\n---\n# Installed\n"
             .to_vec();
     let prompt_bytes = published_tool_prompt();
+    let skill_file_url = "https://hub.ironclaw.com/tests/native-install/scripts/run.py";
+    let skill_file_bytes = b"print('installed bundled file')\n".to_vec();
     let manifest = signed_manifest(
         mixed_manifest_json(MixedManifestFixture {
             tool_url,
@@ -905,6 +1107,9 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             skill_url,
             skill_size: skill_bytes.len(),
             skill_sha: &sha256_hex(&skill_bytes),
+            skill_file_url,
+            skill_file_size: skill_file_bytes.len(),
+            skill_file_sha: &sha256_hex(&skill_file_bytes),
             tool_manifest_url,
             input_schema_url,
             output_schema_url,
@@ -918,12 +1123,13 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         (capabilities_url, capabilities_bytes),
         (
             tool_manifest_url,
-            published_tool_manifest_with_prompt("0.1.0"),
+            published_basic_tool_manifest_with_prompt("0.1.0"),
         ),
         (input_schema_url, published_input_schema()),
         (output_schema_url, published_output_schema()),
         (prompt_url, prompt_bytes.clone()),
         (skill_url, skill_bytes),
+        (skill_file_url, skill_file_bytes.clone()),
     ]));
     let service = configure_test_catalog(
         IronHubService::new_with_runtime_egress(
@@ -951,16 +1157,15 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     assert_eq!(tool.phase, IronHubPhase::Installed);
     let manifest_path =
         VirtualPath::new("/system/extensions/installed-tool/manifest.toml").expect("path");
-    let materialized = services
-        .filesystem
-        .read_file(&manifest_path)
-        .await
-        .expect("tool manifest materialized");
-    assert!(
-        String::from_utf8(materialized)
-            .expect("manifest utf8")
-            .contains("reborn.extension_manifest.v3")
-    );
+    let materialized = String::from_utf8(
+        services
+            .filesystem
+            .read_file(&manifest_path)
+            .await
+            .expect("tool manifest materialized"),
+    )
+    .expect("manifest utf8");
+    assert!(materialized.contains("reborn.extension_manifest.v3"));
     let schema_path = VirtualPath::new(
         "/system/extensions/installed-tool/schemas/installed-tool/invoke.input.v1.json",
     )
@@ -984,6 +1189,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             .expect("verified prompt materialized"),
         prompt_bytes,
     );
+    assert!(materialized.contains("injection = { type = \"basic\", username = \"api-user\" }"));
     assert!(
         services
             .extension_management
@@ -1003,8 +1209,8 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             .active_extensions_for_test()
             .snapshot()
             .get_extension(&ExtensionId::new("installed-tool").expect("extension id"))
-            .is_some(),
-        "extension manager activated and published the installed tool"
+            .is_none(),
+        "a credentialed extension installs but remains inactive until account setup"
     );
 
     let skill = service
@@ -1018,22 +1224,201 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         .await
         .expect("verified skill installs");
     assert_eq!(skill.phase, IronHubPhase::Installed);
+    let bundled_file_path = VirtualPath::new(format!(
+        "/projects/tenants/{}/users/{}/skills/installed-skill/scripts/run.py",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .expect("bundled file path");
     let installed_skill = services
         .skill_management
         .read_content_for_scope(scope, "installed-skill")
         .await
         .expect("skill manager reads installed skill");
     assert!(installed_skill.content.contains("# Installed"));
+    assert_eq!(
+        services
+            .filesystem
+            .read_file(&bundled_file_path)
+            .await
+            .expect("published skill file materialized"),
+        skill_file_bytes,
+    );
 
     let requests = egress.requests();
     // Catalog, then the tool's manifest, wasm, capabilities, two schemas, and
-    // prompt document, then the skill.
-    assert_eq!(requests.len(), 8);
+    // prompt document, then the skill and its bundled file.
+    assert_eq!(requests.len(), 9);
     assert!(requests.iter().all(|request| {
         request.runtime == RuntimeKind::FirstParty
             && request.policy.deny_private_ip_ranges
             && request.capability_id.as_str() == super::IRONHUB_INSTALL_CAPABILITY_ID
     }));
+}
+
+#[tokio::test]
+async fn bundled_file_downloads_are_bounded_and_all_files_install() {
+    const FILE_COUNT: usize = 10;
+    const EXPECTED_CONCURRENCY: usize = 8;
+
+    let owner = "ironhub-bounded-download-owner";
+    let services =
+        crate::lifecycle_test_support::build_lifecycle_test_services(owner, None, false).await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url = "https://hub.ironclaw.com/tests/bounded-download/manifest.json";
+    let skill_bytes =
+        b"---\nname: bundled-skill\ndescription: Concurrent install fixture\n---\n# Fixture\n"
+            .to_vec();
+    let mut manifest = skill_manifest_with_files(Vec::new());
+    manifest.skills[0].skill_md.size_bytes = skill_bytes.len() as u64;
+    manifest.skills[0].skill_md.sha256 = sha256_hex(&skill_bytes);
+
+    let mut responses = vec![(manifest.skills[0].skill_md.url.clone(), skill_bytes)];
+    for index in 0..FILE_COUNT {
+        let path = format!("scripts/file-{index}.txt");
+        let contents = format!("file {index}").into_bytes();
+        let mut file = skill_file(&path, &sha256_hex(&contents));
+        file.artifact.size_bytes = contents.len() as u64;
+        responses.push((file.artifact.url.clone(), contents));
+        manifest.skills[0].files.push(file);
+    }
+    let envelope = signed_manifest(
+        serde_json::to_string(&manifest).expect("manifest JSON"),
+        &test_signing_key(),
+    );
+    responses.push((manifest_url.to_string(), envelope));
+    let egress = Arc::new(BoundedDownloadEgress::new(responses, EXPECTED_CONCURRENCY));
+    let service = configure_test_catalog(
+        IronHubService::new_with_runtime_egress(
+            Arc::clone(&services.skill_management),
+            Arc::clone(&services.extension_management),
+            egress.clone(),
+            scope.clone(),
+            CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+            test_link_state(),
+        ),
+        manifest_url,
+        test_manifest_verify_keys(),
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        service.execute(IronHubCommand::Install {
+            name: "bundled-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                ..IronHubInstallOptions::default()
+            },
+        }),
+    )
+    .await
+    .expect("download concurrency dropped below the barrier width")
+    .expect("bounded companion downloads install");
+
+    assert_eq!(egress.companion_downloads(), FILE_COUNT);
+    assert_eq!(egress.max_concurrency(), EXPECTED_CONCURRENCY);
+    for index in 0..FILE_COUNT {
+        let path = VirtualPath::new(format!(
+            "/projects/tenants/{}/users/{}/skills/bundled-skill/scripts/file-{index}.txt",
+            scope.tenant_id.as_str(),
+            scope.user_id.as_str()
+        ))
+        .expect("installed file path");
+        assert_eq!(
+            services
+                .filesystem
+                .read_file(&path)
+                .await
+                .expect("file read"),
+            format!("file {index}").into_bytes()
+        );
+    }
+}
+
+#[tokio::test]
+async fn bundled_file_checksum_mismatch_aborts_skill_install() {
+    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+        "ironhub-bundle-mismatch-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+        "ironhub-bundle-mismatch-owner",
+    );
+    let manifest_url = "https://hub.ironclaw.com/tests/bundle-mismatch/manifest.json";
+    let skill_url = "https://hub.ironclaw.com/tests/bundle-mismatch/SKILL.md";
+    let bundled_file_url = "https://hub.ironclaw.com/tests/bundle-mismatch/scripts/run.py";
+    let skill_bytes =
+        b"---\nname: installed-skill\ndescription: Installed by IronHub\n---\n# Installed\n"
+            .to_vec();
+    let expected_bundled_file = b"print('expected')\n".to_vec();
+    let tampered_bundled_file = b"print('tampered')\n".to_vec();
+    assert_eq!(
+        expected_bundled_file.len(),
+        tampered_bundled_file.len(),
+        "equal lengths keep this test attributed to the checksum check"
+    );
+    let manifest = signed_manifest(
+        mixed_manifest_json(MixedManifestFixture {
+            tool_url: "https://hub.ironclaw.com/tests/bundle-mismatch/tool.wasm",
+            tool_size: 1,
+            tool_sha: &"1".repeat(64),
+            capabilities_url: "https://hub.ironclaw.com/tests/bundle-mismatch/capabilities.json",
+            capabilities_size: 1,
+            capabilities_sha: &"2".repeat(64),
+            skill_url,
+            skill_size: skill_bytes.len(),
+            skill_sha: &sha256_hex(&skill_bytes),
+            skill_file_url: bundled_file_url,
+            skill_file_size: expected_bundled_file.len(),
+            skill_file_sha: &sha256_hex(&expected_bundled_file),
+            tool_manifest_url: "https://hub.ironclaw.com/tests/bundle-mismatch/manifest.toml",
+            input_schema_url: "https://hub.ironclaw.com/tests/bundle-mismatch/input.json",
+            output_schema_url: "https://hub.ironclaw.com/tests/bundle-mismatch/output.json",
+            prompt_url: "https://hub.ironclaw.com/tests/bundle-mismatch/invoke.md",
+        }),
+        &test_signing_key(),
+    );
+    let egress = Arc::new(RecordingEgress::new([
+        (manifest_url, manifest),
+        (skill_url, skill_bytes),
+        (bundled_file_url, tampered_bundled_file),
+    ]));
+    let service = configure_test_catalog(
+        IronHubService::new_with_runtime_egress(
+            Arc::clone(&services.skill_management),
+            Arc::clone(&services.extension_management),
+            egress.clone(),
+            scope.clone(),
+            CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+            test_link_state(),
+        ),
+        manifest_url,
+        test_manifest_verify_keys(),
+    );
+
+    let error = service
+        .execute(IronHubCommand::Install {
+            name: "installed-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("a mismatched bundled file must abort installation");
+
+    assert!(matches!(error, IronHubCommandError::Install { .. }));
+    assert!(
+        services
+            .skill_management
+            .read_content_for_scope(scope, "installed-skill")
+            .await
+            .is_err(),
+        "neither SKILL.md nor bundled files may be installed after verification fails"
+    );
+    assert_eq!(egress.requests().len(), 3);
 }
 
 #[tokio::test]
@@ -1356,13 +1741,13 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
         .as_str()
         .strip_suffix("/.ironclaw-install.json")
         .expect("metadata has skill directory");
-    let companion_path =
-        VirtualPath::new(format!("{skill_dir}/references.txt")).expect("companion path");
-    let companion_bytes = b"old bundled reference\n";
+    let bundled_file_path =
+        VirtualPath::new(format!("{skill_dir}/references.txt")).expect("bundled file path");
+    let bundled_file_bytes = b"old bundled reference\n";
     skill_filesystem
-        .write_file(&companion_path, companion_bytes)
+        .write_file(&bundled_file_path, bundled_file_bytes)
         .await
-        .expect("seed old companion file");
+        .expect("seed old bundled file");
     let malformed_metadata = br#"{"source":"installed_url","source_url":"unterminated"#;
     skill_filesystem
         .write_file(&metadata_path, malformed_metadata)
@@ -1425,10 +1810,10 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
     );
     assert_eq!(
         skill_filesystem
-            .read_file(&companion_path)
+            .read_file(&bundled_file_path)
             .await
-            .expect("restored companion file"),
-        companion_bytes,
+            .expect("restored bundled file"),
+        bundled_file_bytes,
         "compensation must restore every bundled file"
     );
     let restored = skill_management
@@ -1898,6 +2283,7 @@ fn skill_manifest(
                 size_bytes: u64::try_from(artifact.len()).expect("test artifact length"),
                 sha256: sha256_hex(artifact),
             },
+            files: Vec::new(),
         }],
     }
 }
@@ -2013,6 +2399,9 @@ struct MixedManifestFixture<'a> {
     skill_url: &'a str,
     skill_size: usize,
     skill_sha: &'a str,
+    skill_file_url: &'a str,
+    skill_file_size: usize,
+    skill_file_sha: &'a str,
     tool_manifest_url: &'a str,
     input_schema_url: &'a str,
     output_schema_url: &'a str,
@@ -2030,6 +2419,9 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
         skill_url,
         skill_size,
         skill_sha,
+        skill_file_url,
+        skill_file_size,
+        skill_file_sha,
         tool_manifest_url,
         input_schema_url,
         output_schema_url,
@@ -2056,7 +2448,10 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
                 "size_bytes": capabilities_size,
                 "sha256": capabilities_sha
             },
-            "manifest": published_tool_manifest_with_prompt_artifact(tool_manifest_url, "0.1.0"),
+            "manifest": published_basic_tool_manifest_with_prompt_artifact(
+                tool_manifest_url,
+                "0.1.0",
+            ),
             "schemas": published_tool_schema_artifacts(input_schema_url, output_schema_url),
             "prompts": published_tool_prompt_artifacts(prompt_url)
         }],
@@ -2069,7 +2464,13 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
                 "url": skill_url,
                 "size_bytes": skill_size,
                 "sha256": skill_sha
-            }
+            },
+            "files": [{
+                "path": "scripts/run.py",
+                "url": skill_file_url,
+                "size_bytes": skill_file_size,
+                "sha256": skill_file_sha
+            }]
         }]
     })
     .to_string()
@@ -2092,6 +2493,28 @@ struct ToolManifestFixture<'a> {
 /// The extension manifest IronHub publishes for the fixture tool, shaped like
 /// what `scripts/generate-extension-manifest.py` emits in that repository.
 pub(crate) fn published_tool_manifest(version: &str) -> Vec<u8> {
+    published_tool_manifest_with_credentials(version, "")
+}
+
+fn published_basic_tool_manifest(version: &str) -> Vec<u8> {
+    published_tool_manifest_with_credentials(
+        version,
+        r#"
+[[tools.credentials]]
+handle = "installed_tool_password"
+vendor = "installed-tool"
+audience = { scheme = "https", host = "api.installed-tool.com" }
+injection = { type = "basic", username = "api-user" }
+
+[auth.installed-tool]
+method = "api_key"
+display_name = "installed-tool"
+fields = [ { handle = "installed_tool_password", label = "Password", secret = true } ]
+"#,
+    )
+}
+
+fn published_tool_manifest_with_credentials(version: &str, credentials: &str) -> Vec<u8> {
     format!(
         r#"schema_version = "reborn.extension_manifest.v3"
 id = "installed-tool"
@@ -2108,19 +2531,24 @@ module = "wasm/installed-tool.wasm"
 origin_gate_matrix = {{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }}
 id = "installed-tool.invoke"
 description = "test tool"
-effects = ["network"]
+effects = ["network"{credentials_effect}]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/installed-tool/invoke.input.v1.json"
 output_schema_ref = "schemas/installed-tool/raw_output.v1.json"
-"#
+{credentials}
+"#,
+        credentials_effect = if credentials.is_empty() { "" } else { ", \"use_secret\"" },
     )
     .into_bytes()
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn published_tool_manifest_with_prompt(version: &str) -> Vec<u8> {
-    String::from_utf8(published_tool_manifest(version))
+fn published_basic_tool_manifest_with_prompt(version: &str) -> Vec<u8> {
+    add_prompt_doc_ref(published_basic_tool_manifest(version))
+}
+
+fn add_prompt_doc_ref(bytes: Vec<u8>) -> Vec<u8> {
+    String::from_utf8(bytes)
         .expect("fixture manifest is UTF-8")
         .replace(
             "output_schema_ref = \"schemas/installed-tool/raw_output.v1.json\"\n",
@@ -2138,8 +2566,11 @@ fn published_tool_manifest_artifact(url: &str, version: &str) -> serde_json::Val
     })
 }
 
-fn published_tool_manifest_with_prompt_artifact(url: &str, version: &str) -> serde_json::Value {
-    let bytes = published_tool_manifest_with_prompt(version);
+fn published_basic_tool_manifest_with_prompt_artifact(
+    url: &str,
+    version: &str,
+) -> serde_json::Value {
+    let bytes = published_basic_tool_manifest_with_prompt(version);
     serde_json::json!({
         "url": url,
         "size_bytes": bytes.len(),
@@ -2282,6 +2713,74 @@ struct RecordedRequest {
 struct RecordingEgress {
     responses: Mutex<HashMap<String, VecDeque<Vec<u8>>>>,
     requests: Mutex<Vec<RecordedRequest>>,
+}
+
+struct BoundedDownloadEgress {
+    responses: Mutex<HashMap<String, Vec<u8>>>,
+    first_wave: Barrier,
+    first_wave_size: usize,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+    companion_downloads: AtomicUsize,
+}
+
+impl BoundedDownloadEgress {
+    fn new(responses: Vec<(String, Vec<u8>)>, first_wave_size: usize) -> Self {
+        Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            first_wave: Barrier::new(first_wave_size),
+            first_wave_size,
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+            companion_downloads: AtomicUsize::new(0),
+        }
+    }
+
+    fn max_concurrency(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    fn companion_downloads(&self) -> usize {
+        self.companion_downloads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for BoundedDownloadEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let body = self
+            .responses
+            .lock()
+            .expect("responses lock")
+            .remove(&request.url)
+            .ok_or_else(|| RuntimeHttpEgressError::Request {
+                reason: format!("unexpected test URL {}", request.url),
+                request_bytes: 0,
+                response_bytes: 0,
+            })?;
+        if request.url.contains("/scripts/file-") {
+            let ordinal = self.companion_downloads.fetch_add(1, Ordering::SeqCst);
+            let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(active, Ordering::SeqCst);
+            if ordinal < self.first_wave_size {
+                self.first_wave.wait().await;
+            }
+            tokio::time::sleep(Duration::from_millis(20usize.saturating_sub(ordinal) as u64)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: Vec::new(),
+            body,
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        })
+    }
 }
 
 impl RecordingEgress {
