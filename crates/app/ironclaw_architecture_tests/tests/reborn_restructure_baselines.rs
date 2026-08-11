@@ -134,7 +134,14 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// production wiring and inline regression coverage to the current main tree.
 /// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
 /// manifest ceiling and observed value move with this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_582;
+/// ✎ Re-recorded 41_582 → 41_731 on 2026-08-11 for #7471: the dedicated
+/// process-journal PostgreSQL pool adds its service-graph assembly (second
+/// pool open + journal filesystem mount wiring). Measured on this branch's
+/// merged tree with `bash scripts/ci/check-composition-budget.sh`; the
+/// manifest ceiling (41_810, seeded from the merge-queue commit where
+/// concurrent mainline growth adds ~79 LOC on top of this tree) stays within
+/// the nudge window of this record.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_731;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
