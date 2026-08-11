@@ -1017,6 +1017,40 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         None,
+        None,
+    )
+}
+
+/// Same as `build_harness`, but with an explicit `OutboundStateStorePort`
+/// override in place of the harness's own in-memory store — for a test that
+/// must observe a downstream store failure (e.g.
+/// `TerminalDeliveredWriteFailingStore`) while keeping every other seam
+/// (adapter, coordinator, observer, connection notices) wired identically to
+/// every other connect-nudge test, instead of hand-assembling a parallel
+/// `RunDeliveryServices`/`DeliveryCoordinator`/`RunDeliveryObserver`.
+fn build_harness_with_outbound_store(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    max_wait: Duration,
+    outbound_store: Arc<dyn OutboundStateStorePort>,
+) -> Harness {
+    build_harness_with_gate_ports(
+        states,
+        bind_fails,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait,
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        None,
+        None,
+        Some(outbound_store),
     )
 }
 
@@ -1035,16 +1069,25 @@ fn build_harness_with_gate_ports(
     resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+    // Overrides the coordinator's/services' `outbound_store` (the
+    // `RunDeliveryServices::communication_preferences` reader stays on the
+    // in-memory `store` below either way — a decorator like
+    // `TerminalDeliveredWriteFailingStore` only implements
+    // `OutboundStateStorePort`, not `CommunicationPreferenceRepository`).
+    // `None` reproduces today's behavior exactly.
+    outbound_store_override: Option<Arc<dyn OutboundStateStorePort>>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let outbound_store = outbound_store_override
+        .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn OutboundStateStorePort>);
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        Arc::clone(&outbound_store),
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -1061,7 +1104,7 @@ fn build_harness_with_gate_ports(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        outbound_store: Arc::clone(&outbound_store),
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
@@ -2578,85 +2621,104 @@ async fn observer_connect_nudge_holds_reservation_when_delivery_is_unconfirmed()
     let store = Arc::new(TerminalDeliveredWriteFailingStore {
         inner: Arc::clone(&inner_store),
     });
-    let adapter = Arc::new(RecordingChannelAdapter::new());
-    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
-        TurnStatus::Running,
-        None,
-    )]));
-    let threads = Arc::new(InMemorySessionThreadService::default());
-    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
-    let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
-        Arc::new(StaticResolver {
-            adapter: Arc::clone(&adapter),
-        }),
-        Arc::new(NoStoredReplyContext),
-        DeliveryRetryPolicy {
-            max_attempts: 2,
-            backoff: Duration::ZERO,
-        },
-    ));
-    let services = RunDeliveryServices {
-        binding_service: Arc::new(StaticBindingService {
-            binding: binding(),
-            fail: true,
-        }),
-        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
-        turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
-        route_store: Arc::clone(&inner_store) as Arc<dyn DeliveredGateRouteStore>,
-        communication_preferences: Arc::clone(&inner_store)
-            as Arc<dyn CommunicationPreferenceRepository>,
-        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
-        delivery_targets: Arc::new(StaticTargetCatalog {
-            targets: Vec::new(),
-        }) as Arc<dyn OutboundDeliveryTargetProvider>,
-        coordinator,
-        extension_id: EXTENSION_ID.to_string(),
-        fallback_notice_scope: fallback_scope(),
-        approval_context: None,
-        blocked_auth_prompts: None,
-        auth_flow_cancel: None,
-    };
-    let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
-    let observer = Arc::new(
-        RunDeliveryObserver::with_settings_and_connection_notices(
-            services,
-            RunDeliverySettings {
-                poll_interval: Duration::from_millis(1),
-                max_wait: Duration::from_millis(20),
-                max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
-                max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
-                first_nudge_after: Duration::from_secs(3600),
-                renudge_interval: Duration::from_secs(3600),
-            },
-            connection_notices.clone(),
-        )
-        .with_enabled_commands(["status"], None),
+    let harness = build_harness_with_outbound_store(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        Duration::from_millis(20),
+        store as Arc<dyn OutboundStateStorePort>,
     );
 
     let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
         ProductRejectionKind::BindingRequired,
         "unbound",
     ));
-    observer
+    harness
+        .observer
         .observe_ack(
             user_message_envelope(ProductTriggerReason::DirectChat, "evt-unconfirmed-1"),
             rejected.clone(),
         )
         .await;
-    observer
+    harness
+        .observer
         .observe_ack(
             user_message_envelope(ProductTriggerReason::DirectChat, "evt-unconfirmed-2"),
             rejected,
         )
         .await;
 
-    let texts = adapter.texts();
+    let texts = harness.adapter.texts();
     assert_eq!(
         texts,
-        vec![connection_notices.connect_required.clone()],
+        vec![harness.connection_notices.connect_required.clone()],
         "an unconfirmed-but-sent delivery must hold the reservation, not release it: {texts:?}"
+    );
+}
+
+/// Review finding (PR #7475, ironloopai): `Failed` is not always evidence
+/// that nothing reached the vendor. `ChannelAdapter::deliver` owns vendor
+/// splitting (Slack and Telegram both chunk oversized text into several
+/// vendor-level posts), so a notice's single `OutboundPart::Text` can still
+/// land partially — an earlier chunk accepted, a later one failing —
+/// before the coordinator returns `Failed` for the whole attempt (OUT-7:
+/// retrying would duplicate the accepted chunk). The connect-nudge
+/// reservation must stay held in that case exactly as it does for a
+/// ref-less `Sent`, or a duplicate "please connect" nudge follows a notice
+/// the user partially already received.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_a_multipart_notice_partially_sends() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    // One chunk reached the vendor before a later chunk failed retryably —
+    // the coordinator's OUT-7 rule makes this terminal `Failed`, not another
+    // retry attempt.
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![
+                PartDeliveryOutcome::Sent {
+                    vendor_message_ref: Some("ts-chunk-1".to_string()),
+                },
+                PartDeliveryOutcome::Retryable {
+                    reason: "rate limited".to_string(),
+                },
+            ],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-1"),
+            rejected.clone(),
+        )
+        .await;
+    // A second unbound ping in the same conversation, still inside the
+    // throttle window: must NOT draw a second nudge — the first chunk
+    // already reached the user.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "a partial multipart send must hold the reservation, not release it for a duplicate: {texts:?}"
     );
 }
 

@@ -241,6 +241,16 @@ pub enum CoordinatedDeliveryOutcome {
     Failed {
         attempt: OutboundDeliveryAttempt,
         failure_kind: DeliveryFailureKind,
+        /// Vendor refs for parts THIS invocation confirmed sent before the
+        /// terminal failure. Non-empty only for the partial-multipart case
+        /// (OUT-7): an adapter may split one `OutboundPart` into several
+        /// vendor-level chunks (`ChannelAdapter::deliver` owns splitting —
+        /// Slack and Telegram both chunk oversized text), so a single-part
+        /// envelope can still fail after an earlier chunk reached the
+        /// vendor. Empty whenever nothing reached the vendor, including the
+        /// claim-miss path (`outcome_for_claimed_delivery`), which has no
+        /// egress evidence of its own to report.
+        vendor_message_refs: Vec<String>,
     },
 }
 
@@ -732,26 +742,38 @@ impl DeliveryCoordinator {
                         });
                     }
                     if unauthorized {
+                        // `sent_refs` may be non-empty here too: the report
+                        // covers every part of THIS delivery pass, and an
+                        // adapter that splits one part into several vendor
+                        // chunks (Slack/Telegram) can accept an earlier chunk
+                        // before a later one comes back `Unauthorized`.
                         let kind = DeliveryFailureKind::AuthorizationRevoked;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                             .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_message_refs: sent_refs,
                         });
                     }
                     if permanent || (retryable && any_sent) {
                         // Partial multipart (OUT-7): retrying the whole
                         // envelope would duplicate already-accepted parts.
+                        // `sent_refs` carries whatever vendor evidence exists
+                        // for the parts that DID land before this failure.
                         let kind = DeliveryFailureKind::Rejected;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                             .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_message_refs: sent_refs,
                         });
                     }
-                    // Fully-retryable report (nothing sent).
+                    // Fully-retryable report (nothing sent): `any_sent` is
+                    // false here by construction (a `true` value would have
+                    // taken the branch above), so there is no egress
+                    // evidence to carry forward.
                     if attempts_used >= self.retry.max_attempts {
                         let kind = DeliveryFailureKind::TransportUnavailable;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
@@ -759,6 +781,7 @@ impl DeliveryCoordinator {
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_message_refs: Vec::new(),
                         });
                     }
                     tokio::time::sleep(self.retry.backoff).await;
@@ -776,6 +799,7 @@ impl DeliveryCoordinator {
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
+                            vendor_message_refs: Vec::new(),
                         });
                     }
                     tokio::time::sleep(self.retry.backoff).await;
@@ -828,12 +852,17 @@ impl DeliveryCoordinator {
                 Ok(CoordinatedDeliveryOutcome::Failed {
                     attempt: existing,
                     failure_kind,
+                    // The persisted row does not retain vendor refs, and this
+                    // invocation never drove the send that produced this row
+                    // — there is no partial-egress evidence to report here.
+                    vendor_message_refs: Vec::new(),
                 })
             }
             OutboundDeliveryStatus::Unknown | OutboundDeliveryStatus::Pending => {
                 Ok(CoordinatedDeliveryOutcome::Failed {
                     attempt: existing,
                     failure_kind: DeliveryFailureKind::Unknown,
+                    vendor_message_refs: Vec::new(),
                 })
             }
             OutboundDeliveryStatus::Prepared | OutboundDeliveryStatus::Sending => {

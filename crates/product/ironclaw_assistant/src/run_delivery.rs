@@ -230,8 +230,12 @@ impl NoticeEgress {
 }
 
 /// Classify one NOTICE outcome into what the caller may claim. Keyed off the
-/// outcome VARIANT, never off ref emptiness: an empty `vendor_message_refs`
-/// is not evidence that nothing was sent.
+/// outcome VARIANT first: for `Delivered`/`DeliveredUnconfirmed`/
+/// `AlreadyDelivered`, an empty `vendor_message_refs` is NOT evidence that
+/// nothing was sent (those variants are only reached once the vendor
+/// accepted something). `Failed` is the one variant where ref emptiness
+/// itself is the signal: an empty list means no chunk ever reached the
+/// vendor, a non-empty one means a partial multipart send did.
 pub(crate) fn notice_egress_from_outcome(outcome: &CoordinatedDeliveryOutcome) -> NoticeEgress {
     match outcome {
         CoordinatedDeliveryOutcome::Delivered { .. } => NoticeEgress::Sent {
@@ -250,14 +254,32 @@ pub(crate) fn notice_egress_from_outcome(outcome: &CoordinatedDeliveryOutcome) -
             durably_recorded: true,
             message: None,
         },
-        // `Failed` covers partial-multipart (some parts sent), but a notice
-        // carries exactly one `OutboundPart::Text`, so the partial case is
-        // structurally unreachable here and `Failed` means nothing went out.
-        // This mapping is notice-path-specific; do not lift it to a general
-        // outcome classifier without revisiting that.
-        CoordinatedDeliveryOutcome::NoDelivery
-        | CoordinatedDeliveryOutcome::Rejected { .. }
-        | CoordinatedDeliveryOutcome::Failed { .. } => NoticeEgress::NotSent,
+        CoordinatedDeliveryOutcome::NoDelivery | CoordinatedDeliveryOutcome::Rejected { .. } => {
+            NoticeEgress::NotSent
+        }
+        // A notice's envelope carries exactly one `OutboundPart`, but
+        // `ChannelAdapter::deliver` owns vendor splitting (module docs,
+        // `channel_adapter.rs`): Slack and Telegram both chunk oversized
+        // text into several vendor-level posts, and manifest-provided
+        // notice copy (e.g. `connect_required`) has no length bound. So
+        // `Failed` can still follow an earlier chunk that reached the
+        // vendor — `vendor_message_refs` carries that evidence when it
+        // exists. Empty refs means genuinely nothing went out. This mapping
+        // is notice-path-specific; do not lift it to a general outcome
+        // classifier without revisiting that.
+        CoordinatedDeliveryOutcome::Failed {
+            vendor_message_refs,
+            ..
+        } => {
+            if vendor_message_refs.is_empty() {
+                NoticeEgress::NotSent
+            } else {
+                NoticeEgress::Sent {
+                    durably_recorded: false,
+                    message: None,
+                }
+            }
+        }
     }
 }
 
@@ -744,8 +766,34 @@ mod notice_egress_tests {
         let failed = CoordinatedDeliveryOutcome::Failed {
             attempt: test_attempt(OutboundDeliveryStatus::Failed),
             failure_kind: DeliveryFailureKind::TransportUnavailable,
+            vendor_message_refs: Vec::new(),
         };
-        assert_eq!(notice_egress_from_outcome(&failed), NoticeEgress::NotSent);
+        assert_eq!(
+            notice_egress_from_outcome(&failed),
+            NoticeEgress::NotSent,
+            "no vendor evidence at all must stay NotSent"
+        );
+
+        // Partial multipart (OUT-7): an adapter split one `OutboundPart`
+        // into several vendor chunks and an earlier chunk landed before a
+        // later one failed. This is reachable for a notice — Slack and
+        // Telegram both chunk oversized text, and manifest-provided notice
+        // copy (e.g. `connect_required`) has no length bound — so `Failed`
+        // must NOT collapse to `NotSent` when the coordinator reports
+        // evidence that something already reached the vendor.
+        let partial_failed = CoordinatedDeliveryOutcome::Failed {
+            attempt: test_attempt(OutboundDeliveryStatus::Failed),
+            failure_kind: DeliveryFailureKind::Rejected,
+            vendor_message_refs: vec!["ts-partial-1".to_string()],
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&partial_failed),
+            NoticeEgress::Sent {
+                durably_recorded: false,
+                message: None,
+            },
+            "a partial multipart send must hold the reservation, not release it"
+        );
     }
 
     #[test]
