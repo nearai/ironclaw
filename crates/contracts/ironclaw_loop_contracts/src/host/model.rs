@@ -123,7 +123,7 @@ pub struct LoopPromptBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recent_window_truncation: Option<super::context::LoopContextWindowTruncation>,
+    pub recent_window_truncation: Option<crate::host::context::LoopContextWindowTruncation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
