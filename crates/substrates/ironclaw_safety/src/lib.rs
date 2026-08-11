@@ -10,6 +10,7 @@
 mod credential_detect;
 mod display_redaction;
 mod leak_detector;
+mod leak_pattern_class;
 mod model_input_redaction;
 mod policy;
 mod prompt_validation;
@@ -44,7 +45,10 @@ pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakPreviewPolicy,
     LeakRedactionError, LeakScanResult, LeakSeverity,
 };
-pub use model_input_redaction::{ModelInputRedaction, redact_model_input_text};
+pub use leak_pattern_class::LeakPatternClass;
+pub use model_input_redaction::{
+    ModelInputRedaction, redact_model_input_text, redact_model_input_url,
+};
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use prompt_validation::{PromptSafetyRejection, validate_trusted_trigger_prompt};
 pub use provider_validation::{

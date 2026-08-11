@@ -153,8 +153,9 @@ mod tests {
     }
 
     /// Control characters corrupt prompt/log/terminal framing, so they are
-    /// rejected on every surface — including trusted skill content. The trust
-    /// gate relaxes only credential-shaped value checks.
+    /// rejected on every surface — including trusted skill content. Surfaces
+    /// now differ only in byte budget; credential values are handled by the
+    /// provider-bound redaction pass.
     #[test]
     fn control_characters_are_rejected_on_all_surfaces() {
         for surface in [

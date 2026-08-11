@@ -730,12 +730,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_399 (2026-08-10, prompt recovery hardening): the
-        // contract-owned prompt validator now recognizes decoded Basic auth
-        // credentials, and `LoopContextSnippet::from_untrusted_memory` keeps
-        // memory admission on that same credential-value policy. Runtime
-        // retrieval, sanitization, and budgeting remain in host_runtime.
-        ("ironclaw_loop_contracts", 13_399),
+        // 13_306 -> 13_495 ceiling (2026-08-10, prompt recovery hardening):
+        // production prompt validation now checks structural limits and
+        // control characters only; decoded Basic-auth samples remain test-only.
+        // Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_495),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

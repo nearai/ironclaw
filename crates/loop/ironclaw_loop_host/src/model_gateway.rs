@@ -37,10 +37,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
-    FinishReason, ImageUrl, LlmError, LlmProvider, ReasoningDetail, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
-    contains_codex_text_tool_call_syntax, recover_codex_text_tool_calls_from_tool_names,
-    vision_models::is_vision_model,
+    FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
+    recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
 };
 use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_loop_contracts::{
@@ -54,7 +53,6 @@ use ironclaw_loop_contracts::{
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
-    redact_model_input_text,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::HostManagedLoopPromptPort;
@@ -62,10 +60,14 @@ use ironclaw_turns::{ModelInvalidOutputDetailReason as InvalidOutputReason, Turn
 use tracing::debug;
 
 mod prompt_cache_activity;
+mod redaction;
 
 use prompt_cache_activity::{
     ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
     system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+use redaction::{
+    redact_completion_request, redact_tool_completion_request, redact_tool_definitions,
 };
 
 use crate::{
@@ -1377,7 +1379,17 @@ where
         replay_identity,
         next_fallback_index,
     } = request_context;
+    let redaction_started_at = Instant::now();
     let redaction_count = redact_completion_request(&mut completion);
+    if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+        debug!(
+            target: CONTEXT_SHADOW_TARGET,
+            message_count = completion.messages.len(),
+            redaction_count,
+            elapsed_micros = redaction_started_at.elapsed().as_micros(),
+            "reborn provider-bound message redaction shadow measurement"
+        );
+    }
     if redaction_count > 0 {
         debug!(
             redaction_count,
@@ -1421,7 +1433,17 @@ where
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_redaction_started_at = Instant::now();
             let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions);
+            if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+                debug!(
+                    target: CONTEXT_SHADOW_TARGET,
+                    tool_definition_count = llm_tool_definitions.len(),
+                    redaction_count = tool_redaction_count,
+                    elapsed_micros = tool_redaction_started_at.elapsed().as_micros(),
+                    "reborn provider-bound tool redaction shadow measurement"
+                );
+            }
             if tool_redaction_count > 0 {
                 debug!(
                     redaction_count = tool_redaction_count,
@@ -1648,201 +1670,6 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
-}
-
-fn redact_completion_request(request: &mut CompletionRequest) -> usize {
-    redact_chat_messages(&mut request.messages)
-        .saturating_add(redact_optional_strings(&mut request.stop_sequences))
-}
-
-fn redact_tool_completion_request(request: &mut ToolCompletionRequest) -> usize {
-    redact_chat_messages(&mut request.messages)
-        .saturating_add(redact_tool_definitions(&mut request.tools))
-        .saturating_add(redact_optional_strings(&mut request.stop_sequences))
-}
-
-fn redact_optional_strings(values: &mut Option<Vec<String>>) -> usize {
-    values.as_mut().map_or(0, |values| {
-        values.iter_mut().fold(0usize, |count, value| {
-            count.saturating_add(redact_string(value))
-        })
-    })
-}
-
-fn redact_chat_messages(messages: &mut [ChatMessage]) -> usize {
-    messages.iter_mut().fold(0usize, |count, message| {
-        count.saturating_add(redact_chat_message(message))
-    })
-}
-
-fn redact_chat_message(message: &mut ChatMessage) -> usize {
-    let mut count = redact_string(&mut message.content);
-    for part in &mut message.content_parts {
-        if let ContentPart::Text { text } = part {
-            count = count.saturating_add(redact_string(text));
-        }
-    }
-    if let Some(reasoning) = message.reasoning.as_mut() {
-        count = count.saturating_add(redact_string(reasoning));
-    }
-    if let Some(details) = message.reasoning_details.as_mut() {
-        for detail in &mut details.content {
-            match detail {
-                ReasoningDetail::Text { text, .. } | ReasoningDetail::Summary(text) => {
-                    count = count.saturating_add(redact_string(text));
-                }
-                ReasoningDetail::Encrypted(_) | ReasoningDetail::Redacted { .. } => {}
-            }
-        }
-    }
-    if let Some(tool_calls) = message.tool_calls.as_mut() {
-        for tool_call in tool_calls {
-            count = count.saturating_add(redact_json_string_values(&mut tool_call.arguments));
-            if let Some(reasoning) = tool_call.reasoning.as_mut() {
-                count = count.saturating_add(redact_string(reasoning));
-            }
-            if let Some(parse_error) = tool_call.arguments_parse_error.as_mut() {
-                count = count.saturating_add(redact_string(parse_error));
-            }
-        }
-    }
-    count
-}
-
-fn redact_tool_definitions(definitions: &mut [ToolDefinition]) -> usize {
-    definitions.iter_mut().fold(0usize, |count, definition| {
-        count
-            .saturating_add(redact_string(&mut definition.description))
-            .saturating_add(redact_json_string_values(&mut definition.parameters))
-    })
-}
-
-fn redact_json_string_values(value: &mut serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(text) => redact_string(text),
-        serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
-            count.saturating_add(redact_json_string_values(value))
-        }),
-        serde_json::Value::Object(values) => redact_json_object(values).0,
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
-    }
-}
-
-fn redact_json_object(
-    values: &mut serde_json::Map<String, serde_json::Value>,
-) -> (usize, HashMap<String, String>) {
-    let original = std::mem::take(values);
-    let mut entries = original
-        .into_iter()
-        .map(|(original_key, value)| {
-            let mut redacted_key = original_key.clone();
-            let key_redaction_count = redact_string(&mut redacted_key);
-            (original_key, redacted_key, key_redaction_count, value)
-        })
-        .collect::<Vec<_>>();
-
-    // Reserve unchanged names first. A pre-existing placeholder-shaped key
-    // must not be displaced by a secret-bearing key that redacts to the same
-    // text, and no member may be lost to Map::insert replacement.
-    let mut used_keys = entries
-        .iter()
-        .filter(|(_, _, key_redaction_count, _)| *key_redaction_count == 0)
-        .map(|(_, redacted_key, _, _)| redacted_key.clone())
-        .collect::<HashSet<_>>();
-    for (_, redacted_key, key_redaction_count, _) in &mut entries {
-        if *key_redaction_count > 0 {
-            *redacted_key = collision_safe_json_key(redacted_key, &mut used_keys);
-        }
-    }
-
-    let key_mapping = entries
-        .iter()
-        .map(|(original_key, redacted_key, _, _)| (original_key.clone(), redacted_key.clone()))
-        .collect::<HashMap<_, _>>();
-    let mut redaction_count = entries.iter().fold(0usize, |count, (_, _, key_count, _)| {
-        count.saturating_add(*key_count)
-    });
-
-    // JSON Schema's `required` entries refer to keys in the sibling
-    // `properties` object. Capture that object's exact collision-safe mapping
-    // before visiting the references so the provider receives a valid schema.
-    let mut property_key_mapping = None;
-    if let Some((_, _, _, properties)) = entries
-        .iter_mut()
-        .find(|(original_key, _, _, _)| original_key == "properties")
-    {
-        let (count, mapping) = match properties {
-            serde_json::Value::Object(properties) => redact_json_object(properties),
-            _ => (redact_json_string_values(properties), HashMap::new()),
-        };
-        redaction_count = redaction_count.saturating_add(count);
-        property_key_mapping = Some(mapping);
-    }
-
-    for (original_key, redacted_key, _, mut value) in entries {
-        if original_key != "properties" {
-            let count = if original_key == "required" {
-                match property_key_mapping.as_ref() {
-                    Some(mapping) => redact_json_property_references(&mut value, mapping),
-                    None => redact_json_string_values(&mut value),
-                }
-            } else {
-                redact_json_string_values(&mut value)
-            };
-            redaction_count = redaction_count.saturating_add(count);
-        }
-        values.insert(redacted_key, value);
-    }
-
-    (redaction_count, key_mapping)
-}
-
-fn collision_safe_json_key(base: &str, used_keys: &mut HashSet<String>) -> String {
-    if used_keys.insert(base.to_string()) {
-        return base.to_string();
-    }
-    let mut discriminator = 2usize;
-    loop {
-        let candidate = format!("{base}#{discriminator}");
-        if used_keys.insert(candidate.clone()) {
-            return candidate;
-        }
-        discriminator = discriminator.saturating_add(1);
-    }
-}
-
-fn redact_json_property_references(
-    value: &mut serde_json::Value,
-    key_mapping: &HashMap<String, String>,
-) -> usize {
-    match value {
-        serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
-            let field_count = match value {
-                serde_json::Value::String(reference) => {
-                    let original = reference.clone();
-                    let redaction = redact_model_input_text(&original);
-                    let finding_count = redaction.redaction_count();
-                    *reference = key_mapping
-                        .get(&original)
-                        .cloned()
-                        .unwrap_or_else(|| redaction.into_text());
-                    finding_count
-                }
-                _ => redact_json_string_values(value),
-            };
-            count.saturating_add(field_count)
-        }),
-        _ => redact_json_string_values(value),
-    }
-}
-
-fn redact_string(value: &mut String) -> usize {
-    let redaction = redact_model_input_text(value);
-    let count = redaction.redaction_count();
-    if count > 0 {
-        *value = redaction.into_text();
-    }
-    count
 }
 
 fn accumulate_tool_response_usage(

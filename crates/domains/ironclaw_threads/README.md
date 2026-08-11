@@ -52,6 +52,8 @@ dumping ground.
 - Message identity and per-thread sequence survive redaction/deletion;
   model-visible reads go through policy-filtered APIs — pinned by the contract
   suites below (see `AGENTS.md` for the full working rules).
+- Raw attachment references remain durable, while extracted document text and
+  audio transcripts are secret-redacted when projected into model context.
 - Backend-neutral by construction: persistence is `ScopedFilesystem` only;
   backend choice happens in composition (`.claude/rules/database.md`).
 

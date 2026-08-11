@@ -1539,7 +1539,7 @@ async fn instruction_bundle_allows_trusted_skill_credential_value_in_summary() {
 }
 
 #[tokio::test]
-async fn instruction_bundle_allows_untrusted_skill_security_vocabulary() {
+async fn instruction_bundle_allows_installed_skill_security_vocabulary() {
     let body = "Use the GitHub API with an Authorization: Bearer header.".to_string();
     let context = claimed_run_context().await;
     let bundle = InstructionBundleBuilder::new(context)
@@ -1615,7 +1615,7 @@ async fn instruction_bundle_defers_all_skill_secret_redaction_to_provider_bounda
 }
 
 #[tokio::test]
-async fn instruction_bundle_allows_untrusted_skill_path_and_secret_for_final_redaction() {
+async fn instruction_bundle_allows_installed_skill_path_and_secret_for_final_redaction() {
     let body = "Read /Users/alice/.config/token before calling GitHub".to_string();
     let context = claimed_run_context().await;
     let bundle = InstructionBundleBuilder::new(context.clone())

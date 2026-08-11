@@ -213,11 +213,11 @@ fn render_attachment_header(
 fn body_text(attachment: &AttachmentRef, has_project_path: bool) -> String {
     match attachment.kind {
         AttachmentKind::Audio => match &attachment.extracted_text {
-            Some(text) => format!("Transcript: {}", escape_xml_text(text)),
+            Some(text) => format!("Transcript: {}", model_safe_extracted_text(text)),
             None => "Audio transcript unavailable.".to_string(),
         },
         AttachmentKind::Document => match &attachment.extracted_text {
-            Some(text) => escape_xml_text(text),
+            Some(text) => model_safe_extracted_text(text),
             None => "[Document attached — text extraction unavailable]".to_string(),
         },
         // An image's pixels reach the model through the multimodal path; here it
@@ -237,6 +237,10 @@ fn body_text(attachment: &AttachmentRef, has_project_path: bool) -> String {
         }
         AttachmentKind::Other => "[Binary attachment — not yet stored.]".to_string(),
     }
+}
+
+fn model_safe_extracted_text(value: &str) -> String {
+    escape_xml_text(ironclaw_safety::redact_model_input_text(value).text())
 }
 
 fn escape_xml_attr(value: &str) -> String {
@@ -371,6 +375,22 @@ mod tests {
         );
         assert!(out.contains("Quarterly revenue up 12%"));
         assert!(out.ends_with("</attachments>"));
+    }
+
+    #[test]
+    fn document_extracted_text_redacts_credentials_but_keeps_benign_context() {
+        let secret = "attachment canary,with;delimiters";
+        let out = augment_model_content(
+            "see attached".to_string(),
+            &[doc_ref(Some(&format!(
+                "Marker ZAFFRE. password: \"{secret}\"; secretary: Treasury contact."
+            )))],
+        );
+
+        assert!(!out.contains(secret));
+        assert!(out.contains("[REDACTED_SECRET]"));
+        assert!(out.contains("Marker ZAFFRE"));
+        assert!(out.contains("secretary: Treasury contact"));
     }
 
     #[test]

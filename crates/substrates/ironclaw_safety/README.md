@@ -30,9 +30,15 @@ material itself.
   `credential_detect`, `sensitive_paths`, `display_redaction`, `redaction`).
 - `redact_model_input_text` — an infallible, source-independent model-view
   transform that combines known credential formats with labeled weak values
-  such as `password: letmein`; it also detects offset-prefixed character dumps
-  that reconstruct a labeled value, preventing shell output from bypassing the
-  model boundary by inserting whitespace between every character.
+  such as `password: letmein`, including complete single-, double-, and
+  backtick-quoted values; it also detects offset-prefixed character dumps that
+  reconstruct a labeled value, preventing shell output from bypassing the model
+  boundary by inserting whitespace between every character. Provider-visible
+  host paths are replaced with `[REDACTED_HOST_PATH]`, and encoded JSON that
+  exceeds the bounded decoder fails closed.
+- `redact_model_input_url` — URL-aware model-view redaction for userinfo and
+  credential query parameters; inline `data:` image payloads remain byte-for-byte
+  unchanged.
 
 ## Depends on / consumed by
 

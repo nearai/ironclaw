@@ -176,7 +176,8 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
     );
     let mut request = model_request(interactive_model());
     request.messages[0].content = "system password: letmein".to_string();
-    request.messages[1].content = "user api key = abcdef".to_string();
+    request.messages[1].content =
+        "user api key = abcdef from /Users/alice/.config/provider".to_string();
     request.messages.push(HostManagedModelMessage {
         role: HostManagedModelMessageRole::Assistant,
         content: "assistant password was hunter2".to_string(),
@@ -264,6 +265,8 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
         assert!(!provider_text.contains(secret), "provider saw {secret:?}");
     }
     assert!(provider_text.contains("attachment-context"));
+    assert!(!provider_text.contains("/Users/alice"));
+    assert!(provider_text.contains("[REDACTED_HOST_PATH]"));
     assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 5);
 }
 
@@ -282,6 +285,10 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
         serde_json::json!("api key = abcdef");
     capability_port.definitions[0].parameters["properties"]["password: hunter2"] =
         serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["properties"]["password"] = serde_json::json!({
+        "type": "string",
+        "default": "weak schema default secret",
+    });
     capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_firstsecretvalue123"] =
         serde_json::json!({"type": "string"});
     capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_secondsecretvalue456"] =
@@ -307,6 +314,7 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
     for secret in [
         "abcdef",
         "hunter2",
+        "weak schema default secret",
         "ghp_firstsecretvalue123",
         "ghp_secondsecretvalue456",
     ] {
@@ -316,7 +324,11 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
     let properties = tool.parameters["properties"]
         .as_object()
         .expect("tool properties remain an object");
-    assert_eq!(properties.len(), 4, "redacted keys must not overwrite");
+    assert_eq!(properties.len(), 5, "redacted keys must not overwrite");
+    assert_eq!(
+        properties["password"]["default"], "[REDACTED_SECRET]",
+        "a weak schema default under a sensitive property must be redacted"
+    );
     let redacted_required = tool.parameters["required"]
         .as_array()
         .expect("required remains an array");
@@ -347,7 +359,8 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
 
-    let request = model_request(interactive_model());
+    let mut request = model_request(interactive_model());
+    request.messages[0].content = "system password: first-cache-secret".to_string();
     let run_id = request.run_id;
     gateway.stream_model(request).await.unwrap();
     assert!(
@@ -358,6 +371,7 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
 
     let mut request = model_request(interactive_model());
     request.run_id = run_id;
+    request.messages[0].content = "system password: second-cache-secret".to_string();
     gateway.stream_model(request).await.unwrap();
     assert!(
         !logs_contain("prompt cache break detected"),
@@ -366,10 +380,15 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
 
     let mut request = model_request(interactive_model());
     request.run_id = run_id;
+    request.messages[0].content = "system password: third-cache-secret".to_string();
     gateway.stream_model(request).await.unwrap();
     assert!(
         logs_contain("prompt cache break detected"),
         "a 190K -> 50K cache_read collapse in the same run must record a break"
+    );
+    assert!(
+        logs_contain("system_prompt_changed=false"),
+        "requests differing only in a redacted secret must share the cache signature"
     );
     logs_assert(|lines: &[&str]| {
         // Break telemetry must stay off the REPL-visible warn level: it is

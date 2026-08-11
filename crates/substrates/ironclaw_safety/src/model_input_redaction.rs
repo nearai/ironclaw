@@ -2,9 +2,10 @@ use std::{ops::Range, sync::LazyLock};
 
 use regex::Regex;
 
-use crate::LeakDetector;
+use crate::{LeakDetector, LeakPatternClass};
 
 const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+const REDACTED_HOST_PATH: &str = "[REDACTED_HOST_PATH]";
 const MAX_JSON_REDACTION_DEPTH: usize = 16;
 
 static LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
@@ -63,6 +64,67 @@ pub fn redact_model_input_text(value: &str) -> ModelInputRedaction {
     redact_model_input_text_at_depth(value, 0)
 }
 
+/// Redact a provider-bound URL without rewriting inline `data:` image bytes.
+pub fn redact_model_input_url(value: &str) -> ModelInputRedaction {
+    if value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        return ModelInputRedaction {
+            text: value.to_string(),
+            redaction_count: 0,
+        };
+    }
+
+    let Ok(mut parsed) = url::Url::parse(value) else {
+        return redact_model_input_text(value);
+    };
+    let mut redaction_count = 0usize;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+            return ModelInputRedaction {
+                text: REDACTED_SECRET.to_string(),
+                redaction_count: 1,
+            };
+        }
+        redaction_count = redaction_count.saturating_add(1);
+    }
+    if parsed.query().is_some() {
+        let mut query_redaction_count = 0usize;
+        let pairs = parsed
+            .query_pairs()
+            .map(|(name, value)| {
+                if crate::credential_detect::query_param_is_credential(&name)
+                    && !is_redaction_marker(&value)
+                {
+                    query_redaction_count = query_redaction_count.saturating_add(1);
+                    (name.into_owned(), REDACTED_SECRET.to_string())
+                } else {
+                    (name.into_owned(), value.into_owned())
+                }
+            })
+            .collect::<Vec<_>>();
+        if query_redaction_count > 0 {
+            parsed.query_pairs_mut().clear();
+            for (name, value) in pairs {
+                parsed.query_pairs_mut().append_pair(&name, &value);
+            }
+            redaction_count = redaction_count.saturating_add(query_redaction_count);
+        }
+    }
+
+    let url_redacted = if redaction_count == 0 {
+        value.to_string()
+    } else {
+        parsed.to_string().replace("://@", "://")
+    };
+    let text_redaction = redact_model_input_text(&url_redacted);
+    ModelInputRedaction {
+        text: text_redaction.text,
+        redaction_count: redaction_count.saturating_add(text_redaction.redaction_count),
+    }
+}
+
 fn redact_plain_text(value: &str) -> ModelInputRedaction {
     let Ok(patterns) = LABELED_SECRET_PATTERNS.as_ref() else {
         // The expressions are compile-time literals, but a future edit can still
@@ -87,7 +149,9 @@ fn redact_plain_text(value: &str) -> ModelInputRedaction {
         };
     }
     let labeled_ranges = labeled_secret_ranges(value, patterns);
-    let labeled_redacted = apply_redactions(value, &labeled_ranges);
+    let labeled_redacted = apply_redactions(value, &labeled_ranges, REDACTED_SECRET);
+    let host_path_ranges = host_path_ranges(&labeled_redacted);
+    let path_redacted = apply_redactions(&labeled_redacted, &host_path_ranges, REDACTED_HOST_PATH);
 
     // The shared detector's warn-only entropy heuristic deliberately flags
     // standalone 64-character hex strings. That is useful at an exfiltration
@@ -95,15 +159,18 @@ fn redact_plain_text(value: &str) -> ModelInputRedaction {
     // would be rewritten on every turn. Strong detector findings still redact,
     // and a hex value after a credential label was already removed above.
     let detector_ranges = LEAK_DETECTOR
-        .scan(&labeled_redacted)
+        .scan(&path_redacted)
         .matches
         .into_iter()
-        .filter(|finding| finding.pattern_name != "high_entropy_hex")
+        .filter(|finding| finding.pattern_class() != LeakPatternClass::AmbiguousHexDigest)
         .map(|finding| finding.location)
         .collect::<Vec<_>>();
     let detector_ranges = merge_ranges(detector_ranges);
-    let redaction_count = labeled_ranges.len().saturating_add(detector_ranges.len());
-    let text = apply_redactions(&labeled_redacted, &detector_ranges);
+    let redaction_count = labeled_ranges
+        .len()
+        .saturating_add(host_path_ranges.len())
+        .saturating_add(detector_ranges.len());
+    let text = apply_redactions(&path_redacted, &detector_ranges, REDACTED_SECRET);
     ModelInputRedaction {
         text,
         redaction_count,
@@ -166,6 +233,23 @@ fn decode_character_dump_token(token: &str) -> Option<char> {
 // fields. Scan those fields after decoding so escaped labels such as
 // `\"password\": \"value\"` cannot bypass the ordinary label-aware pass.
 fn redact_model_input_text_at_depth(value: &str, encoded_depth: usize) -> ModelInputRedaction {
+    if encoded_depth >= MAX_JSON_REDACTION_DEPTH
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(value)
+    {
+        let requires_fail_closed_redaction = match json {
+            serde_json::Value::String(text) => !is_redaction_marker(&text),
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                false
+            }
+        };
+        if requires_fail_closed_redaction {
+            return ModelInputRedaction {
+                text: REDACTED_SECRET.to_string(),
+                redaction_count: 1,
+            };
+        }
+    }
     let mut json_redaction_count = 0usize;
     let mut json_redacted = None;
     if encoded_depth < MAX_JSON_REDACTION_DEPTH
@@ -217,11 +301,101 @@ fn labeled_secret_ranges(value: &str, patterns: &[Regex]) -> Vec<Range<usize>> {
     let mut ranges = patterns
         .iter()
         .flat_map(|pattern| pattern.captures_iter(value))
-        .filter_map(|captures| captures.name("value"))
-        .filter_map(|candidate| trimmed_candidate_range(value, candidate.range()))
+        .filter_map(|captures| {
+            credential_candidate_range(
+                value,
+                captures.get(0)?.range(),
+                captures.name("value")?.range(),
+            )
+        })
         .collect::<Vec<_>>();
     ranges.sort_by_key(|range| range.start);
     merge_ranges(ranges)
+}
+
+fn credential_candidate_range(
+    value: &str,
+    full_match: Range<usize>,
+    candidate: Range<usize>,
+) -> Option<Range<usize>> {
+    let candidate_text = value.get(candidate.clone())?;
+    if let Some(quote) = candidate_text.chars().next().filter(|ch| is_quote(*ch)) {
+        let start = candidate.start.saturating_add(quote.len_utf8());
+        let end = quoted_value_end(value, start, quote);
+        return validated_candidate_range(value, start..end);
+    }
+
+    // Authorization commonly quotes the whole scheme/value pair:
+    // `Authorization: "Bearer value with spaces"`. The opening quote is
+    // before the scheme and therefore outside the `value` capture. Recognize
+    // that narrow prefix shape, then extend through its matching close quote.
+    let prefix = value.get(full_match.start..candidate.start)?;
+    if let Some((quote_offset, quote)) = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| is_quote(*character))
+    {
+        let after_quote = prefix.get(quote_offset.saturating_add(quote.len_utf8())..)?;
+        if starts_with_authorization_scheme(after_quote) {
+            let end = quoted_value_end(value, candidate.start, quote);
+            return validated_candidate_range(value, candidate.start..end);
+        }
+    }
+
+    trimmed_candidate_range(value, candidate)
+}
+
+fn quoted_value_end(value: &str, start: usize, quote: char) -> usize {
+    closing_quote_offset(value, start, quote).unwrap_or_else(|| {
+        value
+            .get(start..)
+            .and_then(|tail| tail.find('\n'))
+            .map(|offset| start.saturating_add(offset))
+            .unwrap_or(value.len())
+    })
+}
+
+fn closing_quote_offset(value: &str, start: usize, quote: char) -> Option<usize> {
+    let tail = value.get(start..)?;
+    let mut escaped = false;
+    for (offset, character) in tail.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return Some(start.saturating_add(offset));
+        }
+    }
+    None
+}
+
+fn is_quote(character: char) -> bool {
+    matches!(character, '\'' | '"' | '`')
+}
+
+fn starts_with_authorization_scheme(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    [
+        "basic ",
+        "bearer ",
+        "digest ",
+        "negotiate ",
+        "oauth ",
+        "token ",
+    ]
+    .iter()
+    .any(|scheme| lowercase.starts_with(scheme))
+}
+
+fn validated_candidate_range(value: &str, range: Range<usize>) -> Option<Range<usize>> {
+    let candidate = value.get(range.clone())?;
+    if range.start >= range.end || is_redaction_marker(candidate) {
+        return None;
+    }
+    Some(range)
 }
 
 fn trimmed_candidate_range(value: &str, range: Range<usize>) -> Option<Range<usize>> {
@@ -238,8 +412,14 @@ fn trimmed_candidate_range(value: &str, range: Range<usize>) -> Option<Range<usi
 }
 
 fn is_redaction_marker(value: &str) -> bool {
+    let normalized = value.trim_matches(|character| {
+        matches!(
+            character,
+            '\\' | '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+        )
+    });
     matches!(
-        value.to_ascii_lowercase().as_str(),
+        normalized.to_ascii_lowercase().as_str(),
         "redacted"
             | "redacted_secret"
             | "placeholder"
@@ -249,7 +429,7 @@ fn is_redaction_marker(value: &str) -> bool {
             | "key"
             | "your-token"
             | "your_token"
-    ) || value.contains("...")
+    ) || normalized.contains("...")
 }
 
 fn merge_ranges(ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
@@ -265,7 +445,47 @@ fn merge_ranges(ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     merged
 }
 
-fn apply_redactions(value: &str, ranges: &[Range<usize>]) -> String {
+fn host_path_ranges(value: &str) -> Vec<Range<usize>> {
+    const PREFIXES: [&str; 6] = [
+        "/users/",
+        "/home/",
+        "/private/",
+        "/tmp/", // safety: model-view path literal, not a filesystem temp path.
+        "/var/",
+        "/etc/",
+    ];
+    let lowercase = value.to_ascii_lowercase();
+    let mut ranges = Vec::new();
+    for prefix in PREFIXES {
+        let mut cursor = 0usize;
+        while let Some(relative_start) = lowercase[cursor..].find(prefix) {
+            let start = cursor.saturating_add(relative_start);
+            let end = value[start..]
+                .char_indices()
+                .find(|(_, character)| {
+                    character.is_whitespace()
+                        || matches!(character, '\'' | '"' | '`' | '<' | '>' | ',' | ';')
+                })
+                .map(|(offset, _)| start.saturating_add(offset))
+                .unwrap_or(value.len());
+            let trimmed_end = value[start..end]
+                .trim_end_matches(['.', ':', '!', '?', ')', ']', '}'])
+                .len()
+                .saturating_add(start);
+            if start < trimmed_end {
+                ranges.push(start..trimmed_end);
+            }
+            cursor = end.max(start.saturating_add(prefix.len()));
+            if cursor >= lowercase.len() {
+                break;
+            }
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    merge_ranges(ranges)
+}
+
+fn apply_redactions(value: &str, ranges: &[Range<usize>], replacement: &str) -> String {
     if ranges.is_empty() {
         return value.to_string();
     }
@@ -273,7 +493,7 @@ fn apply_redactions(value: &str, ranges: &[Range<usize>]) -> String {
     let mut cursor = 0;
     for range in ranges {
         redacted.push_str(&value[cursor..range.start]);
-        redacted.push_str(REDACTED_SECRET);
+        redacted.push_str(replacement);
         cursor = range.end;
     }
     redacted.push_str(&value[cursor..]);
@@ -284,7 +504,7 @@ fn apply_redactions(value: &str, ranges: &[Range<usize>]) -> String {
 mod tests {
     use std::time::Instant;
 
-    use super::redact_model_input_text;
+    use super::{MAX_JSON_REDACTION_DEPTH, redact_model_input_text, redact_model_input_url};
 
     #[test]
     fn redacts_labeled_values_without_dropping_surrounding_context() {
@@ -316,6 +536,72 @@ mod tests {
     }
 
     #[test]
+    fn redacts_complete_quoted_credential_values() {
+        for (input, secret, expected) in [
+            (
+                r#"password="my secret,with;delimiters"; keep=visible"#,
+                "my secret,with;delimiters",
+                r#"password="[REDACTED_SECRET]"; keep=visible"#,
+            ),
+            (
+                r#"api_key='single quoted,secret;value'; keep=visible"#,
+                "single quoted,secret;value",
+                "api_key='[REDACTED_SECRET]'; keep=visible",
+            ),
+            (
+                r#"client-secret=`backtick quoted,secret;value`; keep=visible"#,
+                "backtick quoted,secret;value",
+                "client-secret=`[REDACTED_SECRET]`; keep=visible",
+            ),
+            (
+                r#"password="escaped \"quote\",with;delimiters"; keep=visible"#,
+                r#"escaped \"quote\",with;delimiters"#,
+                r#"password="[REDACTED_SECRET]"; keep=visible"#,
+            ),
+            (
+                r#"{"password":"json secret,with;delimiters","marker":"visible"}"#,
+                "json secret,with;delimiters",
+                r#"{"password":"[REDACTED_SECRET]","marker":"visible"}"#,
+            ),
+            (
+                r#"Authorization: "Bearer auth secret,with;delimiters"; keep=visible"#,
+                "auth secret,with;delimiters",
+                r#"Authorization: "Bearer [REDACTED_SECRET]"; keep=visible"#,
+            ),
+            (
+                r#"Authorization='Basic single quoted,secret;value'; keep=visible"#,
+                "single quoted,secret;value",
+                "Authorization='Basic [REDACTED_SECRET]'; keep=visible",
+            ),
+            (
+                r#"Authorization=`Token backtick quoted,secret;value`; keep=visible"#,
+                "backtick quoted,secret;value",
+                "Authorization=`Token [REDACTED_SECRET]`; keep=visible",
+            ),
+            (
+                r#"Authorization: "Bearer escaped \"quote\",with;delimiters"; keep=visible"#,
+                r#"escaped \"quote\",with;delimiters"#,
+                r#"Authorization: "Bearer [REDACTED_SECRET]"; keep=visible"#,
+            ),
+            (
+                "password=\"unclosed secret,with;delimiters\nkeep=visible",
+                "unclosed secret,with;delimiters",
+                "password=\"[REDACTED_SECRET]\nkeep=visible",
+            ),
+        ] {
+            let redaction = redact_model_input_text(input);
+
+            assert!(redaction.was_modified(), "expected redaction for {input:?}");
+            assert!(
+                !redaction.text().contains(secret),
+                "quoted secret remained in {input:?}: {:?}",
+                redaction.text()
+            );
+            assert_eq!(redaction.text(), expected);
+        }
+    }
+
+    #[test]
     fn redacts_credentials_inside_json_encoded_tool_preview() {
         let secret = "railway-test-fake-neutral-credential-encoded";
         let input = serde_json::json!({
@@ -340,7 +626,27 @@ mod tests {
         assert!(redaction.text().contains("attachment-context"));
         assert!(redaction.text().contains("[REDACTED_SECRET]"));
         assert_eq!(repeated.text(), redaction.text());
-        assert!(!repeated.was_modified());
+        assert!(
+            !repeated.was_modified(),
+            "second redaction changed {:?} into {:?}",
+            redaction.text(),
+            repeated.text()
+        );
+    }
+
+    #[test]
+    fn encoded_json_at_depth_limit_fails_closed() {
+        let secret = "encoded-depth-limit-canary";
+        let mut encoded = serde_json::json!({"password": secret}).to_string();
+        for _ in 0..=MAX_JSON_REDACTION_DEPTH {
+            encoded = serde_json::to_string(&encoded).expect("JSON string wrapper");
+        }
+
+        let redaction = redact_model_input_text(&encoded);
+
+        assert!(redaction.was_modified());
+        assert!(!redaction.text().contains(secret));
+        assert!(redaction.text().contains("[REDACTED_SECRET]"));
     }
 
     #[test]
@@ -386,10 +692,8 @@ mod tests {
     fn keeps_security_prose_and_paths_unchanged() {
         for input in [
             "The report documents an authorization flow and API key rotation.",
-            "Read /Users/alice/.config/token before reviewing the report.",
             "The upstream service returned invalid API key.",
             "surface sha256:269cc57b4d0c4368d8b02738ab709c810adb6212729b24bbdc34efb539a3ed07",
-            "/etc/passwd",
             "password: redacted",
             "password: redacted_secret",
             "password: placeholder",
@@ -412,6 +716,37 @@ mod tests {
             );
             assert_eq!(redaction.text(), input);
         }
+    }
+
+    #[test]
+    fn redacts_host_paths_without_rejecting_surrounding_context() {
+        let input = "Read /Users/alice/.config/token and /etc/passwd before reviewing report.md.";
+        let redaction = redact_model_input_text(input);
+
+        assert_eq!(
+            redaction.text(),
+            "Read [REDACTED_HOST_PATH] and [REDACTED_HOST_PATH] before reviewing report.md."
+        );
+        assert_eq!(redaction.redaction_count(), 2);
+    }
+
+    #[test]
+    fn redacts_url_credentials_but_preserves_data_urls() {
+        let secret = "url-query-secret";
+        let redaction = redact_model_input_url(&format!(
+            "https://user:password@example.test/image.png?size=large&token={secret}"
+        ));
+
+        assert!(redaction.was_modified());
+        assert!(!redaction.text().contains(secret));
+        assert!(!redaction.text().contains("user:password"));
+        assert!(redaction.text().contains("size=large"));
+        assert!(redaction.text().contains("REDACTED_SECRET"));
+
+        let data_url = "data:image/png;base64,cGFzc3dvcmQ6IGxldG1laW4=";
+        let preserved = redact_model_input_url(data_url);
+        assert!(!preserved.was_modified());
+        assert_eq!(preserved.text(), data_url);
     }
 
     #[test]
