@@ -336,126 +336,6 @@ fn tool_surface_signature(tools: Option<&Vec<ToolDefinition>>) -> Option<Vec<Str
     })
 }
 
-#[cfg(test)]
-mod prompt_cache_tests {
-    use super::*;
-
-    fn tool(description: &str, parameters: serde_json::Value) -> ToolDefinition {
-        ToolDefinition {
-            name: "search".to_string(),
-            description: description.to_string(),
-            parameters,
-        }
-    }
-
-    #[test]
-    fn tool_surface_signature_includes_description_and_parameters() {
-        let baseline = vec![tool("search docs", serde_json::json!({"type": "object"}))];
-        let description_changed = vec![tool(
-            "search all docs",
-            serde_json::json!({"type": "object"}),
-        )];
-        let parameters_changed = vec![tool(
-            "search docs",
-            serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}}),
-        )];
-
-        assert_ne!(
-            tool_surface_signature(Some(&baseline)),
-            tool_surface_signature(Some(&description_changed))
-        );
-        assert_ne!(
-            tool_surface_signature(Some(&baseline)),
-            tool_surface_signature(Some(&parameters_changed))
-        );
-        assert_ne!(
-            tool_surface_signature(None),
-            tool_surface_signature(Some(&vec![]))
-        );
-    }
-
-    #[test]
-    fn concurrent_request_and_tool_capture_stays_aligned() {
-        fn trace_with_steps(count: usize) -> TraceLlm {
-            TraceLlm::from_trace(LlmTrace {
-                model_name: "capture-test".to_string(),
-                turns: vec![TraceTurn {
-                    user_input: "capture".to_string(),
-                    steps: (0..count)
-                        .map(|_| TraceStep {
-                            request_hint: None,
-                            response: TraceResponse::Text {
-                                content: "ok".to_string(),
-                                input_tokens: 1,
-                                output_tokens: 1,
-                            },
-                            expected_tool_results: Vec::new(),
-                        })
-                        .collect(),
-                    expects: TraceExpects::default(),
-                }],
-                memory_snapshot: Vec::new(),
-                http_exchanges: Vec::new(),
-                expects: TraceExpects::default(),
-                steps: Vec::new(),
-            })
-        }
-
-        let llm = std::sync::Arc::new(trace_with_steps(16));
-        let threads = (0..16)
-            .map(|index| {
-                let llm = std::sync::Arc::clone(&llm);
-                std::thread::spawn(move || {
-                    let tag = format!("call-{index}");
-                    let messages = vec![
-                        ChatMessage::system(format!("system {tag}")),
-                        ChatMessage::user(tag.clone()),
-                    ];
-                    let tools = vec![tool(&tag, serde_json::json!({"type": "object"}))];
-                    llm.next_step(&messages, Some(&tools))
-                        .expect("concurrent trace step is available");
-                })
-            })
-            .collect::<Vec<_>>();
-        for thread in threads {
-            thread.join().expect("capture thread completes");
-        }
-
-        let captures = llm.captured_requests.lock().unwrap().clone();
-        assert_eq!(captures.len(), 16);
-        for capture in captures {
-            let user = capture
-                .messages
-                .iter()
-                .find(|message| message.role == Role::User)
-                .expect("capture carries its user tag");
-            assert_eq!(capture.tools.as_ref().unwrap()[0].description, user.content);
-        }
-
-        let sequential = trace_with_steps(2);
-        let stable_tools = vec![tool("stable", serde_json::json!({"type": "object"}))];
-        sequential
-            .next_step(
-                &[
-                    ChatMessage::system("system before"),
-                    ChatMessage::user("first"),
-                ],
-                Some(&stable_tools),
-            )
-            .expect("first trace step is available");
-        sequential
-            .next_step(
-                &[
-                    ChatMessage::system("system after"),
-                    ChatMessage::user("second"),
-                ],
-                Some(&stable_tools),
-            )
-            .expect("second trace step is available");
-        assert_eq!(sequential.prompt_cache_prefix_churn().len(), 1);
-    }
-}
-
 /// Excerpt around the first differing BYTE, clamped to char boundaries.
 ///
 /// Byte offsets are what a cache actually compares; the clamping keeps the
@@ -1090,5 +970,125 @@ impl LlmProvider for TraceLlm {
                     .to_string(),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_cache_tests {
+    use super::*;
+
+    fn tool(description: &str, parameters: serde_json::Value) -> ToolDefinition {
+        ToolDefinition {
+            name: "search".to_string(),
+            description: description.to_string(),
+            parameters,
+        }
+    }
+
+    #[test]
+    fn tool_surface_signature_includes_description_and_parameters() {
+        let baseline = vec![tool("search docs", serde_json::json!({"type": "object"}))];
+        let description_changed = vec![tool(
+            "search all docs",
+            serde_json::json!({"type": "object"}),
+        )];
+        let parameters_changed = vec![tool(
+            "search docs",
+            serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        )];
+
+        assert_ne!(
+            tool_surface_signature(Some(&baseline)),
+            tool_surface_signature(Some(&description_changed))
+        );
+        assert_ne!(
+            tool_surface_signature(Some(&baseline)),
+            tool_surface_signature(Some(&parameters_changed))
+        );
+        assert_ne!(
+            tool_surface_signature(None),
+            tool_surface_signature(Some(&vec![]))
+        );
+    }
+
+    #[test]
+    fn concurrent_request_and_tool_capture_stays_aligned() {
+        fn trace_with_steps(count: usize) -> TraceLlm {
+            TraceLlm::from_trace(LlmTrace {
+                model_name: "capture-test".to_string(),
+                turns: vec![TraceTurn {
+                    user_input: "capture".to_string(),
+                    steps: (0..count)
+                        .map(|_| TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::Text {
+                                content: "ok".to_string(),
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        })
+                        .collect(),
+                    expects: TraceExpects::default(),
+                }],
+                memory_snapshot: Vec::new(),
+                http_exchanges: Vec::new(),
+                expects: TraceExpects::default(),
+                steps: Vec::new(),
+            })
+        }
+
+        let llm = std::sync::Arc::new(trace_with_steps(16));
+        let threads = (0..16)
+            .map(|index| {
+                let llm = std::sync::Arc::clone(&llm);
+                std::thread::spawn(move || {
+                    let tag = format!("call-{index}");
+                    let messages = vec![
+                        ChatMessage::system(format!("system {tag}")),
+                        ChatMessage::user(tag.clone()),
+                    ];
+                    let tools = vec![tool(&tag, serde_json::json!({"type": "object"}))];
+                    llm.next_step(&messages, Some(&tools))
+                        .expect("concurrent trace step is available");
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().expect("capture thread completes");
+        }
+
+        let captures = llm.captured_requests.lock().unwrap().clone();
+        assert_eq!(captures.len(), 16);
+        for capture in captures {
+            let user = capture
+                .messages
+                .iter()
+                .find(|message| message.role == Role::User)
+                .expect("capture carries its user tag");
+            assert_eq!(capture.tools.as_ref().unwrap()[0].description, user.content);
+        }
+
+        let sequential = trace_with_steps(2);
+        let stable_tools = vec![tool("stable", serde_json::json!({"type": "object"}))];
+        sequential
+            .next_step(
+                &[
+                    ChatMessage::system("system before"),
+                    ChatMessage::user("first"),
+                ],
+                Some(&stable_tools),
+            )
+            .expect("first trace step is available");
+        sequential
+            .next_step(
+                &[
+                    ChatMessage::system("system after"),
+                    ChatMessage::user("second"),
+                ],
+                Some(&stable_tools),
+            )
+            .expect("second trace step is available");
+        assert_eq!(sequential.prompt_cache_prefix_churn().len(), 1);
     }
 }
