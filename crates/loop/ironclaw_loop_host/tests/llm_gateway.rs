@@ -204,7 +204,16 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
             provider_call_id: "call_secret".to_string(),
             provider_tool_name: provider_name("demo__secret"),
             capability_id: CapabilityId::new("demo.secret").unwrap(),
-            arguments: serde_json::json!({"message": "hello"}),
+            arguments: serde_json::json!({
+                "credential": {
+                    "type": "basic",
+                    "description": "prod",
+                    "value": "replayed-credential-secret"
+                },
+                "refresh_token": 123456,
+                "secret": true,
+                "message": "hello"
+            }),
             response_reasoning: None,
             reasoning: None,
             signature: None,
@@ -268,6 +277,28 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
     assert!(!provider_text.contains("/Users/alice"));
     assert!(provider_text.contains("[REDACTED_HOST_PATH]"));
     assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 5);
+    let replayed_arguments = requests[0]
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .find(|call| call.id == "call_secret")
+        .map(|call| &call.arguments)
+        .expect("provider request retains the replayed tool call");
+    assert!(
+        !replayed_arguments
+            .to_string()
+            .contains("replayed-credential-secret")
+    );
+    assert_eq!(
+        replayed_arguments["credential"]["value"],
+        "[REDACTED_SECRET]"
+    );
+    assert!(replayed_arguments["refresh_token"].is_number());
+    assert_eq!(replayed_arguments["refresh_token"], 0);
+    assert!(replayed_arguments["secret"].is_boolean());
+    assert_eq!(replayed_arguments["secret"], false);
+    assert_eq!(replayed_arguments["message"], "hello");
 }
 
 #[tokio::test]

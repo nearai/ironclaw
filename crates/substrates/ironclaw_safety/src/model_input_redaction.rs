@@ -113,15 +113,13 @@ pub fn redact_model_input_url(value: &str) -> ModelInputRedaction {
         }
     }
 
-    let url_redacted = if redaction_count == 0 {
-        value.to_string()
-    } else {
-        parsed.to_string().replace("://@", "://")
-    };
-    let text_redaction = redact_model_input_text(&url_redacted);
     ModelInputRedaction {
-        text: text_redaction.text,
-        redaction_count: redaction_count.saturating_add(text_redaction.redaction_count),
+        text: if redaction_count == 0 {
+            value.to_string()
+        } else {
+            parsed.to_string().replace("://@", "://")
+        },
+        redaction_count,
     }
 }
 
@@ -747,6 +745,18 @@ mod tests {
         let preserved = redact_model_input_url(data_url);
         assert!(!preserved.was_modified());
         assert_eq!(preserved.text(), data_url);
+    }
+
+    #[test]
+    fn url_redaction_preserves_valid_remote_paths_but_plain_text_paths_still_redact() {
+        let remote = "https://cdn.example.test/users/42/avatar.png";
+        let preserved = redact_model_input_url(remote);
+        assert!(!preserved.was_modified());
+        assert_eq!(preserved.text(), remote);
+
+        let request_line = redact_model_input_url("GET /users/42/avatar.png");
+        assert!(request_line.was_modified());
+        assert_eq!(request_line.text(), "GET [REDACTED_HOST_PATH]");
     }
 
     #[test]

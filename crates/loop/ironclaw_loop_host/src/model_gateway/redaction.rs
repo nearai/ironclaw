@@ -82,23 +82,38 @@ pub(super) fn redact_tool_definitions(definitions: &mut [ToolDefinition]) -> usi
     definitions.iter_mut().fold(0usize, |count, definition| {
         count
             .saturating_add(redact_string(&mut definition.description))
-            .saturating_add(redact_json_string_values(&mut definition.parameters))
+            .saturating_add(redact_json_schema(&mut definition.parameters))
     })
 }
 
 fn redact_json_string_values(value: &mut serde_json::Value) -> usize {
+    redact_json_value(value, JsonRedactionContext::Ordinary)
+}
+
+fn redact_json_schema(value: &mut serde_json::Value) -> usize {
+    redact_json_value(value, JsonRedactionContext::Schema)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsonRedactionContext {
+    Ordinary,
+    Schema,
+}
+
+fn redact_json_value(value: &mut serde_json::Value, context: JsonRedactionContext) -> usize {
     match value {
         serde_json::Value::String(text) => redact_string(text),
         serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
-            count.saturating_add(redact_json_string_values(value))
+            count.saturating_add(redact_json_value(value, context))
         }),
-        serde_json::Value::Object(values) => redact_json_object(values).0,
+        serde_json::Value::Object(values) => redact_json_object(values, context).0,
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
     }
 }
 
 fn redact_json_object(
     values: &mut serde_json::Map<String, serde_json::Value>,
+    context: JsonRedactionContext,
 ) -> (usize, HashMap<String, String>) {
     let original = std::mem::take(values);
     let mut entries = original
@@ -136,29 +151,34 @@ fn redact_json_object(
     // `properties` object. Capture that object's exact collision-safe mapping
     // before visiting the references so the provider receives a valid schema.
     let mut property_key_mapping = None;
-    if let Some((_, _, _, properties)) = entries
-        .iter_mut()
-        .find(|(original_key, _, _, _)| original_key == "properties")
+    if context == JsonRedactionContext::Schema
+        && let Some((_, _, _, properties)) = entries
+            .iter_mut()
+            .find(|(original_key, _, _, _)| original_key == "properties")
     {
         let (count, mapping) = match properties {
-            serde_json::Value::Object(properties) => redact_json_object(properties),
-            _ => (redact_json_string_values(properties), HashMap::new()),
+            serde_json::Value::Object(properties) => {
+                redact_json_object(properties, JsonRedactionContext::Schema)
+            }
+            _ => (redact_json_schema(properties), HashMap::new()),
         };
         redaction_count = redaction_count.saturating_add(count);
         property_key_mapping = Some(mapping);
     }
 
     for (original_key, redacted_key, _, mut value) in entries {
-        if original_key != "properties" {
-            let count = if original_key == "required" {
+        let properties_were_preprocessed =
+            context == JsonRedactionContext::Schema && original_key == "properties";
+        if !properties_were_preprocessed {
+            let count = if context == JsonRedactionContext::Schema && original_key == "required" {
                 match property_key_mapping.as_ref() {
                     Some(mapping) => redact_json_property_references(&mut value, mapping),
-                    None => redact_json_string_values(&mut value),
+                    None => redact_json_schema(&mut value),
                 }
             } else if is_sensitive_json_key(&original_key) {
-                redact_sensitive_json_value(&mut value)
+                redact_sensitive_json_value(&mut value, context)
             } else {
-                redact_json_string_values(&mut value)
+                redact_json_value(&mut value, context)
             };
             redaction_count = redaction_count.saturating_add(count);
         }
@@ -194,7 +214,10 @@ fn is_sensitive_json_key(key: &str) -> bool {
     )
 }
 
-fn redact_sensitive_json_value(value: &mut serde_json::Value) -> usize {
+fn redact_sensitive_json_value(
+    value: &mut serde_json::Value,
+    context: JsonRedactionContext,
+) -> usize {
     match value {
         serde_json::Value::String(text) if text == REDACTED_SECRET => 0,
         serde_json::Value::String(text) => {
@@ -202,34 +225,37 @@ fn redact_sensitive_json_value(value: &mut serde_json::Value) -> usize {
             1
         }
         serde_json::Value::Array(values) => values.iter_mut().fold(0usize, |count, value| {
-            count.saturating_add(redact_sensitive_json_value(value))
+            count.saturating_add(redact_sensitive_json_value(value, context))
         }),
-        serde_json::Value::Object(values) if is_json_schema(values) => {
+        serde_json::Value::Object(values) if context == JsonRedactionContext::Schema => {
             values.iter_mut().fold(0usize, |count, (key, value)| {
                 let field_count = if is_schema_secret_value_field(key) {
-                    redact_sensitive_json_value(value)
+                    redact_sensitive_json_value(value, context)
                 } else {
-                    redact_json_string_values(value)
+                    redact_json_value(value, context)
                 };
                 count.saturating_add(field_count)
             })
         }
         serde_json::Value::Object(values) => values.values_mut().fold(0usize, |count, value| {
-            count.saturating_add(redact_sensitive_json_value(value))
+            count.saturating_add(redact_sensitive_json_value(value, context))
         }),
         serde_json::Value::Null => 0,
-        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            *value = serde_json::Value::String(REDACTED_SECRET.to_string());
-            1
+        serde_json::Value::Bool(boolean) => {
+            let modified = *boolean;
+            *boolean = false;
+            usize::from(modified)
+        }
+        serde_json::Value::Number(number) => {
+            let redacted = serde_json::Number::from(0);
+            if *number == redacted {
+                0
+            } else {
+                *number = redacted;
+                1
+            }
         }
     }
-}
-
-fn is_json_schema(values: &serde_json::Map<String, serde_json::Value>) -> bool {
-    values.contains_key("type")
-        || values.contains_key("$ref")
-        || values.contains_key("properties")
-        || values.contains_key("description")
 }
 
 fn is_schema_secret_value_field(key: &str) -> bool {
@@ -267,11 +293,11 @@ fn redact_json_property_references(
                         .unwrap_or_else(|| redaction.into_text());
                     finding_count
                 }
-                _ => redact_json_string_values(value),
+                _ => redact_json_schema(value),
             };
             count.saturating_add(field_count)
         }),
-        _ => redact_json_string_values(value),
+        _ => redact_json_schema(value),
     }
 }
 
@@ -288,7 +314,7 @@ fn redact_string(value: &mut String) -> usize {
 mod tests {
     use ironclaw_llm::{ChatMessage, CompletionRequest, ContentPart, ImageUrl};
 
-    use super::{redact_completion_request, redact_json_string_values};
+    use super::{redact_completion_request, redact_json_schema, redact_json_string_values};
 
     #[test]
     fn sensitive_json_keys_redact_arguments_and_schema_defaults() {
@@ -315,7 +341,7 @@ mod tests {
                 }
             }
         });
-        let schema_count = redact_json_string_values(&mut schema);
+        let schema_count = redact_json_schema(&mut schema);
 
         assert_eq!(schema_count, 3);
         assert_eq!(schema["properties"]["password"]["type"], "string");
@@ -342,7 +368,9 @@ mod tests {
             vec![
                 ContentPart::ImageUrl {
                     image_url: ImageUrl {
-                        url: format!("https://example.test/image.png?size=large&token={secret}"),
+                        url: format!(
+                            "https://example.test/users/42/avatar.png?size=large&token={secret}"
+                        ),
                         detail: None,
                     },
                 },
@@ -363,6 +391,7 @@ mod tests {
             panic!("first part must remain an image URL");
         };
         assert!(!remote.url.contains(secret));
+        assert!(remote.url.contains("/users/42/avatar.png"));
         assert!(remote.url.contains("size=large"));
         assert!(remote.url.contains("REDACTED_SECRET"));
         let ContentPart::ImageUrl { image_url: data } = &request.messages[0].content_parts[1]
@@ -370,5 +399,29 @@ mod tests {
             panic!("second part must remain an image URL");
         };
         assert_eq!(data.url, data_url);
+    }
+
+    #[test]
+    fn ordinary_sensitive_object_is_not_misclassified_as_schema_and_scalars_keep_types() {
+        let mut arguments = serde_json::json!({
+            "credential": {
+                "type": "basic",
+                "description": "prod",
+                "value": "hunter2"
+            },
+            "refresh_token": 123456,
+            "secret": true,
+            "marker": "visible"
+        });
+
+        redact_json_string_values(&mut arguments);
+
+        assert!(!arguments.to_string().contains("hunter2"));
+        assert_eq!(arguments["credential"]["value"], "[REDACTED_SECRET]");
+        assert!(arguments["refresh_token"].is_number());
+        assert_eq!(arguments["refresh_token"], 0);
+        assert!(arguments["secret"].is_boolean());
+        assert_eq!(arguments["secret"], false);
+        assert_eq!(arguments["marker"], "visible");
     }
 }
