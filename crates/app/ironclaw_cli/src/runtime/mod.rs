@@ -2853,6 +2853,23 @@ regex_activation_enabled = false
     }
 
     #[test]
+    fn build_runtime_input_rejects_invalid_railway_shell_override_for_hosted_volume() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _override = EnvGuard::set("IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL", "not-a-bool");
+        let (_temp, config) = boot_config_with_config_toml("hosted-single-tenant-volume", "");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("malformed Railway shell override must fail startup assembly"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(
+            "IRONCLAW_REBORN_ENABLE_RAILWAY_SANDBOX_SHELL must be one of 1, true, 0, false"
+        ));
+    }
+
+    #[test]
     fn railway_shell_override_is_strict_and_scoped_to_base_volume() {
         let _lock = lock_runtime_env();
 

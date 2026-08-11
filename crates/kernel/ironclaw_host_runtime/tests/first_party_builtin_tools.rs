@@ -15,7 +15,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_event_log::InMemoryAuditSink;
-use ironclaw_extension_registry::ExtensionRegistry;
+use ironclaw_extension_registry::{ExtensionError, ExtensionRegistry};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
@@ -521,6 +521,58 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
             .contains("Additional provider-specific shell guidance.")
     );
     assert_eq!(guided_manifest_shell.description, guided_shell.description);
+}
+
+#[test]
+fn append_builtin_shell_guidance_rejects_whitespace_only_guidance() {
+    let mut package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
+
+    let error = append_builtin_shell_guidance(&mut package, " \t\n ")
+        .expect_err("whitespace-only shell guidance must be rejected");
+
+    assert!(matches!(
+        error,
+        ExtensionError::InvalidManifest { reason }
+            if reason == "built-in shell guidance must not be empty"
+    ));
+}
+
+#[test]
+fn append_builtin_shell_guidance_rejects_package_without_shell_descriptor() {
+    let mut package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
+    package
+        .capabilities
+        .retain(|descriptor| descriptor.id.as_str() != SHELL_CAPABILITY_ID);
+
+    let error = append_builtin_shell_guidance(&mut package, "Railway guidance.")
+        .expect_err("package without the shell descriptor must be rejected");
+
+    assert!(matches!(
+        error,
+        ExtensionError::InvalidManifest { reason }
+            if reason == "built-in first-party package is missing capability builtin.shell"
+    ));
+}
+
+#[test]
+fn append_builtin_shell_guidance_rejects_manifest_without_shell_capability() {
+    let mut package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
+    package
+        .manifest
+        .capabilities
+        .retain(|capability| capability.id.as_str() != SHELL_CAPABILITY_ID);
+
+    let error = append_builtin_shell_guidance(&mut package, "Railway guidance.")
+        .expect_err("manifest without the shell capability must be rejected");
+
+    assert!(matches!(
+        error,
+        ExtensionError::InvalidManifest { reason }
+            if reason == "built-in first-party manifest is missing capability builtin.shell"
+    ));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
