@@ -1,25 +1,39 @@
 {
-  "schema_version":"icwm.g0c.identifier-admission-corpus.v2",
-  "oracle":{"crate":"ruma-common","version":"0.19.0","source":"crates.io","registry_checksum":"2c3b4f00112791b490acce57df1ce3eb3f88899b045bebcff8a29f75369640cc","role":"test-only user/room identifier parser oracle; matches the ruma-common layer resolved by the Matrix SDK 0.18 candidate graph"},
-  "cases":[
-    {"identifier_kind":"user_id","value":"@alice:example.org","actor":"@alice:example.org","trigger":"direct_chat","expected":"accepted"},
-    {"identifier_kind":"room_id","value":"!ops:example.org:8448","actor":"@alice:example.org","trigger":"bot_mention","expected":"accepted"},
-    {"identifier_kind":"room_id","value":"!ops:[2001:db8::1]:8448","actor":"@bob:example.org","trigger":"reply_to_bot","expected":"accepted"},
-    {"identifier_kind":"room_id","value":"!ops:example.org","actor":"@mallory:example.org","trigger":"ambient","expected":"rejected"},
-    {"identifier_kind":"room_id","value":"!ops:example.org","actor":null,"trigger":"bot_mention","expected":"rejected"},
-    {"identifier_kind":"user_id","value_pattern":"typed_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"direct_chat","expected":"accepted"},
-    {"identifier_kind":"user_id","value_pattern":"typed_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"room_id","value_pattern":"typed_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"bot_mention","expected":"accepted"},
-    {"identifier_kind":"room_id","value_pattern":"typed_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"bot_mention","expected":"rejected"},
-    {"identifier_kind":"device_id","value_pattern":"opaque_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"device_id","value_pattern":"opaque_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"session_id","value_pattern":"opaque_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"session_id","value_pattern":"opaque_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"device_id","value_pattern":"invalid_utf8_ff","actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"session_id","value":"session\n","actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"user_id","value":"@alice:bad host","actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"room_id","value":"!ops:example.org","actor":"@alice:example.org","trigger":"direct_chat","expected":"rejected"},
-    {"identifier_kind":"user_id","value":"@alice:example.org","actor":"@alice:example.org","trigger":"bot_mention","expected":"rejected"},
-    {"identifier_kind":"user_id","value":"@alice:example.org","actor":"@alice:example.org","trigger":"reply_to_bot","expected":"rejected"}
+  "schema_version": "icwm.g0c.identifier-admission-corpus.v3",
+  "oracle": {
+    "crate": "ruma-common",
+    "version": "0.19.0",
+    "source": "crates.io",
+    "registry_checksum": "2c3b4f00112791b490acce57df1ce3eb3f88899b045bebcff8a29f75369640cc",
+    "role": "test-only identifier parser oracle; oracle acceptance and the intentionally stricter harness admission policy are recorded separately"
+  },
+  "cases": [
+    {"identifier_kind":"room_id","value":"!dm:example.org","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"accepted"},
+    {"identifier_kind":"room_id","value":"!ops:example.org:8448","actor":"@alice:example.org","trigger":"bot_mention","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"accepted"},
+    {"identifier_kind":"room_id","value":"!ops:[2001:db8::1]:8448","actor":"@bob:example.org","trigger":"reply_to_bot","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"accepted"},
+    {"identifier_kind":"room_id","value":"!ops:example.org","actor":"@mallory:example.org","trigger":"ambient","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"},
+    {"identifier_kind":"room_id","value":"!ops:example.org","actor":null,"trigger":"bot_mention","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"},
+
+    {"identifier_kind":"user_id","value_pattern":"typed_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"},
+    {"identifier_kind":"user_id","value_pattern":"typed_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"rejected","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"room_id","value_pattern":"typed_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"bot_mention","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"accepted"},
+    {"identifier_kind":"room_id","value_pattern":"typed_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"bot_mention","oracle_expected":"rejected","identifier_expected":"rejected","admission_expected":"rejected"},
+
+    {"identifier_kind":"device_id","value_pattern":"opaque_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"},
+    {"identifier_kind":"device_id","value_pattern":"opaque_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"session_id","value_pattern":"opaque_ascii_exact_limit","utf8_bytes":255,"actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"},
+    {"identifier_kind":"session_id","value_pattern":"opaque_ascii_over_limit","utf8_bytes":256,"actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"rejected","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"device_id","value_pattern":"invalid_utf8_ff","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"not_applicable","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"session_id","value":"session\n","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"rejected","identifier_expected":"rejected","admission_expected":"rejected"},
+
+    {"identifier_kind":"room_id","value":"!:example.org","actor":"@alice:example.org","trigger":"bot_mention","oracle_expected":"accepted","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"room_id","value":"!opaque-v2","actor":"@alice:example.org","trigger":"bot_mention","oracle_expected":"accepted","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"user_id","value":"@te\nst:example.org","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"user_id","value":"@alice:/","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"rejected","identifier_expected":"accepted","admission_expected":"rejected"},
+
+    {"identifier_kind":"user_id","value":"@alice:bad host","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"rejected","identifier_expected":"rejected","admission_expected":"rejected"},
+    {"identifier_kind":"room_id","value":"!ops:example.org","actor":"@alice:example.org","trigger":"direct_chat","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"accepted"},
+    {"identifier_kind":"user_id","value":"@alice:example.org","actor":"@alice:example.org","trigger":"bot_mention","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"},
+    {"identifier_kind":"user_id","value":"@alice:example.org","actor":"@alice:example.org","trigger":"reply_to_bot","oracle_expected":"accepted","identifier_expected":"accepted","admission_expected":"rejected"}
   ]
 }

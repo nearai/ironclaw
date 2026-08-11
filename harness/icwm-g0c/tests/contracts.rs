@@ -320,9 +320,11 @@ fn response_delivery_loss_is_executable() {
     assert_eq!(harness.adapter().acknowledged_inputs(), 1);
     let report = harness.finish().unwrap();
     assert!(report.crashes.is_empty());
+    assert!(report.failpoints_reached.is_empty());
+    assert_eq!(report.response_losses.len(), 1);
     assert_eq!(
-        report.failpoints_reached,
-        vec![Failpoint::ResponseBeforePrepare]
+        report.disposition,
+        icwm_g0c_harness::ResultDisposition::Failed
     );
 }
 
@@ -369,9 +371,11 @@ fn lost_after_adapter_handling_runs_adapter_then_reports_uncertainty() {
     assert_eq!(harness.adapter().acknowledged_inputs(), 1);
     let report = harness.finish().unwrap();
     assert!(report.crashes.is_empty());
+    assert!(report.failpoints_reached.is_empty());
+    assert_eq!(report.response_losses.len(), 1);
     assert_eq!(
-        report.failpoints_reached,
-        vec![Failpoint::ResponseAfterCommitBeforeAcknowledge]
+        report.disposition,
+        icwm_g0c_harness::ResultDisposition::Uncertain
     );
 }
 
@@ -642,11 +646,13 @@ fn artifact_report_denies_unknown_policy_fields_and_preserves_known_ones() {
 fn published_control_scenario_deserializes_and_drives_the_control_adapter() {
     let scenario: icwm_g0c_harness::Scenario =
         serde_json::from_str(include_str!("../fixtures/CONTROL-SCENARIO.json")).unwrap();
-    let mut harness = Harness::new(
+    scenario.validate_identity().unwrap();
+    let mut harness = Harness::from_scenario(
         ControlAdapter::new(CandidateId::new("control", "1")),
-        scenario.expected_effects,
+        &scenario,
         vec![ScriptedResponse::matrix(200, b"{}".to_vec())],
-    );
+    )
+    .unwrap();
     harness.clock_mut().advance_ms(25).unwrap();
     for input in scenario.inputs {
         harness.drive(input).unwrap();
@@ -656,7 +662,7 @@ fn published_control_scenario_deserializes_and_drives_the_control_adapter() {
         ("scripted_response_consumption".into(), true),
         ("virtual_clock".into(), true),
     ]);
-    let capability_dispositions = [
+    let capability_dispositions: BTreeMap<String, icwm_g0c_harness::ResultDisposition> = [
         "sync",
         "keys_query",
         "keys_claim",
@@ -678,10 +684,21 @@ fn published_control_scenario_deserializes_and_drives_the_control_adapter() {
         )
     })
     .collect();
+    let capability_disposition_reasons = capability_dispositions
+        .keys()
+        .map(|name| {
+            (
+                name.clone(),
+                "Outside the candidate-neutral control adapter topology.".to_owned(),
+            )
+        })
+        .collect();
     harness = harness
         .with_run_plan(icwm_g0c_harness::RunPlan {
+            disposition_reason: Some("The control adapter exercises only candidate-neutral harness mechanics; Matrix transport and crypto capabilities are outside this control topology.".into()),
             capabilities,
             capability_dispositions,
+            capability_disposition_reasons,
             ..Default::default()
         })
         .unwrap();
@@ -725,7 +742,7 @@ fn request_vector_corpus_binds_every_id_to_exact_request_bytes() {
 fn artifact_reports_are_derived_and_checked_for_all_dispositions() {
     for disposition in [
         icwm_g0c_harness::ResultDisposition::Supported,
-        icwm_g0c_harness::ResultDisposition::Failed,
+        icwm_g0c_harness::ResultDisposition::Uncertain,
         icwm_g0c_harness::ResultDisposition::Infeasible,
         icwm_g0c_harness::ResultDisposition::NotApplicable,
     ] {
@@ -746,7 +763,7 @@ fn artifact_reports_are_derived_and_checked_for_all_dispositions() {
         )
         .with_run_plan(plan)
         .unwrap();
-        if disposition == icwm_g0c_harness::ResultDisposition::Failed {
+        if disposition == icwm_g0c_harness::ResultDisposition::Uncertain {
             harness.arm_failpoint(Failpoint::CandidateAfterCommitBeforeAcknowledge);
             assert!(harness.drive(MatrixInput::Emit(effect)).is_err());
         } else {
@@ -805,12 +822,16 @@ fn identifier_and_admission_fixture_executes_every_case() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../fixtures/IDENTIFIER-FIXTURE.json")).unwrap();
     let cases = fixture["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 19);
+    assert_eq!(cases.len(), 23);
+    let mut oracle_accepts_harness_rejects = false;
+    let mut harness_accepts_oracle_rejects = false;
     for case in cases {
         let kind: MatrixIdentifierKind =
             serde_json::from_value(case["identifier_kind"].clone()).unwrap();
         let trigger: AdmissionTrigger = serde_json::from_value(case["trigger"].clone()).unwrap();
-        let expected = case["expected"].as_str().unwrap();
+        let oracle_expected = case["oracle_expected"].as_str().unwrap();
+        let identifier_expected = case["identifier_expected"].as_str().unwrap();
+        let admission_expected = case["admission_expected"].as_str().unwrap();
         let value = if let Some(value) = case["value"].as_str() {
             value.as_bytes().to_vec()
         } else {
@@ -834,31 +855,43 @@ fn identifier_and_admission_fixture_executes_every_case() {
             }
         };
         let actor = case["actor"].as_str().map(str::as_bytes);
-        let accepted = admit_fixture_message(actor, kind, &value, trigger).unwrap_or(false);
-        assert_eq!(accepted, expected == "accepted", "fixture case {case:?}");
+        let identifier_accepted =
+            icwm_g0c_harness::validate_typed_matrix_identifier_bytes(kind, &value).is_ok();
+        assert_eq!(
+            identifier_accepted,
+            identifier_expected == "accepted",
+            "harness identifier result for fixture case {case:?}"
+        );
+        let admission_accepted =
+            admit_fixture_message(actor, kind, &value, trigger).unwrap_or(false);
+        assert_eq!(
+            admission_accepted,
+            admission_expected == "accepted",
+            "message admission result for fixture case {case:?}"
+        );
 
-        if let Ok(value) = std::str::from_utf8(&value) {
-            match kind {
-                MatrixIdentifierKind::UserId => assert_eq!(
-                    ruma_common::UserId::parse(value).is_ok(),
-                    icwm_g0c_harness::validate_typed_matrix_identifier_bytes(
-                        kind,
-                        value.as_bytes()
-                    )
-                    .is_ok()
-                ),
-                MatrixIdentifierKind::RoomId => assert_eq!(
-                    ruma_common::RoomId::parse(value).is_ok(),
-                    icwm_g0c_harness::validate_typed_matrix_identifier_bytes(
-                        kind,
-                        value.as_bytes()
-                    )
-                    .is_ok()
-                ),
-                MatrixIdentifierKind::DeviceId | MatrixIdentifierKind::SessionId => {}
+        let oracle_accepted = std::str::from_utf8(&value).ok().map(|value| match kind {
+            MatrixIdentifierKind::UserId => ruma_common::UserId::parse(value).is_ok(),
+            MatrixIdentifierKind::RoomId => ruma_common::RoomId::parse(value).is_ok(),
+            MatrixIdentifierKind::DeviceId => {
+                let _: ruma_common::OwnedDeviceId = value.into();
+                true
             }
+            MatrixIdentifierKind::SessionId => <&ruma_common::SessionId>::try_from(value).is_ok(),
+        });
+        match oracle_expected {
+            "accepted" => assert_eq!(oracle_accepted, Some(true), "oracle case {case:?}"),
+            "rejected" => assert_eq!(oracle_accepted, Some(false), "oracle case {case:?}"),
+            "not_applicable" => assert_eq!(oracle_accepted, None, "oracle case {case:?}"),
+            other => panic!("unknown oracle expectation {other:?}"),
+        }
+        if let Some(oracle_accepted) = oracle_accepted {
+            oracle_accepts_harness_rejects |= oracle_accepted && !identifier_accepted;
+            harness_accepts_oracle_rejects |= !oracle_accepted && identifier_accepted;
         }
     }
+    assert!(oracle_accepts_harness_rejects);
+    assert!(harness_accepts_oracle_rejects);
 }
 
 #[test]
@@ -906,4 +939,195 @@ fn published_control_result_round_trips_through_report_model() {
     let reparsed: ArtifactReport = serde_json::from_str(&serialized).unwrap();
     assert_eq!(report, reparsed);
     assert_eq!(report.schema_version, "icwm.g0c.harness-result.v1");
+}
+
+#[test]
+fn capability_not_applicable_requires_a_capability_scoped_reason() {
+    let plan = icwm_g0c_harness::RunPlan {
+        capability_dispositions: BTreeMap::from([(
+            "sync".into(),
+            icwm_g0c_harness::ResultDisposition::NotApplicable,
+        )]),
+        ..Default::default()
+    };
+    assert!(matches!(
+        Harness::new(
+            ControlAdapter::new(CandidateId::new("control", "1")),
+            vec![],
+            vec![]
+        )
+        .with_run_plan(plan),
+        Err(HarnessError::MissingCapabilityDispositionReason { capability })
+            if capability == "sync"
+    ));
+}
+
+#[test]
+fn scenario_identity_and_required_failpoints_fail_closed() {
+    let mut scenario: icwm_g0c_harness::Scenario =
+        serde_json::from_str(include_str!("../fixtures/CONTROL-SCENARIO.json")).unwrap();
+    scenario.validate_identity().unwrap();
+    let mut tampered = scenario.clone();
+    tampered.name.push_str("-tampered");
+    assert!(matches!(
+        tampered.validate_identity(),
+        Err(HarnessError::ScenarioIdentityMismatch)
+    ));
+
+    scenario.failpoints = vec![Failpoint::CandidateBeforePrepare];
+    scenario.scenario_id = scenario.derived_id().unwrap();
+    let harness = Harness::from_scenario(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        &scenario,
+        vec![ScriptedResponse::matrix(200, b"{}".to_vec())],
+    )
+    .unwrap();
+    let report = harness.finish().unwrap();
+    assert!(
+        report
+            .disposition_reason
+            .as_deref()
+            .unwrap()
+            .contains("UnreachedFailpoints { count: 1 }")
+    );
+}
+
+#[test]
+fn armed_response_failpoints_execute_and_publish_crashes() {
+    for failpoint in [
+        Failpoint::ResponseBeforePrepare,
+        Failpoint::ResponseAfterCommitBeforeAcknowledge,
+    ] {
+        let mut harness = Harness::new(
+            ControlAdapter::new(CandidateId::new("control", "1")),
+            vec![],
+            vec![ScriptedResponse::matrix(200, b"response".to_vec())],
+        );
+        harness.arm_failpoint(failpoint);
+        assert!(matches!(
+            harness.drive(MatrixInput::ConsumeNextResponse),
+            Err(HarnessError::InjectedFailpoint { failpoint: reached }) if reached == failpoint
+        ));
+        let execution = harness.finish().unwrap();
+        assert_eq!(
+            execution.disposition,
+            icwm_g0c_harness::ResultDisposition::Uncertain
+        );
+        assert_eq!(execution.failpoints_reached, vec![failpoint]);
+        assert_eq!(execution.crashes.len(), 1);
+        assert!(execution.response_losses.is_empty());
+        let mut artifact: ArtifactReport =
+            serde_json::from_str(include_str!("../fixtures/CONTROL-RESULT.json")).unwrap();
+        artifact.apply_execution(&execution).unwrap();
+        artifact.validate_against_execution(&execution).unwrap();
+        artifact.crashes.clear();
+        assert!(matches!(
+            artifact.validate_against_execution(&execution),
+            Err(HarnessError::ArtifactExecutionMismatch)
+        ));
+    }
+}
+
+#[test]
+fn stale_writer_failpoint_is_post_effect_and_terminal_errors_accumulate() {
+    let effect = EffectIntent::new(
+        EffectKind::StaleWriterRejected {
+            holder_id: "old".into(),
+            lease_epoch: 7,
+        },
+        StableId::derive("stale-writer", &[b"old", &7_u64.to_be_bytes()]),
+    );
+    let mut harness = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![effect],
+        vec![],
+    );
+    harness.arm_failpoint(Failpoint::StaleWriterAfterTakeover);
+    assert!(matches!(
+        harness.drive(MatrixInput::StaleWriterAttempt {
+            holder_id: "old".into(),
+            lease_epoch: 7,
+        }),
+        Err(HarnessError::InjectedFailpoint {
+            failpoint: Failpoint::StaleWriterAfterTakeover
+        })
+    ));
+    let report = harness.finish().unwrap();
+    assert_eq!(report.effects.len(), 1);
+
+    let missing = StableId::derive("missing-operation", &[]);
+    let mut multiple = Harness::new(
+        ControlAdapter::new(CandidateId::new("control", "1")),
+        vec![],
+        vec![],
+    );
+    assert!(multiple.drive(MatrixInput::ConsumeNextResponse).is_err());
+    assert!(
+        multiple
+            .drive(MatrixInput::StepOperation {
+                operation_id: missing,
+                step: "still-live".into(),
+            })
+            .is_err()
+    );
+    let reason = multiple.finish().unwrap().disposition_reason.unwrap();
+    assert!(reason.contains("MissingScriptedResponse"));
+    assert!(reason.contains("OperationNotActive"));
+}
+
+#[test]
+fn publication_bindings_are_validated_separately_from_execution() {
+    let artifact: ArtifactReport =
+        serde_json::from_str(include_str!("../fixtures/CONTROL-RESULT.json")).unwrap();
+    let bindings = icwm_g0c_harness::PublicationBindings {
+        dependency_graph: artifact.dependency_graph.clone(),
+        tested_source_baseline: artifact.harness_commit.clone(),
+        component_commits: artifact.component_commits.clone(),
+        scenario_hash: artifact.scenario_hash.clone(),
+        vector_hashes: artifact.vector_hashes.clone(),
+        evidence_hashes: artifact.evidence_hashes.clone(),
+        tier: artifact.tier.clone(),
+        homeservers: artifact.homeservers.clone(),
+        clients: artifact.clients.clone(),
+    };
+    artifact.validate_publication_bindings(&bindings).unwrap();
+
+    let rejects = |stale: &icwm_g0c_harness::PublicationBindings| {
+        assert!(matches!(
+            artifact.validate_publication_bindings(stale),
+            Err(HarnessError::ArtifactPublicationMismatch)
+        ));
+    };
+    let mut stale = bindings.clone();
+    stale.scenario_hash = "0".repeat(64);
+    rejects(&stale);
+
+    let mut stale = bindings.clone();
+    stale.tier = "live".into();
+    rejects(&stale);
+
+    let foreign = icwm_g0c_harness::ArtifactIdentity {
+        name: "foreign".into(),
+        version: "1".into(),
+        stable_id: "0".repeat(64),
+    };
+    let mut stale = bindings.clone();
+    stale.homeservers.push(foreign.clone());
+    rejects(&stale);
+
+    let mut stale = bindings.clone();
+    stale.clients.push(foreign);
+    rejects(&stale);
+
+    let mut stale = bindings.clone();
+    stale
+        .component_commits
+        .insert("unexpected_component".into(), "0".repeat(40));
+    rejects(&stale);
+
+    let mut stale = bindings;
+    stale
+        .component_commits
+        .insert("ironclaw_source_baseline".into(), "0".repeat(40));
+    rejects(&stale);
 }

@@ -1,5 +1,5 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://enjimi.dev/schemas/icwm/g0c/SCENARIO.v1.schema.json",
+  "$schema":"https://json-schema.org/draft/2020-12/schema","$id":"urn:ironclaw:icwm-g0c:scenario:v1",
   "type":"object","additionalProperties":false,"required":["schema_version","scenario_id","name","inputs","expected_effects","failpoints"],
   "properties":{"schema_version":{"const":"icwm.g0c.scenario.v1"},"scenario_id":{"$ref":"#/$defs/hash"},"name":{"type":"string","minLength":1},"inputs":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/input"}},"expected_effects":{"type":"array","items":{"$ref":"#/$defs/effect"}},"failpoints":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/failpoint"}}},
   "$defs":{

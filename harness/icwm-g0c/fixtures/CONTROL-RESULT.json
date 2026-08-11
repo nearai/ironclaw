@@ -6,22 +6,23 @@
     "stable_id": "9ffc40c2eeb5d95b57d052aa0e0b5f97f4a303c0b2f6986cf6232b3ed00ecc6d"
   },
   "dependency_graph": {
-    "sha256": "05f78de0c0d2a30389cebc978752418d5564dbfa7158265e7bc3e61aa2fd3e3d",
+    "sha256": "9c2ffc013c58bea1d6f2c9c5357397d8c7701448e558438a57b4574c35148dd7",
     "artifact": "Cargo.lock"
   },
   "harness_commit": "2d64363101ef0ff062a6345a5573ee855766552f",
   "component_commits": {
     "ironclaw_source_baseline": "2d64363101ef0ff062a6345a5573ee855766552f"
   },
-  "scenario_hash": "4dc447ef48355e832dae27074b40c8283d4874b384ed5cb7885ba3d1192b3056",
+  "scenario_hash": "2427738c14018e932e4d4e7b30396f428056a4159c20d54ac58bdaff81f3f9ae",
   "vector_hashes": {
-    "identifier_admission_corpus": "0b7c83b10c2d8ce85133cef69b9adb1b922d1e681c1644d36522faac094d8842",
+    "identifier_admission_corpus": "4fc4ffe70c1ff757924298430e0e29766d1b5c6675ad6e0f664de81b68d6f94f",
     "request_vectors_v1": "2422a729df9b88f8005f34e35fe2794248412b05cdca50d0d83edeb1c4193878"
   },
   "tier": "deterministic",
   "homeservers": [],
   "clients": [],
   "disposition": "supported",
+  "disposition_reason": "The control adapter exercises only candidate-neutral harness mechanics; Matrix transport and crypto capabilities are outside this control topology.",
   "effects": [
     {
       "sequence": 0,
@@ -32,8 +33,10 @@
     }
   ],
   "failpoints_reached": [],
+  "crashes": [],
+  "response_losses": [],
   "evidence_hashes": {
-    "tested_harness_source": "a691f962b604a8ca4664a1e13cd06c4913648c7a12f54009977a6499a37558c4",
+    "tested_harness_source": "76023706c5fb4bbd1c8eea1c7df9f78c596f557ff31256621ae36cde7df66f23",
     "approved_ignored_common_aggregate": "e603556c99acd3de3c69b60acb74486a858993e5bb7fe9d1bd66827ea6d3d34b"
   },
   "capabilities": {
@@ -54,6 +57,20 @@
     "signatures_upload": "not_applicable",
     "verification": "not_applicable",
     "keys_changes": "not_applicable"
+  },
+  "capability_disposition_reasons": {
+    "sync": "Outside the candidate-neutral control adapter topology.",
+    "keys_query": "Outside the candidate-neutral control adapter topology.",
+    "keys_claim": "Outside the candidate-neutral control adapter topology.",
+    "to_device": "Outside the candidate-neutral control adapter topology.",
+    "room_send": "Outside the candidate-neutral control adapter topology.",
+    "keys_upload": "Outside the candidate-neutral control adapter topology.",
+    "device_list": "Outside the candidate-neutral control adapter topology.",
+    "room_keys_backup": "Outside the candidate-neutral control adapter topology.",
+    "cross_signing": "Outside the candidate-neutral control adapter topology.",
+    "signatures_upload": "Outside the candidate-neutral control adapter topology.",
+    "verification": "Outside the candidate-neutral control adapter topology.",
+    "keys_changes": "Outside the candidate-neutral control adapter topology."
   },
   "expected_failures": [],
   "waivers": [],

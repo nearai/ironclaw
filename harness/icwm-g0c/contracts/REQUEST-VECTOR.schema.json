@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://enjimi.dev/schemas/icwm/g0c/REQUEST-VECTOR.v1.schema.json",
+  "$id": "urn:ironclaw:icwm-g0c:request-vector:v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "corpus_id", "vectors", "capability_expectations"],

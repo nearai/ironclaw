@@ -71,7 +71,8 @@
         "source_provenance_sha256": "6e233f231b9abb2c3d9c64a079ba457143dafc5506a18b679c37424574c7b7c0",
         "scenario_sha256": "d1b0aec8cd656e8157efa2e2807dbe2daf4417be00b2050c4b512c139740dd5b"
       },
-      "author_command": "CARGO_TARGET_DIR=/tmp/icwm-base-crypto-final.QWVnbf cargo run --locked",
+      "normalized_author_command": "CARGO_TARGET_DIR=<isolated-author-target> cargo run --locked",
+      "command_provenance": "The retained command receipt binds the historical execution. Its raw temporary target path was intentionally normalized because it is host-local, non-semantic provenance; this command is not claimed as verbatim historical argv.",
       "recapture_command": "CARGO_TARGET_DIR=<new-isolated-target> cargo run --locked --manifest-path .work/evidence/icwm-n-g0c/candidates/base-crypto/Cargo.toml",
       "claim_boundary": "Only BaseClient-managed OlmMachine construction and two initial transport-free requests were observed; sync, encryption, reopen, crash recovery, and multi-writer behavior were not run."
     },

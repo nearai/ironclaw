@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://enjimi.dev/schemas/icwm/g0c/HARNESS-RESULT.v1.schema.json",
+  "$id": "urn:ironclaw:icwm-g0c:harness-result:v1",
   "title": "ICWM Gate 0C candidate-neutral harness result",
   "type": "object",
   "additionalProperties": false,
@@ -18,7 +18,10 @@
     "disposition",
     "effects",
     "failpoints_reached",
-    "evidence_hashes"
+    "crashes",
+    "response_losses",
+    "evidence_hashes",
+    "capability_disposition_reasons"
   ],
   "properties": {
     "schema_version": { "const": "icwm.g0c.harness-result.v1" },
@@ -54,7 +57,7 @@
       "items": { "$ref": "#/$defs/identity" }
     },
     "disposition": {
-      "enum": ["supported", "failed", "infeasible", "not_applicable"]
+      "enum": ["supported", "failed", "uncertain", "infeasible", "not_applicable"]
     },
     "disposition_reason": { "type": "string", "minLength": 1 },
     "effects": {
@@ -77,6 +80,30 @@
       "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
     },
+    "crashes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["at_ms", "reached"],
+        "properties": {
+          "at_ms": { "type": "integer", "minimum": 0 },
+          "reached": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "response_losses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["at_ms", "phase"],
+        "properties": {
+          "at_ms": { "type": "integer", "minimum": 0 },
+          "phase": { "enum": ["before_candidate", "after_adapter_handling"] }
+        }
+      }
+    },
     "evidence_hashes": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/sha256" }
@@ -87,7 +114,11 @@
     },
     "capability_dispositions": {
       "type": "object",
-      "additionalProperties": { "enum": ["supported", "failed", "infeasible", "not_applicable"] }
+      "additionalProperties": { "enum": ["supported", "failed", "uncertain", "infeasible", "not_applicable"] }
+    },
+    "capability_disposition_reasons": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 }
     },
     "expected_failures": {
       "type": "array",
@@ -106,7 +137,7 @@
     {
       "if": {
         "properties": {
-          "disposition": { "enum": ["infeasible", "not_applicable"] }
+          "disposition": { "enum": ["failed", "uncertain", "infeasible", "not_applicable"] }
         },
         "required": ["disposition"]
       },

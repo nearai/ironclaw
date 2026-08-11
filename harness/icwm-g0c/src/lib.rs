@@ -216,7 +216,7 @@ impl ScriptedResponse {
 }
 
 /// Named failure vocabulary shared by all candidate adapters.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Failpoint {
     LedgerBeforeCryptoStoreAppend,
@@ -249,6 +249,19 @@ pub enum RestartReason {
 pub struct CrashRecord {
     pub at_ms: u64,
     pub reached: Option<Failpoint>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseLossPhase {
+    BeforeCandidate,
+    AfterAdapterHandling,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResponseLossRecord {
+    pub at_ms: u64,
+    pub phase: ResponseLossPhase,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -383,7 +396,9 @@ impl CandidateAdapter for ControlAdapter {
                 )])
             }
             MatrixInput::Emit(intent) => Ok(vec![intent]),
-            MatrixInput::ConsumeNextResponse => Ok(Vec::new()),
+            MatrixInput::ConsumeNextResponse => Err(HarnessError::ControlInputUnsupported {
+                input: "response consumption is owned by Harness::drive_inner".into(),
+            }),
             MatrixInput::Cancel { operation_id } => {
                 if !self.active_operations.remove(&operation_id) {
                     return Err(HarnessError::OperationNotActive { operation_id });
@@ -467,6 +482,7 @@ impl CandidateAdapter for ControlAdapter {
 pub enum ResultDisposition {
     Supported,
     Failed,
+    Uncertain,
     Infeasible,
     NotApplicable,
 }
@@ -490,6 +506,8 @@ pub struct RunPlan {
     #[serde(default)]
     pub capability_dispositions: BTreeMap<String, ResultDisposition>,
     #[serde(default)]
+    pub capability_disposition_reasons: BTreeMap<String, String>,
+    #[serde(default)]
     pub expected_failures: Vec<PolicyRecord>,
     #[serde(default)]
     pub waivers: Vec<PolicyRecord>,
@@ -506,8 +524,10 @@ pub struct HarnessReport {
     pub effects: Vec<RecordedEffect>,
     pub failpoints_reached: Vec<Failpoint>,
     pub crashes: Vec<CrashRecord>,
+    pub response_losses: Vec<ResponseLossRecord>,
     pub capabilities: BTreeMap<String, bool>,
     pub capability_dispositions: BTreeMap<String, ResultDisposition>,
+    pub capability_disposition_reasons: BTreeMap<String, String>,
     pub expected_failures: Vec<PolicyRecord>,
     pub waivers: Vec<PolicyRecord>,
     pub blacklists: Vec<PolicyRecord>,
@@ -538,6 +558,20 @@ pub struct DependencyGraphEvidence {
     pub artifact: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationBindings {
+    pub dependency_graph: DependencyGraphEvidence,
+    pub tested_source_baseline: String,
+    pub component_commits: BTreeMap<String, String>,
+    pub scenario_hash: String,
+    pub vector_hashes: BTreeMap<String, String>,
+    pub evidence_hashes: BTreeMap<String, String>,
+    pub tier: String,
+    pub homeservers: Vec<ArtifactIdentity>,
+    pub clients: Vec<ArtifactIdentity>,
+}
+
 /// Schema-conforming publication model. Construction is explicit so a trace
 /// cannot accidentally masquerade as a fully evidenced result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -558,11 +592,17 @@ pub struct ArtifactReport {
     pub disposition_reason: Option<String>,
     pub effects: Vec<ArtifactEffect>,
     pub failpoints_reached: Vec<String>,
+    #[serde(default)]
+    pub crashes: Vec<CrashRecord>,
+    #[serde(default)]
+    pub response_losses: Vec<ResponseLossRecord>,
     pub evidence_hashes: BTreeMap<String, String>,
     #[serde(default)]
     pub capabilities: BTreeMap<String, bool>,
     #[serde(default)]
     pub capability_dispositions: BTreeMap<String, ResultDisposition>,
+    #[serde(default)]
+    pub capability_disposition_reasons: BTreeMap<String, String>,
     #[serde(default)]
     pub expected_failures: Vec<PolicyRecord>,
     #[serde(default)]
@@ -572,6 +612,27 @@ pub struct ArtifactReport {
 }
 
 impl ArtifactReport {
+    pub fn validate_publication_bindings(
+        &self,
+        expected: &PublicationBindings,
+    ) -> Result<(), HarnessError> {
+        if self.dependency_graph != expected.dependency_graph
+            || self.harness_commit != expected.tested_source_baseline
+            || self.component_commits.get("ironclaw_source_baseline")
+                != Some(&expected.tested_source_baseline)
+            || self.component_commits != expected.component_commits
+            || self.scenario_hash != expected.scenario_hash
+            || self.vector_hashes != expected.vector_hashes
+            || self.evidence_hashes != expected.evidence_hashes
+            || self.tier != expected.tier
+            || self.homeservers != expected.homeservers
+            || self.clients != expected.clients
+        {
+            return Err(HarnessError::ArtifactPublicationMismatch);
+        }
+        Ok(())
+    }
+
     pub fn apply_execution(&mut self, execution: &HarnessReport) -> Result<(), HarnessError> {
         self.candidate = ArtifactIdentity {
             name: execution.candidate.name.clone(),
@@ -591,8 +652,11 @@ impl ArtifactReport {
             .map(|value| serde_json::to_value(value).and_then(serde_json::from_value))
             .collect::<Result<_, _>>()
             .map_err(|_| HarnessError::ArtifactEncoding)?;
+        self.crashes = execution.crashes.clone();
+        self.response_losses = execution.response_losses.clone();
         self.capabilities = execution.capabilities.clone();
         self.capability_dispositions = execution.capability_dispositions.clone();
+        self.capability_disposition_reasons = execution.capability_disposition_reasons.clone();
         self.expected_failures = execution.expected_failures.clone();
         self.waivers = execution.waivers.clone();
         self.blacklists = execution.blacklists.clone();
@@ -613,6 +677,7 @@ impl ArtifactReport {
             || self.disposition_reason != execution.disposition_reason
             || self.capabilities != execution.capabilities
             || self.capability_dispositions != execution.capability_dispositions
+            || self.capability_disposition_reasons != execution.capability_disposition_reasons
             || self.expected_failures != execution.expected_failures
             || self.waivers != execution.waivers
             || self.blacklists != execution.blacklists
@@ -623,6 +688,8 @@ impl ArtifactReport {
                     .map(|value| serde_json::to_value(value).and_then(serde_json::from_value))
                     .collect::<Result<Vec<String>, _>>()
                     .map_err(|_| HarnessError::ArtifactEncoding)?
+            || self.crashes != execution.crashes
+            || self.response_losses != execution.response_losses
             || self
                 .effects
                 .iter()
@@ -675,6 +742,50 @@ pub struct Scenario {
     pub inputs: Vec<MatrixInput>,
     pub expected_effects: Vec<EffectIntent>,
     pub failpoints: Vec<Failpoint>,
+}
+
+impl Scenario {
+    pub fn derived_id(&self) -> Result<StableId, HarnessError> {
+        fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>, HarnessError> {
+            fn sort(value: serde_json::Value) -> serde_json::Value {
+                match value {
+                    serde_json::Value::Array(values) => {
+                        serde_json::Value::Array(values.into_iter().map(sort).collect())
+                    }
+                    serde_json::Value::Object(values) => {
+                        let sorted: BTreeMap<_, _> = values
+                            .into_iter()
+                            .map(|(key, value)| (key, sort(value)))
+                            .collect();
+                        serde_json::Value::Object(sorted.into_iter().collect())
+                    }
+                    other => other,
+                }
+            }
+            let value = serde_json::to_value(value).map_err(|_| HarnessError::ArtifactEncoding)?;
+            serde_json::to_vec(&sort(value)).map_err(|_| HarnessError::ArtifactEncoding)
+        }
+        let inputs = canonical(&self.inputs)?;
+        let expected_effects = canonical(&self.expected_effects)?;
+        let failpoints = canonical(&self.failpoints)?;
+        Ok(StableId::derive(
+            "scenario",
+            &[
+                self.schema_version.as_bytes(),
+                self.name.as_bytes(),
+                &inputs,
+                &expected_effects,
+                &failpoints,
+            ],
+        ))
+    }
+
+    pub fn validate_identity(&self) -> Result<(), HarnessError> {
+        if self.scenario_id != self.derived_id()? {
+            return Err(HarnessError::ScenarioIdentityMismatch);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -758,7 +869,7 @@ pub fn admit_fixture_message(
     let actor = actor.ok_or(HarnessError::MissingActor)?;
     validate_typed_matrix_identifier_bytes(MatrixIdentifierKind::UserId, actor)?;
     let topology_valid = match trigger {
-        AdmissionTrigger::DirectChat => conversation_kind == MatrixIdentifierKind::UserId,
+        AdmissionTrigger::DirectChat => conversation_kind == MatrixIdentifierKind::RoomId,
         AdmissionTrigger::BotMention | AdmissionTrigger::ReplyToBot | AdmissionTrigger::Ambient => {
             conversation_kind == MatrixIdentifierKind::RoomId
         }
@@ -1000,11 +1111,27 @@ pub struct Harness<A: CandidateAdapter> {
     armed_failpoint: Option<Failpoint>,
     failpoints_reached: Vec<Failpoint>,
     crashes: Vec<CrashRecord>,
+    response_losses: Vec<ResponseLossRecord>,
+    required_failpoints: BTreeSet<Failpoint>,
     run_plan: RunPlan,
-    terminal_error: Option<String>,
+    terminal_errors: Vec<(String, bool)>,
 }
 
 impl<A: CandidateAdapter> Harness<A> {
+    pub fn from_scenario(
+        adapter: A,
+        scenario: &Scenario,
+        scripted_responses: Vec<ScriptedResponse>,
+    ) -> Result<Self, HarnessError> {
+        scenario.validate_identity()?;
+        Ok(Self::new(
+            adapter,
+            scenario.expected_effects.clone(),
+            scripted_responses,
+        )
+        .with_required_failpoints(scenario.failpoints.clone()))
+    }
+
     pub fn new(
         adapter: A,
         expected_effects: Vec<EffectIntent>,
@@ -1019,8 +1146,10 @@ impl<A: CandidateAdapter> Harness<A> {
             armed_failpoint: None,
             failpoints_reached: Vec::new(),
             crashes: Vec::new(),
+            response_losses: Vec::new(),
+            required_failpoints: BTreeSet::new(),
             run_plan: RunPlan::default(),
-            terminal_error: None,
+            terminal_errors: Vec::new(),
         }
     }
 
@@ -1039,6 +1168,18 @@ impl<A: CandidateAdapter> Harness<A> {
         {
             return Err(HarnessError::MissingDispositionReason);
         }
+        for (capability, disposition) in &run_plan.capability_dispositions {
+            if *disposition == ResultDisposition::NotApplicable
+                && run_plan
+                    .capability_disposition_reasons
+                    .get(capability)
+                    .is_none_or(String::is_empty)
+            {
+                return Err(HarnessError::MissingCapabilityDispositionReason {
+                    capability: capability.clone(),
+                });
+            }
+        }
         self.run_plan = run_plan;
         Ok(self)
     }
@@ -1055,10 +1196,20 @@ impl<A: CandidateAdapter> Harness<A> {
         self.armed_failpoint = Some(failpoint);
     }
 
+    pub fn with_required_failpoints(mut self, failpoints: Vec<Failpoint>) -> Self {
+        self.required_failpoints = failpoints.into_iter().collect();
+        self
+    }
+
     pub fn drive(&mut self, input: MatrixInput) -> Result<(), HarnessError> {
         let result = self.drive_inner(input);
         if let Err(error) = &result {
-            self.terminal_error = Some(error.to_string());
+            let uncertain = matches!(
+                error,
+                HarnessError::InjectedFailpoint { .. }
+                    | HarnessError::ResponseLostAfterAdapterHandling
+            );
+            self.terminal_errors.push((error.to_string(), uncertain));
         }
         result
     }
@@ -1070,9 +1221,14 @@ impl<A: CandidateAdapter> Harness<A> {
                 .pop_front()
                 .ok_or(HarnessError::MissingScriptedResponse)?;
             if response.delivery == ResponseDelivery::LostBeforeCandidate {
-                self.failpoints_reached
-                    .push(Failpoint::ResponseBeforePrepare);
+                self.response_losses.push(ResponseLossRecord {
+                    at_ms: self.clock.now_ms(),
+                    phase: ResponseLossPhase::BeforeCandidate,
+                });
                 return Err(HarnessError::ResponseLostBeforeCandidate);
+            }
+            if self.armed_failpoint == Some(Failpoint::ResponseBeforePrepare) {
+                return self.trigger(Failpoint::ResponseBeforePrepare);
             }
             let lost_after = response.delivery == ResponseDelivery::LostAfterAdapterHandling;
             let response = if response.delivery == ResponseDelivery::Partial {
@@ -1097,9 +1253,14 @@ impl<A: CandidateAdapter> Harness<A> {
             let prepared = self.adapter.prepare_response(response)?;
             let effects = self.adapter.commit_response(&prepared)?;
             self.append_effects(effects)?;
+            if self.armed_failpoint == Some(Failpoint::ResponseAfterCommitBeforeAcknowledge) {
+                return self.trigger(Failpoint::ResponseAfterCommitBeforeAcknowledge);
+            }
             if lost_after {
-                self.failpoints_reached
-                    .push(Failpoint::ResponseAfterCommitBeforeAcknowledge);
+                self.response_losses.push(ResponseLossRecord {
+                    at_ms: self.clock.now_ms(),
+                    phase: ResponseLossPhase::AfterAdapterHandling,
+                });
                 return Err(HarnessError::ResponseLostAfterAdapterHandling);
             }
             return self.adapter.acknowledge_response(prepared);
@@ -1122,7 +1283,7 @@ impl<A: CandidateAdapter> Harness<A> {
     pub fn crash(&mut self) -> Result<CrashRecord, HarnessError> {
         let reached = self.armed_failpoint.take();
         if let Some(failpoint) = reached {
-            self.failpoints_reached.push(failpoint);
+            self.record_failpoint(failpoint);
         }
         self.adapter.crash(reached)?;
         let record = CrashRecord {
@@ -1138,24 +1299,45 @@ impl<A: CandidateAdapter> Harness<A> {
     }
 
     pub fn finish(self) -> Result<HarnessReport, HarnessError> {
-        let mut terminal_failures = self.terminal_error.into_iter().collect::<Vec<_>>();
+        let mut terminal_failures = self.terminal_errors;
         if !self.expected_effects.is_empty() {
-            terminal_failures.push(
+            terminal_failures.push((
                 HarnessError::MissingEffects {
                     count: self.expected_effects.len(),
                 }
                 .to_string(),
-            );
+                false,
+            ));
         }
         if !self.scripted_responses.is_empty() {
-            terminal_failures.push(
+            terminal_failures.push((
                 HarnessError::UnusedScriptedResponses {
                     count: self.scripted_responses.len(),
                 }
                 .to_string(),
-            );
+                false,
+            ));
         }
-        let disposition = if !terminal_failures.is_empty() {
+        if !self.required_failpoints.is_empty() {
+            terminal_failures.push((
+                HarnessError::UnreachedFailpoints {
+                    count: self.required_failpoints.len(),
+                }
+                .to_string(),
+                false,
+            ));
+        }
+        if let Some(failpoint) = self.armed_failpoint {
+            terminal_failures.push((
+                HarnessError::ArmedFailpointUnreached { failpoint }.to_string(),
+                false,
+            ));
+        }
+        let disposition = if terminal_failures.iter().all(|(_, uncertain)| *uncertain)
+            && !terminal_failures.is_empty()
+        {
+            ResultDisposition::Uncertain
+        } else if !terminal_failures.is_empty() {
             ResultDisposition::Failed
         } else {
             self.run_plan
@@ -1165,7 +1347,13 @@ impl<A: CandidateAdapter> Harness<A> {
         let disposition_reason = if terminal_failures.is_empty() {
             self.run_plan.disposition_reason.clone()
         } else {
-            Some(terminal_failures.join("; "))
+            Some(
+                terminal_failures
+                    .into_iter()
+                    .map(|(reason, _)| reason)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
         };
         Ok(HarnessReport {
             schema_version: TRACE_VERSION.into(),
@@ -1175,8 +1363,10 @@ impl<A: CandidateAdapter> Harness<A> {
             effects: self.ledger,
             failpoints_reached: self.failpoints_reached,
             crashes: self.crashes,
+            response_losses: self.response_losses,
             capabilities: self.run_plan.capabilities,
             capability_dispositions: self.run_plan.capability_dispositions,
+            capability_disposition_reasons: self.run_plan.capability_disposition_reasons,
             expected_failures: self.run_plan.expected_failures,
             waivers: self.run_plan.waivers,
             blacklists: self.run_plan.blacklists,
@@ -1249,13 +1439,20 @@ impl<A: CandidateAdapter> Harness<A> {
         if self.armed_failpoint == Some(failpoint) {
             self.armed_failpoint = None;
         }
-        self.failpoints_reached.push(failpoint);
+        self.record_failpoint(failpoint);
         self.adapter.crash(Some(failpoint))?;
         self.crashes.push(CrashRecord {
             at_ms: self.clock.now_ms(),
             reached: Some(failpoint),
         });
         Err(HarnessError::InjectedFailpoint { failpoint })
+    }
+
+    fn record_failpoint(&mut self, failpoint: Failpoint) {
+        self.required_failpoints.remove(&failpoint);
+        if !self.failpoints_reached.contains(&failpoint) {
+            self.failpoints_reached.push(failpoint);
+        }
     }
 }
 
@@ -1275,7 +1472,10 @@ fn boundary_failpoint(kind: &EffectKind, before: bool) -> Option<Failpoint> {
         (EffectKind::PreparedCiphertext { .. }, false) => {
             Some(Failpoint::AfterPreparedCiphertextHandoff)
         }
-        (EffectKind::StaleWriterRejected { .. }, _) => Some(Failpoint::StaleWriterAfterTakeover),
+        (EffectKind::StaleWriterRejected { .. }, false) => {
+            Some(Failpoint::StaleWriterAfterTakeover)
+        }
+        (EffectKind::StaleWriterRejected { .. }, true) => None,
         _ => None,
     }
 }
@@ -1323,8 +1523,12 @@ pub enum HarnessError {
         actual: StableId,
     },
     ArtifactExecutionMismatch,
+    ArtifactPublicationMismatch,
     ArtifactEncoding,
     MissingDispositionReason,
+    MissingCapabilityDispositionReason {
+        capability: String,
+    },
     InvalidPredeclaredDisposition,
     MissingActor,
     InjectedFailpoint {
@@ -1332,6 +1536,13 @@ pub enum HarnessError {
     },
     ResponseLostBeforeCandidate,
     ResponseLostAfterAdapterHandling,
+    UnreachedFailpoints {
+        count: usize,
+    },
+    ArmedFailpointUnreached {
+        failpoint: Failpoint,
+    },
+    ScenarioIdentityMismatch,
 }
 
 impl Display for HarnessError {
