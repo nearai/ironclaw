@@ -22,7 +22,7 @@ use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
-use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::result_meta::{FailureKind, MODEL_DIAGNOSTIC_MAX_BYTES};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -778,6 +778,78 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     assert!(
         validator.validate(&parse_wrapper_input).is_err(),
         "trigger_create schema must reject parser-style operation/data wrappers"
+    );
+}
+
+/// Regression guard for issue #7246: the agent fabricated automation status
+/// ("your BTC digest is running and sending to Telegram") while the Automations
+/// page showed none. `builtin.trigger_list` IS the model's read path for that
+/// state, so its model-visible description must (a) bridge the user vocabulary
+/// ("automation", "routine") to the trigger capability id and (b) carry the
+/// grounding rule: call it before asserting routine/automation existence or
+/// status, never answer from memory. Driven through the production
+/// `visible_capabilities` surface assembly, not the constant.
+#[tokio::test]
+async fn builtin_trigger_list_surface_grounds_automation_status_claims() {
+    let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let trigger_list = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == TRIGGER_LIST_CAPABILITY_ID)
+        .expect("trigger_list must appear in surface");
+
+    let description = &trigger_list.descriptor.description;
+    // Vocabulary bridge: users ask about "automations" (the Automations page)
+    // and "routines"; the capability id says "trigger". Without all three in
+    // the description the model does not map status questions to this tool.
+    assert!(
+        description.contains("routine"),
+        "trigger_list description must use the routine vocabulary: {description}"
+    );
+    assert!(
+        description.contains("automation"),
+        "trigger_list description must use the automation vocabulary: {description}"
+    );
+    // Grounding rule tied to the specific fabrication (issue #7246), mirroring
+    // the outbound targets-list pattern: state the positive check-before-assert
+    // rule, not generic caution.
+    assert!(
+        description.contains("Call this before"),
+        "trigger_list description must instruct calling it before status claims: {description}"
+    );
+    assert!(
+        description.contains("never report routine or automation status from"),
+        "trigger_list description must forbid answering status from memory: {description}"
+    );
+    // Empty-state grounding: no rows means no automations exist — say so.
+    assert!(
+        description.contains("empty"),
+        "trigger_list description must ground the empty result as 'no routines': {description}"
+    );
+
+    // The same grounding must survive into the model-visible input schema root
+    // description (the trigger_create schema already carries steering there).
+    let schema = &trigger_list.descriptor.parameters_schema;
+    let schema_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_list schema must describe the listing as authoritative state");
+    assert!(
+        schema_description.contains("authoritative"),
+        "trigger_list schema description must declare the response authoritative: {schema_description}"
+    );
+    assert!(
+        schema_description.contains("routine") && schema_description.contains("automation"),
+        "trigger_list schema description must bridge routine/automation vocabulary: {schema_description}"
     );
 }
 
@@ -2070,15 +2142,19 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
         .unwrap();
     }
 
-    let empty = invoke_with_context(
+    // #7474 review: `limit: 0` used to succeed with an empty list while 101
+    // routines exist — exactly the false-absence result the trigger_list
+    // description forbids the model to fabricate. It is now rejected as
+    // invalid input (schema declares `minimum: 1`), so an empty `triggers`
+    // array is always proof of absence.
+    invoke_with_context(
         &runtime,
         TRIGGER_LIST_CAPABILITY_ID,
         json!({ "limit": 0 }),
         context.clone(),
     )
     .await
-    .unwrap();
-    assert_eq!(empty["triggers"], json!([]));
+    .expect_err("a zero limit must be rejected, not answered with an empty list");
 
     let listed = invoke_with_context(
         &runtime,
@@ -4344,6 +4420,285 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.save_body_to, None);
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_surfaces_http_error_status_as_failed_outcome() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        br#"{"message":"authentication required"}"#.to_vec(),
+    ));
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "method": "post",
+            "url": "https://api.example.test/private",
+            "body": "paid"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 403")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["body_text"],
+        json!(r#"{"message":"authentication required"}"#)
+    );
+    assert!(response["auth_hint"].as_str().is_some_and(|hint| {
+        hint.contains("authentication/authorization") && hint.contains("extension")
+    }));
+    assert_eq!(egress.requests().len(), 1);
+    // The failure carries usage like the sibling dispatch paths: egress bytes
+    // from the request body flow into the governor even for failed calls.
+    // (wall_clock_ms is pinned at the classify_status unit seam instead of
+    // here because integration-tier wall-clock is timing-dependent; the
+    // governor records the full failed-call usage, wall_clock_ms included.)
+    let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
+    let usage = governor.usage_for(&tenant_account);
+    assert_eq!(
+        usage.network_egress_bytes, 4,
+        "failed calls must still account egress bytes"
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_keeps_redirect_responses_model_visible() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(302, Vec::new())
+            .with_headers(vec![("location".to_string(), "/next".to_string())]),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/redirect"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .expect("redirect responses must remain inspectable results");
+
+    assert_eq!(output["status"], json!(302));
+    assert_eq!(output["headers"][0]["name"], json!("location"));
+    assert_eq!(output["headers"][0]["value"], json!("/next"));
+}
+
+#[tokio::test]
+async fn builtin_http_surfaces_server_error_status_as_failed_outcome() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        500,
+        br#"{"error":"internal"}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/boom"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 500")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(500));
+    assert_eq!(response["body_text"], json!(r#"{"error":"internal"}"#));
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_http_save_surfaces_http_error_status_as_failed_outcome() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(403, br#"{"message":"denied"}"#.to_vec())
+            .with_saved_body("/workspace/denied.json", 20),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/private",
+            "save_to": "/workspace/denied.json"
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 403")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["saved_body"],
+        json!({"path": "/workspace/denied.json", "bytes_written": 20})
+    );
+    assert!(
+        response.get("body_text").is_none(),
+        "save-mode diagnostics carry saved_body metadata, not the inline body"
+    );
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].save_body_to.is_some(),
+        "save-mode error path must still use strict host egress with a save target"
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_classifies_status_range_boundaries() {
+    for status in [400u16, 599] {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+            status,
+            Vec::new(),
+        ));
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+        let failure = invoke_failure_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/edge"}),
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+        )
+        .await;
+        assert_eq!(
+            failure.kind,
+            FailureKind::OperationFailed,
+            "status {status} must classify as a failure"
+        );
+    }
+    for status in [100u16, 304, 600] {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+            status,
+            Vec::new(),
+        ));
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+        let output = invoke_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/edge"}),
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("status {status} must stay an inspectable result, got {error:?}")
+        });
+        assert_eq!(output["status"], json!(status));
+    }
+}
+
+#[tokio::test]
+async fn builtin_http_error_diagnostic_respects_model_diagnostic_budget() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        vec![b'a'; 16 * 1024],
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/private"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    assert!(
+        text.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+        "diagnostic must fit the model-visible budget, got {} bytes",
+        text.len()
+    );
+    let response: Value =
+        serde_json::from_str(&text).expect("trimmed diagnostic must stay valid JSON");
+    assert_eq!(
+        response["status"],
+        json!(403),
+        "status must survive the budget trim"
+    );
+    assert_eq!(response["truncation"]["body"], json!(true));
+    assert!(
+        response["body_text"].as_str().is_some(),
+        "trimmed error body must remain visible in the diagnostic"
+    );
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_http_error_diagnostic_preserves_egress_truncation_flag() {
+    // The egress returns a partial body when it hits the caller's
+    // response_body_limit; the failure diagnostic must keep reporting that
+    // truncation instead of presenting the partial body as complete.
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        b"partial body that exceeds the one-byte cap".to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/private",
+            "response_body_limit": 1
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("diagnostic must stay valid JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["body_truncated"],
+        json!(true),
+        "egress truncation at the caller cap must stay visible"
+    );
+    assert_eq!(response["truncation"]["body"], json!(true));
 }
 
 #[tokio::test]

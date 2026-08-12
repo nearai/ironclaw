@@ -432,12 +432,18 @@ impl ExtensionIngressRouter {
             .map(|(name, value)| (name.clone(), String::from_utf8_lossy(value).into_owned()))
             .collect();
         let outcome = {
+            let can_reply_in_threads = binding
+                .resolved()
+                .channel
+                .as_ref()
+                .is_some_and(|channel| channel.presentation.can_reply_in_threads);
             let inbound = VerifiedInbound {
                 extension_id: binding.extension_id(),
                 installation_id: &verified.installation_id,
                 config: &non_secret_config,
                 body: &request.body,
                 headers: &forwarded_headers,
+                can_reply_in_threads,
             };
             match catch_unwind(AssertUnwindSafe(|| channel.inbound(inbound))) {
                 Ok(Ok(outcome)) => outcome,

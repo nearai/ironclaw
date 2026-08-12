@@ -43,6 +43,7 @@ fn snapshot(
         status,
         suspension: None,
         checkpoint_ref: None,
+        checkpoint_kind: None,
         input_ref: None,
         failure: None,
         journal_cursor: ProcessJournalCursor(1),
@@ -540,6 +541,7 @@ fn defensive_transition_matrix_fails_closed_without_corrupting_state() {
             payload: ProcessCheckpointPayload::new(payload.to_vec()).expect("payload"),
             created_at: Utc::now(),
             link_to_process: true,
+            kind: None,
             metadata: serde_json::Value::Null,
         };
     assert_error(
@@ -832,6 +834,7 @@ fn command_dispatch_covers_submit_claim_heartbeat_transition_and_control_replay(
         payload: ProcessCheckpointPayload::new(b"checkpoint".to_vec()).expect("payload"),
         created_at: Utc::now(),
         link_to_process: true,
+        kind: None,
         metadata: json!({"checkpoint": true}),
     };
     let mut submission = submit_request(process_id, request_scope.clone());
@@ -1125,6 +1128,7 @@ fn command_dispatch_covers_tree_dependency_checkpoint_and_legacy_import() {
         payload: ProcessCheckpointPayload::new(b"state".to_vec()).expect("checkpoint payload"),
         created_at: Utc::now(),
         link_to_process: true,
+        kind: None,
         metadata: serde_json::Value::Null,
     };
     state
@@ -1135,79 +1139,179 @@ fn command_dispatch_covers_tree_dependency_checkpoint_and_legacy_import() {
         .expect("checkpoint replay");
 }
 
+/// One row of the lease-recovery matrix.
+struct RecoveryCase {
+    label: &'static str,
+    status: ProcessLifecycleStatus,
+    checkpointed: bool,
+    checkpoint_kind: Option<ProcessCheckpointKind>,
+    claim_count: u64,
+    /// How long before `now` the lease expired.
+    expired_for: chrono::Duration,
+    /// `None` means recovery must leave the process alone.
+    expected: Option<(ProcessLifecycleStatus, Option<&'static str>)>,
+}
+
 #[test]
-fn expired_lease_recovery_covers_cancel_requeue_and_bounded_failure_states() {
+fn expired_lease_recovery_covers_cancel_requeue_grace_and_bounded_failure_states() {
+    const LEASE_TTL: chrono::Duration = chrono::Duration::seconds(90);
     let request_scope = scope("recovery");
     let now = Utc::now();
     let worker_id = ProcessWorkerId::from_trusted("recovery-worker");
-    let statuses = [
-        (
-            ProcessLifecycleStatus::CancelRequested,
-            None,
-            1,
-            ProcessLifecycleStatus::Cancelled,
-            None,
-        ),
-        (
-            ProcessLifecycleStatus::Running,
-            None,
-            1,
-            ProcessLifecycleStatus::Queued,
-            None,
-        ),
-        (
-            ProcessLifecycleStatus::Running,
-            Some(ProcessCheckpointRef::from_trusted("checkpoint")),
-            1,
-            ProcessLifecycleStatus::Failed,
-            Some("lease_expired"),
-        ),
-        (
-            ProcessLifecycleStatus::Running,
-            None,
-            MAX_CRASH_RECOVERY_RECLAIMS,
-            ProcessLifecycleStatus::Failed,
-            Some("crash_retry_exhausted"),
-        ),
+    let past_grace = LEASE_TTL + chrono::Duration::seconds(1);
+    let within_grace = chrono::Duration::seconds(1);
+    let cases = [
+        RecoveryCase {
+            label: "cancel-requested is cancelled as soon as the lease expires",
+            status: ProcessLifecycleStatus::CancelRequested,
+            checkpointed: false,
+            checkpoint_kind: None,
+            claim_count: 1,
+            expired_for: within_grace,
+            expected: Some((ProcessLifecycleStatus::Cancelled, None)),
+        },
+        RecoveryCase {
+            label: "checkpointless work is requeued immediately, without a grace window",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: false,
+            checkpoint_kind: None,
+            claim_count: 1,
+            expired_for: within_grace,
+            expected: Some((ProcessLifecycleStatus::Queued, None)),
+        },
+        RecoveryCase {
+            label: "a side-effect checkpoint is never resumed — resuming would re-run the effect",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeSideEffect),
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Failed, Some("lease_expired"))),
+        },
+        RecoveryCase {
+            label: "an unknown checkpoint kind fails closed like a side-effect checkpoint",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: None,
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Failed, Some("lease_expired"))),
+        },
+        RecoveryCase {
+            label: "a before-model checkpoint inside the grace window is left for a later sweep",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            claim_count: 1,
+            expired_for: within_grace,
+            expected: None,
+        },
+        RecoveryCase {
+            label: "a before-model checkpoint past the grace window is requeued",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Queued, None)),
+        },
+        RecoveryCase {
+            label: "a before-block checkpoint past the grace window is requeued",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeBlock),
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Queued, None)),
+        },
+        RecoveryCase {
+            label: "checkpointed requeue shares the crash-reclaim budget and fails when spent",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            claim_count: MAX_CRASH_RECOVERY_RECLAIMS,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Failed, Some("lease_expired"))),
+        },
+        RecoveryCase {
+            label: "checkpointless requeue keeps its own bounded budget",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: false,
+            checkpoint_kind: None,
+            claim_count: MAX_CRASH_RECOVERY_RECLAIMS,
+            expired_for: within_grace,
+            expected: Some((
+                ProcessLifecycleStatus::Failed,
+                Some("crash_retry_exhausted"),
+            )),
+        },
     ];
     let mut state = ProcessJournalMaterializedState::default();
     let mut process_ids = Vec::new();
-    for (status, checkpoint_ref, claim_count, _, _) in &statuses {
+    for case in &cases {
         let process_id = ProcessId::new();
         process_ids.push(process_id);
-        let mut process = snapshot(process_id, *status, request_scope.clone());
-        process.checkpoint_ref = checkpoint_ref.clone();
+        let mut process = snapshot(process_id, case.status, request_scope.clone());
+        process.checkpoint_ref = case
+            .checkpointed
+            .then(|| ProcessCheckpointRef::from_trusted("checkpoint"));
+        process.checkpoint_kind = case.checkpoint_kind;
         process.lease = Some(ProcessLeaseSnapshot {
             worker_id: worker_id.clone(),
             lease_token: ProcessLeaseToken::from_trusted(process_id.to_string()),
-            lease_expires_at: Some(now - chrono::Duration::seconds(1)),
-            last_heartbeat_at: Some(now - chrono::Duration::seconds(2)),
-            claim_count: *claim_count,
+            lease_expires_at: Some(now - case.expired_for),
+            last_heartbeat_at: Some(now - case.expired_for - chrono::Duration::seconds(1)),
+            claim_count: case.claim_count,
         });
         state.processes.insert(process_id, process);
     }
 
     let recovered = state
-        .apply_command(StoredProcessCommand::RecoverExpired(
-            RecoverExpiredProcessLeasesRequest {
+        .apply_command(StoredProcessCommand::RecoverExpired {
+            request: RecoverExpiredProcessLeasesRequest {
                 now,
                 scope_filter: Some(request_scope),
                 process_kind_filter: Some(ProcessKind::Internal),
             },
-        ))
+            lease_duration_millis: u64::try_from(LEASE_TTL.num_milliseconds())
+                .expect("lease ttl millis"),
+        })
         .expect("recover expired leases");
     let StoredCommandOutcome::Recovered(response) = recovered else {
         panic!("recovery command returned wrong outcome");
     };
-    assert_eq!(response.recovered.len(), statuses.len());
-    for (process_id, (_, _, _, expected_status, failure)) in process_ids.into_iter().zip(statuses) {
+    let expected_recovered = cases.iter().filter(|case| case.expected.is_some()).count();
+    assert_eq!(response.recovered.len(), expected_recovered);
+    for (process_id, case) in process_ids.into_iter().zip(&cases) {
         let recovered = state.processes.get(&process_id).expect("recovered process");
-        assert_eq!(recovered.status, expected_status);
-        assert_eq!(
-            recovered.failure.as_ref().map(SanitizedFailure::category),
-            failure
-        );
-        assert!(recovered.lease.is_none());
+        match case.expected {
+            Some((expected_status, failure)) => {
+                assert_eq!(recovered.status, expected_status, "{}", case.label);
+                assert_eq!(
+                    recovered.failure.as_ref().map(SanitizedFailure::category),
+                    failure,
+                    "{}",
+                    case.label
+                );
+                assert!(recovered.lease.is_none(), "{}", case.label);
+                if expected_status == ProcessLifecycleStatus::Queued {
+                    assert_eq!(
+                        recovered.crash_reclaim_count, case.claim_count,
+                        "requeue must carry the claim count forward as the reclaim budget: {}",
+                        case.label
+                    );
+                }
+            }
+            None => {
+                assert_eq!(recovered.status, case.status, "{}", case.label);
+                assert!(
+                    recovered.lease.is_some(),
+                    "a process held for the grace window keeps its lease: {}",
+                    case.label
+                );
+                assert!(recovered.failure.is_none(), "{}", case.label);
+            }
+        }
     }
 }
 

@@ -28,7 +28,6 @@ mod capability_port;
 mod capability_surface_filter;
 mod capability_surface_policy;
 mod compaction_task;
-mod context_shadow;
 mod context_window_cache;
 mod driver_host_port_adapters;
 mod durable_input_queue;
@@ -172,7 +171,8 @@ pub use synthetic_capability::{
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use system_prompt_assets::{
-    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
+    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT,
+    SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
     TOOL_DISCLOSURE_PROTOCOL_PROMPT,
 };
 pub use thread_resolving_model_gateway::{
@@ -200,19 +200,20 @@ use tokio::sync::{Mutex, OnceCell};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, RunId};
+use ironclaw_host_api::turn::TurnLeaseToken;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
     CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
     LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
     LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-    LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
-    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
-    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
-    sort_instruction_snippets_for_prompt,
+    LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind, LoopHostMilestoneEmitter,
+    LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
+    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
+    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+    MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
@@ -226,7 +227,9 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
     ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
-use ironclaw_turns::{LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
+};
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
@@ -335,6 +338,11 @@ where
     /// `Arc` so the "fetch once per run" guarantee holds even if the port is
     /// cloned, exactly like `identity_candidates`.
     memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
+    /// Pre-resolved channel conversation history for shared-channel runs
+    /// (UNTRUSTED third-party text carried on the run's persisted product
+    /// context). Rendered as ONE framed system-context block per prompt
+    /// build; `None` everywhere else.
+    channel_conversation_context: Option<String>,
 }
 
 struct IdentityCandidateCache {
@@ -404,6 +412,7 @@ where
             milestone_sink: None,
             memory_context_service: None,
             memory_snippets_cache: Arc::new(OnceCell::new()),
+            channel_conversation_context: None,
         }
     }
 
@@ -429,6 +438,16 @@ where
         source: Arc<dyn HostIdentityContextSource>,
     ) -> Self {
         self.identity_context_source = Some(source);
+        self
+    }
+
+    /// Installs pre-resolved channel conversation history (UNTRUSTED
+    /// third-party text from the run's product context). Each prompt build
+    /// renders it as exactly ONE system-context block framed by the
+    /// channel-conversation trust preamble; content that fails prompt-safety
+    /// validation is omitted (advisory context never fails the run).
+    pub fn with_channel_conversation_context(mut self, context: String) -> Self {
+        self.channel_conversation_context = (!context.trim().is_empty()).then_some(context);
         self
     }
 
@@ -477,15 +496,14 @@ where
         let mode = request.mode;
         let context_window = async {
             let started_at = ironclaw_observability::live_latency_started_at();
-            let context = self
-                .thread_service
-                .load_context_window(LoadContextWindowRequest {
-                    scope: self.thread_scope.clone(),
-                    thread_id: self.run_context.thread_id.clone(),
-                    max_messages,
-                })
-                .await
-                .map_err(context_read_error)?;
+            let context = load_task_pinned_context_window(
+                self.thread_service.as_ref(),
+                &self.thread_scope,
+                &self.run_context,
+                max_messages,
+            )
+            .await
+            .map_err(context_read_error)?;
             trace_loop_host_latency_ok(
                 "context_load_window",
                 &self.run_context,
@@ -563,9 +581,20 @@ where
             Ok::<_, AgentLoopHostError>((identity_messages, admitted_personal_context_paths))
         };
 
-        let (context, instruction_snippets, (identity_messages, admitted_personal_context_paths)) =
-            tokio::try_join!(context_window, skill_snippets, identity_context)?;
+        let (
+            context,
+            mut instruction_snippets,
+            (identity_messages, admitted_personal_context_paths),
+        ) = tokio::try_join!(context_window, skill_snippets, identity_context)?;
         self.publish_personal_context_admitted(mode, &admitted_personal_context_paths);
+
+        // Channel conversation context: exactly ONE framed system-context
+        // block per prompt build, mirroring how identity context rides the
+        // same bundle. Content that cannot pass the bundle's prompt-safety
+        // validation is dropped here (advisory context never fails the run).
+        if let Some(snippet) = self.channel_conversation_context_snippet() {
+            instruction_snippets.push(snippet);
+        }
 
         // Proactive memory: fetch both lanes ONCE per run (cached) using the
         // latest user message as the query, and surface them into the prompt's
@@ -578,10 +607,20 @@ where
             .iter()
             .filter_map(context_message_to_compaction_metadata)
             .collect();
+        let recent_window_truncation =
+            context
+                .recent_window_truncation
+                .map(|truncation| LoopContextWindowTruncation {
+                    omitted_through_sequence: truncation.omitted_through_sequence,
+                    omitted_through_kind: compaction_kind_for_message(
+                        truncation.omitted_through_kind,
+                    ),
+                });
         let messages = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
-        );
+            accepted_task_message_id(&self.run_context),
+        )?;
         trace_loop_host_latency_ok(
             "context_select_messages",
             &self.run_context,
@@ -597,16 +636,58 @@ where
                 .filter_map(context_message_to_loop_message)
                 .collect(),
             compaction_message_index,
+            recent_window_truncation,
             instruction_snippets,
             memory_snippets,
         })
     }
 }
 
+/// Stable context-snippet ref for the per-run channel conversation block.
+const CHANNEL_CONVERSATION_CONTEXT_SNIPPET_REF: &str = "channel-context:conversation";
+/// Host-authored safe summary for the channel conversation block (must stay
+/// on the loop safe-summary surface: short, no sensitive vocabulary).
+const CHANNEL_CONVERSATION_CONTEXT_SAFE_SUMMARY: &str =
+    "Recent external channel conversation history (context only)";
+/// Trust-boundary framing prepended to the quoted channel history (repo rule:
+/// multi-line prompt text lives in `prompts/*.md`).
+const CHANNEL_CONVERSATION_CONTEXT_FRAMING: &str =
+    include_str!("../prompts/channel_conversation_context.md");
+
 impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
+    /// The framed channel-conversation block for this run, or `None` when the
+    /// run carries no channel context or the assembled block cannot pass the
+    /// same generic model-content validation the instruction bundle applies
+    /// at render time. Pre-validating with [`LoopInlineMessageBody`] (the
+    /// same rule, same crate) is what turns a would-be bundle failure into a
+    /// silent degrade — the memory-lane precedent for untrusted context.
+    fn channel_conversation_context_snippet(&self) -> Option<LoopContextSnippet> {
+        let text = self.channel_conversation_context.as_deref()?;
+        let content = format!(
+            "{}\n\n{text}",
+            CHANNEL_CONVERSATION_CONTEXT_FRAMING.trim_end()
+        );
+        match LoopInlineMessageBody::new(content) {
+            Ok(body) => Some(LoopContextSnippet {
+                snippet_ref: CHANNEL_CONVERSATION_CONTEXT_SNIPPET_REF.to_string(),
+                model_content: body.into_inner(),
+                safe_summary: CHANNEL_CONVERSATION_CONTEXT_SAFE_SUMMARY.to_string(),
+                metadata: None,
+            }),
+            Err(reason) => {
+                tracing::debug!(
+                    reason,
+                    "channel conversation context failed prompt-safety validation; \
+                     omitting it from this run"
+                );
+                None
+            }
+        }
+    }
+
     fn publish_personal_context_admitted(
         &self,
         mode: PromptMode,
@@ -710,9 +791,29 @@ where
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
+    run_lease_fence: Option<RunLeaseFence>,
     // Only successful milestone publications are recorded here: if best-effort
     // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
+}
+
+/// The claimed lease this transcript adapter writes under, plus the authority
+/// that can say whether it is still the live one.
+///
+/// Unlike a journal transition, a transcript append carries no lease of its
+/// own, so nothing stops a worker whose lease recovery already reclaimed from
+/// appending a second assistant message beside the replacement worker's. The
+/// fence closes that by asking the journal — the only authority on ownership —
+/// immediately before the write.
+///
+/// Production always installs one
+/// (`RebornLoopDriverHostFactory::build_text_only_host_with_capabilities`).
+/// It is optional only because adapters constructed outside a claimed run
+/// (crate tests) have no lease to check.
+#[derive(Clone)]
+struct RunLeaseFence {
+    runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+    lease_token: TurnLeaseToken,
 }
 
 const TRANSCRIPT_WRITE_MAX_ATTEMPTS: usize = 3;
@@ -733,6 +834,7 @@ where
             run_context,
             milestone_sink: None,
             reply_attachment_intent_port: None,
+            run_lease_fence: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -749,6 +851,7 @@ where
             run_context,
             milestone_sink: Some(milestone_sink),
             reply_attachment_intent_port: None,
+            run_lease_fence: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -759,6 +862,71 @@ where
     ) -> Self {
         self.reply_attachment_intent_port = Some(port);
         self
+    }
+
+    /// Fence transcript finalization on `lease_token` still being the run's
+    /// live lease. See [`RunLeaseFence`].
+    #[must_use]
+    pub fn with_run_lease_fence(
+        mut self,
+        runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+        lease_token: TurnLeaseToken,
+    ) -> Self {
+        self.run_lease_fence = Some(RunLeaseFence {
+            runtime,
+            lease_token,
+        });
+        self
+    }
+
+    /// Refuse the caller when the journal no longer records this adapter's
+    /// lease as the run's live one.
+    ///
+    /// One bounded, exact-key journal read per call — cheap at today's call
+    /// rates. If `update_assistant_draft` ever becomes a per-token streaming
+    /// path, revisit whether the draft paths should keep paying it.
+    ///
+    /// Fails closed on both answers that are not "yes": a stale lease and a
+    /// backend error that leaves ownership unknown. The refusal is explicit —
+    /// the model output is not dropped silently, it is returned to the agent
+    /// loop as a transcript-write failure, which the loop carries into its exit
+    /// claim; that exit is itself lease-fenced by the journal, so a stale
+    /// worker's failure can never land on the run the replacement completed.
+    async fn ensure_run_lease_is_current(&self) -> Result<(), AgentLoopHostError> {
+        let Some(fence) = self.run_lease_fence.as_ref() else {
+            return Ok(());
+        };
+        // Bounded, exact-key journal read — the journal is the only authority
+        // on who holds the lease. A run that recovery reclaimed carries either
+        // no lease (requeued, not yet re-claimed) or the replacement worker's
+        // token; both compare unequal, which is exactly the answer wanted.
+        let record = fence
+            .runtime
+            .get_run_record(&self.run_context.scope, self.run_context.run_id)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    run_id = %self.run_context.run_id,
+                    %error,
+                    "run lease ownership check failed; refusing the transcript write"
+                );
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::TranscriptWriteFailed,
+                    "run lease ownership could not be verified",
+                )
+            })?;
+        // A missing run (or one outside this scope) is not ours to write for.
+        if record.is_some_and(|record| record.lease_token == Some(fence.lease_token)) {
+            return Ok(());
+        }
+        tracing::debug!(
+            run_id = %self.run_context.run_id,
+            "run lease was reclaimed by recovery; refusing this worker's transcript write"
+        );
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::TranscriptWriteFailed,
+            "run lease was reclaimed; this worker no longer owns the run",
+        ))
     }
 }
 
@@ -781,6 +949,7 @@ where
         request: BeginAssistantDraft,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         let draft = self
             .thread_service
             .append_assistant_draft(AppendAssistantDraftRequest {
@@ -799,6 +968,7 @@ where
         request: UpdateAssistantDraft,
     ) -> Result<(), AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         let message_id = message_id_from_ref(&request.message_ref)?;
         self.load_current_run_message(message_id).await?;
         self.thread_service
@@ -818,6 +988,11 @@ where
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        // Ownership before durability: a worker whose lease recovery already
+        // reclaimed must not append a second answer beside the replacement's.
+        // Every transcript write on this adapter carries the same fence — a
+        // zombie must not reach the transcript through any of its four doors.
+        self.ensure_run_lease_is_current().await?;
         let reply_content = self.finalized_reply_content(request.reply.content).await?;
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendFinalizedAssistantMessageRequest {
@@ -867,6 +1042,7 @@ where
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         // Fail soft on a summary that trips either strict validator: the
         // summary is only the inline label for the result reference (the model
         // sees the real output via the result ref / observation), so a
@@ -1696,7 +1872,8 @@ where
             let context_messages = prompt_context_budget::select_prompt_context_messages(
                 context.messages,
                 self.prompt_context_budget,
-            );
+                accepted_task_message_id(&self.run_context),
+            )?;
             let mut messages = Vec::with_capacity(context_messages.len());
             for (message, _) in context_messages {
                 let Some(content_ref) = message_ref_from_context(&message) else {
@@ -1912,15 +2089,14 @@ where
         );
 
         let started_at = ironclaw_observability::live_latency_started_at();
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                max_messages: self.max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
+        let context = load_task_pinned_context_window(
+            self.thread_service.as_ref(),
+            &self.thread_scope,
+            &self.run_context,
+            self.max_messages,
+        )
+        .await
+        .map_err(context_read_error)?;
         trace_loop_host_latency_ok(
             "model_context_load_window",
             &self.run_context,
@@ -2720,10 +2896,12 @@ fn validate_thread_scope_for_run(
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is absent from the
     // on-disk thread path, so a wrong owner silently reads an empty subtree
-    // and surfaces as `UnknownThread`. Explicit-owner runs intentionally allow
-    // actor/subject divergence for shared conversation routes, but the explicit
-    // owner must still match the resolved thread owner. Legacy actor-fallback
-    // runs continue to require owner=actor.
+    // and surfaces as `UnknownThread`. Explicit-owner runs (host/trigger
+    // creators, subagent parent→child propagation) must match the resolved
+    // thread owner; actor-fallback runs (multi-user WebChat) require
+    // owner==actor. Since the ephemeral-per-ping remodel owner IS the actor,
+    // so the actor-fallback check passes trivially — it stays as a real
+    // scope-mismatch safety guard against a corrupted or wrong thread scope.
     if run_context.scope.has_explicit_thread_owner() {
         if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
             return Err(AgentLoopHostError::new(
@@ -2750,6 +2928,71 @@ fn bounded_limit(requested: usize, configured: usize) -> usize {
     } else {
         requested.min(configured)
     }
+}
+
+fn accepted_task_message_id(run_context: &LoopRunContext) -> Option<ThreadMessageId> {
+    let message_ref = run_context.accepted_message_ref.as_ref()?.as_str();
+    let raw_message_id = message_ref.strip_prefix("msg:")?;
+    ThreadMessageId::parse(raw_message_id).ok()
+}
+
+async fn load_task_pinned_context_window<S>(
+    thread_service: &S,
+    thread_scope: &ThreadScope,
+    run_context: &LoopRunContext,
+    max_messages: usize,
+) -> Result<ironclaw_threads::ContextWindow, SessionThreadError>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    let mut context = thread_service
+        .load_context_window(LoadContextWindowRequest {
+            scope: thread_scope.clone(),
+            thread_id: run_context.thread_id.clone(),
+            max_messages,
+        })
+        .await?;
+    let Some(message_id) = accepted_task_message_id(run_context) else {
+        return Ok(context);
+    };
+    if max_messages == 0
+        || context.messages.iter().any(|message| {
+            message.message_id == Some(message_id) && message.kind == MessageKind::User
+        })
+    {
+        return Ok(context);
+    }
+    let mut pinned = thread_service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope: thread_scope.clone(),
+            thread_id: run_context.thread_id.clone(),
+            message_ids: vec![message_id],
+        })
+        .await?
+        .messages
+        .into_iter()
+        .find(|message| {
+            message.message_id == Some(message_id) && message.kind == MessageKind::User
+        });
+    let Some(pinned) = pinned.take() else {
+        return Ok(context);
+    };
+    if context.messages.len() >= max_messages {
+        let displaced = context.messages.remove(0);
+        if context
+            .recent_window_truncation
+            .as_ref()
+            .is_none_or(|current| current.omitted_through_sequence < displaced.sequence)
+        {
+            context.recent_window_truncation = Some(ironclaw_threads::ContextWindowTruncation {
+                omitted_through_sequence: displaced.sequence,
+                omitted_through_kind: displaced.kind,
+            });
+        }
+    }
+    context.messages.push(pinned);
+    context.messages.sort_by_key(|message| message.sequence);
+    Ok(context)
 }
 
 fn validate_context_cursor(

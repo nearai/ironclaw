@@ -63,6 +63,7 @@ fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
         config: &config,
         body,
         headers: &[],
+        can_reply_in_threads: false,
     })
 }
 

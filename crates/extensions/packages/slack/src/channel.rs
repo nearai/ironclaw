@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAdapter, ChannelError, DeliveryReport, ImmediateResponse, InboundOutcome,
-    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
-    VerifiedInbound,
+    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
+    RunReaction, TargetCandidate, TargetQuery, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -65,7 +65,12 @@ impl ChannelAdapter for SlackChannelAdapter {
                 body: Vec::new(),
             })),
             SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
-            SlackInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
+            SlackInboundEvent::Message(mut message) => {
+                if !request.can_reply_in_threads {
+                    flatten_self_rooted_topic(&mut message)?;
+                }
+                Ok(InboundOutcome::Messages(vec![*message]))
+            }
         }
     }
 
@@ -75,6 +80,22 @@ impl ChannelAdapter for SlackChannelAdapter {
         egress: &dyn RestrictedEgress,
     ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         crate::attachment_transfer::fetch_attachment(attachment, egress).await
+    }
+
+    /// Thread pings fetch that thread's replies; top-level channel pings
+    /// fetch recent channel history. Uses the workspace bot token over the
+    /// manifest-restricted egress and degrades to `Ok(None)` on any vendor
+    /// refusal (e.g. a missing `channels:history` scope) or transport
+    /// failure — context is advisory and never fails admission.
+    async fn fetch_conversation_context(
+        &self,
+        conversation: &ExternalConversationRef,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<
+        Option<ironclaw_extension_contracts::channel_adapter::ChannelConversationContext>,
+        ChannelError,
+    > {
+        crate::conversation_context::fetch_conversation_context(conversation, egress).await
     }
 
     async fn deliver(
@@ -178,6 +199,26 @@ impl ChannelAdapter for SlackChannelAdapter {
                     let outcome =
                         delete_slack_message(egress, &credential, &channel, vendor_message_ref)
                             .await;
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
+                OutboundPart::React {
+                    vendor_message_ref,
+                    reaction,
+                    action,
+                } => {
+                    let outcome = react_slack_message(
+                        egress,
+                        &credential,
+                        &channel,
+                        vendor_message_ref,
+                        slack_reaction_name(*reaction),
+                        *action,
+                    )
+                    .await;
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
                     if !sent {
@@ -411,6 +452,89 @@ async fn delete_slack_message(
     )
 }
 
+/// Slack reaction name (shortcode, no colons) for a neutral run reaction.
+fn slack_reaction_name(reaction: RunReaction) -> &'static str {
+    match reaction {
+        RunReaction::Working => "eyes",
+        RunReaction::Done => "white_check_mark",
+        RunReaction::NeedsInput => "warning",
+        RunReaction::Failed => "x",
+    }
+}
+
+/// Add or remove a reaction on `ts` via `reactions.add` / `reactions.remove`.
+/// Best-effort: `already_reacted` / `no_reaction` are treated as success so the
+/// idempotent 👀→✅ swap never surfaces a spurious failure on a retry.
+async fn react_slack_message(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    ts: &str,
+    name: &str,
+    action: ReactionAction,
+) -> PartDeliveryOutcome {
+    let path = match action {
+        ReactionAction::Add => "reactions.add",
+        ReactionAction::Remove => "reactions.remove",
+    };
+    let body = match serde_json::to_vec(
+        &serde_json::json!({ "channel": channel, "timestamp": ts, "name": name }),
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("{path} body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/{path}"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("{path} response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    if matches!(error.as_str(), "already_reacted" | "no_reaction") {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected {path} ({error})"),
+    )
+}
+
 pub(crate) fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryOutcome {
     match error {
         RestrictedEgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
@@ -447,6 +571,33 @@ fn parse_error(error: SlackPayloadParseError) -> ChannelError {
     }
 }
 
+/// Honor `presentation.can_reply_in_threads = false`: a top-level mention
+/// normally roots its own vendor thread (topic set to its own message ts) so
+/// the whole exchange threads. When the channel declares it does not reply in
+/// threads, that self-rooting is undone — the message stays in the flat
+/// conversation and replies anchor inline. Detected exactly as the hydration
+/// path does: a self-rooted top-level ping is the one whose topic equals its
+/// own message id; a genuine in-thread reply (topic = an earlier message)
+/// keeps its thread. This is what makes the manifest flag load-bearing rather
+/// than decorative.
+fn flatten_self_rooted_topic(message: &mut NormalizedInboundMessage) -> Result<(), ChannelError> {
+    let conversation = &message.conversation;
+    let topic = conversation.topic_id();
+    if topic.is_none() || topic != conversation.reply_target_message_id() {
+        return Ok(());
+    }
+    message.conversation = ExternalConversationRef::new(
+        conversation.space_id(),
+        conversation.conversation_id(),
+        None,
+        conversation.reply_target_message_id(),
+    )
+    .map_err(|error| ChannelError::Parse {
+        reason: format!("failed to flatten self-rooted conversation: {error}"),
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
@@ -471,6 +622,7 @@ mod tests {
             config: &[],
             body,
             headers: &owned_headers,
+            can_reply_in_threads: true,
         })
     }
 
@@ -542,6 +694,110 @@ mod tests {
             messages[0].conversation.topic_id(),
             Some("1710000000.000200"),
             "mention without thread anchors on its own ts"
+        );
+    }
+
+    /// `inbound` with an explicit `can_reply_in_threads` (the helpers above
+    /// pin `true`, Slack's shipped manifest value) — the seam for proving the
+    /// flag drives placement rather than decorating the manifest.
+    fn inbound_with_threading(
+        body: &[u8],
+        can_reply_in_threads: bool,
+    ) -> Result<InboundOutcome, ChannelError> {
+        SlackChannelAdapter.inbound(VerifiedInbound {
+            extension_id: "slack",
+            installation_id: "install_alpha",
+            config: &[],
+            body,
+            headers: &[],
+            can_reply_in_threads,
+        })
+    }
+
+    /// Pin for #7377: `presentation.can_reply_in_threads` is LOAD-BEARING.
+    /// The SAME top-level `app_mention` self-roots a vendor thread (topic =
+    /// its own ts) when the flag is true, and is flattened back into the
+    /// plain conversation (no topic; the ts survives only as the inline reply
+    /// anchor) when the flag is false. If `flatten_self_rooted_topic` were a
+    /// no-op — or the `inbound` dispatch stopped consulting the flag — the
+    /// false arm would still carry the self-rooted topic and fail here.
+    #[test]
+    fn can_reply_in_threads_decides_whether_a_top_level_mention_roots_a_thread() {
+        let top_level_mention: &[u8] = br#"{
+            "type": "event_callback",
+            "event_id": "Ev301",
+            "team_id": "T-A",
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "channel": "C123",
+                "text": "<@UBOT> ship it",
+                "ts": "1710000000.000900"
+            }
+        }"#;
+
+        let InboundOutcome::Messages(rooted) =
+            inbound_with_threading(top_level_mention, true).expect("mention parses")
+        else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            rooted[0].conversation.topic_id(),
+            Some("1710000000.000900"),
+            "threading channel: a top-level mention roots its own thread"
+        );
+
+        let InboundOutcome::Messages(flat) =
+            inbound_with_threading(top_level_mention, false).expect("mention parses")
+        else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            flat[0].conversation.topic_id(),
+            None,
+            "non-threading channel: the self-rooted topic is flattened away"
+        );
+        assert_eq!(
+            flat[0].conversation.reply_target_message_id(),
+            Some("1710000000.000900"),
+            "flattening keeps the message id as the inline reply anchor"
+        );
+        assert_eq!(
+            flat[0].conversation.conversation_id(),
+            rooted[0].conversation.conversation_id(),
+            "flattening only strips the topic — same conversation either way"
+        );
+    }
+
+    /// The false arm flattens ONLY self-rooted top-level pings: a mention
+    /// inside a genuine vendor thread (thread_ts = an EARLIER message) keeps
+    /// its thread even when the channel does not open new ones — the reply
+    /// must go where the conversation already is.
+    #[test]
+    fn can_reply_in_threads_false_keeps_a_genuine_in_thread_mention_threaded() {
+        let in_thread_mention: &[u8] = br#"{
+            "type": "event_callback",
+            "event_id": "Ev302",
+            "team_id": "T-A",
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "channel": "C123",
+                "text": "<@UBOT> and here?",
+                "ts": "1710000000.000901",
+                "thread_ts": "1710000000.000800"
+            }
+        }"#;
+
+        let InboundOutcome::Messages(messages) =
+            inbound_with_threading(in_thread_mention, false).expect("mention parses")
+        else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            messages[0].conversation.topic_id(),
+            Some("1710000000.000800"),
+            "an existing thread is not flattened — only self-rooting is undone"
         );
     }
 
@@ -1799,6 +2055,89 @@ mod tests {
         let body = body_json(&requests[0]);
         assert_eq!(body["channel"], "D123");
         assert_eq!(body["ts"], "1710000001.000001");
+    }
+
+    #[tokio::test]
+    async fn deliver_react_add_calls_reactions_add_with_the_mapped_emoji() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true}"#)]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::React {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                        reaction: RunReaction::Working,
+                        action: ReactionAction::Add,
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Sent {
+                vendor_message_ref: None
+            }
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/reactions.add");
+        let body = body_json(&requests[0]);
+        assert_eq!(body["channel"], "D123");
+        assert_eq!(body["timestamp"], "1710000001.000001");
+        assert_eq!(body["name"], "eyes");
+    }
+
+    #[tokio::test]
+    async fn deliver_react_remove_calls_reactions_remove_and_maps_failure_to_x() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true}"#)]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::React {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                        reaction: RunReaction::Failed,
+                        action: ReactionAction::Remove,
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }));
+        let requests = egress.requests();
+        assert_eq!(requests[0].url, "https://slack.com/api/reactions.remove");
+        assert_eq!(body_json(&requests[0])["name"], "x");
+    }
+
+    #[tokio::test]
+    async fn deliver_react_treats_already_reacted_as_sent() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"already_reacted"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::React {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                        reaction: RunReaction::Working,
+                        action: ReactionAction::Add,
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(
+            matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }),
+            "an already-present reaction is a benign no-op for the idempotent swap"
+        );
     }
 
     #[tokio::test]

@@ -356,6 +356,7 @@ const TERMINAL_RUN_STATUSES = new Set([
 ]);
 
 const SUCCESS_RUN_STATUSES = new Set(["completed", "succeeded"]);
+const FAILURE_RUN_STATUSES = new Set(["failed", "recovery_required"]);
 const PROMPT_RUN_STATUSES = new Set([
   "blocked_auth",
   "blocked_approval",
@@ -627,7 +628,23 @@ function applyProjectionItems({
       // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
       const textRunId = item.text.run_id || null;
+      if (
+        textRunId &&
+        FAILURE_RUN_STATUSES.has(batchRunStatusByRunId.get(textRunId))
+      ) {
+        continue;
+      }
       setMessages((prev) => {
+        if (
+          textRunId &&
+          prev.some(
+            (message) =>
+              isErrorChatMessage(message) &&
+              message.id === `${RUN_FAILURE_ID_PREFIX}${textRunId}`,
+          )
+        ) {
+          return prev;
+        }
         const phaseAware = textRunId
           ? prev.map((message) =>
               message?.role === "assistant" &&
@@ -848,7 +865,8 @@ function appendRunFailureMessage(
       ? connectionContextForRunFailure(runId) || {}
       : {};
   setMessages((prev) => {
-    const existing = prev.findIndex((m) => m.id === messageId);
+    const visibleMessages = withoutStreamingAssistantPhaseForRun(prev, runId);
+    const existing = visibleMessages.findIndex((m) => m.id === messageId);
     const content = failureMessageForRunStatus({
       status,
       failureCategory,
@@ -857,8 +875,13 @@ function appendRunFailureMessage(
     }, t);
     if (existing >= 0) {
       const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
-      if (!hasUsefulUpdate || prev[existing].content === content) return prev;
-      const next = [...prev];
+      if (
+        !hasUsefulUpdate ||
+        visibleMessages[existing].content === content
+      ) {
+        return visibleMessages;
+      }
+      const next = [...visibleMessages];
       next[existing] = {
         ...next[existing],
         content,
@@ -869,20 +892,20 @@ function appendRunFailureMessage(
       };
       return next;
     }
-    const lastMessage = prev[prev.length - 1];
+    const lastMessage = visibleMessages[visibleMessages.length - 1];
     if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
       const replacement = promotedRunFailureMessage(
         lastMessage,
         messageId,
         runId,
       );
-      if (replacement === lastMessage) return prev;
-      const next = [...prev];
+      if (replacement === lastMessage) return visibleMessages;
+      const next = [...visibleMessages];
       next[next.length - 1] = replacement;
       return next;
     }
     return [
-      ...prev,
+      ...visibleMessages,
       createErrorChatMessage({
         id: messageId,
         content,
@@ -898,6 +921,20 @@ function appendRunFailureMessage(
       }),
     ];
   });
+}
+
+function withoutStreamingAssistantPhaseForRun(messages, runId) {
+  if (!runId) return messages;
+  const next = messages.filter(
+    (message) =>
+      !(
+        message?.role === "assistant" &&
+        message.turnRunId === runId &&
+        message.isFinalReply === false &&
+        message.isStreaming === true
+      ),
+  );
+  return next.length === messages.length ? messages : next;
 }
 
 // A projection can report an unknown run failure before the send response maps

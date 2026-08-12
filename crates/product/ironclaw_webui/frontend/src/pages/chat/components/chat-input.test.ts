@@ -33,6 +33,27 @@ function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
     INITIAL_COMMAND_MENU_SELECTION: { index: 0, dismissed: false },
     NEW_DRAFT_KEY: "new",
     useAttachmentConfig: () => ({ accept: [] }),
+    useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
+      const ref = context.React.useRef(null);
+      return [
+        () => {
+          if (!disabled) ref.current?.click();
+        },
+        {
+          ref,
+          type: "file",
+          accept,
+          multiple,
+          disabled,
+          hidden: true,
+          onChange: (event) => {
+            const files = Array.from(event.currentTarget.files || []);
+            event.currentTarget.value = "";
+            if (!disabled && files.length > 0) onSelect(files);
+          },
+        },
+      ];
+    },
     useT: () => (key) => key,
   };
 

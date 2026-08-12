@@ -91,7 +91,7 @@ export IRONCLAW_REBORN_POSTGRES_URL="postgres://ironclaw:ironclaw@127.0.0.1:5432
 backend               = "postgres"
 url_env               = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-pool_max_size         = 2
+pool_max_size         = 8
 ```
 
 <Warning>
@@ -121,10 +121,16 @@ postgres://user:password@db.example.com:5432/ironclaw?sslmode=require
 
 ### Pool Sizing
 
-`storage.pool_max_size` defaults to 2. Keep it below your PostgreSQL server's connection
+`storage.pool_max_size` defaults to 8. Keep it below your PostgreSQL server's connection
 limit — or your managed provider's session-pool cap — after reserving capacity for
 restarts and operator sessions. Override it with
 `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE`.
+
+The process journal opens **2 additional connections** of its own, outside this
+setting. A running turn heartbeats through the journal to keep its lease alive,
+and when that heartbeat shared the pool above, one turn's read burst could starve
+it until the lease expired and the run failed. Budget `pool_max_size + 2`
+connections per running instance.
 
 ---
 

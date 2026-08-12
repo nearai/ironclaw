@@ -1,6 +1,7 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
+import { useFilePicker } from "../../../hooks/useFilePicker";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
   ConfigureFocusHandler,
@@ -17,35 +18,30 @@ function catalogItem(entry) {
 
 function ImportButton({ onImport, isImporting, isBusy }) {
   const t = useT();
-  const fileInputRef = React.useRef(null);
-
-  const handleFileChange = React.useCallback(
-    (e) => {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file || !onImport) return;
-      onImport(file);
-    },
+  const disabled = isBusy || isImporting;
+  const handleImportSelection = React.useCallback(
+    ([file]) => onImport?.(file),
     [onImport]
   );
+  const [openFilePicker, importInputProps] = useFilePicker({
+    accept: ".zip,application/zip",
+    disabled,
+    onSelect: handleImportSelection,
+  });
 
   return (
     <div>
       <button
         type="button"
-        onClick={() => fileInputRef.current?.click()}
-        disabled={isBusy || isImporting}
+        onClick={openFilePicker}
+        disabled={disabled}
         className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] disabled:opacity-50"
       >
         <Icon name="upload" className="h-3 w-3" />
         {isImporting ? t("ext.registry.importing") : t("ext.registry.import")}
       </button>
       <input
-        ref={fileInputRef}
-        type="file"
-        accept=".zip,application/zip"
-        className="hidden"
-        onChange={handleFileChange}
+        {...importInputProps}
       />
     </div>
   );

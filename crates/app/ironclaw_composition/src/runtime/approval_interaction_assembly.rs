@@ -125,7 +125,6 @@ impl ProcessGateApprovalTurnRunLocator {
                 scope_match: None,
                 owner_user_id: Some(scope.user_id.clone()),
                 gate_ref,
-                owner_match: Some(ProcessGateOwnerMatch::ExplicitOrActor),
                 include_historical,
             })
             .await

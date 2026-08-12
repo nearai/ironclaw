@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_host_api::turn::TurnOriginKind;
 use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 // The prompt *content* is owned by the loop tier — `ironclaw_loop_host`, beside
 // its other `prompts/*.md` assets and beside the `HostIdentityContextSource`
@@ -15,8 +16,8 @@ use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
-    IdentityApplicability, IdentityFileName, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
-    TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
+    IdentityApplicability, IdentityFileName, SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
+    SELF_KNOWLEDGE_PROTOCOL_PROMPT, TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
 };
 use ironclaw_turns::LoopMessageRef;
 
@@ -74,7 +75,10 @@ impl DefaultSystemPromptIdentitySource {
         })
     }
 
-    fn prompt_content(&self) -> Result<String, DefaultSystemPromptError> {
+    fn prompt_content(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<String, DefaultSystemPromptError> {
         // Append in memory (not to the seeded, user-editable file) so these
         // sections are system invariants independent of user edits to SYSTEM.md
         // — and so existing installs get them, not just freshly seeded ones.
@@ -85,6 +89,15 @@ impl DefaultSystemPromptIdentitySource {
         }
         if self.benchmarking_mode_active {
             append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_PROMPT);
+        }
+        if matches!(
+            run_context
+                .product_context
+                .as_ref()
+                .map(|context| context.origin),
+            Some(TurnOriginKind::ScheduledTrigger)
+        ) {
+            append_section(&mut content, SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT);
         }
         Ok(content)
     }
@@ -285,11 +298,11 @@ fn ensure_prompt_parent(
 impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
     async fn load_identity_candidates(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         _mode: PromptMode,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         let content = self
-            .prompt_content()
+            .prompt_content(run_context)
             .map_err(|_| HostIdentityContextBuildError::SourceUnavailable)?;
         let name = Self::identity_name()?;
         let message_ref = Self::message_ref_for(&content)?;
@@ -318,7 +331,10 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_host_api::{
+        ids::{TenantId, ThreadId, UserId},
+        turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
+    };
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
@@ -338,6 +354,19 @@ mod tests {
             ThreadId::new("thread-default-system-prompt").expect("valid"),
         );
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile)
+    }
+
+    async fn run_context_with_origin(origin: TurnOriginKind) -> LoopRunContext {
+        test_run_context()
+            .await
+            .with_product_context(ProductTurnContext::new(
+                origin,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("prompt-test-owner").expect("valid user id"),
+                },
+            ))
     }
 
     #[tokio::test]
@@ -524,6 +553,53 @@ mod tests {
         assert!(!off_content.contains("Automated Evaluation Mode"));
         assert!(on_content.contains("Automated Evaluation Mode"));
         assert!(on_content.contains("no one to answer a clarifying question"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_trigger_origin_appends_unattended_protocol_only_to_triggered_runs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
+        let source =
+            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, false)
+                .expect("prompt loads");
+        let interactive_context = run_context_with_origin(TurnOriginKind::Inbound).await;
+        let scheduled_context = run_context_with_origin(TurnOriginKind::ScheduledTrigger).await;
+
+        async fn resolve_content(
+            source: &DefaultSystemPromptIdentitySource,
+            context: &LoopRunContext,
+        ) -> String {
+            let candidates = source
+                .load_identity_candidates(context, PromptMode::TextOnly)
+                .await
+                .expect("candidates load");
+            source
+                .resolve_identity_message_content(
+                    context,
+                    candidates[0]
+                        .message_ref
+                        .as_ref()
+                        .expect("trusted identity has ref"),
+                )
+                .await
+                .expect("resolve content")
+                .expect("content exists")
+                .content
+        }
+
+        let interactive_content = resolve_content(&source, &interactive_context).await;
+        let scheduled_content = resolve_content(&source, &scheduled_context).await;
+
+        assert!(
+            !interactive_content.contains("Unattended Scheduled Run"),
+            "interactive runs must retain the ordinary ask-the-user escape valve"
+        );
+        assert!(scheduled_content.contains("Unattended Scheduled Run"));
+        assert!(scheduled_content.contains("There is no human present"));
+        assert!(scheduled_content.contains("Never end the run with a question"));
+        assert!(scheduled_content.contains("final reply is the run's recorded output"));
     }
 
     #[tokio::test]

@@ -204,6 +204,7 @@ jobs:
           python3 scripts/ci/test_ws12_workflow_contracts.py
           python3 scripts/ci/test-check-target-tree.py
           python3 scripts/ci/test-check-guidance.py
+          python3 scripts/ci/test_cut_ironclaw_release.py
           scripts/ci/test-hermetic-test-process.sh
           scripts/ci/test-reborn-docker-entrypoint.sh
           # #7144: this 204-test module had never been run by any lane, so five
