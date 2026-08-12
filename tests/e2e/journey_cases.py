@@ -22,7 +22,6 @@ from journey_types import (
     ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
-    SlackChannelFixture,
 )
 from provider_capability_inventory import shipped_provider_manifests, EMULATE_SUPPORTED_TOOLS
 
@@ -118,7 +117,6 @@ def unreset_mutating_tools() -> frozenset[str]:
 
 _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
-    "qa_10f_slack_mention_encoding",
 }
 _PROVIDER_REPLAY_FACTS = {
     "qa_7c_slack_bug_logger_routine": ProviderJourneyReplayFacts(
@@ -126,10 +124,6 @@ _PROVIDER_REPLAY_FACTS = {
     ),
     "qa_7e_slack_bug_sheet_delivery": ProviderJourneyReplayFacts(
         google_spreadsheet_id="sheet_reborn_bug_tracker"
-    ),
-    "qa_10e_slack_error_honesty": ProviderJourneyReplayFacts(
-        slack_channel=SlackChannelFixture.MISSING,
-        expected_capability_failure="channel_not_found",
     ),
 }
 
@@ -404,7 +398,14 @@ PRODUCT_JOURNEY_CASES = (
         ),
     ),
     ProductJourneyCase(
-        case_id="scheduled_trigger_slack_delivery_default_and_explicit",
+        # Renamed from `scheduled_trigger_slack_delivery_default_and_explicit`:
+        # the per-trigger stored-target ("default") delivery model this case
+        # named was deleted (delivery_target_id removed; stored targets
+        # migrate into prompts). The surviving story is explicit-only: a
+        # routine/scheduled fire delivers by calling
+        # `builtin.outbound_deliver`, with no stored per-trigger destination
+        # anywhere in the path (see task-9-report.md §13.5 first half).
+        case_id="scheduled_trigger_explicit_tool_delivery_reaches_slack",
         provider_worlds=(ProviderWorld.SLACK,),
         mutable_provider_worlds=(ProviderWorld.SLACK,),
         ingress=JourneyIngress.SCHEDULED_TRIGGER,
@@ -415,29 +416,70 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.EXACT_DESTINATION,
             ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
-            ObservableAssertion.RESTART_IDEMPOTENCY,
         ),
         evidence=CargoEvidence(
-            source=("crates/app/ironclaw_composition/tests/trigger_poller_e2e.rs"),
-            test=(
-                "scheduled_trigger_results_reach_exact_slack_targets_once_"
-                "across_restart"
-            ),
-            target="trigger_poller_e2e",
-            manifest="crates/app/ironclaw_composition/Cargo.toml",
+            source="tests/integration/delivery_user_journeys.rs",
+            test="routine_fire_delivers_via_tool_without_stored_target",
+            target="reborn_integration_delivery_user_journeys",
+        ),
+    ),
+    ProductJourneyCase(
+        case_id="webui_explicit_slack_dm_delivery_with_bot_evidence",
+        provider_worlds=(ProviderWorld.SLACK,),
+        mutable_provider_worlds=(ProviderWorld.SLACK,),
+        ingress=JourneyIngress.WEBUI,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        delivery_target=JourneyDeliveryTarget.SLACK,
+        assertions=(
+            ObservableAssertion.DURABLE_STATE,
+            ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
+            ObservableAssertion.CREDENTIAL_INJECTION,
+        ),
+        evidence=CargoEvidence(
+            source="tests/integration/delivery_user_journeys.rs",
+            test="webui_send_me_on_slack_delivers_via_bot_with_evidence",
+            target="reborn_integration_delivery_user_journeys",
         ),
         delivery_addresses=(
             DeliveryAddressEvidence(
-                conversation_id="D-TRIGGER-DEFAULT",
+                conversation_id="D-JOURNEY",
                 thread_anchor=None,
                 exact_count=1,
                 assertion="assert_slack_dm_delivery_evidence",
             ),
+        ),
+    ),
+    ProductJourneyCase(
+        # A blocked scheduled fire fans its gate-prompt notice to the
+        # creator's enrolled browser through the web-app channel: one
+        # unthreaded push POST to the endpoint capability URL, host-injected
+        # VAPID authorization, RFC 8291 body. Web push has no provider world
+        # (the endpoint is on the manifest's declared push host, answered by
+        # the harness's recording network substrate), so `NONE`.
+        case_id="scheduled_trigger_gate_notice_reaches_web_app_browser",
+        provider_worlds=(ProviderWorld.NONE,),
+        mutable_provider_worlds=(),
+        ingress=JourneyIngress.SCHEDULED_TRIGGER,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        delivery_target=JourneyDeliveryTarget.WEB_APP,
+        assertions=(
+            ObservableAssertion.DURABLE_STATE,
+            ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
+            ObservableAssertion.CREDENTIAL_INJECTION,
+        ),
+        evidence=CargoEvidence(
+            source="tests/integration/delivery_user_journeys.rs",
+            test="blocked_fire_pushes_web_app_notice_to_enrolled_browser",
+            target="reborn_integration_delivery_user_journeys",
+        ),
+        delivery_addresses=(
             DeliveryAddressEvidence(
-                conversation_id="C-TRIGGER-OVERRIDE",
+                conversation_id="https://fcm.googleapis.com/fcm/send/live-subscription-token",
                 thread_anchor=None,
                 exact_count=1,
-                assertion="assert_slack_channel_delivery_evidence",
+                assertion="assert_web_app_delivery_evidence",
             ),
         ),
     ),
@@ -459,6 +501,15 @@ def _production_channel_capabilities(
             assert isinstance(surface, str) and surface, (
                 f"{manifest_path}: channel manifest declares no non-empty id"
             )
+            # The unified channel model folds the browser send path into the
+            # session channel's inbound surface: a channel whose ingress
+            # verification is `authenticated_session` has no webhook mount —
+            # its inbound IS the WebUI session route, so the `webui` journey
+            # cases are its evidence. Map it onto that built-in ingress
+            # instead of demanding a per-channel journey label.
+            verification = (channel.get("ingress") or {}).get("verification") or {}
+            if direction == "inbound" and verification.get("kind") == "authenticated_session":
+                surface = str(JourneyIngress.WEBUI)
             capabilities[surface] = channel.get("presentation") or {}
     return capabilities
 

@@ -9,6 +9,7 @@ use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStoreError, ReplayPayloa
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     capability::{CapabilitySet, EffectKind},
+    capability_surface::CapabilitySurfacePolicy,
     dispatch::{
         CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchInputIssue,
         DispatchInputIssueCode, RuntimeDispatchErrorKind,
@@ -555,6 +556,20 @@ pub trait LoopCapabilityPortFactory: Send + Sync {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
+
+    /// Build a port from an already-resolved host-owned model-surface policy.
+    ///
+    /// The default preserves compatibility for factories whose inner surface
+    /// has no host-runtime visibility request. Production host-backed
+    /// factories override this method so disclosure, outer filtering, and the
+    /// host's visible snapshot all consume the same resolved value.
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        _surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        self.create_capability_port(run_context).await
+    }
 }
 
 pub trait LoopCapabilityPortDecorator: Send + Sync {
@@ -591,6 +606,21 @@ impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let mut port = self.inner.create_capability_port(run_context).await?;
+        for decorator in &self.decorators {
+            port = decorator.decorate(run_context, port);
+        }
+        Ok(port)
+    }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = self
+            .inner
+            .create_capability_port_with_surface_policy(run_context, surface_policy)
+            .await?;
         for decorator in &self.decorators {
             port = decorator.decorate(run_context, port);
         }
@@ -715,6 +745,16 @@ impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         Ok(self.for_run_context(run_context.clone()))
     }
+
+    async fn create_capability_port_with_surface_policy(
+        &self,
+        run_context: &LoopRunContext,
+        surface_policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut factory = self.clone();
+        factory.visible_request.policy = surface_policy.as_ref().clone();
+        factory.create_capability_port(run_context).await
+    }
 }
 
 struct PreparedProviderToolCall {
@@ -723,7 +763,6 @@ struct PreparedProviderToolCall {
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
     effective_capability_ids: Vec<CapabilityId>,
-    capability_info_target_missing: bool,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -1679,7 +1718,6 @@ impl HostRuntimeLoopCapabilityPort {
             provider_turn_id,
             normalized_arguments: prepared.normalized_arguments,
             effective_capability_ids: prepared.effective_capability_ids,
-            capability_info_target_missing: prepared.capability_info_target_missing,
         })
     }
 
@@ -1737,6 +1775,10 @@ impl HostRuntimeLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        false
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.validate_visible_request_scope()?;
         let Some((_, snapshot)) = self.current_snapshot()? else {
@@ -1757,14 +1799,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(tool_call)?;
-        if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID
-            && prepared.capability_info_target_missing
-        {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "capability_info target is not on the visible surface",
-            ));
-        }
         Ok(ProviderToolCallCapabilityIds {
             provider_capability_id: prepared.capability_id,
             effective_capability_ids: prepared.effective_capability_ids,
@@ -7209,20 +7243,24 @@ mod tests {
         let mut call = provider_tool_call();
         call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({ "name": "demo.missing" });
-        let error = port
-            .provider_tool_call_capability_ids(&call)
-            .expect_err("approval-time capability id lookup should reject unknown targets");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            port.provider_tool_call_capability_ids(&call)
+                .expect("unknown targets must remain stageable for a model-visible failure")
+                .effective_capability_ids,
+            vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+        );
 
         let mut malformed_call = provider_tool_call();
         malformed_call.id = "call_malformed_unknown_target".to_string();
         malformed_call.name = capability_info::provider_tool_name().expect("provider tool name");
         malformed_call.arguments =
             serde_json::json!({ "name": "demo.missing", "detail": "everything" });
-        let error = port
-            .provider_tool_call_capability_ids(&malformed_call)
-            .expect_err("approval-time target lookup should still reject unknown targets");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            port.provider_tool_call_capability_ids(&malformed_call)
+                .expect("unknown targets must not pre-empt argument error reporting")
+                .effective_capability_ids,
+            vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+        );
 
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
@@ -9847,6 +9885,7 @@ mod tests {
                 max_egress_bytes: None,
                 resource_profile: None,
                 origin_gate_matrix: None,
+                standard_op: None,
             },
             description_trust: Default::default(),
             access: VisibleCapabilityAccess::Available,
@@ -10081,6 +10120,96 @@ mod tests {
             store.saved().len(),
             1,
             "the replay must persist exactly one gate record after the cancelled attempt"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_duplicate_gate_invocations_share_one_persisted_resolution() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let gate = ironclaw_host_runtime::RuntimeApprovalGate {
+            approval_request_id: ironclaw_host_api::ids::ApprovalRequestId::new(),
+            capability_id: capability_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        };
+        let store = Arc::new(BlockingGateRecordStore::new());
+        let port = Arc::new(
+            runtime_capability_port_with_gate_store(
+                &capability_id,
+                &provider_id,
+                Arc::new(QueuedHostRuntime::new(
+                    vec![visible_capability(
+                        capability_id.clone(),
+                        provider_id.clone(),
+                    )],
+                    vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(gate))],
+                )),
+                Arc::new(RecordingResultWriter::default()),
+                dummy_milestone_sink(),
+                store.clone(),
+                "thread-concurrent-gate-persist",
+            )
+            .await,
+        );
+        let invocation = visible_runtime_invocation(&port).await;
+
+        let owner_port = Arc::clone(&port);
+        let owner_invocation = invocation.clone();
+        let owner =
+            tokio::spawn(async move { owner_port.invoke_capability(owner_invocation).await });
+        store
+            .entered
+            .acquire()
+            .await
+            .expect("owner save entered")
+            .forget();
+
+        let waiter_port = Arc::clone(&port);
+        let waiter = tokio::spawn(async move { waiter_port.invoke_capability(invocation).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiter_holds_reservation = port
+                    .persisted_gate_resolutions
+                    .lock()
+                    .expect("gate resolution reservations lock")
+                    .values()
+                    .any(|state| {
+                        matches!(
+                            state,
+                            GateResolutionState::InFlight(notify)
+                                if Arc::strong_count(notify) >= 3
+                        )
+                    });
+                if waiter_holds_reservation {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter must park on the in-flight reservation");
+        store.release.notify_one();
+
+        let owner_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), owner)
+            .await
+            .expect("owner must finish")
+            .expect("owner task")
+            .expect("owner resolution");
+        let waiter_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must finish")
+            .expect("waiter task")
+            .expect("waiter resolution");
+
+        assert_eq!(
+            gate_ref_for_resolution(&owner_resolution),
+            gate_ref_for_resolution(&waiter_resolution),
+            "the waiter must receive the owner's persisted gate resolution"
+        );
+        assert_eq!(
+            store.saved().len(),
+            1,
+            "concurrent duplicates must persist one gate record"
         );
     }
 

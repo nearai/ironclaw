@@ -26,7 +26,7 @@ use crate::{
 
 use super::{
     first_party_capability_manifest,
-    http_output::{HttpDispatchOutput, shape_response},
+    http_output::{HttpDispatchOutput, classify_status, shape_response},
     input_error,
 };
 
@@ -46,6 +46,7 @@ const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
 const GITHUB_EXTENSION_PREFERENCE: &str = "Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.";
+const WEB_SEARCH_PREFERENCE: &str = "Use this capability for structured HTTP APIs and direct file downloads when raw HTTP request control is required. For general web research or retrieving human-facing web pages, prefer an available `web_search` tool. This client does not render JavaScript and may receive bot or paywall interstitials.";
 const SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY: &str =
     "response body exceeded builtin.http.save response_body_limit; nothing was saved";
 const SAVE_BODY_STORE_UNAVAILABLE_SUMMARY: &str =
@@ -96,7 +97,8 @@ fn http_manifest(
     description: &str,
     effects: Vec<EffectKind>,
 ) -> Result<CapabilityManifest, ExtensionError> {
-    let description = format!("{description} {GITHUB_EXTENSION_PREFERENCE}");
+    let description =
+        format!("{description} {WEB_SEARCH_PREFERENCE} {GITHUB_EXTENSION_PREFERENCE}");
     first_party_capability_manifest(
         capability_id,
         &description,
@@ -129,6 +131,10 @@ fn http_resource_profile() -> ResourceProfile {
 pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
+    // Failure-path usage accounting mirrors the sibling dispatches in
+    // `first_party_tools/mod.rs`: wall time is measured over the whole
+    // dispatch and attached to the capability error.
+    let started = std::time::Instant::now();
     let egress = request
         .services
         .runtime_http_egress
@@ -243,7 +249,17 @@ pub(super) async fn dispatch(
     )
     .await?
     .map_err(|error| http_error(error, save_mode))?;
-    Ok(shape_response(response, response_body_limit))
+    let status = response.status;
+    // Shape at the caller's `response_body_limit` so egress-truncation
+    // accounting stays correct: `shape_response` derives
+    // `body_was_truncated_by_egress` from that limit, and a body the egress
+    // already cut at the caller's cap must not be reported as complete. The
+    // failure diagnostic applies its own display budget separately in
+    // `bounded_failure_diagnostic`; the success-budget trim run here is
+    // discarded for error statuses, which is bounded and sub-millisecond.
+    let shaped = shape_response(response, response_body_limit);
+    let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    classify_status(shaped, status, wall_clock_ms)
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {

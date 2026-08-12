@@ -1,8 +1,8 @@
 use super::*;
 
-use crate::AuthPromptChallengeKind;
 use ironclaw_auth::product_prompt::{AuthChallengeProvider, AuthChallengeView};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
+use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
     ids::VendorId,

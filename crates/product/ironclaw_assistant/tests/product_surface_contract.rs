@@ -2,6 +2,7 @@
 //! Contract tests for the product workflow service.
 
 use ironclaw_loop_host::RejectingInputEnqueue;
+use ironclaw_product_contracts::binding::ResetBindingRequest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,29 +22,25 @@ use ironclaw_assistant::{
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
     ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
-    ResetBindingRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, StaticProductInstallationResolver, approval_gate_ref,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    StaticProductInstallationResolver, approval_gate_ref,
 };
-use ironclaw_assistant::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalEventId, InboundCommandPayload,
-    LinkedThreadActionPayload, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
-    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductSurfaceRejectionKind, ProductTriggerReason, ProjectionCursor, ProjectionReadPayload,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
-    TrustedInboundContext, UserMessagePayload,
-};
+
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::ExternalEventId;
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
     TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -63,10 +60,22 @@ use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 use ironclaw_product_contracts::error::ProductOperationFailure;
-use ironclaw_product_contracts::subject_route::{
-    ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
-    ProductConversationSubjectRouteResolver,
+use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload, TrustedInboundContext,
+    UserMessagePayload,
+};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+};
+use ironclaw_product_contracts::shared_admission::{
+    SharedConversationAdmission, SharedConversationAdmissionRequest,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -859,10 +868,12 @@ fn fake_binding() -> ResolvedBinding {
     ResolvedBinding {
         tenant_id: TenantId::new("tenant:fake").expect("valid tenant"),
         actor_user_id: UserId::new("user:fake").expect("valid actor user"),
-        subject_user_id: Some(UserId::new("user:fake").expect("valid subject user")),
         thread_id: ThreadId::new("thread:fake").expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
+        source_binding_ref: SourceBindingRef::new("source:fake").expect("valid source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:fake")
+            .expect("valid reply ref"),
     }
 }
 
@@ -909,6 +920,7 @@ impl ReplayCountingInboundTurnService {
             .expect("valid accepted message ref"),
             submitted_run_id: TurnRunId::new(),
             binding: fake_binding(),
+            submission: None,
         })
     }
 }
@@ -942,7 +954,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+            return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
@@ -976,7 +988,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         };
 
         self.accept_fresh_user_message(envelope_for_turn)
-            .map(InboundUserMessageDispatch::Accepted)
+            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 }
 
@@ -1368,7 +1380,10 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
         ),
     );
     let base_binding = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&base_envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&base_envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("seed base direct conversation binding");
     let gate_ref = TurnGateRef::new("gate:auth-direct-thread").expect("auth gate");
@@ -1736,14 +1751,14 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
     let owner_binding = ResolvedBinding {
         tenant_id: TenantId::new("tenant:install_alpha").expect("tenant"),
         actor_user_id: UserId::new("user:user1").expect("actor"),
-        subject_user_id: Some(UserId::new("user:user1").expect("subject")),
         thread_id: ThreadId::new("thread:dm-topic").expect("thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("agent")),
         project_id: None,
+        source_binding_ref: SourceBindingRef::new("source:dm-topic").expect("source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:dm-topic").expect("reply ref"),
     };
     let divergent_base_binding = ResolvedBinding {
         actor_user_id: UserId::new("user:someone-else").expect("actor"),
-        subject_user_id: Some(UserId::new("user:someone-else").expect("subject")),
         ..owner_binding.clone()
     };
     let thread_ref = ExternalConversationRef::new(
@@ -3028,6 +3043,7 @@ async fn before_inbound_policy_rewrite_revalidates_payload_before_turn_path() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.rewrite_user_message(UserMessagePayload {
         requested_model: None,
+        channel_context: None,
         text: "a".repeat(64 * 1024 + 1),
         attachments: vec![],
         trigger: ProductTriggerReason::DirectChat,
@@ -3246,6 +3262,7 @@ async fn rejected_busy_is_settled_and_transport_retry_gets_duplicate() {
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: Some(busy_run),
         binding: fake_binding(),
+        busy: None,
     });
     let envelope = sample_envelope("policy-busy-retry");
 
@@ -3467,11 +3484,13 @@ async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
             accepted_message_ref: AcceptedMessageRef::new("msg:first").expect("valid"),
             active_run_id: Some(first_run),
             binding: fake_binding(),
+            busy: None,
         },
         InboundTurnOutcome::Submitted {
             accepted_message_ref: AcceptedMessageRef::new("msg:second").expect("valid"),
             submitted_run_id: second_run,
             binding: fake_binding(),
+            submission: None,
         },
     ]);
 
@@ -3998,12 +4017,14 @@ async fn product_binding_reset_rotates_the_route_and_preserves_canonical_scope()
             Some("project:alpha"),
         )],
     );
-    let initial_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-initial"));
+    let initial_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-initial"))
+        .expect("verified envelope binding request");
     let initial = binding
         .resolve_binding(initial_request)
         .await
         .expect("initial binding");
-    let reset_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-command"));
+    let reset_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-command"))
+        .expect("verified envelope binding request");
 
     let reset = binding
         .reset_binding(ResetBindingRequest {
@@ -4017,7 +4038,6 @@ async fn product_binding_reset_rotates_the_route_and_preserves_canonical_scope()
     assert_ne!(reset.binding.thread_id, reset.previous_thread_id);
     assert_eq!(reset.binding.tenant_id, initial.tenant_id);
     assert_eq!(reset.binding.actor_user_id, initial.actor_user_id);
-    assert_eq!(reset.binding.subject_user_id, initial.subject_user_id);
     assert_eq!(reset.binding.agent_id, initial.agent_id);
     assert_eq!(reset.binding.project_id, initial.project_id);
     let replay = binding
@@ -4137,9 +4157,10 @@ async fn actor_user_resolver_rewrites_pairing_after_explicit_unpair() {
     );
 
     binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
-            "resolver-before-unpair",
-        )))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope("resolver-before-unpair"))
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("initial resolved actor binding");
     conversations
@@ -4152,9 +4173,10 @@ async fn actor_user_resolver_rewrites_pairing_after_explicit_unpair() {
         .await;
 
     binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
-            "resolver-after-unpair",
-        )))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope("resolver-after-unpair"))
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("same-process reconnect should rewrite the resolved actor pairing");
 }
@@ -4284,9 +4306,12 @@ async fn actor_user_resolver_revalidation_cannot_unpair_a_newer_generation() {
         product_binding_service_with_actor_user_resolver_arc(conversations.clone(), actor_resolver);
 
     binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
-            "resolver-replaced-mid-resolution",
-        )))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope(
+                "resolver-replaced-mid-resolution",
+            ))
+            .expect("verified envelope binding request"),
+        )
         .await
         .expect_err("a generation change during resolution must reject the stale turn");
 
@@ -4357,9 +4382,10 @@ async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
     );
 
     let err = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
-            "lookup-resolver-missing-actor",
-        )))
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope("lookup-resolver-missing-actor"))
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect_err("lookup must require an existing durable actor pairing");
 
@@ -4382,9 +4408,10 @@ async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures_befor
     );
 
     let err = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
-            "lookup-resolver-error",
-        )))
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope("lookup-resolver-error"))
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect_err("missing durable pairing fails before resolver revalidation");
 
@@ -4418,7 +4445,10 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
     );
     let envelope = sample_envelope("lookup-resolver-mismatch");
     seed_binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("seed canonical conversation binding");
     let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
@@ -4430,7 +4460,10 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
     );
 
     let error = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect_err("lookup must reject a durable pairing that no longer matches the resolver");
 
@@ -4453,7 +4486,8 @@ async fn lookup_binding_rechecks_direct_actor_revocation_after_the_route_was_cre
     let binding =
         product_binding_service_with_actor_user_resolver_arc(conversations, resolver.clone());
     let envelope = sample_envelope("direct-route-revoked");
-    let request = ResolveBindingRequest::from_envelope(&envelope);
+    let request =
+        ResolveBindingRequest::from_envelope(&envelope).expect("verified envelope binding request");
     binding
         .resolve_binding(request.clone())
         .await
@@ -4485,7 +4519,8 @@ async fn lookup_binding_rechecks_direct_actor_revocation_when_the_epoch_changes(
     let binding =
         product_binding_service_with_actor_user_resolver_arc(conversations, resolver.clone());
     let envelope = sample_envelope("direct-route-new-generation");
-    let request = ResolveBindingRequest::from_envelope(&envelope);
+    let request =
+        ResolveBindingRequest::from_envelope(&envelope).expect("verified envelope binding request");
     binding
         .resolve_binding(request.clone())
         .await
@@ -4572,106 +4607,16 @@ async fn concrete_product_surface_accepts_user_message_for_trusted_installation(
     assert_eq!(submissions[0].actor.user_id.as_str(), "user:alice");
 }
 
-#[tokio::test]
-async fn concrete_product_surface_accepts_shared_route_participant_on_existing_thread() {
-    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
-    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
-    let installation_id =
-        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    conversations
-        .pair_external_actor(
-            tenant_id.clone(),
-            adapter_kind.clone(),
-            installation_id.clone(),
-            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
-            UserId::new("user:alice").expect("user"),
-        )
-        .await;
-    conversations
-        .pair_external_actor(
-            tenant_id.clone(),
-            adapter_kind,
-            installation_id,
-            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
-            UserId::new("user:bob").expect("user"),
-        )
-        .await;
-    let binding = product_binding_service(
-        conversations.clone(),
-        vec![(
-            "test_adapter",
-            "install_alpha",
-            "tenant:alpha",
-            "agent:alpha",
-            Some("project:alpha"),
-        )],
-    );
-    let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    let inbound = Arc::new(DefaultInboundTurnService::new(
-        binding.clone(),
-        InMemorySessionThreadService::default(),
-        coordinator.clone(),
-        Arc::new(RejectingInputEnqueue),
-    ));
-    let workflow = DefaultProductSurface::new(
-        inbound,
-        Arc::new(InMemoryIdempotencyLedger::new()),
-        Arc::new(binding),
-    );
-
-    workflow
-        .submit_inbound(sample_envelope_with_payload(
-            "shared-alice",
-            ProductInboundPayload::UserMessage(
-                UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
-                    .expect("message"),
-            ),
-        ))
-        .await
-        .expect("alice shared message accepted");
-    let shared_thread_id = coordinator.submissions()[0].scope.thread_id.clone();
-    conversations
-        .add_thread_participant(
-            &tenant_id,
-            &shared_thread_id,
-            UserId::new("user:bob").expect("user"),
-        )
-        .await
-        .expect("bob participant added");
-
-    workflow
-        .submit_inbound(sample_envelope_with_context(
-            ProductAdapterId::new("test_adapter").expect("adapter"),
-            AdapterInstallationId::new("install_alpha").expect("install"),
-            ExternalEventId::new("evt:shared-bob").expect("event"),
-            ExternalActorRef::new("test", "user2", Option::<String>::None).expect("actor"),
-            ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
-            ProductInboundPayload::UserMessage(
-                UserMessagePayload::new("hello from bob", vec![], ProductTriggerReason::BotMention)
-                    .expect("message"),
-            ),
-        ))
-        .await
-        .expect("shared participant accepted on existing thread");
-
-    let submissions = coordinator.submissions();
-    assert_eq!(submissions.len(), 2);
-    assert_eq!(
-        submissions[0].scope.thread_id,
-        submissions[1].scope.thread_id
-    );
-    assert_eq!(submissions[0].actor.user_id.as_str(), "user:alice");
-    assert_eq!(submissions[1].actor.user_id.as_str(), "user:bob");
-    assert_eq!(
-        submissions[0].scope.explicit_owner_user_id(),
-        Some(&UserId::new("user:team-agent").expect("team subject"))
-    );
-    assert_eq!(
-        submissions[1].scope.explicit_owner_user_id(),
-        Some(&UserId::new("user:team-agent").expect("team subject"))
-    );
-}
+// Removed with ephemeral-per-ping:
+// `concrete_product_surface_shared_route_joins_one_conversation_thread` and
+// `legacy_operator_owned_shared_row_first_turn_submits_under_the_foreign_owner`
+// pinned the retired shared-thread-JOIN and foreign-owner-carry model at the
+// product-surface tier. There is no shared thread now — each ping resolves onto
+// its own pinger-owned ephemeral thread (owner == actor). Distinct pinger-owned
+// threads through the surface are pinned by
+// `shared_admission_gates_every_resolve_without_rebuilding_scope` and
+// `shared_lookup_verifies_membership_and_never_joins` below; per-event idempotent
+// threads at the conversations tier.
 
 #[tokio::test]
 async fn concrete_product_surface_persists_first_bind_default_scope() {
@@ -4832,8 +4777,11 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
     );
 }
 
+// Pin changed with the run-acts-as-invoker ruling: the fail-closed shape a
+// shared route hits without host configuration is now the "not connected"
+// admission rejection (there is no subject to configure any more).
 #[tokio::test]
-async fn shared_route_without_configured_subject_requires_binding() {
+async fn shared_route_without_admission_resolver_is_not_connected() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -4863,7 +4811,7 @@ async fn shared_route_without_configured_subject_requires_binding() {
     )]);
     let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_payload(
-        "shared-no-subject",
+        "shared-no-admission",
         ProductInboundPayload::UserMessage(
             UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
                 .expect("message"),
@@ -4871,19 +4819,26 @@ async fn shared_route_without_configured_subject_requires_binding() {
     );
 
     let error = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect_err("shared binding must require an explicit subject user");
+        .expect_err("a shared route with no admission resolver must fail closed");
 
     assert!(matches!(
         error,
         ProductOperationFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
+            if reason.contains("not connected")
     ));
 }
 
+// Pin changed with the run-acts-as-invoker ruling (replaces the retired
+// conversation-specific subject-route test): an ADMITTED shared conversation
+// resolves AS THE ACTOR who invoked it, and the admission resolver is handed
+// every request field unswapped.
 #[tokio::test]
-async fn shared_route_uses_conversation_specific_subject_over_installation_default() {
+async fn admitted_shared_route_resolves_as_the_actor() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -4900,17 +4855,14 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
         .await;
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations;
+    let admission = Arc::new(RecordingSharedAdmission::default());
+    admission.set_admitted();
     let scope = ProductInstallationScope::with_default_scope(
         tenant_id,
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_default_subject_user_id(UserId::new("user:default-team").expect("default subject"))
-    .with_conversation_subject_route(
-        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-eng".to_string())
-            .expect("route key"),
-        UserId::new("user:eng-team").expect("route subject"),
-    );
+    .with_shared_conversation_admission(admission.clone());
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -4922,7 +4874,7 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
     let envelope = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-route-subject").expect("event"),
+        ExternalEventId::new("evt:shared-route-admitted").expect("event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
         ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
             .expect("conversation"),
@@ -4933,19 +4885,26 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
     );
 
     let resolved = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect("shared binding should resolve");
+        .expect("admitted shared binding should resolve");
 
     assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
-    assert_eq!(
-        resolved.subject_user_id.as_ref().map(UserId::as_str),
-        Some("user:eng-team")
-    );
+    // The resolver received the request with unswapped fields, and the route
+    // key deliberately drops the topic/thread segment.
+    let calls = admission.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].adapter_id.as_str(), "test_adapter");
+    assert_eq!(calls[0].installation_id.as_str(), "install_alpha");
+    assert_eq!(calls[0].route_key.space_id(), Some("T-team"));
+    assert_eq!(calls[0].route_key.conversation_id(), "C-eng");
 }
 
 #[tokio::test]
-async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
+async fn admitted_shared_route_does_not_probe_existing_binding_before_resolve() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -4963,16 +4922,14 @@ async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
     let counted_conversations = Arc::new(CountingConversationBindingService::new(conversations));
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         counted_conversations.clone();
+    let admission = Arc::new(RecordingSharedAdmission::default());
+    admission.set_admitted();
     let scope = ProductInstallationScope::with_default_scope(
         tenant_id,
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_conversation_subject_route(
-        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-eng".to_string())
-            .expect("route key"),
-        UserId::new("user:eng-team").expect("route subject"),
-    );
+    .with_shared_conversation_admission(admission);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -4984,7 +4941,7 @@ async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
     let envelope = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:static-shared-no-lookup").expect("event"),
+        ExternalEventId::new("evt:admitted-shared-no-lookup").expect("event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
         ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
             .expect("conversation"),
@@ -4995,20 +4952,28 @@ async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
     );
 
     let resolved = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect("static shared binding should resolve");
+        .expect("admitted shared binding should resolve");
 
-    assert_eq!(
-        resolved.subject_user_id.as_ref().map(UserId::as_str),
-        Some("user:eng-team")
-    );
+    // The actor owns the resolve; no probe of existing bindings happens
+    // before the trusted resolve.
+    assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
     assert_eq!(counted_conversations.lookup_count(), 0);
     assert_eq!(counted_conversations.trusted_resolve_count(), 1);
 }
 
+// Pin changed with the run-acts-as-invoker ruling. This replaces the retired
+// dynamic subject-route resolver test: admission is now the ONLY shared-route
+// configuration, it takes effect per request with no scope rebuild, and —
+// unlike the retired subject requirement, which an existing binding satisfied
+// from its persisted scope — it is re-checked on EVERY resolve and lookup, so
+// disconnecting a conversation stops an existing binding immediately.
 #[tokio::test]
-async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_scope() {
+async fn shared_admission_gates_every_resolve_without_rebuilding_scope() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -5025,13 +4990,13 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         .await;
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations;
-    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
+    let admission = Arc::new(RecordingSharedAdmission::default());
     let scope = ProductInstallationScope::with_default_scope(
         tenant_id,
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_conversation_subject_route_resolver(subject_resolver.clone());
+    .with_shared_conversation_admission(admission.clone());
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -5040,253 +5005,196 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
-    let envelope = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-route-subject").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
-                .expect("message"),
-        ),
-    );
+    let shared_envelope = |event: &str, message: &str, conversation: &str, msg: &str| {
+        sample_envelope_with_context(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+            ExternalEventId::new(format!("evt:{event}")).expect("event"),
+            ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+            ExternalConversationRef::new(Some("T-team"), conversation, Some("thread-1"), Some(msg))
+                .expect("conversation"),
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new(message, vec![], ProductTriggerReason::BotMention)
+                    .expect("message"),
+            ),
+        )
+    };
+    let envelope = shared_envelope("shared-admission-gate", "hello shared", "C-eng", "msg-1");
 
+    // Not admitted yet: fail closed with the not-connected rejection.
     let error = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect_err("shared binding must require a configured subject");
+        .expect_err("an unadmitted shared conversation must fail closed");
     assert!(matches!(
         error,
         ProductOperationFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
+            if reason.contains("not connected")
     ));
 
-    subject_resolver.set_subject(UserId::new("user:eng-team").expect("route subject"));
+    // A host-side connect takes effect on the SAME scope object — no rebuild
+    // — and the admitted conversation resolves as the actor.
+    admission.set_admitted();
     let resolved = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect("shared binding should resolve after host route update");
-
+        .expect("shared binding should resolve after the conversation connects");
     assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
-    assert_eq!(
-        resolved.subject_user_id.as_ref().map(UserId::as_str),
-        Some("user:eng-team")
-    );
 
-    let failing_subject_resolver = Arc::new(FailingSubjectRouteResolver::default());
-    let failing_scope = ProductInstallationScope::with_default_scope(
-        TenantId::new("tenant:alpha").expect("tenant"),
-        AgentId::new("agent:alpha").expect("agent"),
-        Some(ProjectId::new("project:alpha").expect("project")),
-    )
-    .with_conversation_subject_route_resolver(failing_subject_resolver.clone());
-    let failing_installation_resolver = StaticProductInstallationResolver::new([(
-        ProductInstallationKey::new(
-            ProductAdapterId::new("test_adapter").expect("adapter"),
-            AdapterInstallationId::new("install_alpha").expect("installation"),
-        ),
-        failing_scope,
-    )]);
-    let failing_binding = ProductConversationBindingService::new(
-        conversation_port.clone(),
-        failing_installation_resolver,
-    );
-    let existing_route_envelope = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-route-subject-existing").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(
-            Some("T-team"),
-            "C-eng",
-            Some("thread-1"),
-            Some("msg-existing"),
-        )
-        .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
+    // Each admitted ping resolves its OWN ephemeral thread (per-event).
+    let again = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-gate-2",
                 "hello existing shared thread",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let resolved_with_unavailable_route_store = failing_binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(
-            &existing_route_envelope,
-        ))
-        .await
-        .expect("existing shared binding should not need route resolver");
-
-    assert_eq!(
-        resolved_with_unavailable_route_store.thread_id,
-        resolved.thread_id
-    );
-    assert_eq!(
-        resolved_with_unavailable_route_store
-            .subject_user_id
-            .as_ref()
-            .map(UserId::as_str),
-        Some("user:eng-team")
-    );
-    let route_mismatch_replay = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-route-subject-existing").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(
-            Some("T-team"),
-            "C-ops",
-            Some("thread-1"),
-            Some("msg-existing"),
+                "C-eng",
+                "msg-2",
+            ))
+            .expect("verified envelope binding request"),
         )
-        .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "reused event id on a different shared route",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
+        .await
+        .expect("existing admitted binding keeps resolving");
+    assert_ne!(
+        again.thread_id, resolved.thread_id,
+        "each ping resolves its own ephemeral thread, not a reused one"
     );
-    let route_mismatch = failing_binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&route_mismatch_replay))
+
+    // Reset is the THIRD admission checkpoint (resolve, lookup, reset): a
+    // disconnected shared conversation must refuse the reset BEFORE any
+    // pairing write or thread rotation. Deleting the reset-side
+    // `ensure_shared_route_admitted` call is exactly the sabotage this leg
+    // exists to catch — before it, no test drove reset on a Shared route.
+    admission.clear_admitted();
+    let reset_error = binding
+        .reset_binding(ResetBindingRequest {
+            resolve_request: ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-reset",
+                "/new",
+                "C-eng",
+                "msg-3",
+            ))
+            .expect("verified envelope binding request"),
+            expected_thread_id: again.thread_id.clone(),
+        })
+        .await
+        .expect_err("a disconnected shared conversation must not reset");
+    assert!(matches!(
+        reset_error,
+        ProductOperationFailure::BindingRequired { reason }
+            if reason.contains("not connected")
+    ));
+
+    // And the denied reset wrote nothing: re-admitting, a later ping resolves
+    // cleanly as the actor. Under ephemeral-per-ping there is no reused shared
+    // thread for a bad reset to rotate — every ping mints its own — so the
+    // aftermath check is that the binding still resolves, not thread reuse.
+    admission.set_admitted();
+    let after_failed_reset = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-gate-3",
+                "still my thread",
+                "C-eng",
+                "msg-4",
+            ))
+            .expect("verified envelope binding request"),
+        )
+        .await
+        .expect("re-admitted conversation resolves");
+    assert_ne!(
+        after_failed_reset.thread_id, again.thread_id,
+        "each ping mints its own ephemeral thread"
+    );
+    assert_eq!(after_failed_reset.actor_user_id.as_str(), "user:alice");
+
+    // Event-route integrity survives the remodel: replaying an event id
+    // against a DIFFERENT (also admitted) conversation is denied.
+    let route_mismatch = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-gate-2",
+                "reused event id on a different shared route",
+                "C-ops",
+                "msg-2",
+            ))
+            .expect("verified envelope binding request"),
+        )
         .await
         .expect_err("existing shared binding must record the external event route");
     assert!(matches!(
         route_mismatch,
         ProductOperationFailure::BindingAccessDenied
     ));
-    assert_eq!(failing_subject_resolver.call_count(), 0);
-    let calls = subject_resolver.calls();
-    assert_eq!(calls.len(), 2);
+
+    // The resolver saw every attempt with unswapped fields: deny, admit,
+    // continuity resolve, the denied reset, the post-reset resolve, and the
+    // C-ops route-mismatch probe.
+    let calls = admission.calls();
+    assert_eq!(calls.len(), 6);
+    assert_eq!(calls[0].adapter_id.as_str(), "test_adapter");
+    assert_eq!(calls[0].installation_id.as_str(), "install_alpha");
     assert_eq!(calls[0].route_key.space_id(), Some("T-team"));
     assert_eq!(calls[0].route_key.conversation_id(), "C-eng");
+    assert_eq!(calls[5].route_key.conversation_id(), "C-ops");
 
-    subject_resolver.set_subject(UserId::new("user:ops-team").expect("updated route subject"));
-    let reassigned_route_envelope = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-route-subject-2").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-2"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "hello existing shared thread",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let resolved_after_route_update = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(
-            &reassigned_route_envelope,
-        ))
+    // Disconnecting stops the EXISTING binding immediately: resolve and
+    // lookup both fail closed even though the thread already exists.
+    admission.clear_admitted();
+    let disconnected = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-gate-3",
+                "hello disconnected shared route",
+                "C-eng",
+                "msg-3",
+            ))
+            .expect("verified envelope binding request"),
+        )
         .await
-        .expect("existing shared binding should keep its original subject");
-
-    assert_eq!(resolved_after_route_update.thread_id, resolved.thread_id);
-    assert_eq!(
-        resolved_after_route_update
-            .subject_user_id
-            .as_ref()
-            .map(UserId::as_str),
-        Some("user:eng-team")
-    );
-
-    subject_resolver.clear_subject();
-    let deleted_route_envelope = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-route-subject-3").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-3"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "hello deleted shared route",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let resolved_after_route_delete = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(
-            &deleted_route_envelope,
-        ))
+        .expect_err("a disconnected conversation must stop resolving immediately");
+    assert!(matches!(
+        disconnected,
+        ProductOperationFailure::BindingRequired { reason }
+            if reason.contains("not connected")
+    ));
+    let disconnected_lookup = binding
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-admission-gate-4",
+                "lookup disconnected shared route",
+                "C-eng",
+                "msg-4",
+            ))
+            .expect("verified envelope binding request"),
+        )
         .await
-        .expect("existing shared binding should survive route deletion");
-
-    assert_eq!(resolved_after_route_delete.thread_id, resolved.thread_id);
-    assert_eq!(
-        resolved_after_route_delete
-            .subject_user_id
-            .as_ref()
-            .map(UserId::as_str),
-        Some("user:eng-team")
-    );
-
-    let deleted_route_lookup_envelope = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-route-subject-4").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-4"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "lookup deleted shared route",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let looked_up_after_route_delete = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(
-            &deleted_route_lookup_envelope,
-        ))
-        .await
-        .expect("existing shared binding lookup should survive route deletion");
-
-    assert_eq!(looked_up_after_route_delete.thread_id, resolved.thread_id);
-    assert_eq!(
-        looked_up_after_route_delete
-            .subject_user_id
-            .as_ref()
-            .map(UserId::as_str),
-        Some("user:eng-team")
-    );
+        .expect_err("a disconnected conversation must stop lookups immediately");
+    assert!(matches!(
+        disconnected_lookup,
+        ProductOperationFailure::BindingRequired { reason }
+            if reason.contains("not connected")
+    ));
 }
 
+// Pin changed with the run-acts-as-invoker ruling. This replaces the retired
+// default-subject-disable test: unrouted-shared fail-closed is now the ONLY
+// behavior (there is no default subject to disable), and the surviving order
+// pin is that admission rejects BEFORE any actor-binding side effect runs.
 #[tokio::test]
-async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
+async fn unadmitted_shared_route_fails_before_actor_binding_side_effects() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
-    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
-    let installation_id =
-        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
     let conversations = Arc::new(InMemoryConversationServices::default());
-    conversations
-        .pair_external_actor(
-            tenant_id.clone(),
-            adapter_kind,
-            installation_id,
-            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
-            UserId::new("user:alice").expect("user"),
-        )
-        .await;
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
     let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
         conversations;
-    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
+    let admission = Arc::new(RecordingSharedAdmission::default());
     let actor_resolver = Arc::new(RecordingProductActorUserResolver::new([(
         ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
         UserId::new("user:alice").expect("user"),
@@ -5296,14 +5204,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_default_subject_user_id(UserId::new("user:default-team").expect("default subject"))
-    .with_conversation_subject_route(
-        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-static".to_string())
-            .expect("static route key"),
-        UserId::new("user:static-team").expect("static route subject"),
-    )
-    .with_conversation_subject_route_resolver(subject_resolver.clone())
-    .without_default_subject_for_unrouted_shared_conversations()
+    .with_shared_conversation_admission(admission.clone())
     .with_actor_user_resolver(actor_resolver.clone(), actor_pairings);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
@@ -5317,7 +5218,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
     let unrouted = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-default-disabled").expect("event"),
+        ExternalEventId::new("evt:shared-unadmitted-order").expect("event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
         ExternalConversationRef::new(Some("T-team"), "C-ops", Some("thread-1"), Some("msg-1"))
             .expect("conversation"),
@@ -5327,148 +5228,37 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         ),
     );
     let error = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&unrouted))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&unrouted)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect_err("unrouted shared binding must not fall back to default subject");
+        .expect_err("an unadmitted shared conversation must fail closed");
     assert!(matches!(
         error,
         ProductOperationFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
+            if reason.contains("not connected")
     ));
     assert!(
         actor_resolver.calls().is_empty(),
-        "unrouted shared route must fail before actor resolver side effects"
+        "an unadmitted shared route must fail before actor resolver side effects"
     );
 
-    let static_route = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-static-with-default-disabled").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-static", Some("thread-1"), Some("msg-2"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new("hello static", vec![], ProductTriggerReason::BotMention)
-                .expect("message"),
-        ),
-    );
-    let resolved_static = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&static_route))
+    // Once the conversation is connected, the same request resolves as the
+    // resolved actor, who owns their thread.
+    admission.set_admitted();
+    let resolved = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&unrouted)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect("static shared route still resolves without default fallback");
-    assert_eq!(
-        resolved_static.subject_user_id.as_ref().map(UserId::as_str),
-        Some("user:static-team")
+        .expect("an admitted shared conversation resolves");
+    assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
+    assert!(
+        !actor_resolver.calls().is_empty(),
+        "the admitted resolve consults the actor resolver"
     );
-
-    subject_resolver.set_subject(UserId::new("user:dynamic-team").expect("dynamic route subject"));
-    let dynamic_route = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-with-default-disabled").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-3"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new("hello dynamic", vec![], ProductTriggerReason::BotMention)
-                .expect("message"),
-        ),
-    );
-    let resolved_dynamic = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&dynamic_route))
-        .await
-        .expect("dynamic shared route still resolves without default fallback");
-    assert_eq!(
-        resolved_dynamic
-            .subject_user_id
-            .as_ref()
-            .map(UserId::as_str),
-        Some("user:dynamic-team")
-    );
-
-    subject_resolver.set_subject(UserId::new("user:reassigned-team").expect("route subject"));
-    let reassigned_dynamic_route = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-reassigned").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-4"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "hello reassigned dynamic",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let reassigned_error = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(
-            &reassigned_dynamic_route,
-        ))
-        .await
-        .expect_err("existing shared binding must not switch subjects without rebinding");
-    assert!(matches!(
-        reassigned_error,
-        ProductOperationFailure::BindingAccessDenied
-    ));
-
-    subject_resolver.clear_subject();
-    let deleted_dynamic_route = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-deleted").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-5"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "hello deleted dynamic",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let error = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&deleted_dynamic_route))
-        .await
-        .expect_err("existing shared binding must stop resolving after route removal");
-    assert!(matches!(
-        error,
-        ProductOperationFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
-    ));
-
-    let deleted_dynamic_route_lookup = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-deleted-lookup")
-            .expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-6"))
-            .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "lookup deleted dynamic",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-    let lookup_error = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(
-            &deleted_dynamic_route_lookup,
-        ))
-        .await
-        .expect_err("existing shared binding lookup must stop after route removal");
-    assert!(matches!(
-        lookup_error,
-        ProductOperationFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
-    ));
 }
 
 #[tokio::test]
@@ -5524,7 +5314,9 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
         },
         Some(AgentId::new("agent:alpha").expect("agent")),
         Some(ProjectId::new("project:alpha").expect("project")),
-        Some(UserId::new("user:subject").expect("subject")),
+        // No trusted owner: shared bindings are keyed and owned by the
+        // paired actor (run-acts-as-invoker).
+        None,
     )
     .await
     .expect("seed binding");
@@ -5537,6 +5329,7 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
+    .with_shared_conversation_admission(Arc::new(AdmitAllSharedAdmission))
     .with_preconfigured_actor_binding(
         ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
         UserId::new("user:bob").expect("user"),
@@ -5552,7 +5345,10 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
     let binding = ProductConversationBindingService::new(conversation_port, resolver);
 
     let error = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect_err("lookup should reject mismatched resolved actor");
 
@@ -5563,54 +5359,37 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
 }
 
 #[tokio::test]
-async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
+async fn shared_lookup_verifies_membership_and_never_joins() {
+    // Pin changed with the ephemeral-per-ping remodel (#7377): a shared
+    // (channel) RESOLVE mints a fresh pinger-owned thread — there is no shared
+    // thread and no participant set to widen. Existing-only LOOKUPS never mint
+    // or join: they return the per-conversation binding only to a participant
+    // of its stored thread (the pinger who seeded it) and refuse everyone else.
+    // Admission is consulted first either way.
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
         ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
     let conversations = Arc::new(InMemoryConversationServices::default());
-    conversations
-        .pair_external_actor(
-            tenant_id.clone(),
-            adapter_kind.clone(),
-            installation_id.clone(),
-            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
-            UserId::new("user:alice").expect("user"),
-        )
-        .await;
-    ConversationBindingPort::resolve_or_create_binding(
-        conversations.as_ref(),
-        ironclaw_conversations::ResolveConversationRequest {
-            tenant_id: tenant_id.clone(),
-            adapter_kind,
-            adapter_installation_id: installation_id,
-            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
-                .expect("actor"),
-            external_conversation_ref: ExternalConversationRef::new(
-                Some("T-team"),
-                "C-eng",
-                Some("thread-legacy"),
-                Some("msg-legacy"),
+    for (external, canonical) in [("user1", "user:alice"), ("user2", "user:bob")] {
+        conversations
+            .pair_external_actor(
+                tenant_id.clone(),
+                adapter_kind.clone(),
+                installation_id.clone(),
+                ExternalActorRef::new("test", external, None::<String>).expect("actor"),
+                UserId::new(canonical).expect("user"),
             )
-            .expect("conversation"),
-            external_event_id: ironclaw_conversations::ExternalEventId::new("evt:legacy-shared")
-                .expect("event"),
-            route_kind: ironclaw_conversations::ConversationRouteKind::Shared,
-            requested_agent_id: Some(AgentId::new("agent:legacy").expect("agent")),
-            requested_project_id: Some(ProjectId::new("project:legacy").expect("project")),
-        },
-    )
-    .await
-    .expect("seed legacy shared binding");
-
-    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
-    subject_resolver.set_subject(UserId::new("user:eng-team").expect("route subject"));
+            .await;
+    }
+    let admission = Arc::new(RecordingSharedAdmission::default());
+    admission.set_admitted();
     let scope = ProductInstallationScope::with_default_scope(
         tenant_id,
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_conversation_subject_route_resolver(subject_resolver.clone());
+    .with_shared_conversation_admission(admission.clone());
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -5621,45 +5400,102 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
     let binding = ProductConversationBindingService::new(conversation_port, resolver);
-    let envelope = sample_envelope_with_context(
-        ProductAdapterId::new("test_adapter").expect("adapter"),
-        AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:legacy-shared-lookup").expect("event"),
-        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
-        ExternalConversationRef::new(
-            Some("T-team"),
-            "C-eng",
-            Some("thread-legacy"),
-            Some("msg-lookup"),
+    let shared_envelope = |event: &str, external_actor: &str, msg: &str| {
+        sample_envelope_with_context(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+            ExternalEventId::new(format!("evt:{event}")).expect("event"),
+            ExternalActorRef::new("test", external_actor, Option::<String>::None).expect("actor"),
+            ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some(msg))
+                .expect("conversation"),
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                    .expect("message"),
+            ),
         )
-        .expect("conversation"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "lookup existing legacy shared route",
-                vec![],
-                ProductTriggerReason::BotMention,
-            )
-            .expect("message"),
-        ),
-    );
-
-    let error = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+    };
+    // Seed the shared conversation thread through the product service.
+    let alice = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-membership-seed",
+                "user1",
+                "msg-1",
+            ))
+            .expect("verified envelope binding request"),
+        )
         .await
-        .expect_err("lookup must not backfill legacy ownerless shared routes");
+        .expect("alice's admitted shared binding resolves");
+    assert_eq!(alice.actor_user_id.as_str(), "user:alice");
 
+    // Bob never resolved in this conversation: the existing-only lookup
+    // verifies membership and must refuse rather than join him in.
+    let error = binding
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-membership-lookup-bob",
+                "user2",
+                "msg-2",
+            ))
+            .expect("verified envelope binding request"),
+        )
+        .await
+        .expect_err("a lookup must not join a never-resolved user into the thread");
     assert!(matches!(
         error,
         ProductOperationFailure::BindingAccessDenied
     ));
+
+    // A Shared-route RESOLVE gives bob his OWN ephemeral thread, acting as
+    // himself — there is no shared thread to join.
+    let bob = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-membership-join-bob",
+                "user2",
+                "msg-3",
+            ))
+            .expect("verified envelope binding request"),
+        )
+        .await
+        .expect("bob's shared resolve mints his own ephemeral thread");
+    assert_ne!(
+        bob.thread_id, alice.thread_id,
+        "each pinger gets their own ephemeral thread, never a shared one"
+    );
+    assert_eq!(bob.actor_user_id.as_str(), "user:bob");
+
+    // Note: the retired "a joined participant's later lookup resolves the
+    // shared thread" leg is gone with the shared-membership model — bob's
+    // resolve minted a per-event thread only, so a later lookup (against the
+    // seeded per-conversation binding, which he is not a participant of) would
+    // correctly refuse, not join.
+
+    // Alice seeded the per-conversation binding, so her own existing-only
+    // lookup still resolves its stored thread without minting a new one.
+    let alice_again = binding
+        .lookup_binding(
+            ResolveBindingRequest::from_envelope(&shared_envelope(
+                "shared-membership-lookup-alice",
+                "user1",
+                "msg-5",
+            ))
+            .expect("verified envelope binding request"),
+        )
+        .await
+        .expect("alice's own lookup resolves");
+    assert_eq!(alice_again.thread_id, alice.thread_id);
     assert!(
-        subject_resolver.calls().is_empty(),
-        "existing-only lookup must stay read-only and must not invoke route subject resolution"
+        !admission.calls().is_empty(),
+        "lookups consult admission before touching binding state"
     );
 }
 
+// Pin changed with the run-acts-as-invoker ruling: direct routes are never
+// gated by shared-conversation admission — even a failing resolver is not
+// consulted (replaces the retired subject-route-resolver skip test).
 #[tokio::test]
-async fn direct_route_skips_dynamic_subject_route_resolver() {
+async fn direct_route_never_consults_shared_admission() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -5676,13 +5512,13 @@ async fn direct_route_skips_dynamic_subject_route_resolver() {
         .await;
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations;
-    let subject_resolver = Arc::new(FailingSubjectRouteResolver::default());
+    let admission = Arc::new(FailingSharedAdmission::default());
     let scope = ProductInstallationScope::with_default_scope(
         tenant_id,
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_conversation_subject_route_resolver(subject_resolver.clone());
+    .with_shared_conversation_admission(admission.clone());
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -5692,7 +5528,7 @@ async fn direct_route_skips_dynamic_subject_route_resolver() {
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, resolver);
     let envelope = sample_envelope_with_payload(
-        "direct-skips-subject-resolver",
+        "direct-skips-admission",
         ProductInboundPayload::UserMessage(
             UserMessagePayload::new("hello direct", vec![], ProductTriggerReason::DirectChat)
                 .expect("message"),
@@ -5700,20 +5536,21 @@ async fn direct_route_skips_dynamic_subject_route_resolver() {
     );
 
     let resolved = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect("direct binding should not depend on shared-route resolver");
+        .expect("direct binding should not depend on shared admission");
 
     assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
-    assert_eq!(
-        resolved.subject_user_id.as_ref().map(UserId::as_str),
-        Some("user:alice")
-    );
-    assert_eq!(subject_resolver.call_count(), 0);
+    assert_eq!(admission.call_count(), 0);
 }
 
+// Pin changed with the run-acts-as-invoker ruling: the failing-resolver
+// propagation contract carries over to the admission port unchanged.
 #[tokio::test]
-async fn shared_route_propagates_dynamic_subject_route_resolver_error() {
+async fn shared_route_propagates_admission_resolver_error() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         Arc::new(InMemoryConversationServices::default());
@@ -5722,7 +5559,7 @@ async fn shared_route_propagates_dynamic_subject_route_resolver_error() {
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_conversation_subject_route_resolver(Arc::new(FailingSubjectRouteResolver::default()));
+    .with_shared_conversation_admission(Arc::new(FailingSharedAdmission::default()));
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -5734,7 +5571,7 @@ async fn shared_route_propagates_dynamic_subject_route_resolver_error() {
     let envelope = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("installation"),
-        ExternalEventId::new("evt:shared-route-resolver-error").expect("event"),
+        ExternalEventId::new("evt:shared-admission-resolver-error").expect("event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
         ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
             .expect("conversation"),
@@ -5745,14 +5582,17 @@ async fn shared_route_propagates_dynamic_subject_route_resolver_error() {
     );
 
     let error = binding
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
-        .expect_err("shared resolver error must propagate");
+        .expect_err("admission resolver error must propagate");
 
     assert!(matches!(
         error,
         ProductOperationFailure::Transient { reason }
-            if reason == "subject resolver backend down"
+            if reason == "admission resolver backend down"
     ));
 }
 
@@ -5787,7 +5627,7 @@ async fn concrete_product_surface_bot_mention_uses_shared_route() {
     assert_eq!(submissions.len(), 1);
     assert_eq!(
         binding.route_kinds(),
-        vec![ironclaw_assistant::ProductConversationRouteKind::Shared]
+        vec![ironclaw_product_contracts::binding::ProductConversationRouteKind::Shared]
     );
 }
 
@@ -5911,7 +5751,7 @@ async fn concrete_product_surface_reuses_prepared_binding_for_content_only_polic
     assert_eq!(binding.resolve_count(), 1);
     assert_eq!(
         binding.route_kinds(),
-        vec![ironclaw_assistant::ProductConversationRouteKind::Direct]
+        vec![ironclaw_product_contracts::binding::ProductConversationRouteKind::Direct]
     );
 }
 
@@ -5953,8 +5793,8 @@ async fn concrete_product_surface_recomputes_route_after_policy_rewrites_trigger
     assert_eq!(
         binding.route_kinds(),
         vec![
-            ironclaw_assistant::ProductConversationRouteKind::Direct,
-            ironclaw_assistant::ProductConversationRouteKind::Shared,
+            ironclaw_product_contracts::binding::ProductConversationRouteKind::Direct,
+            ironclaw_product_contracts::binding::ProductConversationRouteKind::Shared,
         ]
     );
 }
@@ -6236,7 +6076,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
         .submit_inbound(sample_envelope("direct-owner"))
         .await
         .expect("owner accepted");
-    let direct_thread = coordinator.submissions()[0].scope.thread_id.clone();
+    let _direct_thread = coordinator.submissions()[0].scope.thread_id.clone();
     conversations
         .pair_external_actor(
             TenantId::new("tenant:alpha").expect("tenant"),
@@ -6246,14 +6086,6 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
             UserId::new("user:bob").expect("user"),
         )
         .await;
-    conversations
-        .add_thread_participant(
-            &TenantId::new("tenant:alpha").expect("tenant"),
-            &direct_thread,
-            UserId::new("user:bob").expect("user"),
-        )
-        .await
-        .expect("participant added");
     let denied = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("install"),
@@ -6498,7 +6330,11 @@ async fn in_memory_idempotency_ledger_rejects_settle_after_expiry_without_reclai
 }
 
 fn product_binding_service(
-    conversations: Arc<InMemoryConversationServices>,
+    // Widened to the domain port (not `Arc<InMemoryConversationServices>`)
+    // so the legacy-row pin below can drive the SAME production binding
+    // service over the filesystem-backed conversation store it rewrites;
+    // in-memory callers coerce implicitly.
+    conversations: Arc<dyn ironclaw_conversations::ConversationBindingService>,
     installations: Vec<(&str, &str, &str, &str, Option<&str>)>,
 ) -> ProductConversationBindingService {
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
@@ -6510,14 +6346,16 @@ fn product_binding_service(
                     ProductAdapterId::new(adapter).expect("adapter"),
                     AdapterInstallationId::new(installation).expect("installation"),
                 ),
+                // Admit-all shared admission: these fixtures exercise flows
+                // other than admission, and shared routes fail closed
+                // without a resolver. Admission-specific tests build their
+                // own scopes with the recording/failing doubles.
                 ProductInstallationScope::with_default_scope(
                     TenantId::new(tenant).expect("tenant"),
                     AgentId::new(agent).expect("agent"),
                     project.map(|value| ProjectId::new(value).expect("project")),
                 )
-                .with_default_subject_user_id(
-                    UserId::new("user:team-agent").expect("team subject"),
-                ),
+                .with_shared_conversation_admission(Arc::new(AdmitAllSharedAdmission)),
             )
         },
     ));
@@ -6756,10 +6594,14 @@ impl ProductActorUserResolver for RevokingProductActorUserResolver {
     }
 }
 
+/// Shared-conversation admission double (replaced the retired
+/// `RecordingSubjectRouteResolver` with the run-acts-as-invoker ruling): a
+/// toggleable connected/disconnected answer, recording every request so tests
+/// can prove the resolver is handed unswapped fields.
 #[derive(Debug, Default)]
-struct RecordingSubjectRouteResolver {
-    subject_user_id: Mutex<Option<UserId>>,
-    calls: Mutex<Vec<ProductConversationSubjectRouteResolutionRequest>>,
+struct RecordingSharedAdmission {
+    admitted: Mutex<bool>,
+    calls: Mutex<Vec<SharedConversationAdmissionRequest>>,
 }
 
 struct CountingConversationBindingService {
@@ -6849,22 +6691,22 @@ impl ironclaw_conversations::ConversationBindingService for CountingConversation
     }
 }
 
-impl RecordingSubjectRouteResolver {
-    fn set_subject(&self, subject_user_id: UserId) {
+impl RecordingSharedAdmission {
+    fn set_admitted(&self) {
         *self
-            .subject_user_id
+            .admitted
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(subject_user_id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }
 
-    fn clear_subject(&self) {
+    fn clear_admitted(&self) {
         *self
-            .subject_user_id
+            .admitted
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
     }
 
-    fn calls(&self) -> Vec<ProductConversationSubjectRouteResolutionRequest> {
+    fn calls(&self) -> Vec<SharedConversationAdmissionRequest> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6873,29 +6715,30 @@ impl RecordingSubjectRouteResolver {
 }
 
 #[async_trait]
-impl ProductConversationSubjectRouteResolver for RecordingSubjectRouteResolver {
-    async fn resolve_product_conversation_subject_route(
+impl SharedConversationAdmission for RecordingSharedAdmission {
+    async fn shared_conversation_admitted(
         &self,
-        request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure> {
+        request: SharedConversationAdmissionRequest,
+    ) -> Result<bool, ProductOperationFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
-        Ok(self
-            .subject_user_id
+        Ok(*self
+            .admitted
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
 }
 
+/// Failing admission double (replaced `FailingSubjectRouteResolver`): the
+/// resolver error must propagate to the caller unchanged.
 #[derive(Debug, Default)]
-struct FailingSubjectRouteResolver {
+struct FailingSharedAdmission {
     calls: Mutex<usize>,
 }
 
-impl FailingSubjectRouteResolver {
+impl FailingSharedAdmission {
     fn call_count(&self) -> usize {
         *self
             .calls
@@ -6905,18 +6748,33 @@ impl FailingSubjectRouteResolver {
 }
 
 #[async_trait]
-impl ProductConversationSubjectRouteResolver for FailingSubjectRouteResolver {
-    async fn resolve_product_conversation_subject_route(
+impl SharedConversationAdmission for FailingSharedAdmission {
+    async fn shared_conversation_admitted(
         &self,
-        _request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductOperationFailure> {
+        _request: SharedConversationAdmissionRequest,
+    ) -> Result<bool, ProductOperationFailure> {
         *self
             .calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
         Err(ProductOperationFailure::Transient {
-            reason: "subject resolver backend down".into(),
+            reason: "admission resolver backend down".into(),
         })
+    }
+}
+
+/// Admit-everything admission for fixtures whose scenario is not about
+/// admission itself (shared routes fail closed without one).
+#[derive(Debug)]
+struct AdmitAllSharedAdmission;
+
+#[async_trait]
+impl SharedConversationAdmission for AdmitAllSharedAdmission {
+    async fn shared_conversation_admitted(
+        &self,
+        _request: SharedConversationAdmissionRequest,
+    ) -> Result<bool, ProductOperationFailure> {
+        Ok(true)
     }
 }
 
@@ -7014,6 +6872,7 @@ async fn rejected_busy_is_settled_and_duplicate_on_transport_retry() {
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: Some(busy_run),
         binding: fake_binding(),
+        busy: None,
     });
 
     let envelope = sample_envelope("busy-retry");
@@ -7215,6 +7074,7 @@ async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transpo
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: None,
         binding: fake_binding(),
+        busy: None,
     });
     let envelope = sample_envelope("busy-no-run");
 

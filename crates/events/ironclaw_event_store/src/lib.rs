@@ -15,7 +15,7 @@
 //! `LibSql*` / `Postgres*` impls that spoke SQL directly were removed during
 //! the `src/db/` dissolution pass — see the design-doc entry "Legacy
 //! per-backend store cleanup" in
-//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//! `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 //!
 //! KNOWN LIMITATION (PR #3171 review #39): replay filtering currently stops
 //! at project / mission / thread / process scope. The `ResourceScope` carries
@@ -54,7 +54,15 @@ mod durable_log;
 
 pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
 pub use durable_log::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
-pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 2;
+/// Connections a deployment opens for data-plane traffic when the operator does
+/// not say otherwise.
+///
+/// This was 2, which one turn's read burst could saturate on its own: the event
+/// store, the trigger repository, and every result read share this pool, so a
+/// busy turn queued behind itself and callers hit the checkout timeout. 8 leaves
+/// room for concurrent turns without being a figure a small managed Postgres
+/// cannot serve. Operators override it with `pool_max_size`.
+pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 8;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PostgresPoolTlsOptions {
@@ -608,7 +616,7 @@ mod postgres_backed {
                 return Err(RebornEventStoreError::RemotePostgresClearTextDisabled);
             }
             tracing::warn!(
-                target = "ironclaw::reborn::event_store::postgres",
+                target: "ironclaw::reborn::event_store::postgres",
                 "remote Reborn Postgres cleartext connection explicitly allowed; use only on a trusted private network"
             );
             Manager::from_config(pg_config, NoTls, manager_config)

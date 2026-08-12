@@ -91,6 +91,30 @@ fn resolve_path(
         ));
     }
     if !operation_allowed(&grant.permissions, operation) {
+        // Name the root, the writable alternatives, and -- only for a skill root -- the tool that
+        // owns writes there. The bare denial said just "the tool was denied filesystem access", so an
+        // agent editing its own skill had no idea what to do and fell back to remove-then-reinstall.
+        //
+        // `/skills` is deliberately read-only for the filesystem tools: writes go through
+        // `skill_install`/`skill_update`, which validate the manifest discovery requires. Suggesting
+        // those tools for a read-only WORKSPACE would be nonsense, which a test caught.
+        if grant.permissions.read && !grant.permissions.write {
+            let writable = writable_roots(mounts);
+            let mut reason = format!("{} does not permit writes", safe_summary_path(path));
+            if !writable.is_empty() {
+                reason.push_str(&format!(" (writable roots: {writable})"));
+            }
+            if is_skill_alias(grant) {
+                reason.push_str(
+                    ". Skills change through skill_install or skill_update, which validate the \
+                     manifest that discovery requires",
+                );
+            }
+            return Err(CodingCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::FilesystemDenied,
+                reason,
+            ));
+        }
         return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
             format!(
@@ -118,8 +142,83 @@ fn available_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
     roots.join(", ")
 }
 
+/// The roots this caller may actually write to, for a denial that tells the agent where to go.
+fn writable_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
+    let mut roots: Vec<String> = mounts
+        .mounts
+        .iter()
+        .filter(|mount| mount.permissions.write)
+        .map(|mount| safe_summary_path_text(mount.alias.as_str()))
+        .collect();
+    roots.sort_unstable();
+    roots.join(", ")
+}
+
+/// Is this grant the user's OWN skill root, whose writes belong to the skill capabilities?
+///
+/// Exact match, not `ends_with("skills")`. The suffix test also matched `/system/skills` and
+/// `/tenant-shared/skills`, which are read-only to everyone -- `skill_install`/`skill_update` write
+/// the caller's own root and cannot touch either. Suggesting them there sends an agent to a tool
+/// that will refuse it for a second, unexplained reason.
+fn is_skill_alias(grant: &ironclaw_host_api::mount::MountGrant) -> bool {
+    grant.alias.as_str() == "/skills"
+}
+
+/// A path under the staged-skills directory names a skill that has not been activated yet.
+///
+/// `.skills/<name>/…` only exists once the skill is activated -- activation is what copies a bundle
+/// out of the read-only store into the workspace. Without this, a miss there reported the generic
+/// "can't access your workspace file", and an agent that had just installed a skill spent two failed
+/// calls discovering the ordering instead of being told it.
+pub(super) fn unactivated_skill_hint(path: &str) -> Option<String> {
+    let trimmed = path.trim_start_matches('/');
+    let tail = trimmed
+        .strip_prefix("workspace/")
+        .unwrap_or(trimmed)
+        .strip_prefix(".skills/")?;
+    let name = tail.split('/').next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} does not exist yet: a skill's bundled files are staged into the workspace when the skill \
+         is ACTIVATED. Call skill_activate with name={name} first, then read or run it from there",
+        safe_summary_path(path)
+    ))
+}
+
+/// The mount aliases an agent may address, as directory entries.
+///
+/// `list_dir "/"` used to fail with `path  is not under an available scoped root` -- the offending
+/// path rendered blank because the safe-summary encoder maps `/` to a space, so the message named
+/// nothing at all. The agent was doing something reasonable: asking what the filesystem contains
+/// before writing to it. The roots are exactly the answer, and they were already being computed for
+/// the error text.
+pub(super) fn root_alias_entries(mounts: &ironclaw_host_api::mount::MountView) -> Vec<String> {
+    let mut roots: Vec<String> = mounts
+        .mounts
+        .iter()
+        .map(|mount| format!("{}/", mount.alias.as_str()))
+        .collect();
+    roots.sort_unstable();
+    roots.dedup();
+    roots
+}
+
+/// Is this an attempt to address the filesystem root itself?
+pub(super) fn is_filesystem_root_request(path: &str) -> bool {
+    matches!(path.trim(), "/" | "//")
+}
+
 fn scoped_path_input(path: &str) -> String {
-    if path == "." || path.is_empty() {
+    // `/` means the workspace, like `.` and `""`.
+    //
+    // It used to pass through, and `ScopedPath::new("/")` rejects the bare root -- so the tool failed
+    // with `path  is not under an available scoped root`, the offending path rendering BLANK because
+    // the safe-summary encoder maps `/` to a space. Agents hit this constantly: a leading-wildcard
+    // glob, or an attempt to look at the root to see what exists, produced an error that named
+    // nothing. `list_dir` special-cased it; every other coding tool did not.
+    if path == "." || path.is_empty() || path.trim() == "/" {
         DEFAULT_SCOPED_ROOT.to_string()
     } else if path.starts_with('/') {
         path.to_string()
@@ -421,4 +520,117 @@ pub(super) fn safe_summary_path(scoped_path: &str) -> String {
 
 fn safe_summary_path_text(path: &str) -> String {
     path.trim_start_matches('/').replace(['/', '\\'], " ")
+}
+
+#[cfg(test)]
+mod root_listing_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
+
+    fn view() -> MountView {
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/workspace").expect("alias"),
+                VirtualPath::new("/projects/workspace").expect("target"),
+                MountPermissions::read_write(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/skills").expect("alias"),
+                VirtualPath::new("/tenants/t/users/u/skills").expect("target"),
+                MountPermissions::read_only(),
+            ),
+        ])
+        .expect("view")
+    }
+
+    /// `list_dir "/"` must answer with the roots, not an error naming nothing.
+    ///
+    /// The failure read `path  is not under an available scoped root` -- blank, because the
+    /// safe-summary encoder maps `/` to a space. The agent was asking what the filesystem contains
+    /// before writing to it, and the roots were already computed for that very error message.
+    #[test]
+    fn the_filesystem_root_lists_the_available_roots() {
+        assert!(is_filesystem_root_request("/"));
+        assert!(is_filesystem_root_request(" / "));
+        assert!(!is_filesystem_root_request("/workspace"));
+        assert!(!is_filesystem_root_request(""));
+
+        assert_eq!(
+            root_alias_entries(&view()),
+            vec!["/skills/".to_string(), "/workspace/".to_string()],
+            "sorted, one entry per grant, so an agent can see where it may work"
+        );
+    }
+}
+
+#[cfg(test)]
+mod root_path_normalization_tests {
+    use super::*;
+
+    /// `/`, `.` and `""` all mean the workspace, for every coding tool.
+    ///
+    /// `/` used to pass through to `ScopedPath::new`, which rejects the bare root, and the resulting
+    /// summary rendered the path BLANK because the safe-summary encoder maps `/` to a space. Agents hit
+    /// it constantly -- a leading-wildcard glob, or looking at the root to see what exists -- and got
+    /// `path  is not under an available scoped root`, naming nothing. `list_dir` special-cased it;
+    /// `glob`, `grep`, `read_file`, `write_file` and `apply_patch` did not.
+    #[test]
+    fn the_filesystem_root_normalizes_to_the_workspace() {
+        for input in ["/", " / ", ".", ""] {
+            assert_eq!(
+                scoped_path_input(input),
+                DEFAULT_SCOPED_ROOT,
+                "{input:?} must resolve to the workspace rather than the unaddressable bare root"
+            );
+        }
+    }
+
+    /// An absolute path under a real root is untouched.
+    #[test]
+    fn absolute_paths_are_passed_through() {
+        assert_eq!(
+            scoped_path_input("/skills/x/SKILL.md"),
+            "/skills/x/SKILL.md"
+        );
+        assert_eq!(scoped_path_input("scripts/x.py"), "/workspace/scripts/x.py");
+    }
+}
+
+#[cfg(test)]
+mod unactivated_skill_hint_tests {
+    use super::*;
+
+    /// A miss under `.skills/<name>` must name the call that fixes it.
+    ///
+    /// Observed on a live run: the agent installed a skill, took the runnable path out of the install
+    /// result, and read it immediately -- before activating. It got the generic "can't access your
+    /// workspace file" twice, then activated and it worked. Two wasted calls and a confusing trace, for
+    /// an ordering the tools knew and did not say.
+    #[test]
+    fn a_miss_under_staged_skills_names_skill_activate() {
+        for path in [
+            ".skills/egfr-calc/scripts/egfr.py",
+            "/workspace/.skills/egfr-calc/scripts/egfr.py",
+            "/.skills/egfr-calc",
+        ] {
+            let hint = unactivated_skill_hint(path)
+                .unwrap_or_else(|| panic!("{path} must produce an activation hint"));
+            assert!(
+                hint.contains("skill_activate") && hint.contains("egfr-calc"),
+                "the hint must name the call and the skill; got {hint}"
+            );
+        }
+    }
+
+    /// Ordinary workspace paths are unaffected -- a missing file is just a missing file.
+    #[test]
+    fn other_paths_get_no_activation_hint() {
+        assert!(unactivated_skill_hint("scripts/egfr.py").is_none());
+        assert!(unactivated_skill_hint("/workspace/notes.md").is_none());
+        assert!(unactivated_skill_hint("/skills/egfr-calc/SKILL.md").is_none());
+        assert!(unactivated_skill_hint(".skills").is_none());
+    }
 }

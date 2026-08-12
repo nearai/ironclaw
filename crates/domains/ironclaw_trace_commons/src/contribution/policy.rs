@@ -13,7 +13,7 @@ pub enum TraceUploadAuthMode {
     /// Operator-minted workload token read from env (legacy/back-compat path).
     #[default]
     WorkloadTokenEnv,
-    /// Self-signed workload JWTs using the standaloneice key (agent onboarding path).
+    /// Self-signed workload JWTs using the standalone device key (agent onboarding path).
     DeviceKey,
 }
 

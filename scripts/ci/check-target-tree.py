@@ -99,36 +99,20 @@ class Exception_:
 # ---------------------------------------------------------------------------
 # The exceptions table — shrink-only. Every row names the row that closes it.
 # ---------------------------------------------------------------------------
-EXCEPTIONS: tuple[Exception_, ...] = (
-    Exception_(
-        package="ironclaw_projects",
-        actual="crates/ironclaw_projects",
-        documented=None,
-        owner="PROPOSAL §12.10 consolidation audit (2026-07-30 owner rule) — "
-        "`projects` → `identity` is the audit's single clear merge verdict",
-        why=(
-            "§5 draws no `ironclaw_projects` because the merge is decided. WS7 measured "
-            "the merge and skipped it rather than smuggling it into a move PR: it is not "
-            "a `git mv` but a source merge across 2 consumer crates / 5 files, and it "
-            "carries an equality-baseline and an origins-row cost that a family-move PR "
-            "cannot absorb. The crate is at its pre-merge flat path until that row lands; "
-            "delete this exception in the same PR."
-        ),
-    ),
-    Exception_(
-        package="ironclaw_first_party_extension_ports",
-        actual="crates/ironclaw_first_party_extension_ports",
-        documented=None,
-        owner="its own §9 disposition row (deletion), not WS7",
-        why=(
-            "§5 draws no home for this crate because its disposition is deletion. That "
-            "deletion is design work, not a move: intervening waves moved adapters INTO "
-            "it, so it cannot be deleted by relocating it. WS7 deliberately left it flat "
-            "rather than inventing a family for a crate that is not supposed to have one. "
-            "Delete this exception in the PR that deletes the crate."
-        ),
-    ),
-)
+#
+# ✎ 2026-08-05: the `ironclaw_projects` row is GONE, not edited — its
+# disposition closed. WS10's merge row landed the §12.10 consolidation verdict
+# (`projects` → `identity`, as the `projects` module), the package stopped being
+# a workspace member, and this gate said so by name: *"EXCEPTIONS carries a row
+# for a delta that no longer exists … Delete the row."* That is the table
+# working as designed — a row cannot outlive what it excuses — and it is why
+# closing a disposition is a deletion here rather than a rewrite. ✎ 2026-08-05:
+# the last two rows closed together in the tail batch — `ironclaw_projects`
+# dissolved into `identity::projects` and `ironclaw_first_party_extension_ports`
+# into `loop_host::skill_activation` — so the table is EMPTY, which is the §5
+# steady state. A new flat crate or undocumented delta now fails with no
+# escape hatch short of adding a row here, in review.
+EXCEPTIONS: tuple[Exception_, ...] = ()
 
 
 # ---------------------------------------------------------------------------

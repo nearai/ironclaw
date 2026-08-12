@@ -107,6 +107,39 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     assert!(cap.origin_gate_matrix.is_none());
 }
 
+/// The `standard:` schema-ref namespace is reserved to host-synthesized
+/// standard_op bindings (manifest v3). A v2 capability has no `standard_op`
+/// vocabulary at all, so hand-writing a `standard:` ref must still fail
+/// closed rather than let a bespoke tool wear a canonical schema.
+#[test]
+fn rejects_capability_declaring_reserved_standard_namespace_schema_ref() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        "input_schema_ref = \"schemas/example/echo.input.v1.json\"",
+        "input_schema_ref = \"standard:messaging/send_message.input.v1\"",
+    );
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("reserved"), "{err}");
+
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        "output_schema_ref = \"schemas/example/echo.output.v1.json\"",
+        "output_schema_ref = \"standard:messaging/send_message.output.v1\"",
+    );
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("reserved"), "{err}");
+}
+
 #[test]
 fn parses_partial_origin_gate_matrix_with_omitted_origin_defaulting_to_forbidden() {
     // A capability declaring only `loop_run` and `product` in its origin→gate

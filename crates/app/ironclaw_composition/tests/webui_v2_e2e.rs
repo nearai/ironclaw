@@ -28,6 +28,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
+use ironclaw_composition::test_support::with_test_authenticated_session_channel;
 use ironclaw_composition::{
     OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     build_reborn_runtime,
@@ -46,7 +47,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostManagedModelStreamSink,
+    HostManagedModelStreamSink, ToolDisclosureMode,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
@@ -697,15 +698,16 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     // composition graph grew. Boxing here moves the composition future to the
     // heap once, for every caller.
     Box::pin(async move {
-        let mut build_input =
+        let mut build_input = with_test_authenticated_session_channel(
             ironclaw_composition::local_filesystem_build_input(runtime_owner_id, storage_root)
-                .with_runtime_policy(policy)
-                .with_bundled_first_party_for_test();
+                .with_runtime_policy(policy),
+        );
         if let Some(google_oauth_backend) = google_oauth_backend {
             build_input = build_input
                 .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
         }
         let input = RebornRuntimeInput::from_build_input(build_input)
+            .with_tool_disclosure(ToolDisclosureMode::Off)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: TENANT.to_string(),
                 agent_id: AGENT.to_string(),
@@ -745,6 +747,10 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
             .await
             .expect("enable global auto-approve for e2e dispatch");
         let bundle = runtime.product_surface(None).expect("product surface");
+        let session_channel_extension_id = runtime
+            .session_channel_extension_id()
+            .expect("test deployment resolves exactly one session channel")
+            .to_string();
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(ValidTokenForUser::new(authenticated_user_id)),
@@ -755,7 +761,8 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
             // tests.
             vec![HeaderValue::from_static("http://localhost:0")],
         )
-        .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+        .with_session_channel_extension_id(session_channel_extension_id);
         let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
         Harness {
@@ -786,12 +793,12 @@ async fn build_two_user_harness_with_workspace_scoping(
 ) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         ironclaw_composition::local_filesystem_build_input(USER, storage_root)
             .with_runtime_policy(policy)
-            .with_workspace_scoped_per_caller(workspace_scoped_per_caller)
-            .with_bundled_first_party_for_test(),
-    )
+            .with_workspace_scoped_per_caller(workspace_scoped_per_caller),
+    ))
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
         agent_id: AGENT.to_string(),
@@ -824,12 +831,17 @@ async fn build_two_user_harness_with_workspace_scoping(
         .await
         .expect("enable global auto-approve for user A");
     let bundle = runtime.product_surface(None).expect("product surface");
+    let session_channel_extension_id = runtime
+        .session_channel_extension_id()
+        .expect("test deployment resolves exactly one session channel")
+        .to_string();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(TwoUserTokens),
         vec![HeaderValue::from_static("http://localhost:0")],
     )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_session_channel_extension_id(session_channel_extension_id);
     let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
     Harness {
@@ -990,12 +1002,26 @@ async fn create_thread(router: &axum::Router, client_action_id: &str) -> String 
 }
 
 async fn send_message(router: &axum::Router, thread_id: &str, client_action_id: &str) {
+    // The unified channel model routes browser sends through the generic
+    // session-inbound route keyed by the `GET /session`-advertised channel —
+    // the same discovery the SPA performs.
+    let session = router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/session"))
+        .await
+        .expect("session oneshot");
+    let session_json = read_json(session).await;
+    let session_channel = session_json["session_channel_extension_id"]
+        .as_str()
+        .expect("session advertises the session channel extension id")
+        .to_string();
     let send = router
         .clone()
         .oneshot(bearer_post(
-            &format!("/api/webchat/v2/threads/{thread_id}/messages"),
+            &format!("/api/webchat/v2/channels/{session_channel}/messages"),
             json!({
                 "client_action_id": client_action_id,
+                "thread_id": thread_id,
                 "content": "please call the echo tool",
             }),
         ))
@@ -2006,6 +2032,7 @@ mod operator_llm_config {
                 .with_runtime_policy(local_host_effective_policy())
                 .with_bundled_first_party_for_test(),
         )
+        .with_tool_disclosure(ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),

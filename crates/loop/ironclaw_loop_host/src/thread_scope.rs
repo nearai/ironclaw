@@ -37,6 +37,12 @@ impl ThreadScopeResolver {
         scope
     }
 
+    /// Resolve the run's thread owner: an explicit turn owner (host/trigger
+    /// creator, subagent parent→child propagation, or Ownerless→system) is
+    /// authoritative; otherwise the owner follows the run's actor (multi-user
+    /// WebChat). Owner == actor since the ephemeral-per-ping remodel, so the
+    /// explicit-owner and actor branches never disagree — this is run-user
+    /// resolution, not an owner-vs-actor choice.
     pub fn resolve_for_turn(
         base: &ThreadScope,
         turn_scope: &TurnScope,
@@ -99,8 +105,14 @@ mod tests {
         );
     }
 
+    /// An explicit turn owner is applied verbatim, skipping the actor rewrite.
+    /// Here an Ownerless turn scope stays system-scoped even with an actor
+    /// present — preserving Ownerless→SYSTEM. (Explicit-owner turns are
+    /// triggers and subagent children; owner==actor for actor-fallback WebChat
+    /// runs, so the only "explicit over the actor" case left is this
+    /// ownerless/system one.)
     #[test]
-    fn explicit_turn_owner_overrides_actor_rewrite() {
+    fn explicit_ownerless_turn_scope_stays_system_over_the_actor_rewrite() {
         let base = scope(Some("runtime-owner"));
         let turn_scope = TurnScope::new_with_owner(
             base.tenant_id.clone(),

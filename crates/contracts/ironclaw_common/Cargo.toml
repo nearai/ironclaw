@@ -8,6 +8,8 @@ authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
+# Internal-only workspace: nothing here is published (PROPOSAL §11.3).
+publish = false
 
 [package.metadata.ironclaw]
 layer = "contracts"

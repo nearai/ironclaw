@@ -14,6 +14,7 @@ pub(crate) fn internal_refs_from_ack(
             ProductInboundAck::Accepted {
                 accepted_message_ref,
                 submitted_run_id,
+                ..
             } => {
                 return Ok(
                     OpenAiCompatInternalRefs::new(OpenAiCompatProductActionRef::new(format!(
@@ -64,6 +65,7 @@ pub(crate) fn product_ack_from_reborn_submit(
         } => ProductInboundAck::Accepted {
             accepted_message_ref,
             submitted_run_id: run_id,
+            submission: None,
         },
         RebornSubmitTurnResponse::RejectedBusy {
             accepted_message_ref,
@@ -72,6 +74,7 @@ pub(crate) fn product_ack_from_reborn_submit(
         } => ProductInboundAck::RejectedBusy {
             accepted_message_ref,
             active_run_id,
+            busy: None,
         },
         RebornSubmitTurnResponse::DeferredBusy {
             accepted_message_ref,
@@ -80,6 +83,7 @@ pub(crate) fn product_ack_from_reborn_submit(
         } => ProductInboundAck::DeferredBusy {
             accepted_message_ref,
             active_run_id,
+            busy: None,
         },
     }
 }
@@ -96,6 +100,7 @@ mod tests {
         let ack = ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
             active_run_id: TurnRunId::new(),
+            busy: None,
         };
         let err = internal_refs_from_ack(&ack).unwrap_err();
         assert_eq!(
@@ -113,6 +118,7 @@ mod tests {
                 accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy-dup")
                     .expect("ref"),
                 active_run_id: TurnRunId::new(),
+                busy: None,
             }),
         };
         let err = internal_refs_from_ack(&ack).unwrap_err();
@@ -125,6 +131,7 @@ mod tests {
         let ack = ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
             active_run_id: None,
+            busy: None,
         };
         let err = internal_refs_from_ack(&ack).unwrap_err();
         assert_eq!(err.status_code(), 500);

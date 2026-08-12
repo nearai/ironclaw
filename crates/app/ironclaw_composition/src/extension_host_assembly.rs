@@ -44,6 +44,11 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    /// Host-owned per-user delivery registrations, handed to the coordinator
+    /// so a channel with zero of them resolves to "no target" before any
+    /// adapter call (design §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
 }
 
 pub(crate) struct BackendExtensionHostAssembly {
@@ -67,6 +72,7 @@ pub(crate) async fn build_backend_extension_host(
         channel_bindings,
         installation_store,
         admin_configuration_resolver,
+        delivery_registrations,
         resource_governor,
         reserved_capability_ids,
         host_runtime_http_egress,
@@ -113,7 +119,7 @@ pub(crate) async fn build_backend_extension_host(
             native_factories,
             channel_adapters: channel_bindings
                 .iter()
-                .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
+                .map(|binding| (binding.extension_id.clone(), binding.surfaces.clone()))
                 .collect(),
             installation_store: Arc::clone(&installation_store),
             boot_installations,
@@ -163,6 +169,7 @@ pub(crate) async fn build_backend_extension_host(
                 Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
                     Arc::clone(&ingress.reply_context),
                 )),
+                Arc::clone(&delivery_registrations),
                 ironclaw_assistant::DeliveryRetryPolicy::default(),
             ));
             (Some(coordinator), Some(resolver))
@@ -380,7 +387,13 @@ pub(crate) struct ChannelHostAssemblySource {
     /// Durable outcome record for proactive (trigger-fired) deliveries; the
     /// workflow factory wires it into every per-extension triggered driver.
     pub(crate) triggered_delivery_store: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
+    /// The owner-scoped outbound target catalog the background-run notifier
+    /// resolves stored notification-channel ids through at fire time.
+    pub(crate) outbound_delivery_targets:
+        Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
     pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+    pub(crate) dm_targets:
+        Arc<ironclaw_extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) channel_pairing:
@@ -417,8 +430,11 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
         outbound_preferences: Arc::clone(&services.outbound_preferences),
         triggered_delivery_store: Arc::clone(&services.triggered_run_delivery),
+        outbound_delivery_targets: Arc::clone(&services.outbound_delivery_targets)
+            as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
         identity_lookup: Arc::clone(&services.channel_identity_store)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+        dm_targets: Arc::clone(&services.channel_dm_target_store),
         deployment_channels: Arc::clone(&services.deployment_channels),
         channel_config: Arc::clone(&services.channel_config_service),
         channel_pairing: services.channel_pairing.clone(),
@@ -486,7 +502,9 @@ pub(crate) fn start_channel_host(
         delivered_gate_routes,
         outbound_preferences,
         triggered_delivery_store,
+        outbound_delivery_targets,
         identity_lookup,
+        dm_targets,
         deployment_channels,
         channel_config,
         channel_pairing,
@@ -497,6 +515,7 @@ pub(crate) fn start_channel_host(
             outbound_store: Arc::clone(outbound_state),
             route_store: Arc::clone(delivered_gate_routes),
             communication_preferences: Arc::clone(outbound_preferences),
+            delivery_targets: Arc::clone(outbound_delivery_targets),
             project_filesystem: Arc::clone(project_filesystem),
             approval_context,
             blocked_auth_prompts,
@@ -534,6 +553,7 @@ pub(crate) fn start_channel_host(
             as Arc<dyn ironclaw_product_contracts::channel_workflow::ChannelWorkflowFactory>,
         identity,
         identity_lookup,
+        dm_targets: Some(Arc::clone(dm_targets)),
         channel_pairing: channel_pairing.clone(),
         admin_users,
     });
@@ -603,7 +623,7 @@ pub(crate) async fn build_runtime_channel_host(
                 &binding.extension_id,
                 ironclaw_extension_host::channel_host::ChannelExtras {
                     preference_target_codec: binding.preference_target_codec.clone(),
-                    subject_route_resolver: None,
+                    shared_admission: None,
                     storage_roots: None,
                 },
             )

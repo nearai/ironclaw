@@ -16,10 +16,11 @@ use ironclaw_product_contracts::surface::{
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, LifecycleProductResponse, ProductSetupExtensionRequest,
-    ProductSurfaceFailure, RebornExtensionCredentialSetup, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornSetupExtensionResponse, lifecycle_product_surface_error,
+    LifecycleProductAction, LifecycleProductResponse, ProductSurfaceFailure,
+    RebornExtensionCredentialSetup, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornSetupExtensionResponse, lifecycle_product_surface_error,
 };
+use ironclaw_product_contracts::inbound_requests::ProductSetupExtensionRequest;
 
 use super::{
     ExtensionCredentialSetupService,

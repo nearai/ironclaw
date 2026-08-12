@@ -2,6 +2,7 @@ mod credential;
 mod host_port;
 mod pipeline;
 mod sanitize;
+mod vapid;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{

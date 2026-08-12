@@ -112,7 +112,8 @@ The shared Reborn runtime HTTP egress service uses this surface to:
 - inject material into the outgoing request shape
 - scrub leased values from runtime-visible network errors and response headers/bodies
 - strip sensitive response headers and block credential-shaped response bodies before they reach runtime callers
-- support header, query parameter, and path-placeholder credential targets. Request-body credential injection remains out of scope.
+- support validated header, query-parameter, path-placeholder, JSON-body,
+  host-composed Basic authorization, and VAPID authorization credential targets.
 
 Path-placeholder injection has the weakest ambient-redaction story: upstream
 access logs, CDN/proxy logs, crash dumps, and `Referer` values commonly retain
@@ -216,11 +217,11 @@ Closed in the current Reborn slice:
 - durable credential account/session storage through `CredentialBroker`
 - production wiring guardrails for credential account/session stores
 - staged-obligation production egress as the canonical direct-secret-injection boundary
-- V1 HTTP credential target coverage for headers, query params, and path placeholders
+- HTTP credential target coverage for headers, query params, path placeholders,
+  JSON bodies, host-composed Basic authorization, and VAPID authorization
 
 Deferred outside this issue's V1 slice:
 
-- request-body credential injection
 - non-HTTP credentials
 - arbitrary script or external MCP process ambient-network credential injection
 - external proxy/sidecar credential enforcement

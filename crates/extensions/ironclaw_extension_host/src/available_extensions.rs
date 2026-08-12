@@ -14,6 +14,7 @@ use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKi
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
+    messaging::STANDARD_SCHEMA_REF_PREFIX,
     path::VirtualPath,
 };
 // Imported from the contract that owns it. `ironclaw_assistant` only re-exports
@@ -118,9 +119,8 @@ pub struct AvailableExtensionPackage {
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
     pub channel_directions: Option<LifecycleChannelDirections>,
-    /// The channel surface's declared `[channel.presentation]` (markdown +
-    /// message cap), cached at construction like `channel_directions`. Fed into
-    /// prompt construction via the lifecycle summary (OUT-11).
+    /// How the model should format output for this channel. Cached at
+    /// construction like `channel_directions` and fed into prompt construction.
     pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
@@ -841,8 +841,10 @@ fn bundled_extension_package(
 
 /// Fail catalog construction before a package can be installed when its
 /// manifest points at a static file the bundle does not carry. Dynamic hosted
-/// MCP schemas are inlined at discovery time and are the only intentional
-/// non-file references.
+/// MCP schemas (inlined at discovery time) and standardized-messaging-framework
+/// `standard_op` bindings (host-resolved from the compiled-in
+/// `ironclaw_host_api::messaging` registry, never a package asset — spec §6/§7.1)
+/// are the only intentional non-file references.
 fn validate_bundled_package_assets(
     label: &str,
     package: &ExtensionPackage,
@@ -856,6 +858,10 @@ fn validate_bundled_package_assets(
             && path
                 .strip_prefix(&dynamic_schema_prefix)
                 .is_some_and(|suffix| !suffix.is_empty())
+    };
+    let is_standard_op_schema_ref = |field: &str, path: &str| {
+        matches!(field, "input_schema_ref" | "output_schema_ref")
+            && path.starts_with(STANDARD_SCHEMA_REF_PREFIX)
     };
     let require_asset = |field: &str, path: &str| {
         if has_asset(path) {
@@ -894,7 +900,7 @@ fn validate_bundled_package_assets(
         ];
         for (field, path) in refs {
             let Some(path) = path else { continue };
-            if is_inline_dynamic_schema_ref(field, path) {
+            if is_inline_dynamic_schema_ref(field, path) || is_standard_op_schema_ref(field, path) {
                 continue;
             }
             require_asset(
@@ -934,8 +940,8 @@ fn channel_directions_from_manifest_record(
     // Manifest v3: the resolved channel descriptor declares its directions.
     if let Some(channel) = &record.resolved().channel {
         return Ok(Some(LifecycleChannelDirections {
-            inbound: channel.inbound,
-            outbound: channel.outbound,
+            inbound: channel.supports_inbound(),
+            outbound: channel.supports_outbound(),
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.
@@ -961,10 +967,8 @@ fn channel_directions_from_manifest_record(
     Ok(directions)
 }
 
-/// The channel surface's declared `[channel.presentation]` (markdown support +
-/// message length cap). Only manifest v3 declares presentation via the resolved
-/// channel descriptor; v2 channels have none. Cached at construction like
-/// `channel_directions` and fed into prompt construction (OUT-11).
+/// The channel surface's presentation facts. Only manifest v3 declares a
+/// channel descriptor; v2 channels have none.
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
 ) -> Option<ironclaw_extension_contracts::channel::ChannelPresentation> {
@@ -1328,13 +1332,17 @@ mod tests {
             }
 
             // Hosted-MCP inline schemas under this package's exact dynamic
-            // prefix ship no package asset; every other ref remains static.
+            // prefix ship no package asset; standard_op bindings resolve
+            // from the compiled-in `ironclaw_host_api::messaging` registry,
+            // also never a package asset (spec §6/§7.1); every other ref
+            // remains static.
             let dynamic_schema_prefix = format!("schemas/{extension_id}/dynamic/");
             let is_dynamic_schema_ref = |schema_ref: &str| {
-                crate::is_hosted_http_mcp_package(&package.package)
+                (crate::is_hosted_http_mcp_package(&package.package)
                     && schema_ref
                         .strip_prefix(&dynamic_schema_prefix)
-                        .is_some_and(|suffix| !suffix.is_empty())
+                        .is_some_and(|suffix| !suffix.is_empty()))
+                    || schema_ref.starts_with(STANDARD_SCHEMA_REF_PREFIX)
             };
 
             for capability in &package.package.manifest.capabilities {
@@ -2145,15 +2153,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             .channel_presentation
             .as_ref()
             .expect("slack declares [channel.presentation]");
-        assert!(
-            presentation.supports_markdown,
-            "slack declares supports_markdown = true"
-        );
-        assert_eq!(
-            presentation.max_message_chars,
-            Some(40_000),
-            "slack declares max_message_chars = 40000"
-        );
+        assert!(presentation.supports_markdown, "slack declares markdown");
         assert_eq!(
             presentation.command_prefix.as_deref(),
             Some("/ironclaw "),

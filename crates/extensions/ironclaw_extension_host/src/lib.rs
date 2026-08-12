@@ -9,7 +9,7 @@
 //!
 //! It contains no concrete product name, protocol route, or behavior branch:
 //! concrete extensions implement the [`ironclaw_extension_contracts::tool_adapter::ToolAdapter`] and
-//! [`ironclaw_extension_contracts::channel_adapter::ChannelAdapter`] traits and are supplied by the binary.
+//! [`ironclaw_extension_contracts::channel_adapter::ChannelDelivery`] traits and are supplied by the binary.
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
 
@@ -39,8 +39,9 @@ pub mod channel_identity_store;
 pub mod channel_lifecycle;
 pub mod channel_outbound_targets;
 pub mod channel_pairing;
-pub mod channel_subject_routes;
+pub mod channel_shared_admission;
 pub mod channel_triggered_delivery;
+mod channel_vendor_calls;
 pub mod deployment_channels;
 pub mod egress;
 pub mod entrypoint;
@@ -75,6 +76,7 @@ pub mod removal_cleanup;
 pub mod reply_contexts;
 pub mod resolver;
 pub mod run_delivery_ports;
+pub mod session_ingress;
 pub mod skill_learning;
 pub mod skill_listing;
 pub mod store;
@@ -155,10 +157,6 @@ pub use channel_identity_store::{
 pub use channel_lifecycle::{
     channel_connect_strategy, channel_connection_requirement,
     package_declares_inbound_product_adapter,
-};
-pub use channel_subject_routes::{
-    ChannelConfigSubjectRouteResolver, SharedChannelAdmissionHandles, handle_declares_field,
-    managed_channel_subject_user_id, shared_channel_admission_handles,
 };
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,

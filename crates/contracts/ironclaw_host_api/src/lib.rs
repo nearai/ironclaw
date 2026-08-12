@@ -29,6 +29,9 @@
 //!   runtime policy vocabulary consumed by the resolver in
 //!   `ironclaw_runtime_policy` and the host runtime planner.
 //! - [`ingress`]: host-owned HTTP ingress descriptors for product/API surfaces.
+//! - [`messaging`]: [`StandardMessagingOp`], the closed standard messaging
+//!   operation vocabulary, canonical input/output schemas, description cores,
+//!   and the `messaging.*` error-code taxonomy.
 #![warn(unreachable_pub)]
 
 pub mod action;
@@ -38,6 +41,7 @@ pub mod audit;
 pub mod authorized;
 pub mod capability;
 pub mod capability_profile;
+pub mod capability_surface;
 pub mod decision;
 pub mod dispatch;
 #[cfg(feature = "test-support")]
@@ -53,6 +57,7 @@ pub mod ids;
 pub mod ingress;
 pub mod invocation;
 pub mod lane;
+pub mod messaging;
 pub mod mount;
 pub mod outbound;
 pub mod path;
@@ -63,6 +68,8 @@ pub mod runtime;
 pub mod runtime_policy;
 pub mod safe_summary;
 pub mod scope;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod trust;
 pub mod turn;
 pub mod user_identity;

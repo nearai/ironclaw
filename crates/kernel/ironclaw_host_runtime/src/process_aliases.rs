@@ -24,6 +24,29 @@ impl HostWorkdirAlias {
         Ok(Self { alias, host_path })
     }
 
+    /// This alias narrowed to one caller's workspace subtree.
+    ///
+    /// Mirrors `scoped_workspace_mount_view`, which resolves `/workspace` to
+    /// `<root>/tenants/<t>/users/<u>`. Only the workspace alias is scoped: `/host` and the raw
+    /// host-home aliases are ambient by construction and have no per-caller subtree.
+    pub(crate) fn scoped_to_caller(
+        &self,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+    ) -> Option<Self> {
+        if self.alias != WORKSPACE_WORKDIR_ALIAS {
+            return None;
+        }
+        Some(Self {
+            alias: self.alias.clone(),
+            host_path: self
+                .host_path
+                .join("tenants")
+                .join(scope.tenant_id.as_str())
+                .join("users")
+                .join(scope.user_id.as_str()),
+        })
+    }
+
     fn resolve(&self, workdir: &str) -> Option<PathBuf> {
         if workdir == self.alias {
             return Some(PathBuf::new());
@@ -32,6 +55,9 @@ impl HostWorkdirAlias {
         relative_workdir_tail(relative)
     }
 }
+
+/// The alias the workspace filesystem tools expose, and the only one that is per-caller.
+pub(crate) const WORKSPACE_WORKDIR_ALIAS: &str = "/workspace";
 
 pub(crate) fn resolve_local_host_workdir(
     workdir: Option<&str>,
@@ -443,5 +469,64 @@ mod tests {
             rewrite_local_host_output_aliases("/Users/alice/proj/out.pdf", &[]),
             "/Users/alice/proj/out.pdf"
         );
+    }
+}
+
+#[cfg(test)]
+mod per_caller_workspace_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
+
+    fn scope() -> ResourceScope {
+        ResourceScope::local_default(UserId::new("ada").expect("user"), InvocationId::new())
+            .expect("scope")
+    }
+
+    /// The shell's `/workspace` must name the same directory the file tools write to.
+    ///
+    /// It did not. `scoped_workspace_mount_view` resolves `/workspace` to
+    /// `<root>/tenants/<t>/users/<u>`, while this alias list -- built once at composition, before any
+    /// caller exists -- resolved it to `<root>`. One alias, two directories, in one process: an agent
+    /// wrote `scripts/egfr.py` with `write_file`, ran `python3 scripts/egfr.py` in the shell, and
+    /// landed three directories above its own file. Neither side errored.
+    #[test]
+    fn the_workspace_alias_is_narrowed_to_the_caller() {
+        let scope = scope();
+        let alias = HostWorkdirAlias::try_new("/workspace", "/srv/workspace").expect("alias");
+
+        let scoped = alias
+            .scoped_to_caller(&scope)
+            .expect("workspace alias scopes");
+
+        assert_eq!(
+            resolve_local_host_workdir(Some("/workspace"), std::slice::from_ref(&scoped))
+                .expect("resolves"),
+            PathBuf::from(format!(
+                "/srv/workspace/tenants/{}/users/ada",
+                scope.tenant_id.as_str()
+            )),
+            "the shell must land in the caller's own subtree, the one the file tools write to"
+        );
+
+        // A path inside the command string is rewritten against the same narrowed root, so
+        // `cd /workspace && python3 scripts/x.py` and `write_file scripts/x.py` agree.
+        assert!(
+            rewrite_local_host_command_aliases(
+                "cd /workspace && ls",
+                std::slice::from_ref(&scoped)
+            )
+            .contains(&format!("/users/{}", "ada")),
+            "command-string rewriting must use the same per-caller root"
+        );
+    }
+
+    /// Only the workspace is per-caller. `/host` is ambient by construction and has no subtree.
+    #[test]
+    fn ambient_aliases_are_not_scoped() {
+        let alias = HostWorkdirAlias::try_new("/host", "/Users/ada").expect("alias");
+        assert!(alias.scoped_to_caller(&scope()).is_none());
     }
 }

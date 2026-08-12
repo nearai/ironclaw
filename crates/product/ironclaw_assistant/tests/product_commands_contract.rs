@@ -6,7 +6,8 @@ use ironclaw_assistant::{
     declared_command_help_text, product_command_descriptors, required_audience,
     validate_declared_product_command,
 };
-use ironclaw_assistant::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_product_contracts::inbound::{InboundCommandPayload, ProductRejectionKind};
 
 #[test]
 fn command_payload_maps_to_typed_model_command_without_v1_parser() {

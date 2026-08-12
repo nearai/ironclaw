@@ -1,7 +1,7 @@
 ---
 name: ceo-setup
 version: 0.4.0
-description: One-time onboarding for the executive/manager commitment workflow — delegation-heavy, meeting prep, decision capture, morning and evening digests. Creates a `commitments` project and installs two dashboard widgets. After successful setup this skill is excluded from selection until the marker file is deleted.
+description: One-time onboarding for the executive/manager commitment workflow — delegation, meeting prep, decision capture, daily digests. Creates a `commitments` project and two dashboard widgets, then excludes itself until its marker file is deleted.
 activation:
   setup_marker: projects/commitments/.ceo-setup-complete
   keywords:

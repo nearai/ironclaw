@@ -1,3 +1,4 @@
+// arch-exempt: large_file, live source-route delivery loop pending the run_delivery split, plan #6175
 //! The live source-route half of run delivery: watch the run an inbound
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
@@ -14,20 +15,26 @@ use crate::commands::{
     declared_command_help_text_with_prefix, product_command_descriptors,
     render_command_result_text,
 };
-use crate::{
-    AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind,
-    ProductTriggerReason,
-};
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
+use ironclaw_extension_contracts::channel_adapter::{
+    OutboundPart, ProductTriggerReason, ReactionAction, RunReaction,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
     ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
+};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionKind,
 };
 use ironclaw_threads::{
     AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
@@ -45,10 +52,11 @@ use super::{
     delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
     thread_scope_from_binding, turn_scope_from_thread_scope,
 };
+use crate::ProductSurfaceFailure;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
-use crate::{ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding};
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -70,6 +78,42 @@ struct RunNotificationDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
+}
+
+/// The live working indicator for one run: the currently posted message (if
+/// any) and a monotonic post counter. Notice delivery ids are stable per
+/// `notice_ref`, so every re-post — a nudge refresh, or re-entering the wait
+/// loop after a gate cycle retracted the indicator — must carry a fresh ref;
+/// replaying an already-delivered ref settles `AlreadyDelivered` and no
+/// indicator appears. The counter never resets within a run.
+#[derive(Default)]
+struct WorkingIndicator {
+    message: Option<DeliveredChannelMessage>,
+    posts: u32,
+}
+
+impl WorkingIndicator {
+    /// The next post's notice ref. The first post keeps the historical bare
+    /// `working:{run_id}` bytes; every later post is suffixed with the
+    /// monotonic index.
+    fn next_notice_ref(&mut self, run_id: TurnRunId) -> String {
+        let index = self.posts;
+        self.posts += 1;
+        if index == 0 {
+            format!("working:{run_id}")
+        } else {
+            format!("working:{run_id}:{index}")
+        }
+    }
+}
+
+/// Mutable per-run reaction state threaded through the live delivery loop: the
+/// reaction currently shown on the triggering message, and a monotonic id so
+/// each transition is a distinct, idempotent delivery.
+#[derive(Default)]
+struct SourceReactionState {
+    current: Option<RunReaction>,
+    seq: u64,
 }
 
 /// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
@@ -289,7 +333,7 @@ impl RunDeliveryObserver {
             match claim {
                 DeliveryClaim::AlreadyActive => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target: "ironclaw::reborn::run_delivery",
                         %run_id,
                         "skipping redundant delivery loop: a loop is already watching this run"
                     );
@@ -297,7 +341,7 @@ impl RunDeliveryObserver {
                 }
                 DeliveryClaim::AlreadyDelivered => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target: "ironclaw::reborn::run_delivery",
                         %run_id,
                         "skipping redundant delivery loop: this run's final reply was already delivered"
                     );
@@ -314,7 +358,7 @@ impl RunDeliveryObserver {
         };
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 "final reply delivery skipped because the delivery semaphore was closed"
             );
             return;
@@ -323,7 +367,7 @@ impl RunDeliveryObserver {
         drop(_delivery_guard);
         if let Err(error) = delivery_result {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 error = %error,
                 "final reply delivery failed after immediate ACK"
             );
@@ -402,10 +446,15 @@ impl RunDeliveryObserver {
         let Some(run_id) = submitted_run_id(&ack) else {
             return Ok(());
         };
+        let binding_request = ResolveBindingRequest::from_envelope(&envelope).map_err(|error| {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        })?;
         let binding = self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+            .lookup_binding(binding_request)
             .await
             .map_err(ProductSurfaceFailure::from)?;
         let actor = TurnActor::new(binding.actor_user_id.clone());
@@ -440,7 +489,7 @@ impl RunDeliveryObserver {
                     && matches!(error.category(), TurnErrorCategory::ScopeNotFound) =>
             {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     %run_id,
                     "skipping live delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
                 );
@@ -449,41 +498,78 @@ impl RunDeliveryObserver {
             Err(error) => return Err(error.into()),
         }
         let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
-        let mut working_message: Option<DeliveredChannelMessage> = None;
+        let mut working_indicator = WorkingIndicator::default();
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
+        // The current run-lifecycle reaction on the triggering message and a
+        // monotonic id for each transition. Stays `None` until a working phase
+        // places 👀 — an instant reply gets no reaction (and so no terminal swap).
+        let mut reaction_state = SourceReactionState::default();
         loop {
-            let actionable_state = {
-                self.wait_for_actionable(
+            let actionable_state = match self
+                .wait_for_actionable(
                     &envelope,
                     &scope,
                     run_id,
                     delivered_blocked_marker.as_ref(),
-                    &mut working_message,
+                    &mut working_indicator,
+                    &mut reaction_state,
                 )
                 .await
-                .map_err(|err| {
+            {
+                Ok(state) => state,
+                Err(err) => {
+                    // Timed out (or a wait error): don't leave a stuck "thinking"
+                    // indicator. Retract it and mark the triggering message ❌;
+                    // the caller posts the "taking longer / check the web app"
+                    // notice.
+                    if let Some(message) = working_indicator.message.take() {
+                        self.services
+                            .retract_message(scope.clone(), Some(run_id), message)
+                            .await;
+                    }
+                    self.set_source_reaction(
+                        &scope,
+                        run_id,
+                        envelope.external_conversation_ref(),
+                        &mut reaction_state,
+                        RunReaction::Failed,
+                    )
+                    .await;
                     // If a blocked-state notification was already delivered,
                     // a timeout does not leave the user in silence — convert
                     // to the quieter variant so feedback does not double-post.
-                    if matches!(err, RunDeliveryError::RunWaitTimedOut { .. })
-                        && delivered_blocked_marker.is_some()
-                    {
-                        RunDeliveryError::RunWaitTimedOutAfterNotification { run_id }
-                    } else {
-                        err
-                    }
-                })?
+                    return Err(
+                        if matches!(err, RunDeliveryError::RunWaitTimedOut { .. })
+                            && delivered_blocked_marker.is_some()
+                        {
+                            RunDeliveryError::RunWaitTimedOutAfterNotification { run_id }
+                        } else {
+                            err
+                        },
+                    );
+                }
             };
             if matches!(
                 actionable_state.status,
                 TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
-            ) && let Some(message) = working_message.take()
-            {
-                self.services
-                    .retract_message(scope.clone(), Some(run_id), message)
-                    .await;
+            ) {
+                if let Some(message) = working_indicator.message.take() {
+                    self.services
+                        .retract_message(scope.clone(), Some(run_id), message)
+                        .await;
+                }
+                // Parked waiting on the user: swap 👀 → ⚠️ on the triggering
+                // message so it reads as "needs you" at a glance.
+                self.set_source_reaction(
+                    &scope,
+                    run_id,
+                    envelope.external_conversation_ref(),
+                    &mut reaction_state,
+                    RunReaction::NeedsInput,
+                )
+                .await;
             }
-            let Some(notification) = self
+            let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
                     &binding,
@@ -493,8 +579,57 @@ impl RunDeliveryObserver {
                     &actionable_state,
                 )
                 .await?
-            else {
-                return Ok(());
+            {
+                Some(notification) => notification,
+                None => {
+                    // A terminal state produced no deliverable notification.
+                    // Never leave a stuck working indicator: retract it. For a
+                    // genuine failure (not a completed-but-empty run) also post a
+                    // brief failure notice and mark ❌ — source-routed through the
+                    // same reliable path as the working indicator, so it reaches
+                    // the originating channel even without a reply-target binding.
+                    if actionable_state.status.is_terminal() {
+                        self.delivery_runs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_delivered(run_id);
+                        if let Some(message) = working_indicator.message.take() {
+                            self.services
+                                .retract_message(scope.clone(), Some(run_id), message)
+                                .await;
+                        }
+                        if actionable_state.status == TurnStatus::Completed {
+                            self.set_source_reaction(
+                                &scope,
+                                run_id,
+                                envelope.external_conversation_ref(),
+                                &mut reaction_state,
+                                RunReaction::Done,
+                            )
+                            .await;
+                        } else {
+                            self.services
+                                .post_notice(
+                                    DeliveryIntent::FailureNotice,
+                                    scope.clone(),
+                                    Some(run_id),
+                                    envelope.external_conversation_ref(),
+                                    prompts::RUN_FAILED_MESSAGE,
+                                    format!("run-failed:{run_id}"),
+                                )
+                                .await;
+                            self.set_source_reaction(
+                                &scope,
+                                run_id,
+                                envelope.external_conversation_ref(),
+                                &mut reaction_state,
+                                RunReaction::Failed,
+                            )
+                            .await;
+                        }
+                    }
+                    return Ok(());
+                }
             };
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
@@ -538,11 +673,26 @@ impl RunDeliveryObserver {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record_delivered(run_id);
-                if let Some(message) = working_message.take() {
+                if let Some(message) = working_indicator.message.take() {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
                 }
+                // Swap to the terminal reaction — ✅ done or ❌ failed. A no-op
+                // if the run never showed a working phase (nothing was reacted).
+                let terminal_reaction = if actionable_state.status == TurnStatus::Completed {
+                    RunReaction::Done
+                } else {
+                    RunReaction::Failed
+                };
+                self.set_source_reaction(
+                    &scope,
+                    run_id,
+                    envelope.external_conversation_ref(),
+                    &mut reaction_state,
+                    terminal_reaction,
+                )
+                .await;
                 for message in messages_to_delete_after_final {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
@@ -567,10 +717,17 @@ impl RunDeliveryObserver {
         scope: &TurnScope,
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
-        working_message: &mut Option<DeliveredChannelMessage>,
+        working_indicator: &mut WorkingIndicator,
+        reaction_state: &mut SourceReactionState,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
+        let notice_seed = run_id.to_string().bytes().map(u64::from).sum::<u64>();
+        // "Still working" nudges within this running stretch: the first at
+        // `first_nudge_after`, then each gap doubling so a long run backs off.
+        let mut nudge_count: u64 = 0;
+        let mut next_nudge_at = self.settings.first_nudge_after;
+        let mut nudge_gap = self.settings.renudge_interval;
         loop {
             let state = self
                 .services
@@ -591,24 +748,109 @@ impl RunDeliveryObserver {
             if start.elapsed() >= self.settings.max_wait {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
-            if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
-                *working_message = self
-                    .services
-                    .post_notice(
-                        DeliveryIntent::Working,
-                        scope.clone(),
-                        Some(run_id),
+            if blocked_actionable_marker(&state).is_none() {
+                if working_indicator.message.is_none() {
+                    // First working notice for this running stretch. Vary the
+                    // line per run (seeded by the run id) so a channel with
+                    // several runs in flight keeps one voice each, and mark the
+                    // triggering message with 👀 so the user sees which ping is
+                    // being worked on.
+                    let notice_ref = working_indicator.next_notice_ref(run_id);
+                    working_indicator.message = self
+                        .services
+                        .post_notice(
+                            DeliveryIntent::Working,
+                            scope.clone(),
+                            Some(run_id),
+                            envelope.external_conversation_ref(),
+                            prompts::working_message(notice_seed),
+                            notice_ref,
+                        )
+                        .await;
+                    self.set_source_reaction(
+                        scope,
+                        run_id,
                         envelope.external_conversation_ref(),
-                        prompts::WORKING_MESSAGE,
-                        format!("working:{run_id}"),
+                        reaction_state,
+                        RunReaction::Working,
                     )
                     .await;
+                } else if start.elapsed() >= next_nudge_at {
+                    // The run is taking a while: refresh the indicator (retract +
+                    // repost) with an escalated "still working" line so the user
+                    // knows it hasn't stalled, keeping the latest status at the
+                    // bottom of the conversation. Each gap doubles.
+                    if let Some(previous) = working_indicator.message.take() {
+                        self.services
+                            .retract_message(scope.clone(), Some(run_id), previous)
+                            .await;
+                    }
+                    nudge_count += 1;
+                    next_nudge_at += nudge_gap;
+                    nudge_gap = nudge_gap.saturating_mul(2);
+                    let notice_ref = working_indicator.next_notice_ref(run_id);
+                    working_indicator.message = self
+                        .services
+                        .post_notice(
+                            DeliveryIntent::Working,
+                            scope.clone(),
+                            Some(run_id),
+                            envelope.external_conversation_ref(),
+                            prompts::long_running_message(notice_seed, nudge_count),
+                            notice_ref,
+                        )
+                        .await;
+                }
             }
             tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
             poll_interval = poll_interval
                 .saturating_mul(2)
                 .min(std::time::Duration::from_secs(5));
         }
+    }
+
+    /// Transition the run-lifecycle reaction on the triggering message to
+    /// `next` (👀 working → ⚠️ needs-input → 👀 working → ✅ done / ❌ failed),
+    /// removing the previous reaction first so only one shows at a time.
+    /// `current`/`seq` persist the state and a monotonic delivery id across the
+    /// run; a no-op when the reaction is unchanged or there is nothing to react
+    /// to. Best-effort throughout — a reaction never affects the run.
+    async fn set_source_reaction(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        conversation: &ExternalConversationRef,
+        state: &mut SourceReactionState,
+        next: RunReaction,
+    ) {
+        if state.current == Some(next) || conversation.reply_target_message_id().is_none() {
+            return;
+        }
+        if let Some(previous) = state.current.take() {
+            self.services
+                .react_to_source(
+                    scope.clone(),
+                    run_id,
+                    conversation,
+                    previous,
+                    ReactionAction::Remove,
+                    state.seq,
+                )
+                .await;
+            state.seq += 1;
+        }
+        self.services
+            .react_to_source(
+                scope.clone(),
+                run_id,
+                conversation,
+                next,
+                ReactionAction::Add,
+                state.seq,
+            )
+            .await;
+        state.seq += 1;
+        state.current = Some(next);
     }
 
     async fn notification_for_actionable_state(
@@ -802,8 +1044,16 @@ impl RunDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id =
-            prompts::run_notification_projection_id(run_id, notification.event_kind);
+        // Key gate prompts by their gate ref: one run can park on several
+        // gates in sequence, and each is its own durable delivery fact (a
+        // repeat announcement of the SAME gate still dedupes to
+        // `AlreadyDelivered`). Kinds that carry no gate ref keep the
+        // historical undiscriminated id shape.
+        let projection_id = prompts::run_notification_projection_id(
+            run_id,
+            notification.event_kind,
+            notification.gate_ref_for_routing.as_deref(),
+        );
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {
@@ -829,7 +1079,6 @@ impl RunDeliveryObserver {
             .coordinator
             .deliver(
                 &outbound_policy,
-                self.services.communication_preferences.as_ref(),
                 &target_authority,
                 self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
@@ -881,17 +1130,58 @@ impl RunDeliveryObserver {
     /// Scope for notices raised outside a resolved delivery loop: the
     /// conversation's binding scope when it resolves, else the host's
     /// fallback notice scope (never silent, always attributed).
+    /// Resolve this envelope's conversation binding for the notice paths that
+    /// DEGRADE rather than fail: an envelope that cannot even produce a
+    /// binding request and a binding that does not resolve are the same
+    /// answer here — no usable conversation — so both collapse to `None`.
+    ///
+    /// Two call sites deliberately do not use this, and the difference is
+    /// behavioral rather than stylistic. The delivery path propagates a
+    /// malformed binding request as an error, because a send with no binding
+    /// is a fault and not a degrade. And `post_rejection_hint_if_authorized`
+    /// keeps the two apart on purpose: an unparseable envelope means it
+    /// posted nothing (`false`), while an unauthorized conversation means it
+    /// handled the case by deliberately staying silent (`true`).
+    async fn degradable_binding(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        degrade: &'static str,
+    ) -> Option<ResolvedBinding> {
+        let request = match ResolveBindingRequest::from_envelope(envelope) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    error = %error,
+                    degrade,
+                    "envelope produced no binding request"
+                );
+                return None;
+            }
+        };
+        match self.services.binding_service.lookup_binding(request).await {
+            Ok(binding) => Some(binding),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    error = %error,
+                    degrade,
+                    "conversation binding did not resolve"
+                );
+                None
+            }
+        }
+    }
+
     async fn notice_scope(&self, envelope: &ProductInboundEnvelope) -> TurnScope {
         match self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .degradable_binding(envelope, "notice scope falls back to the host scope")
             .await
         {
-            Ok(binding) => thread_scope_from_binding(&binding)
+            Some(binding) => thread_scope_from_binding(&binding)
                 .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                 .unwrap_or_else(|_| self.services.fallback_notice_scope.clone()),
-            Err(_) => self.services.fallback_notice_scope.clone(),
+            None => self.services.fallback_notice_scope.clone(),
         }
     }
 
@@ -903,16 +1193,19 @@ impl RunDeliveryObserver {
         let Some(hint) = rejection_hint_for_resolution(envelope, ack) else {
             return false;
         };
+        let Ok(binding_request) = ResolveBindingRequest::from_envelope(envelope) else {
+            return false;
+        };
         let binding = match self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .lookup_binding(binding_request)
             .await
         {
             Ok(binding) => binding,
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %error,
                     "skipped rejection hint because the originating conversation was not authorized"
                 );
@@ -983,16 +1276,21 @@ impl RunDeliveryObserver {
         true
     }
 
-    /// A first-contact DM from a user with no identity binding is rejected
-    /// with `BindingRequired`. Instead of silently dropping it, greet them
-    /// with a connect nudge — but ONLY in a 1:1 direct chat: the nudge is
-    /// addressed to one person and must never land in a shared conversation.
-    /// The gate is the adapter's own trigger classification
-    /// (`ProductTriggerReason::DirectChat` — the same signal the OAuth-link
-    /// privacy rule trusts). Deliberately performs NO binding lookup (the
-    /// sender is unbound by definition) and posts only fixed, host-authored
-    /// text. Transport retries arrive as `Duplicate`, so this fires at most
-    /// once per inbound event.
+    /// A message from a user with no identity binding is rejected with
+    /// `BindingRequired`. Instead of silently dropping it, greet them with a
+    /// connect nudge. In a 1:1 direct chat that lands in the DM as before;
+    /// in a shared conversation it lands as a reply anchored on the sender's
+    /// own message (the envelope's message-scoped conversation ref carries
+    /// the anchor — a threading surface roots a thread on the ping, a flat
+    /// surface quotes it), so the nudge addresses the one unpaired sender
+    /// rather than the room. The
+    /// text is fixed, host-authored, and link-free (OAuth links and pairing
+    /// codes stay out of shared surfaces by the private-setup rules).
+    /// Deliberately performs NO binding lookup (the sender is unbound by
+    /// definition). Transport retries arrive as `Duplicate`, so this fires
+    /// at most once per inbound event, and the per-conversation reservation
+    /// throttles repeats — per rooted thread (each top-level ping roots its
+    /// own conversation) and per flat chat or topic.
     async fn post_connect_nudge_if_unbound_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -1004,7 +1302,11 @@ impl RunDeliveryObserver {
         if !matches!(rejection.kind, ProductRejectionKind::BindingRequired) {
             return false;
         }
-        if !envelope_is_direct_chat(envelope) {
+        // Only nudge when the message actually addressed the bot. A shared
+        // channel forwards ordinary chatter and unbound thread replies that
+        // also reject `BindingRequired`; nudging those would butt a "connect"
+        // notice into conversations nobody pointed at the bot.
+        if !envelope_addresses_the_bot(envelope) {
             return false;
         }
         let conversation_key = envelope
@@ -1109,7 +1411,7 @@ impl RunDeliveryObserver {
         };
         if already_seen {
             tracing::debug!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 "busy-thread hint suppressed: already posted for this (conversation, event_id) pair (transport retry)"
             );
             return;
@@ -1119,29 +1421,23 @@ impl RunDeliveryObserver {
         // fall back to the generic copy rather than going silent — the hint
         // replies to the sender's own conversation and leaks nothing.
         let (hint, scope) = match self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .degradable_binding(envelope, "busy-thread hint falls back to generic copy")
             .await
         {
-            Ok(binding) => {
+            Some(binding) => {
                 let hint = self.busy_hint_from_run_state(&binding, active_run_id).await;
                 let scope = thread_scope_from_binding(&binding)
                     .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                     .unwrap_or_else(|_| self.services.fallback_notice_scope.clone());
                 (hint, scope)
             }
-            Err(error) => {
-                tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
-                    error = %error,
-                    "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
-                );
-                (
-                    prompts::BUSY_GENERIC_MESSAGE.to_string(),
-                    self.services.fallback_notice_scope.clone(),
-                )
-            }
+            // The helper already logged why; the degrade is the generic copy
+            // on the host's fallback scope, which leaks nothing about a
+            // conversation this caller could not resolve.
+            None => (
+                prompts::BUSY_GENERIC_MESSAGE.to_string(),
+                self.services.fallback_notice_scope.clone(),
+            ),
         };
         self.services
             .post_notice(
@@ -1169,7 +1465,7 @@ impl RunDeliveryObserver {
             Ok(scope) => scope,
             Err(err) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %err,
                     "busy-thread hint scope derivation failed; using generic copy"
                 );
@@ -1230,7 +1526,7 @@ impl RunDeliveryObserver {
             },
             Err(err) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target: "ironclaw::reborn::run_delivery",
                     error = %err,
                     "busy-thread hint run-state lookup failed; using generic copy"
                 );
@@ -1345,7 +1641,10 @@ pub(crate) fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     }
 }
 
-fn render_command_result(command: &str, payload: &crate::ProductCommandResultPayload) -> String {
+fn render_command_result(
+    command: &str,
+    payload: &ironclaw_product_contracts::inbound::ProductCommandResultPayload,
+) -> String {
     if let Ok(view) = serde_json::from_value::<CommandResultView>(payload.as_value().clone()) {
         return render_command_result_text(&view);
     }
@@ -1354,7 +1653,7 @@ fn render_command_result(command: &str, payload: &crate::ProductCommandResultPay
         Ok(rendered) => rendered,
         Err(error) => {
             tracing::debug!(
-                target = "ironclaw::reborn::run_delivery",
+                target: "ironclaw::reborn::run_delivery",
                 %error,
                 "could not render product command result payload"
             );
@@ -1382,16 +1681,16 @@ fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInbo
         ProductInboundPayload::AuthResolution(payload)
             if matches!(
                 &payload.result,
-                crate::AuthResolutionResult::Denied
+                ironclaw_product_contracts::inbound::AuthResolutionResult::Denied
             )
     ) && !matches!(
         envelope.payload(),
         ProductInboundPayload::ApprovalResolution(payload)
-            if payload.decision == crate::ApprovalDecision::Deny
+            if payload.decision == ironclaw_product_contracts::inbound::ApprovalDecision::Deny
     ) && !matches!(
         envelope.payload(),
         ProductInboundPayload::ScopedApprovalResolution(payload)
-            if payload.decision == crate::ApprovalDecision::Deny
+            if payload.decision == ironclaw_product_contracts::inbound::ApprovalDecision::Deny
     )
 }
 
@@ -1456,10 +1755,26 @@ fn rejection_ack_for_surface_error(error: &ProductAdapterError) -> Option<Produc
             kind,
             retryable: false,
             ..
-        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-            product_rejection_kind_for_surface_rejection(*kind),
-            "workflow rejected resolution",
-        ))),
+        } => {
+            // A duplicate or replay-unavailable resolution is not a policy
+            // verdict on THIS message: the original action already produced
+            // its result and feedback, so these settle silently. Widening
+            // them into `PolicyDenied` rendered the fixed DM-only command
+            // copy at a user retrying a command in a direct conversation —
+            // a false statement that hid the real (already-delivered)
+            // outcome.
+            if matches!(
+                kind,
+                ProductSurfaceRejectionKind::DuplicateAction
+                    | ProductSurfaceRejectionKind::ReplayUnavailable
+            ) {
+                return None;
+            }
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                product_rejection_kind_for_surface_rejection(*kind),
+                "workflow rejected resolution",
+            )))
+        }
         _ => None,
     }
 }
@@ -1475,7 +1790,9 @@ fn product_rejection_kind_for_surface_rejection(
         ProductSurfaceRejectionKind::ThreadBusy
         | ProductSurfaceRejectionKind::AdmissionRejected
         | ProductSurfaceRejectionKind::Unavailable
-        | ProductSurfaceRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
+        | ProductSurfaceRejectionKind::Conflict
+        | ProductSurfaceRejectionKind::DuplicateAction
+        | ProductSurfaceRejectionKind::ReplayUnavailable => ProductRejectionKind::PolicyDenied,
     }
 }
 
@@ -1486,7 +1803,7 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
             ProductInboundPayload::AuthResolution(payload)
                 if matches!(
                     &payload.result,
-                    crate::AuthResolutionResult::Denied
+                    ironclaw_product_contracts::inbound::AuthResolutionResult::Denied
                 )
         )
 }
@@ -1502,9 +1819,80 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
     )
 }
 
+/// Does this message ADDRESS the bot — a DM, a mention, or a slash command —
+/// as opposed to ordinary channel chatter the adapter merely forwarded?
+///
+/// The connect nudge fires only for addressed messages: a shared channel
+/// delivers every `message` event the bot is subscribed to, and an unbound
+/// human-to-human thread reply (`ReplyToBot` with no existing binding) also
+/// rejects `BindingRequired` — nudging THAT would post a "connect" notice
+/// into a conversation nobody pointed at the bot. Requiring a bot-addressed
+/// trigger keeps the nudge to the "someone tried to use the bot and isn't
+/// paired" case on every surface.
+fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload)
+            if matches!(
+                payload.trigger,
+                ProductTriggerReason::DirectChat
+                    | ProductTriggerReason::BotMention
+                    | ProductTriggerReason::BotCommand
+            )
+    )
+}
+
 /// OAuth setup links are only safe in a private DM.
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
+}
+
+#[cfg(test)]
+mod rejection_ack_tests {
+    use super::rejection_ack_for_surface_error;
+    use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+    use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductRejectionKind};
+
+    fn surface_rejected(kind: ProductSurfaceRejectionKind) -> ProductAdapterError {
+        ProductAdapterError::SurfaceRejected {
+            kind,
+            status_code: 409,
+            retryable: false,
+            reason: ironclaw_host_api::product_adapter::RedactedString::new(
+                "workflow rejected resolution",
+            ),
+        }
+    }
+
+    // Regression: widening Duplicate/Replay into PolicyDenied rendered the
+    // fixed "Commands can only be used in a direct conversation" copy at a
+    // user retrying a command in a DM — false, and it hid the real outcome.
+    // These families settle silently; the original action's feedback stands.
+    #[test]
+    fn duplicate_and_replay_rejections_settle_silently() {
+        for kind in [
+            ProductSurfaceRejectionKind::DuplicateAction,
+            ProductSurfaceRejectionKind::ReplayUnavailable,
+        ] {
+            assert!(
+                rejection_ack_for_surface_error(&surface_rejected(kind)).is_none(),
+                "{kind:?} must not produce user-facing rejection feedback"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rejections_still_produce_the_denied_ack() {
+        let ack = rejection_ack_for_surface_error(&surface_rejected(
+            ProductSurfaceRejectionKind::AdmissionRejected,
+        ))
+        .expect("a real policy rejection still acks");
+        assert!(matches!(
+            ack,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+        ));
+    }
 }
 
 #[cfg(test)]

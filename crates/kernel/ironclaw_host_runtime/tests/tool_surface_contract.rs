@@ -16,12 +16,14 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extension_registry::{
-    CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    CapabilityVisibility, ExtensionManifest, ExtensionManifestRecord, ExtensionPackage,
+    ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::trust::TrustPolicyInput;
@@ -32,6 +34,7 @@ use ironclaw_host_api::{
         CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, CapabilitySet,
         EffectKind, GrantConstraints,
     },
+    capability_profile::CapabilityProfileSchemaRef,
     decision::{Decision, Obligations},
     dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
     host_port::HostPortCatalog,
@@ -52,8 +55,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
-    HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, SurfaceKind,
+    CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID, HostRuntime,
+    MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, SurfaceKind,
     VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
     builtin_first_party_package, publish_hot_capability_catalog,
 };
@@ -333,6 +336,70 @@ async fn hot_capability_catalog_fails_closed_when_bounded_backend_returns_too_ma
         matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
             if reason.contains("input_schema_ref") && reason.contains("exceeds")),
         "unexpected error: {err:?}"
+    );
+}
+
+/// `standard_op` binding (standardized messaging framework, task 4): a v3
+/// manifest tool bound to `send_message` carries host-synthesized
+/// `standard:messaging/send_message.{input,output}.v1` refs (task 2/3) —
+/// `publish_hot_capability_catalog` must resolve both from the compiled-in
+/// registry and never touch the filesystem/package root.
+#[tokio::test]
+async fn hot_capability_catalog_resolves_standard_messaging_schema_ref_without_filesystem() {
+    let manifest_record = ExtensionManifestRecord::from_toml(
+        SLACK_STANDARD_OP_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        None,
+        &capability_provider_contracts(),
+        None,
+    )
+    .unwrap();
+    let manifest: ExtensionManifest = manifest_record.manifest().clone().try_into().unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/slack").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    // Deliberately unmounted: any attempt to read a package asset from disk
+    // fails immediately, proving standard-ref resolution never reaches it.
+    let fs = DiskFilesystem::new();
+
+    let catalog = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap();
+
+    let record = catalog.get(&capability_id("slack.send_message")).unwrap();
+    let input_properties = record
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("resolved standard input schema has properties");
+    assert!(input_properties.contains_key("conversation"));
+    assert!(input_properties.contains_key("text"));
+    let output_properties = record
+        .output_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("resolved standard output schema has properties");
+    assert!(output_properties.contains_key("message_ref"));
+}
+
+/// Unknown standard schema identities are rejected before a hot catalog can
+/// ever observe them. Generic string construction and resolved-record
+/// deserialization are both fail-closed; only the typed standard-op
+/// constructors can mint the reserved namespace.
+#[test]
+fn unknown_standard_schema_ref_is_unconstructible() {
+    assert!(CapabilityProfileSchemaRef::new("standard:messaging/bogus.input.v1").is_err());
+    assert!(
+        serde_json::from_value::<CapabilityProfileSchemaRef>(serde_json::json!(
+            "standard:messaging/bogus.input.v1"
+        ))
+        .is_err()
     );
 }
 
@@ -624,6 +691,14 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
+    // The runtime has always accepted a `files` array (`parse_install_files` in
+    // ironclaw_first_party_extensions::skills) but the schema never advertised it AND set
+    // `additionalProperties: false`, so a model attempting a multi-file install was
+    // rejected. Measured consequence on the 31-task SkillsBench subset
+    // (nearai/benchmarks#287): 0 of 27 agent-authored skills shipped a single resource
+    // file, against 18 of 31 human-curated ones -- agents could only ever author the
+    // prose half of a skill.
+    assert_schema_has_property(&surface, "builtin.skill_install", "files");
 
     let apply_patch_schema = &surface
         .capabilities
@@ -773,56 +848,81 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         trigger_create
             .descriptor
             .description
-            .contains("pass delivery_target_id"),
-        "trigger_create description should teach per-trigger delivery routing"
+            .contains("builtin__outbound_deliver"),
+        "trigger_create description should name the tool the routine's prompt must call to deliver"
     );
     assert!(
-        trigger_create.descriptor.description.contains(
-            "If delivery_target_id is set, never put a send, post, or deliver-results step"
-        ),
-        "trigger_create description should front-load the no-duplicate-delivery rule"
+        trigger_create
+            .descriptor
+            .description
+            .contains("a fire that makes no delivery call delivers nothing externally"),
+        "trigger_create description should state the no-call/no-delivery rule"
     );
-    let trigger_prompt_description = trigger_create
+    let trigger_properties = trigger_create
         .descriptor
         .parameters_schema
         .get("properties")
-        .and_then(|properties| properties.get("prompt"))
+        .and_then(serde_json::Value::as_object)
+        .expect("trigger_create schema should declare properties");
+    // The retired stored delivery route: routines carry delivery in the prompt
+    // now, so the input surface must not offer the field at all (a create call
+    // carrying it is rejected as an unexpected field).
+    assert!(
+        !trigger_properties.contains_key("delivery_target_id"),
+        "trigger_create schema must not declare the retired delivery_target_id input: {:?}",
+        trigger_properties.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !trigger_create
+            .descriptor
+            .description
+            .contains("delivery_target_id"),
+        "trigger_create description must not advertise the retired delivery_target_id input"
+    );
+    let trigger_prompt_description = trigger_properties
+        .get("prompt")
         .and_then(|property| property.get("description"))
         .and_then(serde_json::Value::as_str)
         .expect("trigger prompt description should be present");
     assert!(
-        trigger_prompt_description
-            .contains("Never tell the prompt to send results back to the requesting user"),
-        "trigger_create prompt schema should forbid result self-delivery phrasing"
+        trigger_prompt_description.contains("builtin__outbound_deliver"),
+        "trigger_create prompt schema should teach delivery as an explicit prompt step"
     );
     assert!(
-        trigger_prompt_description.contains("receiving results is routing"),
-        "trigger_create prompt schema should frame send-me asks as routing, not a prompt step"
-    );
-    let trigger_delivery_target_description = trigger_create
-        .descriptor
-        .parameters_schema
-        .get("properties")
-        .and_then(|properties| properties.get("delivery_target_id"))
-        .and_then(|property| property.get("description"))
-        .and_then(serde_json::Value::as_str)
-        .expect("trigger delivery_target_id description should be present");
-    assert!(
-        trigger_delivery_target_description.contains("builtin__outbound_delivery_targets_list"),
-        "delivery_target_id schema should point at the target list capability"
+        trigger_prompt_description.contains("builtin__outbound_delivery_targets_list")
+            && trigger_prompt_description.contains("while the user is present"),
+        "trigger_create prompt schema should require the destination be picked at creation time"
     );
     assert!(
-        trigger_delivery_target_description.contains(
-            "Do not also put a send, post, or deliver-results step for that result in prompt"
-        ),
-        "delivery_target_id schema should forbid duplicate prompt delivery"
+        !trigger_prompt_description.contains("delivery_target_id"),
+        "trigger_create prompt schema must not reference the retired stored delivery target"
+    );
+
+    let outbound_deliver = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.outbound_deliver"))
+        .expect("builtin.outbound_deliver should be visible");
+    assert!(
+        outbound_deliver
+            .descriptor
+            .description
+            .contains("builtin__outbound_delivery_targets_list"),
+        "outbound_deliver description should point the model at delivery target selection"
     );
     assert!(
-        trigger_delivery_target_description
-            .contains("inherits the current source run's authorized delivery route")
-            && trigger_delivery_target_description.contains("trusted run state")
-            && trigger_delivery_target_description.contains("never prompt parsing"),
-        "delivery_target_id schema should explain trusted source-route inheritance"
+        outbound_deliver
+            .descriptor
+            .description
+            .contains("provider message references"),
+        "outbound_deliver description should name its delivery evidence"
+    );
+    assert!(
+        outbound_deliver
+            .descriptor
+            .description
+            .contains("never deliver to the conversation you are replying in"),
+        "outbound_deliver description should forbid self-conversation delivery"
     );
 
     let http_schema = &surface
@@ -1070,6 +1170,7 @@ async fn visible_surface_policy_filters_runtime_and_effects_before_authorization
         allowed_effects: vec![EffectKind::DispatchCapability],
         include_requires_approval: true,
         max_capabilities: None,
+        ..CapabilitySurfacePolicy::allow_only([capability_id("echo.say")])
     };
 
     let surface = runtime.visible_capabilities(request).await.unwrap();
@@ -1315,12 +1416,14 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_policy() {
         allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
         include_requires_approval: true,
         max_capabilities: None,
+        ..CapabilitySurfacePolicy::allow_all()
     };
     let policy_b = CapabilitySurfacePolicy {
         allowed_runtimes: vec![RuntimeKind::Script, RuntimeKind::Wasm],
         allowed_effects: vec![EffectKind::Network, EffectKind::DispatchCapability],
         include_requires_approval: true,
         max_capabilities: None,
+        ..CapabilitySurfacePolicy::allow_all()
     };
 
     let surface_a = runtime
@@ -1336,6 +1439,42 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_policy() {
     assert_eq!(
         surface_a.version, surface_b.version,
         "equivalent allow-list ordering must not churn the surface version"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_version_includes_capability_id_scope() {
+    let context = context_with_grants([(
+        capability_id("echo.say"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let runtime = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])));
+
+    let all = runtime
+        .visible_capabilities(
+            visible_request(context.clone()).with_policy(CapabilitySurfacePolicy::allow_all()),
+        )
+        .await
+        .unwrap();
+    let only = runtime
+        .visible_capabilities(visible_request(context).with_policy(
+            CapabilitySurfacePolicy::allow_only([capability_id("echo.say")]),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(visible_ids(&all), visible_ids(&only));
+    assert_ne!(
+        all.version, only.version,
+        "distinct capability-id ceilings must not share a surface version"
     );
 }
 
@@ -2370,6 +2509,32 @@ visibility = "model"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 prompt_doc_ref = "prompts/echo/say.md"
+"#;
+
+/// v3 manifest with one `[[tools]]` entry bound to the `send_message`
+/// standard op: no declared schema refs (the host synthesizes
+/// `standard:messaging/send_message.{input,output}.v1`), matching the
+/// canonical `<extension>.<op_name>` id shape and the `external_write` effect
+/// the write-op rule requires.
+const SLACK_STANDARD_OP_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "slack"
+name = "Slack"
+version = "0.1.0"
+description = "Slack standard-op fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack.wasm"
+
+[[tools]]
+standard_op = "send_message"
+id = "slack.send_message"
+description = "Send a message to a conversation."
+effects = ["external_write"]
+default_permission = "ask"
+visibility = "model"
 "#;
 
 const ECHO_MANIFEST: &str = r#"

@@ -606,7 +606,7 @@ mod tests {
     /// shares one `AsyncStorageWorker`, so writers going through a
     /// cloned/shared handle serialize on that worker today. A contention
     /// test shaped around a single shared store handle belongs with the
-    /// worker-async follow-up (see `docs/plans/2026-06-25-cas-migration.md`).
+    /// worker-async follow-up (see `docs/internal/plans/2026-06-25-cas-migration.md`).
     fn store(
         filesystem: Arc<ScopedFilesystem<SlowGetBackend>>,
         worker_name: &'static str,

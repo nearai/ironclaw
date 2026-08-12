@@ -40,6 +40,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                 max_egress_bytes: None,
                 default_permission: PermissionMode::Allow,
                 visibility: ironclaw_extension_registry::CapabilityVisibility::Model,
+                standard_op: None,
                 input_schema_ref:
                     ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef::new(
                         "schemas/fixture/input.v1.json",

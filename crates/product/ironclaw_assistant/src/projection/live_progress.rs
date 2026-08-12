@@ -7,12 +7,6 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
-    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
-    ProductWorkSummaryPhase,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
@@ -24,7 +18,6 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ProjectionStreamError,
     ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
     runtime::RuntimeKind,
@@ -32,6 +25,13 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
     LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
+};
+use ironclaw_loop_host::{SkillActivationObservedEvent, SkillActivationObserver};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
+    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
 
@@ -429,6 +429,7 @@ pub(super) fn product_items_for_live_update(
                     id: id.clone(),
                     run_id: Some(*run_id),
                     body: body.clone(),
+                    finalized: false,
                 })
             }
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {

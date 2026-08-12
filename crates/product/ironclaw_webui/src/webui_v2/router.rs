@@ -16,44 +16,51 @@ use ironclaw_product_contracts::surface::{
 use serde::Serialize;
 
 use crate::webui_v2::descriptors::{
-    WEBUI_V2_PATTERN_ADMIN_USER, WEBUI_V2_PATTERN_ADMIN_USER_ROLE,
-    WEBUI_V2_PATTERN_ADMIN_USER_SECRET, WEBUI_V2_PATTERN_ADMIN_USER_SECRETS,
-    WEBUI_V2_PATTERN_ADMIN_USER_STATUS, WEBUI_V2_PATTERN_ADMIN_USERS,
-    WEBUI_V2_PATTERN_AUTOMATION_DETAIL, WEBUI_V2_PATTERN_BROWSE_FS_DIR,
-    WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN,
-    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
-    WEBUI_V2_PATTERN_DELETE_THREAD, WEBUI_V2_PATTERN_EXECUTE_COMMAND,
-    WEBUI_V2_PATTERN_GET_ATTACHMENT, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-    WEBUI_V2_PATTERN_GET_RUN_ARTIFACT, WEBUI_V2_PATTERN_GET_SESSION,
-    WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT, WEBUI_V2_PATTERN_GET_TIMELINE,
-    WEBUI_V2_PATTERN_IMPORT_EXTENSION, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
-    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
-    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_COMMANDS,
-    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
-    WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
-    WEBUI_V2_PATTERN_LIST_PROJECT_FILES, WEBUI_V2_PATTERN_LIST_PROJECTS,
-    WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
-    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
+    WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_ARTIFACT,
+    WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_RUN_ARTIFACT,
+    WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS, WEBUI_V2_PATTERN_ADMIN_USER,
+    WEBUI_V2_PATTERN_ADMIN_USER_ROLE, WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
+    WEBUI_V2_PATTERN_ADMIN_USER_SECRETS, WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
+    WEBUI_V2_PATTERN_ADMIN_USERS, WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
+    WEBUI_V2_PATTERN_BROWSE_FS_DIR, WEBUI_V2_PATTERN_CANCEL_RUN,
+    WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
+    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
+    WEBUI_V2_PATTERN_EXECUTE_COMMAND, WEBUI_V2_PATTERN_GET_ATTACHMENT,
+    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_RUN_ARTIFACT,
+    WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT,
+    WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_IMPORT_EXTENSION,
+    WEBUI_V2_PATTERN_INSPECTOR_PROMPT, WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
+    WEBUI_V2_PATTERN_INSPECTOR_TOOL, WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
+    WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+    WEBUI_V2_PATTERN_LIST_COMMANDS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
+    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
+    WEBUI_V2_PATTERN_LIST_PROJECTS, WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS,
+    WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS, WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
+    WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE, WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
     WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP, WEBUI_V2_PATTERN_OPERATOR_LOGS,
     WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
     WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
-    WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES, WEBUI_V2_PATTERN_PAUSE_AUTOMATION,
-    WEBUI_V2_PATTERN_PROJECT_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL,
-    WEBUI_V2_PATTERN_PROJECT_MEMBERS, WEBUI_V2_PATTERN_READ_FS_FILE,
-    WEBUI_V2_PATTERN_READ_PROJECT_FILE, WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION,
-    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
-    WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN, WEBUI_V2_PATTERN_SEARCH_SKILLS,
-    WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-    WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
-    WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
-    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
-    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
-    WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
-    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
-    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK,
-    WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES, WEBUI_V2_PATTERN_TRACE_CREDITS,
-    WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+    WEBUI_V2_PATTERN_PAUSE_AUTOMATION, WEBUI_V2_PATTERN_PROJECT_DETAIL,
+    WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBERS,
+    WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
+    WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN,
+    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
+    WEBUI_V2_PATTERN_SET_ACTIVE_LLM, WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+    WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE, WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+    WEBUI_V2_PATTERN_SETTINGS_TOOLS, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
+    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STAT_FS_PATH,
+    WEBUI_V2_PATTERN_STAT_PROJECT_FILE, WEBUI_V2_PATTERN_STREAM_EVENTS,
+    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
+    WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+    WEBUI_V2_PATTERN_USER_MODEL_CATALOG, WEBUI_V2_PATTERN_USER_MODEL_POLICY,
 };
 use crate::webui_v2::handlers;
 use crate::webui_v2::sse_capacity::SseCapacity;
@@ -100,6 +107,8 @@ pub struct WebUiV2State {
     reborn_projects_enabled: bool,
     workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
+    admin_thread_scrape_enabled: bool,
+    session_channel_extension_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -118,7 +127,21 @@ impl WebUiV2State {
             reborn_projects_enabled: false,
             workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
+            admin_thread_scrape_enabled: false,
+            session_channel_extension_id: None,
         }
+    }
+
+    /// The deployment's authenticated-session channel, advertised to the SPA
+    /// on `GET /session` so it can address the generic session-inbound route
+    /// without carrying a channel name of its own.
+    pub fn with_session_channel_extension_id(mut self, extension_id: Option<String>) -> Self {
+        self.session_channel_extension_id = extension_id;
+        self
+    }
+
+    pub fn session_channel_extension_id(&self) -> Option<&str> {
+        self.session_channel_extension_id.as_deref()
     }
 
     /// Deployment gate for the Reborn Projects WebUI surface (the sidebar
@@ -161,6 +184,23 @@ impl WebUiV2State {
         self.regression_artifact_export_enabled
     }
 
+    /// Deployment gate for the admin thread-scraping surface (cross-user
+    /// transcript artifact collection for debugging/optimization). Off by
+    /// default. Deliberately independent of
+    /// [`with_regression_artifact_export_enabled`]: that QA-only caller-owned
+    /// flag must never silently mount tenant-wide admin transcript access.
+    /// Host composition reads `IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE` and feeds
+    /// it here; the browser learns it from `GET /session`'s
+    /// `features.admin_thread_scrape`.
+    pub fn with_admin_thread_scrape_enabled(mut self, enabled: bool) -> Self {
+        self.admin_thread_scrape_enabled = enabled;
+        self
+    }
+
+    pub fn admin_thread_scrape_enabled(&self) -> bool {
+        self.admin_thread_scrape_enabled
+    }
+
     pub fn services(&self) -> &Arc<dyn ProductSurface> {
         &self.services
     }
@@ -185,6 +225,7 @@ pub fn webui_v2_router(state: WebUiV2State) -> Router {
 
 pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOptions) -> Router {
     let regression_artifact_export_enabled = state.regression_artifact_export_enabled();
+    let admin_thread_scrape_enabled = state.admin_thread_scrape_enabled();
     let mut router = Router::new()
         // GET and POST share the `/api/webchat/v2/threads` path
         // (`WEBUI_V2_PATTERN_CREATE_THREAD == WEBUI_V2_PATTERN_LIST_THREADS`);
@@ -228,7 +269,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             put(handlers::admin_put_user_secret).delete(handlers::admin_delete_user_secret),
         )
         .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
-        .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
+        .route(
+            WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
+            post(handlers::session_channel_message),
+        )
+        .route(
+            WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+            get(handlers::get_user_model_catalog),
+        )
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_LOGS, get(handlers::query_logs))
         .route(
@@ -319,12 +367,24 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             post(handlers::trace_account_login_link),
         )
         .route(
-            WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
-            get(handlers::get_outbound_preferences).post(handlers::set_outbound_preferences),
-        )
-        .route(
             WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
             get(handlers::list_outbound_delivery_targets),
+        )
+        .route(
+            WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS,
+            get(handlers::get_notification_channels).post(handlers::set_notification_channels),
+        )
+        .route(
+            WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
+            get(handlers::notification_setup_status),
+        )
+        .route(
+            WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE,
+            post(handlers::notification_setup_enable),
+        )
+        .route(
+            WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
+            post(handlers::notification_setup_disable),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSIONS,
@@ -396,6 +456,21 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
                 get(handlers::get_thread_artifact),
             );
     }
+    if admin_thread_scrape_enabled {
+        router = router
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS,
+                get(handlers::admin_list_thread_scrape_threads),
+            )
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_ARTIFACT,
+                get(handlers::admin_get_thread_scrape_artifact),
+            )
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_RUN_ARTIFACT,
+                get(handlers::admin_get_thread_scrape_run_artifact),
+            );
+    }
     if options.mount_llm_config_routes {
         router = router
             // `WEBUI_V2_PATTERN_GET_LLM_CONFIG == WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER`
@@ -411,6 +486,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
                 post(handlers::set_active_llm),
+            )
+            .route(
+                WEBUI_V2_PATTERN_USER_MODEL_POLICY,
+                put(handlers::set_user_model_policy),
             )
             .route(
                 WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
@@ -471,6 +550,22 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_LOGS,
                 get(handlers::query_operator_logs),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
+                get(crate::webui_v2::inspector::get_inspector_snapshot),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_PROMPT,
+                get(crate::webui_v2::inspector::get_inspector_prompt),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_TOOL,
+                get(crate::webui_v2::inspector::get_inspector_tool),
+            )
+            .route(
+                WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
+                get(crate::webui_v2::inspector::stream_inspector_updates),
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,

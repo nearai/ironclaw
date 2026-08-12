@@ -53,7 +53,7 @@ const APPROVAL_SETTINGS_CACHE_TTL: Duration = Duration::from_millis(500);
 /// dispatch while prompt construction does not reread the same settings once
 /// per visible capability.
 pub(crate) struct StoreApprovalSettingsProvider {
-    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     auto_approve_cache: Mutex<AutoApproveSettingsCache>,
@@ -67,7 +67,7 @@ pub(crate) struct StoreApprovalSettingsProvider {
 
 impl StoreApprovalSettingsProvider {
     pub(crate) fn new(
-        overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
         auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ) -> Self {

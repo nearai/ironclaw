@@ -16,14 +16,21 @@ layer = "contracts"
 
 [features]
 # Dev-only seam (rule: cargo-features.md bar #4 — the sanctioned `test-support`
-# name). Compiles the shared `TestDispatcher` `CapabilityDispatcher` double so
-# downstream crates stop hand-rolling ~25 one-method dispatcher fakes. Never
-# enabled by a shipped artifact.
-test-support = []
+# name). Compiles the shared `TestDispatcher` `CapabilityDispatcher` double
+# (`dispatch_test_support`) and the messaging conformance test-support helpers
+# (`test_support::messaging_conformance`), so downstream crates stop
+# hand-rolling ~25 one-method dispatcher fakes and per-extension canonical
+# schema-validation plumbing. `dep:jsonschema` must be pulled in here (not
+# only via `[dev-dependencies]`) because the conformance helpers are a `pub`
+# module that has to compile at the *library* level for downstream crates
+# that enable this feature (e.g. `tests/integration`), not only for this
+# crate's own `cargo test`. Never enabled by a shipped artifact.
+test-support = ["dep:jsonschema"]
 
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+jsonschema = { version = "0.46", default-features = false, optional = true }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,6 +41,14 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 zeroize = "1"
 
 [dev-dependencies]
+# Standard messaging contract tests only (`messaging.rs`): compiles the 32
+# canonical schema files to confirm they are valid draft-07 JSON Schema. Kept
+# unconditional (rather than relying solely on the optional `dep:jsonschema`
+# above) so plain `cargo test -p ironclaw_host_api` — no `--features
+# test-support` — still runs this suite, matching
+# crates/kernel/ironclaw_host_runtime/Cargo.toml:55. Production output validation
+# happens in ironclaw_host_runtime (Task 5), not here.
+jsonschema = { version = "0.46", default-features = false }
 rust_decimal_macros = "1"
 static_assertions = "1"
 toml = "1.1"

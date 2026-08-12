@@ -5,8 +5,8 @@
 //! [`InMemoryBackend`] composed under a `/threads` mount alias whose
 //! `VirtualPath` target encodes a tenant/user prefix. Mirrors the shape of
 //! the approval and process-journal filesystem contract suites — see
-//! `crates/ironclaw_approvals/tests/approval_resolution_contract.rs` and
-//! `crates/ironclaw_processes/tests/process_journal_store_contract.rs`.
+//! `crates/kernel/ironclaw_approvals/tests/approval_resolution_contract.rs` and
+//! `crates/kernel/ironclaw_processes/tests/process_journal_store_contract.rs`.
 
 use std::{
     collections::HashMap,
@@ -25,7 +25,10 @@ use ironclaw_filesystem::{
     TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
-    ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{
+        AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
+        UserId,
+    },
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
 };
@@ -37,13 +40,191 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
-    ThreadHistoryRequest, ThreadMessageId, ThreadScope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
+
+fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
+    ProviderToolCallReferenceEnvelope {
+        provider_id: "test-provider".to_string(),
+        provider_model_id: "test-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: call_id.to_string(),
+        provider_tool_name: ProviderToolName::new("builtin__result_read")
+            .expect("provider tool name"),
+        capability_id: CapabilityId::new("builtin.result_read").unwrap(),
+        arguments: serde_json::json!({"offset": 0}),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    }
+}
+
+#[tokio::test]
+async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-exact-result-update", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-exact-result-update");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-exact-result-update").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let spawn = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            safe_summary: ToolResultSafeSummary::new("subagent still running").unwrap(),
+            provider_call: Some(provider_call_reference("spawn-call")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let page = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            safe_summary: ToolResultSafeSummary::new("result page returned").unwrap(),
+            provider_call: Some(provider_call_reference("result-read-call")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    let updated = service
+        .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            provider_call_id: Some("spawn-call".to_string()),
+            safe_summary: ToolResultSafeSummary::new("subagent completed").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(updated.message_id, spawn.message_id);
+    assert_ne!(updated.message_id, page.message_id);
+    let updated_envelope =
+        ToolResultReferenceEnvelope::from_json_str(updated.content.as_deref().unwrap()).unwrap();
+    assert_eq!(updated_envelope.safe_summary.as_str(), "subagent completed");
+    let context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![page.message_id],
+        })
+        .await
+        .unwrap();
+    let page_envelope =
+        ToolResultReferenceEnvelope::from_json_str(context.messages[0].content.as_str()).unwrap();
+    assert_eq!(page_envelope.safe_summary.as_str(), "result page returned");
+}
+
+#[tokio::test]
+async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_result_ref() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-shared-continuation", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-shared-continuation");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-shared-continuation").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let first_call = provider_call_reference("call_1");
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page").unwrap(),
+            provider_call: Some(first_call.clone()),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page replay").unwrap(),
+            provider_call: Some(first_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("second page").unwrap(),
+            provider_call: Some(provider_call_reference("call_2")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate.message_id, first.message_id);
+    assert_ne!(second.message_id, first.message_id);
+    assert_eq!(
+        first
+            .tool_result_provider_call
+            .as_ref()
+            .expect("first provider call persists")
+            .provider_call_id,
+        "call_1"
+    );
+    assert_eq!(
+        second
+            .tool_result_provider_call
+            .as_ref()
+            .expect("second provider call persists")
+            .provider_call_id,
+        "call_2"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::ToolResultReference)
+            .count(),
+        2
+    );
+}
 
 #[tokio::test]
 async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
@@ -1683,6 +1864,108 @@ async fn filesystem_preview_append_retries_converge_on_one_message() {
         .filter(|message| message.kind == MessageKind::CapabilityDisplayPreview)
         .count();
     assert_eq!(preview_count, 1);
+}
+
+#[tokio::test]
+async fn filesystem_context_limit_counts_only_model_visible_messages() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-visible-window", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-visible-window");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-visible-window").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("original task"),
+        })
+        .await
+        .unwrap();
+
+    // Capability previews are durable transcript rows but are never model
+    // context. The limit therefore applies after removing them, just as it
+    // does in the in-memory implementation.
+    for index in 0..70 {
+        service
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-visible-window".into(),
+                preview: preview_envelope(InvocationId::new()),
+            })
+            .await
+            .unwrap();
+        service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-visible-window".into(),
+                result_ref: format!("result:visible-window-{index}"),
+                safe_summary: ToolResultSafeSummary::new(format!("result {index}")).unwrap(),
+                provider_call: Some(provider_call_reference(&format!("call-{index}"))),
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 128,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 71);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+    assert_eq!(context.messages[0].content, "original task");
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::CapabilityDisplayPreview)
+    );
+    assert!(context.recent_window_truncation.is_none());
+
+    let truncated = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        truncated
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![139, 141]
+    );
+    let boundary = truncated
+        .recent_window_truncation
+        .expect("omitted visible messages must produce an exact watermark");
+    assert_eq!(boundary.omitted_through_sequence, 137);
+    assert_eq!(
+        boundary.omitted_through_kind,
+        MessageKind::ToolResultReference
+    );
 }
 
 #[tokio::test]
@@ -3841,7 +4124,7 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
 /// `put` impl rejects entries with `kind.is_some()`, which `cas_update`
 /// surfaces as `CasUnsupported`. This mirrors
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend` in
-/// `crates/ironclaw_approvals/tests/run_state_contract.rs`.
+/// `crates/kernel/ironclaw_approvals/tests/approval_store_contract.rs`.
 #[tokio::test]
 async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backend() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -4949,13 +5232,34 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
         .await
         .unwrap();
 
-    // Summary spans [1..3] covering the Draft at seq 2.  Must be suppressed.
+    // Push the Draft outside the first durable page selected for a 16-message
+    // context window. The summary still intersects that recent page, so a
+    // backend that validates summaries only against the first raw tail would
+    // incorrectly surface it.
+    for sequence in 4..=20 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(format!("filler {sequence}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Summary spans [1..4] covering the Draft at seq 2. Its terminal sequence
+    // is present in the first durable page, but its start and the Draft are
+    // not; pagination must continue far enough to validate the complete range.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
-            end_sequence: 3,
+            end_sequence: 4,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
@@ -4974,11 +5278,22 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
 
     assert_eq!(
         context.messages.len(),
-        2,
+        16,
         "summary must be suppressed for draft-spanning range"
     );
-    assert_eq!(context.messages[0].content, "first");
-    assert_eq!(context.messages[1].content, "third");
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Summary)
+    );
+    assert_eq!(context.messages[0].content, "filler 5");
+    assert_eq!(context.messages[15].content, "filler 20");
+    let truncation = context
+        .recent_window_truncation
+        .expect("the omitted fourth user message is the exact truncation boundary");
+    assert_eq!(truncation.omitted_through_sequence, 4);
+    assert_eq!(truncation.omitted_through_kind, MessageKind::User);
 }
 
 // Real thread store backend that fails only the summary-artifact write, so all

@@ -11,7 +11,6 @@ use crate::backend_store_assembly::{
     filesystem_resource_governor, resolve_explicit_or_keychain_master_key,
     trigger_repository_for_durable_backend,
 };
-#[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, capability_authorizer};
@@ -36,19 +35,9 @@ use crate::input::{
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
 };
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
-use crate::outbound::outbound_preferences_capability::{
-    extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
-    insert_handler as insert_outbound_preferences_handler,
-};
-use crate::outbound::{
-    outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
-};
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
-use crate::runtime_mounts::{
-    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
-    workspace_mount_view,
-};
+use crate::runtime_mounts::{memory_mount_view, workspace_mount_view};
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
 #[cfg(test)]
@@ -62,10 +51,12 @@ use ironclaw_approvals::ApprovalRequestStore;
 use ironclaw_approvals::{
     AutoApproveSettingStore, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
 };
-use ironclaw_assistant::RebornProjectService;
 use ironclaw_assistant::{
-    ChannelConnectionRequirement, ExtensionAccountSetupRegistry, OutboundPreferencesProductService,
-    ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ChannelConnectionRequirement, ExtensionAccountSetupRegistry,
+    ProductAuthTurnGateResumeDispatcher,
+};
+use ironclaw_assistant::{
+    notification_channels_set_operator_tool_info, outbound_delivery_synthetic_provider,
 };
 use ironclaw_auth::RebornProductAuthServicePorts;
 use ironclaw_auth::product_auth::durable::{
@@ -153,7 +144,7 @@ use ironclaw_host_api::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse,
     },
-    ids::{CorrelationId, ExtensionId, InvocationId, PackageId, RunId, UserId, VendorId},
+    ids::{CorrelationId, ExtensionId, InvocationId, PackageId, UserId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
     resource::{ResourceEstimate, ResourceScope},
@@ -170,6 +161,8 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
+use ironclaw_identity::projects::ProjectRepository;
+use ironclaw_identity::projects::RebornProjectService;
 use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntentPort};
 use ironclaw_outbound::{
@@ -180,7 +173,7 @@ use ironclaw_product_contracts::account_setup::{
     ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
-use ironclaw_projects::ProjectRepository;
+use ironclaw_product_contracts::project_service::ProjectService;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, BudgetGateStorePort, FilesystemResourceGovernor,
@@ -197,7 +190,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turn_runner::runtime::ProcessRuntimeSystem;
-use ironclaw_turns::{AgentTurnRuntimePort, GetRunStateRequest, TurnScope};
+use ironclaw_turns::AgentTurnRuntimePort;
 use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
@@ -209,15 +202,11 @@ use auth_engine_assembly::{
     ProductAuthServicesCompositionInput, compose_product_auth_services, compose_provider_client,
 };
 mod trigger_creation_assembly;
+pub(crate) use trigger_creation_assembly::LateBoundAgentTurnRuntime;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
-pub(crate) use trigger_creation_assembly::{
-    TriggerSourceReplyTarget, TurnStateTriggerSourceReplyTarget,
-};
 #[cfg(test)]
-use trigger_creation_assembly::{
-    pair_trigger_creator, validate_trigger_delivery_target_against_registry,
-};
-mod production_backend_assembly;
+use trigger_creation_assembly::pair_trigger_creator;
+pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
@@ -268,6 +257,8 @@ pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<Compos
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    pub(crate) user_sandbox_process_port:
+        Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
@@ -282,9 +273,13 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) capability_policy: Arc<BuiltinCapabilityPolicy>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Host-owned per-user delivery registrations (channel contract §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes each channel's non-secret client-bootstrap document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
@@ -318,8 +313,7 @@ pub(crate) struct RebornRuntimeStores {
         dead_code,
         reason = "held for test-support rebinding after runtime construction"
     )]
-    pub(crate) trigger_source_reply_target:
-        Arc<std::sync::RwLock<Arc<dyn TriggerSourceReplyTarget>>>,
+    pub(crate) trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
@@ -334,7 +328,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
-    pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -348,6 +341,10 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
+    /// The bound memory provider's own memory guidance for the model (#7185),
+    /// resolved from its bundle at the same point `memory_lifecycle` is.
+    /// `None` when unbound or the provider declares no `guidance_doc`.
+    pub(crate) memory_guidance: Option<String>,
     /// The deployment's single workspace scoping decision, read by every
     /// workspace write lane (grants, approval leases, attachment handles).
     pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -711,6 +708,47 @@ pub(super) use with_shared_host_runtime_wiring;
 /// here, at build time, from declarative connection config — construction no
 /// longer performs database I/O. The `Prebuilt` arm is the caller-supplied
 /// test escape hatch and is preferred verbatim when present.
+/// Connections the process journal opens for itself.
+///
+/// The journal issues one heartbeat per running turn plus its group-commit
+/// flusher's writes, and nothing else uses this pool — which is exactly why two
+/// connections are enough. The point is not capacity, it is that a heartbeat
+/// never waits behind event-store, trigger, or result-read traffic.
+const PROCESS_JOURNAL_POOL_MAX_SIZE: usize = 2;
+
+/// The pools a PostgreSQL deployment runs on: the shared data plane, and a small
+/// dedicated one for the process journal.
+pub(crate) struct PostgresPools {
+    pub(crate) data_plane: deadpool_postgres::Pool,
+    /// `None` when the caller handed in an already-opened pool and there is no
+    /// connection config to open a second one from; the journal then shares the
+    /// data-plane pool, as it always did.
+    pub(crate) process_journal: Option<deadpool_postgres::Pool>,
+}
+
+fn open_postgres_pools_from_source(
+    source: PostgresPoolSource,
+) -> Result<PostgresPools, RebornBuildError> {
+    match source {
+        PostgresPoolSource::Prebuilt(pool) => Ok(PostgresPools {
+            data_plane: pool,
+            process_journal: None,
+        }),
+        PostgresPoolSource::Config(connection) => {
+            let process_journal = ironclaw_event_store::open_postgres_pool_with_tls_options(
+                connection.url.clone(),
+                PROCESS_JOURNAL_POOL_MAX_SIZE,
+                connection.tls_options,
+            )?
+            .into_driver();
+            Ok(PostgresPools {
+                data_plane: open_postgres_pool_from_source(PostgresPoolSource::Config(connection))?,
+                process_journal: Some(process_journal),
+            })
+        }
+    }
+}
+
 fn open_postgres_pool_from_source(
     source: PostgresPoolSource,
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
@@ -1086,50 +1124,6 @@ pub async fn provision_standalone_keychain_master_key() -> KeychainMasterKeyOutc
     }
 }
 
-/// The host-owned outbound target registry always exposes the WebApp
-/// final-reply destination (#6520 run-scoped delivery): channel extensions add
-/// their targets at activation, but "store the answer in run history" is a
-/// host affordance that must exist even with zero channels active.
-fn host_owned_outbound_delivery_target_registry()
--> Result<Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>, RebornBuildError> {
-    let registry = Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
-    let web_app = ironclaw_outbound::OutboundDeliveryTargetSummary::new(
-        ironclaw_outbound::OutboundDeliveryTargetId::new(
-            ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
-        )
-        .map_err(|reason| RebornBuildError::InvalidConfig {
-            reason: format!("host-owned WebApp target id is invalid: {reason}"),
-        })?,
-        "web_app",
-        "Web app only",
-        Some("Store the final answer in run history without external delivery.".to_string()),
-    )
-    .map_err(|reason| RebornBuildError::InvalidConfig {
-        reason: format!("host-owned WebApp delivery target is invalid: {reason}"),
-    })?;
-    registry
-        .register_provider(
-            ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
-            Arc::new(
-                ironclaw_outbound::HostOwnedOutboundDeliveryTargetProvider::new(
-                    web_app,
-                    ironclaw_outbound::DeliveryTargetCapabilities {
-                        final_replies: true,
-                        progress: false,
-                        gate_prompts: false,
-                        auth_prompts: false,
-                        modalities: Vec::new(),
-                    },
-                    ironclaw_outbound::RunFinalReplyDestination::WebApp,
-                ),
-            ),
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("host-owned WebApp delivery target registration failed: {error}"),
-        })?;
-    Ok(registry)
-}
-
 pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     // Shared by standalone and production composition so host-owned first-party
     // capabilities expose the same built-in package contract in both profiles.
@@ -1192,11 +1186,6 @@ fn production_builtin_extension_registry(
     let package = extend_builtin_operator_config_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("operator configuration package is invalid: {error}"),
-        }
-    })?;
-    let package = extend_builtin_outbound_preferences_package(package).map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("outbound preferences package is invalid: {error}"),
         }
     })?;
     let package = extend_builtin_skill_auto_activate_package(package).map_err(|error| {

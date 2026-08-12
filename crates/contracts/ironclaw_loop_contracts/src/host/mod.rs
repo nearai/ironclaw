@@ -33,7 +33,7 @@ pub use context::{
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
     LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-    LoopContextSnippetMetadata, LoopInputCursor,
+    LoopContextSnippetMetadata, LoopContextWindowTruncation, LoopInputCursor,
 };
 pub use error::{AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 pub use input::{
@@ -43,7 +43,8 @@ pub use model::{
     AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,
     LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
     LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRequest, LoopPromptPort, ModelStreamChunk, ParentLoopOutput, PromptMode,
+    LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort, ModelStreamChunk,
+    ParentLoopOutput, PromptMode,
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,

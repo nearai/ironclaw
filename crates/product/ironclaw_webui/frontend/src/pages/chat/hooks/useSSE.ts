@@ -7,15 +7,76 @@ import {
 } from "../lib/connection-status";
 
 const ACTIVE_STREAM_STALL_DEADLINE_MS = 30_000;
-const SSE_CONNECTION_ID = clientActionId();
-let nextConnectionGeneration = 0;
+const SSE_CONNECTION_STORAGE_KEY = "ironclaw:v2-sse-connection";
+const SSE_RETRY_BASE_MS = 1_000;
+const SSE_RETRY_MAX_MS = 30_000;
+const SSE_RETRY_JITTER_RATIO = 0.2;
+const SSE_RETRY_RESET_AFTER_MS = 15_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-function connectionGeneration() {
-  nextConnectionGeneration =
-    nextConnectionGeneration >= Number.MAX_SAFE_INTEGER
-      ? 1
-      : nextConnectionGeneration + 1;
-  return nextConnectionGeneration;
+function newConnectionState() {
+  return { connectionId: clientActionId(), generation: 0 };
+}
+
+function isDocumentReload() {
+  try {
+    const navigation =
+      globalThis.performance?.getEntriesByType?.("navigation")[0];
+    return Boolean(
+      navigation && "type" in navigation && navigation.type === "reload",
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function loadConnectionState() {
+  // sessionStorage can be copied into a newly opened or duplicated tab. Only
+  // an actual reload may reuse the predecessor document's stream identity;
+  // every fresh top-level navigation must get an independent server slot.
+  if (!isDocumentReload()) return newConnectionState();
+  try {
+    const raw = globalThis.sessionStorage?.getItem(SSE_CONNECTION_STORAGE_KEY);
+    if (!raw) return newConnectionState();
+    const candidate = JSON.parse(raw);
+    const validConnectionId =
+      typeof candidate?.connectionId === "string" &&
+      /^[A-Za-z0-9_-]{1,64}$/.test(candidate.connectionId);
+    const validGeneration =
+      typeof candidate?.generation === "number" &&
+      Number.isSafeInteger(candidate.generation) &&
+      candidate.generation >= 0;
+    if (validConnectionId && validGeneration) {
+      return {
+        connectionId: candidate.connectionId,
+        generation: candidate.generation,
+      };
+    }
+  } catch (_) {
+    // Storage may be unavailable or contain stale data. A fresh identity still
+    // gives this document a usable stream; the server's max lifetime bounds
+    // any proxy-held stream that cannot be superseded.
+  }
+  return newConnectionState();
+}
+
+const sseConnectionState = loadConnectionState();
+
+function nextConnectionState() {
+  if (sseConnectionState.generation >= Number.MAX_SAFE_INTEGER) {
+    sseConnectionState.connectionId = clientActionId();
+    sseConnectionState.generation = 0;
+  }
+  sseConnectionState.generation += 1;
+  try {
+    globalThis.sessionStorage?.setItem(
+      SSE_CONNECTION_STORAGE_KEY,
+      JSON.stringify(sseConnectionState),
+    );
+  } catch (_) {
+    // Best effort. In-memory state still orders this document's reconnects.
+  }
+  return { ...sseConnectionState };
 }
 
 function isBrowserOffline() {
@@ -30,6 +91,27 @@ function isRetryableResponseStatus(status) {
     status === 429 ||
     status >= 500
   );
+}
+
+function localRetryDelayMs(attempt) {
+  const exponential = Math.min(
+    SSE_RETRY_BASE_MS * 2 ** Math.min(attempt, 30),
+    SSE_RETRY_MAX_MS,
+  );
+  const jitter = 1 - SSE_RETRY_JITTER_RATIO + Math.random() * 2 * SSE_RETRY_JITTER_RATIO;
+  return Math.min(Math.round(exponential * jitter), SSE_RETRY_MAX_MS);
+}
+
+function responseRetryAfterMs(response) {
+  const raw = response?.headers?.get?.("retry-after")?.trim();
+  if (!raw) return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(Math.ceil(seconds * 1_000), MAX_TIMER_DELAY_MS);
+  }
+  const deadline = Date.parse(raw);
+  if (!Number.isFinite(deadline)) return 0;
+  return Math.min(Math.max(0, deadline - Date.now()), MAX_TIMER_DELAY_MS);
 }
 
 export function useSSE({
@@ -53,19 +135,34 @@ export function useSSE({
     }
     let controller = null;
     let activityWatchdog = null;
+    let retryTimer = null;
+    let retryBackoffResetTimer = null;
+    let retryAttempt = 0;
     let disposed = false;
     let terminalErrorReceived = false;
     let connectedOnce = false;
     let streamOpen = false;
+    let streamStabilityConfirmed = false;
     const request = eventStreamRequest({
       threadId,
-      connectionId: SSE_CONNECTION_ID,
     });
     const stream = new EventSourcePlus(request.url, {
       credentials: "same-origin",
       headers: request.headers,
       maxRetryInterval: 30_000,
-      retryStrategy: "always",
+      // IronClaw owns reconnect timing below. `event-source-plus` still owns
+      // fetch, framing, cancellation, and Last-Event-ID, but its 0.1.x retry
+      // clock starts at 2ms and resets on HTTP headers rather than a proven
+      // live SSE frame. Letting both layers retry creates request storms.
+      retryStrategy: "on-error",
+      // The package's internal retry path (`_handleRetry`) is the one storm
+      // source `on-error` alone cannot stop: a mid-stream body/network failure
+      // after a successful handshake bypasses onRequestError and
+      // onResponseError and reopens on the package's own clock. `maxRetryCount`
+      // 0 turns that path into a single `error` abort event, which the
+      // coordinator below routes through the same jittered backoff as every
+      // other reconnect source.
+      maxRetryCount: 0,
     });
 
     function clearActivityWatchdog() {
@@ -73,6 +170,72 @@ export function useSSE({
         clearTimeout(activityWatchdog);
         activityWatchdog = null;
       }
+    }
+
+    function clearRetryBackoffResetTimer() {
+      if (retryBackoffResetTimer) {
+        clearTimeout(retryBackoffResetTimer);
+        retryBackoffResetTimer = null;
+      }
+    }
+
+    function markTransportUnavailable() {
+      streamOpen = false;
+      streamStabilityConfirmed = false;
+      clearActivityWatchdog();
+      clearRetryBackoffResetTimer();
+    }
+
+    function cancelScheduledRetry() {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    }
+
+    function resetRetryBackoff() {
+      retryAttempt = 0;
+      cancelScheduledRetry();
+    }
+
+    function scheduleRetryBackoffReset() {
+      if (streamStabilityConfirmed || retryBackoffResetTimer) return;
+      retryBackoffResetTimer = setTimeout(() => {
+        retryBackoffResetTimer = null;
+        if (disposed || terminalErrorReceived || !streamOpen) return;
+        streamStabilityConfirmed = true;
+        resetRetryBackoff();
+      }, SSE_RETRY_RESET_AFTER_MS);
+    }
+
+    function scheduleReconnect(reason, response = null) {
+      if (disposed || terminalErrorReceived) return;
+      markTransportUnavailable();
+      setStatus(CONNECTION_STATUS.RECONNECTING);
+      if (retryTimer) return;
+
+      // Abort the package-owned request before its catch path can start an
+      // automatic retry. Every retry source then converges on this one timer.
+      controller?.abort(`retry scheduled: ${reason}`);
+      if (document.visibilityState === "hidden" || isBrowserOffline()) return;
+
+      const delay = Math.max(
+        localRetryDelayMs(retryAttempt),
+        responseRetryAfterMs(response),
+      );
+      retryAttempt = Math.min(retryAttempt + 1, 30);
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (
+          disposed ||
+          terminalErrorReceived ||
+          document.visibilityState === "hidden" ||
+          isBrowserOffline()
+        ) {
+          return;
+        }
+        controller?.reconnect();
+      }, delay);
     }
 
     function activityIsExpected() {
@@ -100,12 +263,13 @@ export function useSSE({
           return;
         }
         setStatus(CONNECTION_STATUS.RECONNECTING);
-        controller.reconnect();
+        scheduleReconnect("activity watchdog");
       }, ACTIVE_STREAM_STALL_DEADLINE_MS);
     }
 
     function markConnected() {
       if (disposed || terminalErrorReceived) return;
+      streamOpen = true;
       connectedOnce = true;
       setStatus(CONNECTION_STATUS.CONNECTED);
     }
@@ -125,9 +289,12 @@ export function useSSE({
       controller = stream.listen({
         onRequest({ options }) {
           if (disposed || terminalErrorReceived) return;
+          markTransportUnavailable();
+          const connectionState = nextConnectionState();
           options.query = {
             ...options.query,
-            connection_generation: connectionGeneration(),
+            connection_id: connectionState.connectionId,
+            connection_generation: connectionState.generation,
           };
           setStatus(
             connectedOnce
@@ -137,7 +304,7 @@ export function useSSE({
         },
         onRequestError() {
           if (disposed || terminalErrorReceived) return;
-          setStatus(CONNECTION_STATUS.RECONNECTING);
+          scheduleReconnect("request error");
         },
         onResponse({ response }) {
           if (disposed || terminalErrorReceived) return;
@@ -146,17 +313,18 @@ export function useSSE({
             response.headers.get("content-type")?.includes("text/event-stream")
           ) {
             markConnected();
+            scheduleActivityWatchdog();
           }
         },
         onResponseError({ response }) {
           if (disposed || terminalErrorReceived) return;
           if (isRetryableResponseStatus(response.status)) {
-            setStatus(CONNECTION_STATUS.RECONNECTING);
+            scheduleReconnect("retryable stream response", response);
             return;
           }
+          markTransportUnavailable();
           terminalErrorReceived = true;
-          streamOpen = false;
-          clearActivityWatchdog();
+          cancelScheduledRetry();
           controller?.abort("non-retryable stream response");
           setStatus(CONNECTION_STATUS.DISCONNECTED);
         },
@@ -171,7 +339,14 @@ export function useSSE({
           if (!frame || typeof frame !== "object") return;
           const rawType = frame.type || message.event || "message";
           const type = rawType === "stream_error" ? "error" : rawType;
-          if (type !== "error") markConnected();
+          if (type !== "error") {
+            markConnected();
+            // The server emits one keep_alive immediately after admission.
+            // Start the stability interval only after that valid application
+            // frame. A quiet stream that remains open for the full interval is
+            // healthy even when no second frame arrives to trigger a reset.
+            scheduleRetryBackoffReset();
+          }
           onEventRef.current?.({
             type,
             frame,
@@ -180,8 +355,8 @@ export function useSSE({
           scheduleActivityWatchdog();
           if (type === "error" && frame.retryable === false) {
             terminalErrorReceived = true;
-            streamOpen = false;
-            clearActivityWatchdog();
+            markTransportUnavailable();
+            cancelScheduledRetry();
             controller?.abort("non-retryable stream event");
             setStatus(CONNECTION_STATUS.DISCONNECTED);
             return;
@@ -192,24 +367,33 @@ export function useSSE({
             frame.retryable === true
           ) {
             stream.lastEventId = undefined;
-            setStatus(CONNECTION_STATUS.RECONNECTING);
-            controller?.reconnect();
+            scheduleReconnect("projection replay unavailable");
           }
         },
+      });
+      controller.onAbort?.((event) => {
+        if (event.type === "end-of-stream") {
+          scheduleReconnect("stream ended");
+        } else if (event.type === "error") {
+          // The package emits exactly one `error` abort event when its
+          // internal retry path is disabled (maxRetryCount 0): a mid-stream
+          // body/network failure after the SSE handshake. No
+          // onRequestError/onResponseError fires on that path, so this is the
+          // only signal the coordinator sees.
+          scheduleReconnect("stream body failure");
+        }
       });
       if (terminalErrorReceived) {
         streamOpen = false;
         controller?.abort("non-retryable stream response");
         return;
       }
-      streamOpen = true;
-      scheduleActivityWatchdog();
     }
 
     function disconnectForHiddenTab() {
       if (disposed || terminalErrorReceived) return;
-      streamOpen = false;
-      clearActivityWatchdog();
+      markTransportUnavailable();
+      cancelScheduledRetry();
       controller?.abort("document hidden");
       setStatus(CONNECTION_STATUS.PAUSED);
     }
@@ -221,22 +405,21 @@ export function useSSE({
       } else if (!controller) {
         connect();
       } else {
-        streamOpen = true;
         setStatus(CONNECTION_STATUS.CONNECTING);
-        controller.reconnect();
-        scheduleActivityWatchdog();
+        scheduleReconnect("document visible");
       }
     }
 
     function handleNetworkOffline() {
       if (disposed || terminalErrorReceived) return;
+      markTransportUnavailable();
+      cancelScheduledRetry();
       setStatus(CONNECTION_STATUS.RECONNECTING);
     }
 
     function handleNetworkOnline() {
       if (disposed || terminalErrorReceived) return;
-      setStatus(CONNECTION_STATUS.RECONNECTING);
-      controller?.reconnect();
+      scheduleReconnect("network online");
     }
 
     syncActivityWatchdogRef.current = () => {
@@ -258,6 +441,8 @@ export function useSSE({
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       clearActivityWatchdog();
+      clearRetryBackoffResetTimer();
+      cancelScheduledRetry();
       syncActivityWatchdogRef.current = () => {};
       controller?.abort("component disposed");
       controller = null;

@@ -61,16 +61,50 @@ use ratchet_support::workspace_root;
 use serde_json::Value;
 
 /// Flipped to `false` by the WS2 PR named in the module docs. While it is
-/// `true` the scan reports and never fails on findings; the self-tests below
-/// keep the scanner itself honest in the meantime.
+/// `true` the scan reports and never fails on **findings**; the ratchet below
+/// and the self-tests keep it from getting worse in the meantime.
 const REPORT_ONLY: bool = true;
 
-/// WS0 inventory size, measured on this checkout (`origin/main` @ `ae0989c37`,
-/// 2026-07-30) by running this test: 62 escaping include sites — 19 reaching
-/// into another workspace crate, 43 reaching repo-root assets. Reported
-/// against today's count so the delta is visible without re-deriving it.
+/// WS0 inventory size, measured on `origin/main` @ `ae0989c37` (2026-07-30) by
+/// running this test: 62 escaping include sites — 19 reaching into another
+/// workspace crate, 43 reaching repo-root assets. Kept as **history**, printed
+/// beside today's count so the delta is visible without re-deriving it.
+///
+/// ⚠ Do not read either number as live. CHECKLIST WS2 recorded that package
+/// colocation *reclassified* most of this inventory without repairing any of
+/// it — a data-only package directory owns no `Cargo.toml`, so a reach into it
+/// stopped counting as cross-crate and started counting as a repo-root asset.
+/// The live figures are the two constants below.
 const WS0_ESCAPING_INCLUDE_SITES: usize = 62;
 const WS0_CROSS_CRATE_INCLUDE_SITES: usize = 19;
+
+/// **Live** cross-crate count, and a shrink-only ratchet on it — the half of
+/// §11.2.7 that can be enforced before the flip.
+///
+/// Measured 2026-08-05 on this checkout by running this test: **104 escaping
+/// sites, 16 cross-crate** (17 before #6831 retired the slack schema-asset
+/// embed — standard_op-bound tools resolve schemas from the compiled-in
+/// `ironclaw_host_api::messaging` registry, not package assets). The 16 sit
+/// with three owners, none of them WS10's, and each needs a design decision
+/// rather than a path repoint (CHECKLIST WS2's disposition 3, filed as #7093):
+///
+///   * `ironclaw_extension_support` → the slack/telegram package crates (4).
+///     The obvious inversion is an **upward** `runtimes → products` edge, so it
+///     may not be fixable as stated.
+///   * `ironclaw_host_runtime` → `memory-native`/`mem0` (7) — five of them in
+///     `first_party_tools/schemas.rs`.
+///   * source-scraping drift guards (5): `ironclaw_assistant`'s failure-
+///     explanation tests compile three sibling crates' `.rs` files, and
+///     `ironclaw_operator::llm_admin::provider_admin` compiles the CLI's.
+///
+/// **Why an equality and not `<=`.** The lesson `reborn_extension_specificity`
+/// paid for (#7147): a ceiling sitting above the live list is an unclaimed
+/// budget for exactly the debt it is supposed to stop, and a one-directional
+/// ratchet cannot see it. Both directions fail with distinct messages, so a PR
+/// that removes a reach-in must lower this constant in the same change and a PR
+/// that adds one is red. When it reaches **0**, flip `REPORT_ONLY` and delete
+/// this constant with the gate that reads it.
+const CROSS_CRATE_INCLUDE_SITES: usize = 16;
 
 /// This file's own fixtures are include-shaped strings; skip it the way the
 /// shared type-def scanner skips the ratchet files (defense in depth).
@@ -398,6 +432,32 @@ fn reborn_cross_crate_include_paths_are_inventoried() {
          of compiling another crate's tree into this one:\n{}",
         cross_crate.len(),
         render(&cross_crate)
+    );
+
+    // The half that IS enforceable before the flip: the count cannot move in
+    // either direction without this file being edited. Kept in the same test as
+    // the inventory it ratchets so a reader cannot get one without the other.
+    assert!(
+        cross_crate.len() <= CROSS_CRATE_INCLUDE_SITES,
+        "cross-crate `include_str!`/`include_bytes!` reach-ins grew to {} (recorded {}). \
+         §11.2.7 is shrink-only while it waits on the flip: a new reach-in compiles another \
+         crate's tree into this one, bypassing the dependency graph the boundary gates police, \
+         and pushes the flip further away. Route the data through the owning crate's public API \
+         or the binary's package inventory. Today's inventory:\n{}",
+        cross_crate.len(),
+        CROSS_CRATE_INCLUDE_SITES,
+        render(&cross_crate)
+    );
+    assert!(
+        cross_crate.len() >= CROSS_CRATE_INCLUDE_SITES,
+        "cross-crate reach-ins are down to {} but CROSS_CRATE_INCLUDE_SITES is {} — {} sites of \
+         UNTRACKED SLACK. A ceiling above the live count is an unclaimed budget: that many new \
+         reach-ins can land and every gate stays green. Lower the constant to {} in the PR that \
+         removed them (#7147's lesson, applied here).",
+        cross_crate.len(),
+        CROSS_CRATE_INCLUDE_SITES,
+        CROSS_CRATE_INCLUDE_SITES - cross_crate.len(),
+        cross_crate.len()
     );
 }
 

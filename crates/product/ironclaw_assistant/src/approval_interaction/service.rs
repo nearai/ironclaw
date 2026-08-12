@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::ApprovalStatus;
 use ironclaw_approvals::{
-    DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverrideKey,
-    ToolPermissionOverrideStorePort,
+    CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
+    ToolPermissionOverrideKey,
 };
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnStatus};
 use ironclaw_host_api::{
@@ -72,7 +72,7 @@ pub struct DefaultApprovalInteractionService {
     // revoke controls land, plan #4539
     persistent_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     persistent_grantee_resolver: Option<Arc<dyn PersistentApprovalGranteeResolver>>,
-    tool_permission_overrides: Option<Arc<dyn ToolPermissionOverrideStorePort>>,
+    tool_permission_overrides: Option<Arc<dyn CapabilityPermissionOverrideStorePort>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
@@ -139,7 +139,7 @@ impl DefaultApprovalInteractionService {
 
     pub fn with_tool_permission_override_store(
         mut self,
-        tool_permission_overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+        tool_permission_overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     ) -> Self {
         self.tool_permission_overrides = Some(tool_permission_overrides);
         self

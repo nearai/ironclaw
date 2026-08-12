@@ -27,6 +27,44 @@ async fn secret_store_returns_metadata_without_secret_material() {
 }
 
 #[tokio::test]
+async fn concurrent_put_if_absent_preserves_exactly_one_winner() {
+    let store = std::sync::Arc::new(SecretStore::ephemeral());
+    let scope = sample_scope("tenant-a", "user-a");
+    let handle = SecretHandle::new("generated_key").unwrap();
+    let first = {
+        let store = std::sync::Arc::clone(&store);
+        let scope = scope.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            store
+                .put_if_absent(scope, handle, SecretMaterial::from("first"), None)
+                .await
+                .unwrap()
+        })
+    };
+    let second = {
+        let store = std::sync::Arc::clone(&store);
+        let scope = scope.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            store
+                .put_if_absent(scope, handle, SecretMaterial::from("second"), None)
+                .await
+                .unwrap()
+        })
+    };
+
+    let (first_won, second_won) = (first.await.unwrap(), second.await.unwrap());
+    assert_ne!(first_won, second_won, "exactly one create must commit");
+    let lease = store.lease_once(&scope, &handle).await.unwrap();
+    let material = store.consume(&scope, lease.id).await.unwrap();
+    assert_eq!(
+        material.expose_secret(),
+        if first_won { "first" } else { "second" }
+    );
+}
+
+#[tokio::test]
 async fn secret_store_consumes_one_shot_secret_lease() {
     let store = SecretStore::ephemeral();
     let scope = sample_scope("tenant-a", "user-a");

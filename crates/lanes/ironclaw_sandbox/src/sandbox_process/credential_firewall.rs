@@ -1,5 +1,5 @@
 //! Sandbox credential firewall — obligation-staging chokepoint (design
-//! decision W8, `docs/plans/2026-07-26-sandbox-credential-firewall-design.md`
+//! decision W8, `docs/internal/plans/2026-07-26-sandbox-credential-firewall-design.md`
 //! §2.2 "End-to-end flow", §2.3 "Placeholder vs grant lifetime", §3.3
 //! "what JIT does NOT block", §3.4 "D2 mechanics").
 //!

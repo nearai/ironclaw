@@ -210,6 +210,7 @@ where
         let context = ContextWindow {
             thread_id: thread_id.clone(),
             messages: context_messages_with_summary_replacements(&messages, &[]),
+            recent_window_truncation: None,
         };
         if let Ok(mut cache) = self.one_shot_context_windows.lock() {
             let key = one_shot_context_window_cache_key(scope, thread_id);
@@ -230,10 +231,10 @@ where
     ) -> Option<ContextWindow> {
         let key = one_shot_context_window_cache_key(scope, thread_id);
         let mut context = self.one_shot_context_windows.lock().ok()?.remove(&key)?;
-        if max_messages < context.messages.len() {
-            let start = context.messages.len() - max_messages;
-            context.messages = context.messages.split_off(start);
-        }
+        let (messages, recent_window_truncation) =
+            crate::contract::truncate_context_window(context.messages, max_messages);
+        context.messages = messages;
+        context.recent_window_truncation = recent_window_truncation;
         Some(context)
     }
 
@@ -710,19 +711,59 @@ where
         thread_id: &ThreadId,
         turn_run_id: &str,
         result_ref: &str,
+        provider_call_id: Option<&str>,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         self.ensure_transcript_indexes_migrated(scope).await?;
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
-        let indexed_message_id = index_store
-            .read_tool_result(scope, thread_id, turn_run_id, result_ref)
-            .await?;
+        let indexed_message_id = match provider_call_id {
+            Some(provider_call_id) => {
+                index_store
+                    .read_tool_result_provider_call(
+                        scope,
+                        thread_id,
+                        turn_run_id,
+                        result_ref,
+                        provider_call_id,
+                    )
+                    .await?
+            }
+            None => {
+                index_store
+                    .read_tool_result(scope, thread_id, turn_run_id, result_ref)
+                    .await?
+            }
+        };
         if let Some(message_id) = indexed_message_id
             && let Some((message, _)) = self
                 .read_message_versioned(scope, thread_id, message_id)
                 .await?
-            && matches_tool_result_reference(&message, turn_run_id, result_ref)
+            && matches_tool_result_reference_invocation(
+                &message,
+                turn_run_id,
+                result_ref,
+                provider_call_id,
+            )
         {
             return Ok(Some(message));
+        }
+
+        // Compatibility/backfill path for rows whose generic v1 index predates
+        // provider-call-specific result indexes. Before provider calls were
+        // part of this key there could be at most one row per (run, result), so
+        // only a row with no provider metadata is an unambiguous legacy match.
+        if provider_call_id.is_some() {
+            let indexed_message_id = index_store
+                .read_tool_result(scope, thread_id, turn_run_id, result_ref)
+                .await?;
+            if let Some(message_id) = indexed_message_id
+                && let Some((message, _)) = self
+                    .read_message_versioned(scope, thread_id, message_id)
+                    .await?
+                && matches_tool_result_reference(&message, turn_run_id, result_ref)
+                && message.tool_result_provider_call.is_none()
+            {
+                return Ok(Some(message));
+            }
         }
 
         Ok(None)
@@ -799,42 +840,88 @@ where
         Ok(messages)
     }
 
-    async fn list_latest_thread_messages(
+    async fn list_effective_context_messages(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
-        limit: usize,
-    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        max_messages: usize,
+        summaries: &[SummaryArtifact],
+    ) -> Result<Vec<ContextMessage>, SessionThreadError> {
         self.ensure_transcript_indexes_migrated(scope).await?;
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let limit = u32::try_from(limit)
+        // Read enough durable rows to produce `max_messages + 1` effective
+        // model-visible entries. Capability previews and other hidden rows do
+        // not consume the model-context limit.
+        let limit = u32::try_from(max_messages.saturating_add(1))
             .unwrap_or(Page::MAX_LIMIT)
-            .min(Page::MAX_LIMIT);
+            .clamp(1, Page::MAX_LIMIT);
         let root = messages_root(scope, thread_id)?;
         let index = message_sequence_index_spec()?;
-        let page = OrderedPage::new(
-            index.name,
-            fs_index_key("sequence")?,
-            fs_index_key("message_id")?,
-            SortDirection::Descending,
-            limit,
-        );
-        let mut messages = self
-            .filesystem
-            .query_ordered(
-                &scope.to_resource_scope(),
-                &root,
-                &thread_partition_filter(thread_id)?,
-                &page,
-            )
-            .await?
-            .into_iter()
-            .map(|entry| deserialize::<ThreadMessageRecord>(&entry.entry.body))
-            .collect::<Result<Vec<_>, _>>()?;
-        messages.reverse();
-        Ok(messages)
+        let sequence_key = fs_index_key("sequence")?;
+        let message_id_key = fs_index_key("message_id")?;
+        let mut cursor = None;
+        let mut newest_first = Vec::new();
+
+        loop {
+            let mut page = OrderedPage::new(
+                index.name.clone(),
+                sequence_key.clone(),
+                message_id_key.clone(),
+                SortDirection::Descending,
+                limit,
+            );
+            if let Some(after) = cursor.take() {
+                page = page.after(after);
+            }
+            let entries = self
+                .filesystem
+                .query_ordered(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &thread_partition_filter(thread_id)?,
+                    &page,
+                )
+                .await?;
+            let entry_count = entries.len();
+            cursor = entries.last().and_then(|entry| {
+                Some(OrderedQueryCursor {
+                    value: entry.entry.indexed.get(&sequence_key)?.clone(),
+                    tie_breaker: entry.entry.indexed.get(&message_id_key)?.clone(),
+                })
+            });
+            newest_first.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| deserialize::<ThreadMessageRecord>(&entry.entry.body))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+
+            let chronological = newest_first.iter().rev().cloned().collect::<Vec<_>>();
+            let context = context_messages_with_summary_replacements(&chronological, summaries);
+            let oldest_loaded_sequence = newest_first
+                .last()
+                .map(|message| message.sequence)
+                .unwrap_or(u64::MAX);
+            let retained_boundary_start =
+                context.len().saturating_sub(max_messages.saturating_add(1));
+            let tail_has_unvalidated_summary = context[retained_boundary_start..]
+                .iter()
+                .filter_map(|message| message.summary_id)
+                .any(|summary_id| {
+                    summaries.iter().any(|summary| {
+                        summary.summary_id == summary_id
+                            && summary.start_sequence < oldest_loaded_sequence
+                    })
+                });
+            // A replacement summary inside the retained suffix can move the
+            // exact truncation watermark. Do not stop until its whole durable
+            // range has been read, otherwise an older Draft/redaction can be
+            // missed and a synthetic summary sequence reported as the boundary.
+            if (context.len() > max_messages && !tail_has_unvalidated_summary)
+                || entry_count < limit as usize
+            {
+                return Ok(context);
+            }
+        }
     }
 
     async fn latest_thread_message_by_kind_status(
@@ -1935,6 +2022,11 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let provider_call = request.provider_call;
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
+        }
         let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
@@ -1947,6 +2039,9 @@ where
                 &request.thread_id,
                 &request.turn_run_id,
                 &envelope.result_ref,
+                provider_call
+                    .as_ref()
+                    .map(|provider_call| provider_call.provider_call_id.as_str()),
             )
             .await?
         {
@@ -1954,9 +2049,6 @@ where
             // and attach it (or reject on conflict) — matching the in-memory
             // contract semantics.
             let provider_call_update = if let Some(provider_call) = provider_call.as_ref() {
-                provider_call
-                    .validate()
-                    .map_err(SessionThreadError::Serialization)?;
                 match existing.tool_result_provider_call.as_ref() {
                     Some(existing_call) if existing_call == provider_call => None,
                     Some(_) => {
@@ -2018,11 +2110,6 @@ where
                 return Ok(updated);
             }
             return Ok(existing);
-        }
-        if let Some(provider_call) = &provider_call {
-            provider_call
-                .validate()
-                .map_err(SessionThreadError::Serialization)?;
         }
         let content = serde_json::to_string(&envelope)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
@@ -2155,6 +2242,7 @@ where
                 &request.thread_id,
                 &request.turn_run_id,
                 &request.result_ref,
+                request.provider_call_id.as_deref(),
             )
             .await?
             .ok_or_else(|| {
@@ -2171,6 +2259,7 @@ where
         // the initial lookup path.
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
+        let provider_call_id = request.provider_call_id.clone();
         let thread_id_for_error = request.thread_id.clone();
         let safe_summary = request.safe_summary;
         let now = Utc::now();
@@ -2180,7 +2269,12 @@ where
             &request.thread_id,
             message.message_id,
             |message| {
-                if !matches_tool_result_reference(message, &turn_run_id, &result_ref) {
+                if !matches_tool_result_reference_invocation(
+                    message,
+                    &turn_run_id,
+                    &result_ref,
+                    provider_call_id.as_deref(),
+                ) {
                     return Err(SessionThreadError::Backend(format!(
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
                     )));
@@ -2449,20 +2543,23 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        let messages = self
-            .list_latest_thread_messages(&request.scope, &request.thread_id, request.max_messages)
-            .await?;
         let summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
-        let mut context = context_messages_with_summary_replacements(&messages, &summaries);
-        if request.max_messages < context.len() {
-            let start = context.len() - request.max_messages;
-            context = context.split_off(start);
-        }
+        let context = self
+            .list_effective_context_messages(
+                &request.scope,
+                &request.thread_id,
+                request.max_messages,
+                &summaries,
+            )
+            .await?;
+        let (messages, recent_window_truncation) =
+            crate::contract::truncate_context_window(context, request.max_messages);
         Ok(ContextWindow {
             thread_id: request.thread_id,
-            messages: context,
+            messages,
+            recent_window_truncation,
         })
     }
 
@@ -3246,6 +3343,21 @@ fn matches_tool_result_reference(
         && message.tool_result_ref.as_deref() == Some(result_ref)
 }
 
+fn matches_tool_result_reference_invocation(
+    message: &ThreadMessageRecord,
+    turn_run_id: &str,
+    result_ref: &str,
+    provider_call_id: Option<&str>,
+) -> bool {
+    matches_tool_result_reference(message, turn_run_id, result_ref)
+        && provider_call_id.is_none_or(|requested| {
+            message
+                .tool_result_provider_call
+                .as_ref()
+                .is_none_or(|existing| existing.provider_call_id == requested)
+        })
+}
+
 fn assistant_message_matches_run(
     message: &ThreadMessageRecord,
     turn_run_id: &str,
@@ -3449,7 +3561,7 @@ fn summary_covers_redacted_or_deleted_content(
 // single-record RMWs onto `cas_update` (fail-closed on a non-CAS
 // backend) is a tracked, deferred follow-up sibling to the
 // `ironclaw_turns` runner-lease migration (#5274) — see
-// `docs/plans/2026-06-25-cas-migration.md`.
+// `docs/internal/plans/2026-06-25-cas-migration.md`.
 
 /// Local error classification for the CAS-aware put helper.
 enum PutError {

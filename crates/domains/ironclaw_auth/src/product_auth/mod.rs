@@ -25,7 +25,7 @@
 //! `tests/module_charter.rs::the_two_engines_do_not_name_each_other`. The two
 //! engines meet only through the shared vocabulary re-exported from the crate
 //! root (`credential`, `provider`, `oauth`, `scope`, `ids`, `error`), which is
-//! why that vocabulary is a **third** owner in `CLAUDE.md`'s sub-owner map
+//! why that vocabulary is a **third** owner in `AGENTS.md`'s sub-owner map
 //! rather than being charged to either engine.
 
 pub mod api;

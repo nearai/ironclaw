@@ -203,20 +203,33 @@ class TargetTreeGateTests(unittest.TestCase):
         self.assertIn("Delete the row", output)
 
     def test_exception_row_describing_a_different_delta_fails(self) -> None:
-        rows = tuple(
-            GATE.Exception_(
-                package=row.package,
-                actual="crates/somewhere_else",
-                documented=row.documented,
-                owner=row.owner,
-                why=row.why,
-            )
-            if row.package == "ironclaw_projects"
-            else row
-            for row in GATE.EXCEPTIONS
+        """Synthesized divergence + wrong row, so the case survives the empty table.
+
+        The table hit its designed steady state (EMPTY) on 2026-08-05 when both
+        dissolutions landed, and the previous version — which doctored whichever
+        live rows existed — refused to run. At steady state nothing diverges
+        from §5, so exercising the "describes a different delta" arm requires
+        manufacturing BOTH halves: the metadata moves one member off its §5
+        path (the divergence), and an exception row excuses it with a wrong
+        `actual` (the stale record). The arm must then reject the row.
+        """
+        document = copy.deepcopy(self.metadata)
+        victim = next(
+            p for p in document["packages"]
+            if p["name"] == "ironclaw_agent_loop"
         )
-        with mock.patch.object(GATE, "EXCEPTIONS", rows):
-            code, output = self.run_gate()
+        victim["manifest_path"] = victim["manifest_path"].replace(
+            "crates/loop/ironclaw_agent_loop", "crates/kernel/ironclaw_agent_loop"
+        )
+        stale = GATE.Exception_(
+            package="ironclaw_agent_loop",
+            actual="crates/somewhere_else",
+            documented="crates/loop/ironclaw_agent_loop",
+            owner="self-test synthetic row",
+            why="synthesized by the self-test; never a real disposition",
+        )
+        with mock.patch.object(GATE, "EXCEPTIONS", GATE.EXCEPTIONS + (stale,)):
+            code, output = self.run_gate(metadata=document)
         self.assertEqual(code, 1)
         self.assertIn("describes a different delta", output)
 

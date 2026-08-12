@@ -11,7 +11,7 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
@@ -109,26 +109,26 @@ pub(crate) struct OAuthDcrCallbackConfig {
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
-    TenantSandbox {
-        process_port: Arc<TenantSandboxProcessPort>,
+    UserSandbox {
+        process_port: Arc<UserSandboxProcessPort>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebornRuntimeProcessBindingError {
-    MissingTenantSandboxProcessPort,
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    MissingUserSandboxProcessPort,
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
 impl std::fmt::Display for RebornRuntimeProcessBindingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingTenantSandboxProcessPort => formatter.write_str(
-                "production tenant-sandbox process backend requires a tenant sandbox process binding",
+            Self::MissingUserSandboxProcessPort => formatter.write_str(
+                "production user-sandbox process backend requires a user sandbox process binding",
             ),
-            Self::UnexpectedTenantSandboxProcessPort { process_backend } => write!(
+            Self::UnexpectedUserSandboxProcessPort { process_backend } => write!(
                 formatter,
-                "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+                "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
             ),
         }
     }
@@ -139,8 +139,8 @@ impl RebornRuntimeProcessBinding {
         Self::default()
     }
 
-    pub fn tenant_sandbox(process_port: Arc<TenantSandboxProcessPort>) -> Self {
-        Self::TenantSandbox { process_port }
+    pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
+        Self::UserSandbox { process_port }
     }
 
     pub(crate) fn validate_for_production_policy(
@@ -148,15 +148,14 @@ impl RebornRuntimeProcessBinding {
         runtime_policy: &EffectiveRuntimePolicy,
     ) -> Result<(), RebornRuntimeProcessBindingError> {
         match (runtime_policy.process_backend, self) {
-            (
-                ProcessBackendKind::TenantSandbox,
-                RebornRuntimeProcessBinding::TenantSandbox { .. },
-            ) => Ok(()),
-            (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
-                Err(RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort)
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::UserSandbox { .. }) => {
+                Ok(())
             }
-            (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => Err(
-                RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::None) => {
+                Err(RebornRuntimeProcessBindingError::MissingUserSandboxProcessPort)
+            }
+            (_, RebornRuntimeProcessBinding::UserSandbox { .. }) => Err(
+                RebornRuntimeProcessBindingError::UnexpectedUserSandboxProcessPort {
                     process_backend: runtime_policy.process_backend,
                 },
             ),
@@ -242,13 +241,33 @@ pub struct ChannelExtensionBinding {
     /// `ironclaw_hooks::identity::ExtensionId` — the two coexist by design and
     /// resolve by crate, never by name (see `ironclaw_hooks/src/identity.rs`).
     pub extension_id: ironclaw_host_api::ids::ExtensionId,
-    /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
+    /// The channel halves this extension implements, linked into the
+    /// deployment. Which halves are present is checked against the manifest's
+    /// `[channel.*]` sections at activation, so a binding that claims an axis
+    /// its manifest does not declare (or omits one it does) fails there
+    /// rather than at first send.
+    pub surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec: Option<
         std::sync::Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>,
     >,
+    /// An extension-owned outbound delivery-target catalog provider (e.g.
+    /// web-app's constant per-user "Web app" entry). Registered generically
+    /// into the outbound target registry under the extension id; most channel
+    /// extensions leave this `None` because the generic channel provider
+    /// derives their targets from provisioned records.
+    pub outbound_target_provider:
+        Option<std::sync::Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>>,
+    /// Optional startup initialization owned by this binary-linked channel.
+    /// Composition supplies shared host resources and treats the returned
+    /// client bootstrap document as opaque.
+    pub first_party_initializer:
+        Option<std::sync::Arc<dyn crate::channel_initialization::FirstPartyChannelInitializer>>,
+    /// Optional pre-generic registration document address carried as opaque
+    /// deployment data by the binary that links the concrete package.
+    /// Composition validates the path but never branches on extension id.
+    pub registration_document_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]

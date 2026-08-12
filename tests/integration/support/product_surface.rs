@@ -7,8 +7,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_assistant::{
-    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductConversationRouteKind,
-    ProductInboundAction, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
+    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
+    ProductSurfaceFailure,
 };
 use ironclaw_filesystem::{DiskFilesystem, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -20,6 +20,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_contracts::action::ActionFingerprintKey;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -190,6 +193,20 @@ where
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        // Route-kind mismatch refusal, mirroring the conversations domain
+        // (#7377): a Direct request can key-collide only with a SHARED-born
+        // conversation, and is refused instead of trusting the caller to
+        // re-classify the conversation's route kind. Checked before the
+        // stored-row read — binding rows are route-blind.
+        let owner_path = conversation_owner_path(&self.scope, &request)?;
+        let shared_owner =
+            read_json::<F, StoredSharedBornMarker>(&self.filesystem, &self.scope, &owner_path)
+                .await?;
+        if shared_owner.is_some() && request.route_kind == ProductConversationRouteKind::Direct {
+            return Err(ProductOperationFailure::BindingRequired {
+                reason: "a Direct route must not address a shared-born conversation".to_string(),
+            });
+        }
         let path = binding_path(&self.scope, &request)?;
         if let Some(stored) =
             read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path).await?
@@ -197,12 +214,32 @@ where
             return Ok(stored.binding);
         }
 
+        // A run acts as, and is scoped to, the user who invoked it
+        // (`actor_user_id`) on every route kind — ephemeral per-ping threads
+        // are pinger-owned, so a binding carries no separate owner identity.
         let actor_user_id = user_id_for_binding(&self.scope.tenant_id, &request)?;
-        let subject_user_id = match request.route_kind {
-            ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
-            ProductConversationRouteKind::Shared => Some(self.scope.user_id.clone()),
-        };
+        // A Shared route records an existence-only marker on first bind so a
+        // later Direct request to the same conversation is refused above.
+        if request.route_kind == ProductConversationRouteKind::Shared && shared_owner.is_none() {
+            write_json(
+                &self.filesystem,
+                &self.scope,
+                &owner_path,
+                &StoredSharedBornMarker {},
+            )
+            .await?;
+        }
         let binding_key = binding_key(&self.scope, &request)?;
+        // This conversation-keyed harness double does not model per-ping
+        // ephemeral thread minting (the conversations tier does); its per-event
+        // refs are keyed by the conversation binding, which is enough for the
+        // integration seams that use it. Real per-event refs are pinned where
+        // the ephemeral store lives.
+        let source_binding_ref =
+            ironclaw_turns::SourceBindingRef::new(format!("source:harness-{binding_key}"))
+                .map_err(|error| ProductOperationFailure::BindingResolutionFailed {
+                    reason: error.to_string(),
+                })?;
         let reply_target_binding_ref =
             ironclaw_turns::ReplyTargetBindingRef::new(format!("reply:harness-{binding_key}"))
                 .map_err(|error| ProductOperationFailure::BindingResolutionFailed {
@@ -211,10 +248,11 @@ where
         let binding = ResolvedBinding {
             tenant_id: self.scope.tenant_id.clone(),
             actor_user_id,
-            subject_user_id,
             thread_id: thread_id_for_binding(&self.scope, &request)?,
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
+            source_binding_ref,
+            reply_target_binding_ref: reply_target_binding_ref.clone(),
         };
         let reply_target = StoredHarnessReplyTarget {
             tenant_id: binding.tenant_id.clone(),
@@ -244,6 +282,16 @@ where
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        // Same route-kind mismatch refusal as `resolve_binding` (#7377).
+        let owner_path = conversation_owner_path(&self.scope, &request)?;
+        let shared_owner =
+            read_json::<F, StoredSharedBornMarker>(&self.filesystem, &self.scope, &owner_path)
+                .await?;
+        if shared_owner.is_some() && request.route_kind == ProductConversationRouteKind::Direct {
+            return Err(ProductOperationFailure::BindingRequired {
+                reason: "a Direct route must not address a shared-born conversation".to_string(),
+            });
+        }
         let path = binding_path(&self.scope, &request)?;
         read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path)
             .await?
@@ -408,6 +456,15 @@ fn idempotency_lock_for_key(key: String) -> Arc<Mutex<()>> {
     lock
 }
 
+/// Existence-only marker written by a Shared resolve on first bind. It carries
+/// NO owner: ephemeral-per-ping threads are pinger-owned (owner == actor), so a
+/// binding has no separate owner identity. Its sole purpose is the route-kind
+/// refusal — a later `Direct` request to the same conversation is refused
+/// because a shared-born marker exists (see `resolve_binding`). Conversation-
+/// keyed with no actor component; a conversation with no marker is Direct-born.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct StoredSharedBornMarker {}
+
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct StoredConversationBinding {
     binding: ResolvedBinding,
@@ -418,9 +475,9 @@ struct StoredHarnessReplyTarget {
     tenant_id: TenantId,
     actor_user_id: UserId,
     thread_id: ThreadId,
-    adapter_id: ironclaw_assistant::ProductAdapterId,
-    installation_id: ironclaw_assistant::AdapterInstallationId,
-    external_conversation_ref: ironclaw_assistant::ExternalConversationRef,
+    adapter_id: ironclaw_host_api::product_adapter::ProductAdapterId,
+    installation_id: ironclaw_host_api::product_adapter::AdapterInstallationId,
+    external_conversation_ref: ironclaw_extension_contracts::external::ExternalConversationRef,
     route_kind: ProductConversationRouteKind,
 }
 
@@ -522,6 +579,30 @@ fn binding_path(
             request.installation_id.as_str(),
             request.external_actor_ref.kind(),
             request.external_actor_ref.id(),
+            &request.external_conversation_ref.conversation_fingerprint(),
+        ],
+    )
+}
+
+/// The conversation-keyed sibling of [`binding_path`]: no actor components,
+/// so every participant's resolve addresses the same ownership record.
+fn conversation_owner_path(
+    scope: &ResourceScope,
+    request: &ResolveBindingRequest,
+) -> Result<ScopedPath, ProductOperationFailure> {
+    let agent_id = scope.agent_id.as_ref().ok_or_else(|| {
+        ProductOperationFailure::BindingResolutionFailed {
+            reason: "missing agent id in binding scope".to_string(),
+        }
+    })?;
+    let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
+    hashed_scoped_path(
+        "/workflow/conversation-owners",
+        &[
+            agent_id.as_str(),
+            project_id,
+            request.adapter_id.as_str(),
+            request.installation_id.as_str(),
             &request.external_conversation_ref.conversation_fingerprint(),
         ],
     )

@@ -51,6 +51,7 @@ use ironclaw_host_api::{
     host_port::{HostPortCatalog, HostPortId},
     http::RuntimeCredentialTarget,
     ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+    messaging::{STANDARD_SCHEMA_REF_PREFIX, StandardMessagingOp},
     resource::ResourceProfile,
     runtime::{RuntimeKind, TrustClass},
     trust::RequestedTrustClass,
@@ -549,6 +550,13 @@ pub struct CapabilityDeclV2 {
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
     pub visibility: CapabilityVisibility,
+    /// The standard messaging operation this tool is bound to (manifest v3
+    /// `standard_op`), or `None` for a bespoke tool. v2 manifests must never
+    /// set this (`ExtensionManifestV2::project_and_extend_capabilities`
+    /// rejects it at parse). `#[serde(default)]` so resolved records
+    /// persisted before this field existed rehydrate to `None`.
+    #[serde(default)]
+    pub standard_op: Option<StandardMessagingOp>,
     pub input_schema_ref: CapabilityProfileSchemaRef,
     /// Optional since manifest v3 dropped output schema declarations;
     /// v2 manifests may still carry one.
@@ -885,6 +893,25 @@ impl ExtensionManifestV2 {
         registry: &HostApiContractRegistry,
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
+        // `standard_op` binding is v3-only vocabulary: the field exists on
+        // the shared `RawCapabilityV2` raw shape (so v3's per-tool loop can
+        // thread it through the same `CapabilityDeclV2::from_raw`), which
+        // means a v2 manifest's `capability_provider.tools` section can also
+        // set it. A v3-bound entry never reaches this v2-only parse path
+        // (`crate::v3::parse_v3` builds its `ExtensionManifestV2` directly
+        // and never calls this function), so any capability with
+        // `standard_op` set here came from a v2 manifest and must fail
+        // closed rather than silently accept an unsynthesized binding.
+        if self
+            .capabilities
+            .iter()
+            .chain(projection.capabilities.iter())
+            .any(|capability| capability.standard_op.is_some())
+        {
+            return Err(ManifestV2Error::Invalid {
+                reason: "standard_op requires manifest schema v3".to_string(),
+            });
+        }
         self.capabilities.extend(projection.capabilities);
         self.host_api_surfaces.extend(projection.surfaces);
         Ok(())
@@ -1172,10 +1199,42 @@ impl CapabilityDeclV2 {
             });
         }
 
-        if raw.description.trim().is_empty() {
+        // A `standard_op` binding's model-facing description is host-composed
+        // from the canonical description core plus the extension's vendor
+        // addendum (Task 3 of the standardized messaging framework); an
+        // empty addendum is valid input here — composition guarantees the
+        // final description is non-empty. Bespoke (non-bound) tools keep the
+        // unconditional check.
+        if raw.standard_op.is_none() && raw.description.trim().is_empty() {
             return Err(ManifestV2Error::Invalid {
                 reason: format!("capability {id} description must not be empty"),
             });
+        }
+
+        // The `standard:` schema-ref namespace is reserved to host-synthesized
+        // standard_op bindings (the v3 per-tool loop synthesizes it only
+        // after validating the binding). This check is the convergence point
+        // for both manifest versions: a bespoke (unbound) v3 tool or a v2
+        // capability that hand-writes a `standard:` ref would otherwise wear
+        // a canonical schema while skipping every binding validation
+        // `standard_op` enforces — and, once later tasks land, canonical
+        // output enforcement — so reject it before either ref is validated
+        // as a `CapabilityProfileSchemaRef` (whose carve-out for this exact
+        // prefix would otherwise let it through as a well-formed path).
+        if raw.standard_op.is_none() {
+            let declares_standard_ref =
+                raw.input_schema_ref.starts_with(STANDARD_SCHEMA_REF_PREFIX)
+                    || raw
+                        .output_schema_ref
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with(STANDARD_SCHEMA_REF_PREFIX));
+            if declares_standard_ref {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!(
+                        "schema ref namespace `standard:` is reserved to standard_op bindings (tool {id})"
+                    ),
+                });
+            }
         }
 
         // Reject duplicate effects — declaring the same `EffectKind` twice in
@@ -1192,26 +1251,27 @@ impl CapabilityDeclV2 {
             }
         }
 
-        let input_schema_ref =
-            CapabilityProfileSchemaRef::new(raw.input_schema_ref).map_err(|err| {
-                ManifestV2Error::InvalidSchemaRef {
-                    capability: id.clone(),
-                    field: "input_schema_ref",
-                    reason: err.to_string(),
-                }
-            })?;
-        let output_schema_ref = raw
-            .output_schema_ref
-            .map(|value| {
-                CapabilityProfileSchemaRef::new(value).map_err(|err| {
-                    ManifestV2Error::InvalidSchemaRef {
-                        capability: id.clone(),
-                        field: "output_schema_ref",
-                        reason: err.to_string(),
-                    }
-                })
+        let input_schema_ref = match raw.standard_op {
+            Some(op) => CapabilityProfileSchemaRef::standard_messaging_input(op),
+            None => CapabilityProfileSchemaRef::new(raw.input_schema_ref),
+        }
+        .map_err(|err| ManifestV2Error::InvalidSchemaRef {
+            capability: id.clone(),
+            field: "input_schema_ref",
+            reason: err.to_string(),
+        })?;
+        let output_schema_ref = match raw.standard_op {
+            Some(op) => Some(CapabilityProfileSchemaRef::standard_messaging_output(op)),
+            None => raw.output_schema_ref.map(CapabilityProfileSchemaRef::new),
+        }
+        .map(|result| {
+            result.map_err(|err| ManifestV2Error::InvalidSchemaRef {
+                capability: id.clone(),
+                field: "output_schema_ref",
+                reason: err.to_string(),
             })
-            .transpose()?;
+        })
+        .transpose()?;
         let prompt_doc_ref = raw
             .prompt_doc_ref
             .map(|value| {
@@ -1328,6 +1388,7 @@ impl CapabilityDeclV2 {
             effects: raw.effects,
             default_permission: raw.default_permission,
             visibility: raw.visibility,
+            standard_op: raw.standard_op,
             input_schema_ref,
             output_schema_ref,
             prompt_doc_ref,
@@ -1863,6 +1924,14 @@ pub(crate) struct RawCapabilityV2 {
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) default_permission: PermissionMode,
     pub(crate) visibility: CapabilityVisibility,
+    /// v3-only: threaded from `RawToolV3::standard_op` by the v3 per-tool
+    /// loop, which validates and synthesizes schema refs before constructing
+    /// this struct. `#[serde(default)]` so existing manifests (and the v2
+    /// wire shape, which must never set this — rejected in
+    /// `ExtensionManifestV2::project_and_extend_capabilities`) parse to
+    /// `None`.
+    #[serde(default)]
+    pub(crate) standard_op: Option<StandardMessagingOp>,
     pub(crate) input_schema_ref: String,
     #[serde(default)]
     pub(crate) output_schema_ref: Option<String>,

@@ -15,7 +15,7 @@ use serde_json::Value;
 // lockstep edit of the ~100 literals below. On today's tree resolution is the
 // identity — pinned by `reborn_crate_inventory.rs`.
 use ratchet_support::{
-    crate_path, owning_crate_name, production_rust_files, resolve_crate_relative,
+    crate_dir, crate_path, owning_crate_name, production_rust_files, resolve_crate_relative,
     strip_comments_and_strings, try_crate_directory, workspace_root,
 };
 
@@ -81,7 +81,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
 /// names `cargo metadata` reports, which are package names. A crate whose
 /// directory and package disagree therefore has one spelling that guards and
 /// one that is inert — and the inert one fails *silently*, because a forbidden
-/// entry that matches nothing simply never fires. `crates/ironclaw_cli/`
+/// entry that matches nothing simply never fires. `crates/app/ironclaw_cli/`
 /// declaring `name = "ironclaw"` is the only such crate in the tree today, and
 /// it is exactly the one an author reaches for by directory name.
 ///
@@ -151,6 +151,76 @@ fn boundary_rule_names_are_package_names_not_crate_directories() {
         violations.is_empty(),
         "boundary rules must name packages, not directories:\n{}",
         violations.join("\n")
+    );
+}
+
+/// PROPOSAL §11.3: this is an internal-only workspace and **nothing publishes**.
+///
+/// The proposal recorded that as a fact plus one exception —
+/// *"nothing publishes; `skills` is the one manifest missing `publish = false`
+/// — fix"*. Measured 2026-08-05 the exception had grown to **three**
+/// (`ironclaw_skills`, `ironclaw_common`, `ironclaw_safety`), which is what a
+/// prose claim with no gate behind it does: every crate added or renamed since
+/// is a fresh chance to omit the key, and the omission is invisible until
+/// someone runs `cargo publish`. All three now declare it, and this test is why
+/// the count cannot drift back — a new crate that forgets the key fails here
+/// rather than being noticed by the next reader of the proposal.
+///
+/// Read from the manifests rather than from `cargo metadata`, deliberately:
+/// metadata reports `publish: null` both for "key absent" and for
+/// `publish = true`, so the distinction this test exists for is not in it.
+#[test]
+fn reborn_no_workspace_crate_is_publishable() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let mut missing = Vec::new();
+    let mut checked = 0usize;
+    for package in packages {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        let manifest_path = package["manifest_path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} has no manifest_path"));
+        let manifest = std::fs::read_to_string(manifest_path)
+            .unwrap_or_else(|error| panic!("cannot read {manifest_path}: {error}"));
+        checked += 1;
+        // Table-scoped: `publish` is only meaningful in `[package]`. A
+        // `publish = false` under any other table (say, `[package.metadata]`)
+        // is inert to cargo and must not satisfy this gate.
+        let mut in_package_table = false;
+        let mut declared = false;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_package_table = trimmed == "[package]";
+                continue;
+            }
+            if in_package_table && trimmed == "publish = false" {
+                declared = true;
+                break;
+            }
+        }
+        if !declared {
+            missing.push(format!("{name} at {manifest_path}"));
+        }
+    }
+
+    // Fail-closed: a metadata query that returned nothing would otherwise pass
+    // this test having checked no manifest at all.
+    assert!(
+        checked >= 60,
+        "expected to check every workspace manifest; saw only {checked}"
+    );
+    assert!(
+        missing.is_empty(),
+        "every workspace package must declare `publish = false` — this workspace is \
+         internal-only and nothing is released to a registry (PROPOSAL §11.3, CHECKLIST \
+         WS10). Add the key to:\n{}",
+        missing.join("\n")
     );
 }
 
@@ -247,26 +317,10 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
             }
         }
 
-        for dependency in
-            workspace_dependency_names(package).filter(|dep| is_normal_dependency(dep))
-        {
-            let Some(dependency_name) = dependency["name"].as_str() else {
-                continue;
-            };
-            let Some(dependency_layer) = layers.get(dependency_name) else {
-                continue;
-            };
-            if dependency_layer == "legacy" && crate_name != "ironclaw_legacy" {
-                if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
-                    used_exceptions.insert((exception.crate_name, exception.dependency_name));
-                    continue;
-                }
-                violations.push(format!(
-                    "{crate_name} ({crate_layer}) must not depend on legacy crate \
-                     {dependency_name} via a normal dependency"
-                ));
-            }
-        }
+        // A second pass rejecting a normal dep on a `legacy`-layer crate used to
+        // sit here. It was deleted with the variant (§11.3, 2026-08-05): no
+        // package has declared `layer = "legacy"` since the v1 tree went, so
+        // `layers` could never hold one and the loop could not fire.
     }
 
     assert!(
@@ -386,15 +440,21 @@ fn reborn_crate_dependency_boundaries_hold() {
 
     // Canonical Reborn identity layer: it maps external identities to a stable
     // `UserId` at the bottom of the stack, so among internal ironclaw crates it
-    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
-    // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
-    // as an allowlist so it can never reach UPSTREAM (into
-    // `ironclaw_composition` / `ironclaw_assistant`) or onto the v1
-    // legacy enclave — the "never reach upstream" property the crate guarantees.
+    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes),
+    // `ironclaw_filesystem` (the durable substrate it persists behind) and
+    // `ironclaw_product_contracts` (the `ProjectService` port its `projects`
+    // module implements — added 2026-08-05 by PROPOSAL §12.13 D-Q, and by
+    // exactly that one entry). Enforced as an allowlist so it can never reach
+    // UPSTREAM (into `ironclaw_composition` / `ironclaw_assistant`) or onto the
+    // v1 legacy enclave — the "never reach upstream" property the crate
+    // guarantees. All three additions are contracts- or substrates-layer, so
+    // the guarantee is unchanged in kind: D-Q widens what this crate may *name*,
+    // never the direction it may point.
     let reborn_identity_allowed = [
         "ironclaw_identity",
         "ironclaw_host_api",
         "ironclaw_filesystem",
+        "ironclaw_product_contracts",
     ];
     assert_no_normal_workspace_deps(
         &dependencies,
@@ -515,6 +575,463 @@ fn reborn_crate_dependency_boundaries_hold() {
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+/// PROPOSAL §11.2.3's **size-ceiling** clause: *"Each contracts crate also
+/// carries a checked size ceiling (a line-count ratchet raised only by explicit
+/// review) alongside its purity allowlist."*
+///
+/// ✎ **Added 2026-08-05 (CHECKLIST WS10, §11.2.3).** The Wave 2 truth audit
+/// recorded this clause as the one part of item 3 that *"does not exist
+/// anywhere"* — and as the clause that would now bite, because the contracts
+/// tier grew past every size a thin trait/DTO layer was supposed to have while
+/// only its *dependencies* were policed. A crate cannot import a framework, and
+/// could absorb an unbounded amount of logic instead; that substitution is
+/// exactly what this ratchet makes visible.
+///
+/// **Ceilings, not equalities**, unlike this file's other ratchets — and
+/// deliberately, because the two failure modes differ. A dependency allowlist
+/// with slack is an unclaimed budget for the specific debt it names (#7147); a
+/// line ceiling with slack just means the crate got smaller, which is the
+/// direction wanted, and equality here would red the build on every routine
+/// deletion.
+///
+/// Each ceiling is **pinned at the measured count** ("set to current, not
+/// padded") and the pass window extends [`GROWTH_TOLERANCE`] above it and
+/// [`TOLERANCE`] below it. The upward slack exists because a hard cap at the
+/// observed count reds **every open branch** the moment anyone lands a line
+/// in a contracts crate on main — measured, not hypothetical: PR #7157
+/// re-captured `ironclaw_loop_contracts` four times, roughly once per fold
+/// onto main, every delta ≤105 lines (gate audit 2026-08,
+/// `docs/internal/gate-audit-2026-08.md` §3.2). The tolerance is sized to
+/// absorb that routine drift while staying far under the growth this gate
+/// exists to force into review (the reviewed raises it has caught were
+/// +1,069 and +1,214 lines; `composition-budget.toml` uses the same 150).
+/// Growth past the window is the reviewed decision; re-pin to the new
+/// measured count in the same PR, with the reason, and keep the dated
+/// re-capture notes below **append-only** — an overwritten rationale is a
+/// lost audit trail.
+///
+/// The ceiling is also bounded from *below*: a crate more than one
+/// [`TOLERANCE`] window under its ceiling has banked slack, which is how a
+/// ratchet goes inert (the exact way `composition-budget.toml`'s share
+/// ceiling did — 17.4pp of slack, constraining nothing, #7151). Re-capture at
+/// every wave close.
+///
+/// Measured through [`production_rust_files`], the suite's single definition of
+/// a production source file, so the numbers agree with every sibling gate
+/// rather than with a private walk.
+/// The banked-slack window below each ceiling: a crate sitting more than
+/// this far under its ceiling forces a re-capture (anti-inertness).
+const TOLERANCE: usize = 400;
+
+/// Working slack ABOVE each pinned count, so routine drift — a fold from
+/// main, a few lines of wiring — passes while real growth still forces a
+/// reviewed re-pin. Before 2026-08-07 this direction had NO tolerance
+/// (the check was a bare `lines > ceiling`), which combined with
+/// "set to current" pins to red every open branch on any main-side
+/// contracts-crate growth (see the module doc and the gate audit).
+const GROWTH_TOLERANCE: usize = 150;
+
+/// One crate's measured production line count judged against its pinned
+/// ceiling. The pass window is `[ceiling - TOLERANCE, ceiling +
+/// GROWTH_TOLERANCE]`; both jaws are enforced by the size-ceiling gate and
+/// the arithmetic is pinned by `contracts_size_ceiling_window_edges_hold`.
+#[derive(Debug, PartialEq, Eq)]
+enum CeilingVerdict {
+    /// Inside the window — the routine-drift case the working slack exists
+    /// for.
+    Within,
+    /// Growth past the working slack: a reviewed re-pin is required.
+    Over,
+    /// More than one banked-slack window under the ceiling: re-capture in
+    /// the PR that shrank the crate (anti-inertness).
+    Banked,
+}
+
+fn contracts_ceiling_verdict(lines: usize, ceiling: usize) -> CeilingVerdict {
+    if lines > ceiling + GROWTH_TOLERANCE {
+        CeilingVerdict::Over
+    } else if ceiling.saturating_sub(lines) > TOLERANCE {
+        CeilingVerdict::Banked
+    } else {
+        CeilingVerdict::Within
+    }
+}
+
+#[test]
+fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
+    /// `(crate, production line ceiling)` — captured 2026-08-05 by running this
+    /// test with every ceiling at `0` and reading the counts out of its own
+    /// failure message. Never counted by eye.
+    /// Re-pinned 2026-08-07 (gate audit): all six set to the counts this
+    /// test reported with every ceiling at 0 on this tree. Three had been
+    /// seeded at measured+400 (common, loop_contracts, prompt_envelope) —
+    /// the maximum non-tripping pad, contradicting the capture rule above —
+    /// and three at measured+0. With `GROWTH_TOLERANCE` carrying the working
+    /// slack, every pin now follows the one rule: set to current.
+    /// ✎ Union re-captured on the #7373 merge (2026-08-08): every value below
+    /// is the merged tree's own report (ceilings-at-0 procedure); #7157's and
+    /// this audit's chains fold together, and product_contracts ratchets down.
+    /// ✎ Union re-captured on the 2026-08-12 refresh merge of main: the
+    /// ceilings-at-0 procedure on the merged tree reports common 3_393,
+    /// extension_contracts 7_892, host_api 19_017, loop_contracts 13_345,
+    /// product_contracts 16_024, prompt_envelope 432 — five rows' surviving
+    /// pins already equal the merged tree's report exactly; prompt_envelope
+    /// re-pins from main's 832 (the last row still carrying the +400 seed
+    /// pad) to its measured count per the capture rule above.
+    const SIZE_CEILINGS: &[(&str, usize)] = &[
+        ("ironclaw_common", 3_393),
+        // 7_727 -> 7_748 (2026-08-05, #7157): +21 lines for the
+        // `ActivePreferenceTargetCodecs` port beside its sibling
+        // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
+        // no logic. Count read from this test's own failure message.
+        // 7_748 -> 7_752 (2026-08-08, web-app channel): +4 lines for the
+        // `VapidAuthorization` arm in the channel egress injection validator
+        // — schema vocabulary only; signing lives in ironclaw_host_runtime.
+        // 7_752 -> 7_758 (2026-08-09, notifications capability): +6 lines for the
+        // `ChannelDescriptor.notifications` field + its doc — a manifest capability
+        // declaration only; notification delivery gating lives in
+        // ironclaw_outbound (DeliveryTargetCapabilities) and product resolution.
+        // 7_758 -> 7_851 (2026-08-10, presence-shared-conversations rebased onto
+        // main): the `ChannelConversationContext` DTO + the
+        // `fetch_conversation_context` channel-adapter method (channel-history
+        // hydration) and the `presentation.can_reply_in_threads` reply-placement
+        // flag. Contract vocabulary only — the fetch impl lives in the slack
+        // package, the flag is consumed by the channel workflow. Count read from
+        // this test's failure on the rebased base.
+        // 7_851 -> 7_885 (2026-08-10, rich working indicator #7446): the
+        // `OutboundPart::React` variant plus the neutral `RunReaction` /
+        // `ReactionAction` enums for run-lifecycle reactions on the triggering
+        // message. Contract vocabulary only — vendor reaction rendering (Slack
+        // reactions.add/remove, Telegram setMessageReaction) lives in the channel
+        // packages and the reaction lifecycle in the delivery observer. Count
+        // read from this test's failure message. 7_885 -> 7_892 after merging
+        // #7076's Basic credential target declaration and validator vocabulary;
+        // composition and injection remain in ironclaw_host_runtime.
+        // 7_892 -> 8_157 (2026-08-11, unified channel model): the
+        // `IngressVerificationRecipe::AuthenticatedSession` trust class
+        // (recipe.rs), the `route_suffix` -> Option change with its
+        // trust-class<->mount validation and paired errors (channel.rs), the
+        // `ReplyTransport` declaration, and the §7b notification-setup
+        // adapter surface (`deliver_notification` default + the three setup
+        // methods, `NotificationSetupScope`/`Status`, payload/detail byte
+        // bounds). Declarations and shape validation only; dispatch lives in
+        // ironclaw_assistant and behavior behind each adapter. Count read
+        // from this test's failure on the merged branch.
+        // 8_157 -> 8_594 (2026-08-11, channel capability contract): the
+        // ingress/reply/delivery descriptor axes and transport vocabulary,
+        // three optional capability traits, complete inbound
+        // canonical complete-attachment/conversation-context DTOs, declarative
+        // ingress registration recipes, and host-owned delivery-registration
+        // view replace booleans, one eleven-method trait, and post-parse
+        // callbacks. Declarations and shape validation only; vendor I/O stays
+        // in packages and routing/persistence in extension_host/assistant.
+        // Count read from this test's own failure message.
+        // 8_594 -> 8_605 (2026-08-11, channel contract review): conformance
+        // now fails when fixtures claim an ingress challenge or delivery
+        // target-listing expectation without the corresponding capability
+        // half, and the live delivery boundary docs name
+        // `ChannelDelivery::deliver`. Test-contract validation and neutral
+        // API documentation only; execution remains outside contracts.
+        // 8_605 -> 8_771 (2026-08-11, channel boundary simplification): the
+        // canonical complete inbound attachment/context vocabulary, the
+        // narrower reply/delivery traits, and one private decoder for the
+        // immediately preceding v3 channel descriptor shape. Provider parsing,
+        // attachment fetch, persistence, and delivery behavior remain in their
+        // owning package/host/domain crates. Count read from this test's own
+        // failure message.
+        // 7_892 -> 7_947 on main (2026-08-11, #7185 provider-shipped memory
+        // guidance): the optional `[memory].guidance_doc` field on
+        // `MemoryDescriptor`, its doc comment, and two parse tests — a field
+        // name and no behavior.
+        // Union re-measured on the merged tree (2026-08-12): the branch's
+        // channel-contract vocabulary and main's memory-guidance field are
+        // disjoint. Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 8_772),
+        // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
+        // the growth is the `messaging` vocabulary — the StandardMessagingOp
+        // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
+        // constants, and the test-support conformance module. Declarations
+        // only; executable validation stays in ironclaw_host_runtime. Rationale
+        // reviewed in the PR body's architecture-audit section.
+        // Raised 18_570 -> 18_784 by #7233 after merging #6831: the canonical
+        // CapabilitySurfacePolicy and capability-id scope algebra are neutral
+        // host declarations; enforcement remains in host_runtime/loop_host.
+        // Raised 18_784 -> 18_799 by #7214: the user-sandbox backend rename
+        // preserves the legacy `tenant_sandbox` wire value, and the neutral
+        // sandbox transport now exposes graceful lifecycle release. This is
+        // contract vocabulary; execution and provider cleanup remain in the
+        // sandbox runtime lane.
+        // Raised 18_799 -> 18_832 by the web-app channel: the
+        // `RuntimeCredentialTarget::VapidAuthorization` injection kind and the
+        // `VapidCredentialMaterialV1` material schema (RFC 8292 vocabulary,
+        // declarations only); ES256 signing stays at the host egress
+        // credential chokepoint in ironclaw_host_runtime.
+        // 18_832 -> 18_922 (web-app review): `VapidCredentialMaterialV1` gained
+        // a redacting `Debug`, a `validate_shape` fallible shape check, and a
+        // dependency-free base64url decode helper — all declaration/validation
+        // on the type's own shape, no execution.
+        // 18_922 -> 18_974 (2026-08-10, presence-shared-conversations rebased onto
+        // main): the serde-defaulted `ProductTurnContext.channel_context` field +
+        // its `with_channel_context` builder carry hydrated channel context on the
+        // durable turn record. A DTO field only; the fetch and prompt framing live
+        // in the slack package and loop_host. Count read from failure.
+        // 18_974 -> 18_994 (#7076 takeover): the
+        // `RuntimeCredentialTarget::Basic` declaration, username validation,
+        // and wire-contract vocabulary; RFC 7617 composition remains in
+        // ironclaw_host_runtime.
+        // 18_994 -> 19_003 (2026-08-11, unified channel model): +9 lines of
+        // VAPID credential-target doc corrections referencing the renamed
+        // `ironclaw_web_app` domain crate. Comment-adjacent churn only.
+        // 18_994 -> 19_063 on main (2026-08-11, #7509 plus #7484's merged
+        // host-context contract): `ModelResultPreview` now redacts
+        // credential-keyed values inside nested and line-numbered JSON before
+        // marker masking can destroy the key/value relationship, plus the
+        // bounded context-window watermark DTO.
+        // Both sides then add #7525's typed
+        // `UnattendedQuestionEndingResponse` invalid-output reason and its
+        // sanitized user-facing summary. Classification and recovery remain
+        // in ironclaw_agent_loop; this crate owns only shared failure
+        // vocabulary. Union re-measured on the merged tree (2026-08-12);
+        // count read from this test's own failure message.
+        ("ironclaw_host_api", 19_026),
+        // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
+        // delivery-heuristic vocabulary (stored trigger delivery targets and
+        // their run-profile plumbing) left this crate with the two-lane
+        // delivery model. The final count includes 96 prompt-inspection lines
+        // and 3 model-accounting lines subsequently merged from main; #7157
+        // remains a net 229-line reduction against that main baseline.
+        // 13_949 -> 13_115 (2026-08-07, #7157 review round): the
+        // connected-channels line gained a byte budget so the runtime-context
+        // slice cannot exceed the 4 KiB prompt surface it is validated on (a
+        // worst case measured 4,391 bytes, which would end every run for that
+        // user), and `runtime_context.rs`'s 919-line inline `#[cfg(test)]`
+        // module was split verbatim into a `runtime_context/tests.rs` sibling
+        // — which `production_rust_files` excludes, unlike an inline module in
+        // a production file. Net effect is a smaller crate than before the
+        // fixes, so the ceiling ratchets DOWN rather than being raised. Count
+        // read from this test's own failure message.
+        // 13_115 -> 13_028 (2026-08-07, run-acts-as-invoker follow-up):
+        // `LoopRunContext::acting_user_id` (+16 lines) declares the one
+        // acting-identity ladder both the composition gate raise and the
+        // loop-host resume replay load key their scope-keyed stores by —
+        // hand-synced copies of it had already diverged once. Paid for by
+        // splitting `host/run_context.rs`'s 104-line inline `#[cfg(test)]`
+        // module into its `run_context/tests.rs` sibling, so the ceiling
+        // ratchets DOWN. Count read from this test's own failure message.
+        // 13_028 -> 13_094 (2026-08-08, merge with main): main's
+        // #7361/#7363 added +66 lines to `instruction_bundle.rs`, folded
+        // in when this branch merged main. Not growth from this PR; count
+        // read from this test's own failure message after the merge.
+        // 13_094 -> 13_107 (2026-08-08, run-acts-as-invoker review
+        // hardening): +13 lines for `LoopRunContext::acting_resource_scope`
+        // — the raise/resume scope recipe both gate-dance crates previously
+        // hand-synced now lives once on the contract type (its callers in
+        // composition and loop_host DELETED their copies). Reason recorded
+        // in the PR body; count read from this test's failure message.
+        // 13_107 -> 13_112 (2026-08-09, ephemeral-per-ping remodel): +5 lines
+        // reframing the `acting_user_id`/`acting_resource_scope` docs to the
+        // single "the run's user" model (owner-vs-actor divergence retired).
+        // Vocabulary/comment change only — the actor-first ladder itself is
+        // preserved (WebChat=actor, trigger=creator, system=fallback). Count
+        // read from this test's own failure message.
+        // 13_112 -> 13_172 (2026-08-10, #7247 truthful connection context):
+        // `PendingExtensionAuthState` (the per-caller "installed but not
+        // authenticated for this user" DTO) + its bounded, sanitized render
+        // arm beside the existing connected-channels line. Declaration and
+        // rendering vocabulary only — the per-caller verdict computation
+        // lives in ironclaw_assistant (`caller_extension_auth`), the ports in
+        // composition. Count read from this test's own failure message.
+        // 13_172 -> 13_306 (2026-08-10, #7294 recalled-memory framing,
+        // batch-merged with #7247): the instruction bundle's recall-framing
+        // message (`memory_recall_framing.md` include + its render wiring)
+        // lands in the same crate as #7247's raise; each fix measured the
+        // ceiling alone against main, so the batch branch re-measures the
+        // union — the #7147 parallel-baseline lesson applied. Framing/render
+        // vocabulary only — scope filtering stays in the memory providers
+        // and host runtime. Count read from this test's own failure message.
+        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // one defaulted port capability declares when ordered batch middleware
+        // must retain batch entry. Scheduling and hook behavior remain in their
+        // owning loop crates. Count read from this test's own failure message.
+        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // one bounded truncation-watermark DTO carried across the existing
+        // context and prompt contracts. Window selection and task-pinning
+        // behavior remain in ironclaw_threads and ironclaw_loop_host.
+        // 13_326 -> 13_334 (2026-08-11, #7484 eviction compaction): typed
+        // tool-result compaction metadata plus window-eviction initiator/mode
+        // variants. Cut-point policy and execution remain in agent_loop and
+        // loop_host. Count read from this test's own failure message.
+        // 13_334 -> 13_345 (2026-08-12, #7416 fail-closed batch ordering):
+        // the batch-ordering port contract now defaults to ordered entry and
+        // documents the explicit opt-in required for concurrent singles.
+        // Scheduling and wrapper behavior remain in their owning loop crates.
+        // 13_345 -> 13_524 (2026-08-12, #7509 prompt recovery hardening):
+        // production prompt validation checks structural limits and control
+        // characters only; decoded Basic-auth samples remain test-only. Count
+        // read from this test's own failure message after merging #7416.
+        ("ironclaw_loop_contracts", 13_524),
+        // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
+        // is bounded, output-only read-view descriptors. Capture, retention,
+        // authorization, and transport behavior remain in their owning
+        // non-contract crates.
+        // 15_758 -> 15_715 (2026-08-08, #7373 merge re-capture): the crate came
+        // back 43 lines lighter from main-side work, so the pin ratchets DOWN
+        // with it. Count read from this test's own failure message.
+        // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
+        // growth is the three admin scrape request DTOs and the wire
+        // `RebornListThreadsResponse` reuse — declarations only; authorization,
+        // audit, and artifact building stay in ironclaw_assistant. Folded with
+        // the ratchet-down above on the second #7373 merge (2026-08-08); the
+        // value below is the merged tree's own report.
+        // Raised 15_800 -> 15_840 by the web-app channel: the browser
+        // enrollment wire DTO family (`RebornWebApp*` status/subscribe/
+        // unsubscribe shapes) — declarations only; validation and storage stay
+        // in ironclaw_web_app and ironclaw_assistant.
+        // 15_840 -> 15_879: the web_app descriptor module (the status view +
+        // subscribe/unsubscribe command descriptors) joined per the
+        // transport/product boundary — new feature descriptors are declared
+        // here, not added to the frozen webui→assistant residue.
+        // 15_879 -> 15_885 (review): the `endpoint_digest` field + its doc on
+        // `RebornWebAppSubscriptionInfo` for account-scoped enrollment
+        // correlation.
+        // 15_885 -> 15_904 (2026-08-10, presence-shared-conversations rebased onto
+        // main): per-event source/reply-target binding refs on `ResolvedBinding`
+        // (a shared route resolves each inbound event onto its OWN ephemeral
+        // thread, carried through the wire contract), net of the ephemeral-per-ping
+        // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
+        // retired). Declaration only. Count read from failure.
+        // 15_909 -> 16_119 (2026-08-11, unified channel model): the inbound
+        // trusted-context request (`requested_model` included), the
+        // `SessionChannelDirectory` port
+        // (session_ingress), the reply-mode + notifications-require-setup
+        // delivery-port defaults, and the generic notification-setup
+        // descriptors + `RebornNotificationSetup*` wire family that replaced
+        // the retired per-channel enrollment module. Declarations only —
+        // admission, dispatch, and storage stay in their owning crates.
+        // Raised by #7419 (tenant model allowlist): the additional growth is
+        // limited to the policy persistence port, user-safe DTOs, and
+        // transport-consumed descriptors; validation, storage, and request
+        // enforcement stay in owning crates. The merged count was measured by
+        // this gate after resolving the two disjoint contract changes.
+        // 16_135 -> 16_155 (2026-08-12, channel final-reply evidence): one
+        // default-false `finalized` bit on projection text distinguishes a
+        // durable transcript row from volatile live text. The contract only
+        // names that fact; projection, delivery, and WebUI behavior remain in
+        // their owning product crates. Count read from this gate.
+        // 16_155 -> 16_167 (2026-08-12, review fixes): +12 lines of
+        // vocabulary, no logic — the restored `BUILTIN_SESSION_SURFACE_ID`
+        // persisted-coordinate constant with its doc (the OpenAI-compat
+        // unparameterized session lane), and `#[serde(rename_all)]` on the
+        // two ledger-persisted inbound enums. Count read from this gate.
+        ("ironclaw_product_contracts", 16_167),
+        // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
+        // measured count — this row still carried the +400 seed pad the
+        // 2026-08-07 re-pin removed from its siblings.
+        ("ironclaw_prompt_envelope", 432),
+    ];
+
+    let root = workspace_root();
+    let mut over = Vec::new();
+    let mut banked = Vec::new();
+    for (crate_name, ceiling) in SIZE_CEILINGS {
+        let src = crate_dir(&root, crate_name).join("src");
+        let files = production_rust_files(&src);
+        assert!(
+            !files.is_empty(),
+            "no production sources found under {} — this ratchet would pass having measured \
+             nothing",
+            src.display()
+        );
+        let lines: usize = files
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                    .lines()
+                    .count()
+            })
+            .sum();
+
+        match contracts_ceiling_verdict(lines, *ceiling) {
+            CeilingVerdict::Over => over.push(format!(
+                "{crate_name}: {lines} production lines over a ceiling of {ceiling} \
+                 (+{GROWTH_TOLERANCE} working slack -> effective {})",
+                ceiling + GROWTH_TOLERANCE
+            )),
+            CeilingVerdict::Banked => banked.push(format!(
+                "{crate_name}: {lines} production lines against a ceiling of {ceiling} \
+                 ({} of slack, window is {TOLERANCE})",
+                ceiling - lines
+            )),
+            CeilingVerdict::Within => {}
+        }
+    }
+
+    assert!(
+        over.is_empty(),
+        "a contracts crate grew past its §11.2.3 size ceiling:\n{}\n\nA contracts crate holds \
+         traits and DTOs. Growing one is how logic reaches the tier the dependency allowlist \
+         above already protects — the allowlist cannot see a crate that imports nothing and \
+         implements everything. Either move the growth to the crate that owns the behavior, or \
+         raise the ceiling HERE with the reason in the PR body, which is what \"raised only by \
+         explicit review\" means.",
+        over.join("\n")
+    );
+    assert!(
+        banked.is_empty(),
+        "a contracts crate is now far enough under its ceiling that the ceiling constrains \
+         nothing:\n{}\n\nRe-capture it in the PR that shrank the crate. A ratchet left above \
+         what it measures is an unclaimed budget for the next unreviewed growth — the specific \
+         way `composition-budget.toml`'s share ceiling went inert with 17.4pp of slack (#7151).",
+        banked.join("\n")
+    );
+}
+
+/// Regression pin for the 2026-08-07 zero-slack repair (gate audit §3.2):
+/// before it, the growth check was a bare `lines > ceiling` — `TOLERANCE`
+/// was consulted only for the banked-slack direction — so every "set to
+/// current" pin was a hard cap at the observed count, and one line landed on
+/// main in any contracts crate redded every open branch at its next fold
+/// (measured on #7157: four loop_contracts re-captures, roughly one per
+/// fold). This fixture drives the REAL comparison the gate runs at all four
+/// window edges so the asymmetry cannot silently return.
+#[test]
+fn contracts_size_ceiling_window_edges_hold() {
+    const CEILING: usize = 10_000;
+    // Upward jaw: the last line of working slack passes; one more is growth
+    // that demands a reviewed re-pin.
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING + GROWTH_TOLERANCE, CEILING),
+        CeilingVerdict::Within
+    );
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING + GROWTH_TOLERANCE + 1, CEILING),
+        CeilingVerdict::Over
+    );
+    // Downward jaw: the last line of the banked window passes; one more is
+    // slack the ceiling must re-capture.
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING - TOLERANCE, CEILING),
+        CeilingVerdict::Within
+    );
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING - TOLERANCE - 1, CEILING),
+        CeilingVerdict::Banked
+    );
+    // The pin itself sits inside the window (the audit sabotage log's ±1
+    // probes, as arithmetic).
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING, CEILING),
+        CeilingVerdict::Within
+    );
+    // A scan that measured nothing against a real pin reads as banked slack,
+    // never as a silent pass — the suite's fail-closed doctrine.
+    assert_eq!(
+        contracts_ceiling_verdict(0, CEILING),
+        CeilingVerdict::Banked
+    );
 }
 
 /// PROPOSAL §11.2.3, external half: a contracts crate never acquires a
@@ -878,6 +1395,182 @@ fn retired_host_trusted_ingress_token_crate_stays_removed() {
     );
 }
 
+/// The module that received the dissolved `ironclaw_first_party_extension_ports`
+/// crate, resolved through the crate inventory like every other path here.
+const DISSOLVED_PORTS_MODULE: &str = "crates/ironclaw_loop_host/src/skill_activation";
+
+/// The dissolved crate's entire workspace dependency set, frozen as an
+/// **equality** (CHECKLIST WS8, 2026-08-05).
+///
+/// `ironclaw_first_party_extension_ports` declared exactly these five workspace
+/// dependencies plus `ironclaw_loop_host` itself, and a `BoundaryRule` enforced
+/// the complement. The crate is gone — its contents live in
+/// `ironclaw_loop_host` — and a crate-granular rule can no longer say anything
+/// useful about them, because `loop_host` legitimately depends on nine of the
+/// crates that rule forbade (`approvals`, `capabilities`, `host_runtime`,
+/// `llm`, `memory`, `outbound`, `processes`, `resources`, `safety`). Dissolving
+/// the crate without this test would have widened the moved code's legal reach
+/// by those nine in silence: the classic "removing a redundant layer un-masks
+/// behavior" trade, where the layer was backstopping an import restriction.
+///
+/// An **equality**, not a denylist, because the denylist form only catches the
+/// crates someone thought to enumerate. Widening this set is allowed and is
+/// exactly the reviewable moment: it means the skill-activation adapters have
+/// grown a new dependency the dissolved crate never had.
+const DISSOLVED_PORTS_MODULE_REACH: &[&str] = &[
+    "ironclaw_filesystem",
+    "ironclaw_host_api",
+    "ironclaw_loop_contracts",
+    "ironclaw_skills",
+    "ironclaw_turns",
+];
+
+/// Every `ironclaw_*` crate named in code (not comments or string literals)
+/// under `dir`, recursively.
+fn workspace_crates_named_in_code(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    named: &mut std::collections::BTreeMap<String, String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            workspace_crates_named_in_code(&path, root, named);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        // Fatal on unreadable: a scanner that skips a file it cannot read
+        // reports an empty reach and passes while measuring nothing (WS10).
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let code = strip_comments_and_strings(&source);
+        let chars: Vec<char> = code.chars().collect();
+        let mut index = 0usize;
+        while index < chars.len() {
+            if !(chars[index] == 'i' && code_word_starts_at(&chars, index, "ironclaw_")) {
+                index += 1;
+                continue;
+            }
+            let mut end = index + "ironclaw_".len();
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[index..end].iter().collect();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            named
+                .entry(name)
+                .or_insert_with(|| relative.display().to_string());
+            index = end;
+        }
+    }
+}
+
+/// `word` begins at `index` and is not preceded by an identifier character.
+fn code_word_starts_at(chars: &[char], index: usize, word: &str) -> bool {
+    if index > 0 {
+        let previous = chars[index - 1];
+        if previous.is_ascii_alphanumeric() || previous == '_' {
+            return false;
+        }
+    }
+    chars[index..]
+        .iter()
+        .zip(word.chars())
+        .filter(|(a, b)| **a == *b)
+        .count()
+        == word.chars().count()
+}
+
+/// ✎ WS8, 2026-08-05 — the module-granular successor to the deleted
+/// `BoundaryRule { crate_name: "ironclaw_first_party_extension_ports", .. }`.
+#[test]
+fn dissolved_ports_module_keeps_its_crate_boundary() {
+    let root = workspace_root();
+    let dir = crate_path(&root, DISSOLVED_PORTS_MODULE);
+    assert!(
+        dir.is_dir(),
+        "{DISSOLVED_PORTS_MODULE} does not resolve — the skill-activation module moved again \
+         and this gate now measures nothing. Repoint it rather than deleting it."
+    );
+
+    let mut named = std::collections::BTreeMap::new();
+    workspace_crates_named_in_code(&dir, &root, &mut named);
+    // `ironclaw_loop_host` is the crate the module now lives in; it names
+    // itself through `crate::`, so a literal self-reference would be a
+    // leftover from the move.
+    let permitted: std::collections::BTreeSet<&str> =
+        DISSOLVED_PORTS_MODULE_REACH.iter().copied().collect();
+
+    let unexpected: Vec<String> = named
+        .iter()
+        .filter(|(name, _)| !permitted.contains(name.as_str()))
+        .map(|(name, first)| format!("    {name} (first seen in {first})"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the skill-activation module reaches crates the dissolved \
+         `ironclaw_first_party_extension_ports` never depended on. Its old crate boundary is \
+         now enforced here, at module granularity, because `ironclaw_loop_host` legitimately \
+         depends on nine crates that boundary forbade — so folding the module in widened its \
+         *legal* reach and only this equality keeps its *actual* reach honest. If the new \
+         dependency is intended, add it to DISSOLVED_PORTS_MODULE_REACH in the same change \
+         with the reason.\n{}",
+        unexpected.join("\n")
+    );
+
+    let missing: Vec<&&str> = DISSOLVED_PORTS_MODULE_REACH
+        .iter()
+        .filter(|name| !named.contains_key(**name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these crates are in DISSOLVED_PORTS_MODULE_REACH but the skill-activation module no \
+         longer names any of them: {missing:?}. A stale allowance is a hole waiting to be \
+         reused — drop it in the change that removed the dependency."
+    );
+}
+
+/// The scanner must see a rogue import and must not be fooled by prose. Without
+/// this, the equality above could pass on an empty measurement.
+#[test]
+fn dissolved_ports_module_scanner_reads_code_not_comments() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-dissolved-ports-scan-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/example/src/skill_activation");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    std::fs::write(
+        src.join("prose.rs"),
+        "//! Mentions ironclaw_host_runtime in prose only.\n\
+         // and ironclaw_approvals in a line comment\n\
+         fn f() { let _ = \"ironclaw_secrets\"; }\n",
+    )
+    .expect("prose fixture must be written");
+    std::fs::write(
+        src.join("rogue.rs"),
+        "use ironclaw_processes::ProcessId;\nuse my_ironclaw_turns::Nope;\n",
+    )
+    .expect("rogue fixture must be written");
+
+    let mut named = std::collections::BTreeMap::new();
+    workspace_crates_named_in_code(&src, &root, &mut named);
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    let found: Vec<&String> = named.keys().collect();
+    assert_eq!(
+        found,
+        vec!["ironclaw_processes"],
+        "the scanner must report the real import, ignore comment/string mentions, and not \
+         match inside a longer identifier: {named:?}"
+    );
+}
+
 #[test]
 fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     let root = workspace_root();
@@ -905,7 +1598,12 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     ];
     let untrusted_src_roots = [
         "crates/ironclaw_capabilities/src",
-        "crates/ironclaw_first_party_extension_ports/src",
+        // ✎ WS8, 2026-08-05: was `crates/ironclaw_first_party_extension_ports/src`.
+        // That crate dissolved into `ironclaw_loop_host`, so this narrows to the
+        // module that received it rather than dropping the tree out of the guard
+        // (the rest of `loop_host` is not an ingress path and is not covered
+        // here — widening it to the whole crate would be a different claim).
+        "crates/ironclaw_loop_host/src/skill_activation",
         "crates/extensions/ironclaw_extension_support/src",
         "crates/ironclaw_extension_contracts/src",
         // WS2.4: the manager holds the extension-management capability
@@ -1043,8 +1741,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_webui",
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
+            // The web-app channel package (adapter/codec/target provider) and
+            // its protocol domain crate: the binary constructs the adapter
+            // and package-owned initializer, while composition consumes only
+            // their neutral binding contracts.
+            "ironclaw_web_app",
+            "ironclaw_web_app_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1444,7 +2148,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
 /// (`ironclaw_turn_runner::driver_registry::DriverRegistry`, etc.). The wall was
 /// pure speculative public API.
 ///
-/// This test pins the cleanup: `crates/ironclaw_turn_runner/src/lib.rs` must be a
+/// This test pins the cleanup: `crates/loop/ironclaw_turn_runner/src/lib.rs` must be a
 /// directory of `pub mod` declarations and nothing else. A future contributor
 /// who tries to re-add the convenience `pub use` block fails this test
 /// alongside the boundary rule that forbids any non-composition crate from
@@ -2615,7 +3319,7 @@ fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
         "shared WASM sandbox core should stay as a module inside ironclaw_wasm after W2.3"
     );
     let guardrails =
-        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/CLAUDE.md"))
+        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/AGENTS.md"))
             .expect("ironclaw_wasm guardrails must be readable");
     assert!(
         guardrails.contains("wasm_sandbox_core")
@@ -2813,7 +3517,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     //
     // KNOWN GAP, deliberately not closed here: the trailing comment below
     // describes a WebChat v2 route-surface entry that is absent, so the rule
-    // does not cover `crates/ironclaw_webui/src` at all. Adding it turns this
+    // does not cover `crates/product/ironclaw_webui/src` at all. Adding it turns this
     // gate red (that tree carries `axum::serve` and `TcpListener::bind` hits),
     // which is an architecture decision — either webui owns server lifecycle it
     // should not, or the rule owes it an `exempt`. Not a gate repoint; recorded
@@ -3502,45 +4206,17 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_wasm",
             ],
         },
-        BoundaryRule {
-            // First-party extension ports are adapter glue above concrete
-            // userland implementations. They may depend on loop/turn-facing
-            // contracts, but must not reach into host runtime authority or
-            // product composition.
-            crate_name: "ironclaw_first_party_extension_ports",
-            forbidden: vec![
-                "ironclaw_legacy",
-                "ironclaw_approvals",
-                "ironclaw_authorization",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_engine",
-                "ironclaw_event_log",
-                "ironclaw_extension_registry",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_llm",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_assistant",
-                "ironclaw_assistant",
-                "ironclaw_turn_runner",
-                "ironclaw_composition",
-                "ironclaw_config",
-                "ironclaw_event_store",
-                "ironclaw_resources",
-                "ironclaw_approvals",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_sandbox",
-                "ironclaw_secrets",
-                "ironclaw_tui",
-                "ironclaw_wasm",
-            ],
-        },
+        // ✎ WS8, 2026-08-05 — the `ironclaw_first_party_extension_ports` rule
+        // that sat here is gone with the crate. Its replacement is
+        // `dissolved_ports_module_keeps_its_crate_boundary` below, which pins
+        // the same reach at module granularity. Deleting it outright would
+        // have widened the moved code's legal imports by nine crates in
+        // silence; leaving it would have left an inert rule, since a rule
+        // whose crate has no directory is skipped by
+        // `reborn_boundary_rules_active_crates_are_workspace_members`.
+        // `ironclaw_first_party_extension_ports` stays in every *forbidden*
+        // list that named it — those are reintroduction pins now, and the
+        // crate must not come back.
         BoundaryRule {
             crate_name: "ironclaw_config",
             forbidden: vec![
@@ -3931,7 +4607,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_host_ingress",
                 "ironclaw_operator",
-                // The CLI, by its PACKAGE name. `crates/ironclaw_cli/`
+                // The CLI, by its PACKAGE name. `crates/app/ironclaw_cli/`
                 // is only the directory; `forbidden` is matched against
                 // `cargo metadata` package names, so the directory spelling
                 // is an entry that can never fire. Pinned by
@@ -4571,7 +5247,24 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     ]
 }
 
-const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
+/// The closed layer set — PROPOSAL §8.1 rule 1's seven-layer ladder, and
+/// nothing else.
+///
+/// ✎ **The vestigial `legacy` variant was deleted here 2026-08-05** (PROPOSAL
+/// §11.2.11 and §11.3, CHECKLIST WS10). It described the v1 package tree, which
+/// no longer exists: measured through `cargo metadata` across all 66 workspace
+/// packages, **zero** declared `layer = "legacy"`, so both rules keyed on it
+/// (`layer_allows_dependency`'s permissive `"legacy" => true` arm and the
+/// second dependency pass that rejected a normal dep on a legacy-layer crate)
+/// were unreachable — a `match` arm and a loop that could not fire.
+///
+/// ⚠ **Not to be confused with the ~60 `ironclaw_legacy` entries in
+/// `boundary_rules()`.** Those name a retired v1 *crate* and are live
+/// reintroduction pins, deliberately kept and deliberately matching nothing
+/// (`boundary_rule_names_are_package_names_not_crate_directories` documents
+/// exactly that distinction). Deleting a dead *layer* variant does not touch
+/// them.
+const IRONCLAW_CRATE_LAYERS: [&str; 7] = [
     "contracts",
     "substrates",
     "runtimes",
@@ -4579,7 +5272,6 @@ const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
     "loops",
     "products",
     "app",
-    "legacy",
 ];
 
 struct LayerMatrixException {
@@ -4600,7 +5292,7 @@ struct LayerMatrixException {
 ///
 /// ```text
 /// rg -c "^    LayerMatrixException \{" \
-///   crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
+///   crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs
 /// ```
 ///
 /// The target is the empty list (PROPOSAL §11.2.2, CHECKLIST WS12). This
@@ -4969,10 +5661,9 @@ fn layer_allows_dependency(crate_layer: &str, dependency_layer: &str) -> bool {
             dependency_layer,
             "contracts" | "substrates" | "runtimes" | "kernel" | "loops" | "products" | "app"
         ),
-        // The v1 package/crates may still depend on Reborn while parity work
-        // is in flight, but Reborn layers are intentionally not allowed to
-        // depend back on legacy.
-        "legacy" => true,
+        // No `legacy` arm: the variant is gone from `IRONCLAW_CRATE_LAYERS`, so
+        // a manifest declaring it now fails the unknown-layer assertion before
+        // this function is ever reached (§11.3, 2026-08-05).
         _ => false,
     }
 }

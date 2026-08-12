@@ -1,3 +1,4 @@
+// arch-exempt: large_file, missing dedicated host API credential-contract fixture module; Basic credential wire-contract coverage stays with the existing host API credential fixtures, plan #4088
 use std::path::PathBuf;
 
 use ironclaw_host_api::{
@@ -30,6 +31,7 @@ use ironclaw_host_api::{
         ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
     },
     ingress::{IngressPolicy, IngressRouteDescriptor},
+    messaging::StandardMessagingOp,
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
     resource::{
@@ -42,6 +44,31 @@ use ironclaw_host_api::{
 };
 use rust_decimal_macros::dec;
 use serde_json::json;
+
+#[test]
+fn search_messages_accepts_portable_sort_modes() {
+    let contract = StandardMessagingOp::SearchMessages
+        .contract()
+        .expect("search_messages has a contract");
+    let schema: serde_json::Value =
+        serde_json::from_str(contract.input_schema).expect("schema parses");
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .expect("schema compiles");
+
+    for sort in ["relevance", "timestamp"] {
+        assert!(
+            validator.is_valid(&json!({"query": "from:me", "sort": sort})),
+            "search_messages must accept the canonical {sort} sort mode",
+        );
+    }
+    assert!(
+        validator.is_valid(&json!({"query": "from:me"})),
+        "search_messages must preserve provider-default ordering when sort is omitted",
+    );
+    assert!(!validator.is_valid(&json!({"query": "from:me", "sort": "newest"})));
+}
 
 #[test]
 fn dispatch_input_issue_code_wire_strings_cover_all_variants() {
@@ -116,6 +143,23 @@ fn runtime_credential_targets_validate_declaration_shape() {
             "{invalid:?} should be rejected"
         );
     }
+    assert!(
+        RuntimeCredentialTarget::Basic {
+            username: "api-user".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", " ", "user:name", "user\nname", "user\0name"] {
+        assert!(
+            RuntimeCredentialTarget::Basic {
+                username: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
 }
 
 #[test]
@@ -178,6 +222,23 @@ fn runtime_credential_target_serializes_path_placeholder() {
     let wire = json!({
         "type": "path_placeholder",
         "placeholder": "__credential__"
+    });
+
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
+    );
+}
+
+#[test]
+fn runtime_basic_credential_target_round_trips_on_the_wire() {
+    let target = RuntimeCredentialTarget::Basic {
+        username: "api-user".to_string(),
+    };
+    let wire = json!({
+        "type": "basic",
+        "username": "api-user"
     });
 
     assert_eq!(serde_json::to_value(&target).unwrap(), wire);
@@ -1574,12 +1635,37 @@ fn capability_profile_schema_refs_are_relative_repository_paths() {
         "schemas/memory/with:colon.json",
         "c:/win/schema.json",
         "schemas/memory/contains space.json",
+        // The host-owned namespace is never accepted from the generic string
+        // constructor, including otherwise valid canonical refs.
+        "standard:messaging/send_message.input.v1",
+        "standard:messaging/edit_message.output.v1",
+        "evil:messaging/x.json",
+        "standard:",
+        "standard:messaging/../../x",
+        "standard:messaging/a:b.json",
+        "standard:messaging/",
     ] {
         assert!(
             CapabilityProfileSchemaRef::new(invalid).is_err(),
             "{invalid:?} should be rejected"
         );
     }
+
+    assert_eq!(
+        CapabilityProfileSchemaRef::standard_messaging_input(
+            ironclaw_host_api::messaging::StandardMessagingOp::SendMessage,
+        )
+        .expect("typed standard input ref")
+        .as_str(),
+        "standard:messaging/send_message.input.v1"
+    );
+    assert!(
+        CapabilityProfileSchemaRef::standard_messaging_output(
+            ironclaw_host_api::messaging::StandardMessagingOp::ForwardMessage,
+        )
+        .is_err(),
+        "reserved operations have no constructible canonical schema ref"
+    );
 }
 
 fn sample_context_with_agent(agent: Option<&str>) -> ExecutionContext {

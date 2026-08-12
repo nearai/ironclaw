@@ -843,7 +843,9 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
         .await
         .unwrap();
     let mut conflicting_provider_call = provider_call_reference();
-    conflicting_provider_call.provider_call_id = "call_2".to_string();
+    conflicting_provider_call.provider_tool_name =
+        ProviderToolName::new("demo__other").expect("provider tool name");
+    conflicting_provider_call.capability_id = CapabilityId::new("demo.other").unwrap();
 
     let error = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -859,6 +861,107 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
         .expect_err("conflicting provider metadata rejected");
 
     assert!(error.to_string().contains("provider metadata conflicts"));
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_same_result_ref() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-shared-continuation");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-shared-continuation").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let first_call = provider_call_reference();
+    let mut second_call = provider_call_reference();
+    second_call.provider_call_id = "call_2".to_string();
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page").unwrap(),
+            provider_call: Some(first_call.clone()),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page replay").unwrap(),
+            provider_call: Some(first_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("second page").unwrap(),
+            provider_call: Some(second_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate.message_id, first.message_id);
+    assert_ne!(second.message_id, first.message_id);
+    let updated = service
+        .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            provider_call_id: Some("call_1".to_string()),
+            safe_summary: ToolResultSafeSummary::new("first page settled").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.message_id, first.message_id);
+    assert_ne!(updated.message_id, second.message_id);
+    assert_eq!(
+        first
+            .tool_result_provider_call
+            .as_ref()
+            .expect("first provider call persists")
+            .provider_call_id,
+        "call_1"
+    );
+    assert_eq!(
+        second
+            .tool_result_provider_call
+            .as_ref()
+            .expect("second provider call persists")
+            .provider_call_id,
+        "call_2"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    let result_messages = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::ToolResultReference)
+        .collect::<Vec<_>>();
+    assert_eq!(result_messages.len(), 2);
 }
 
 #[tokio::test]
@@ -2162,6 +2265,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
             result_ref: "result:model-observation-tool".into(),
+            provider_call_id: None,
             safe_summary: ToolResultSafeSummary::new("tool failed after child completion").unwrap(),
         })
         .await

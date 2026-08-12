@@ -12,6 +12,36 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+// ---------------------------------------------------------------------------
+// `#[cfg(test)]` removal — TWO scanners, deliberately, because the callers ask
+// two different questions (CHECKLIST WS10, the scanner-consolidation row).
+//
+// The row that ordered this consolidation described "one `strip_cfg_test_blocks`"
+// maintained in four copies. Measured on this tree the copies are **six**
+// spellings in **two semantic families**, and collapsing the families onto one
+// body would silently change two gates' verdicts:
+//
+//   * [`strip_cfg_test_blocks`] — the *byte-scanning* family (four byte-identical
+//     copies: the two port-inversion gates, `reborn_runner_sheds`,
+//     `reborn_transport_product_boundary`, plus `reborn_registration_pipeline_
+//     boundary`'s `strip_cfg_test`, which was the same body missing one guard).
+//     It finds the marker ANYWHERE and brace-balances, so it is only sound on
+//     source whose comments and string literals are already blanked. Its callers
+//     all compose it as `strip_cfg_test_blocks(&strip_comments_and_strings(src))`.
+//
+//   * [`strip_line_anchored_cfg_test_items`] — the *line-anchored* family (two copies:
+//     `reborn_extension_specificity`, `reborn_manifest_reparse_gate`). Its
+//     callers scan **raw** source on purpose — the specificity gate treats a
+//     vendor name in a comment as a violation, and the reparse gate filters
+//     comment lines itself afterwards — so they cannot pre-strip. Feeding raw
+//     source to the byte-scanning family would let a `#[cfg(test)]` written
+//     inside a doc comment or a string literal swallow real production code:
+//     the fail-OPEN direction, and the one this whole directory exists to stop.
+//
+// Two names, one implementation each, and the difference is documented rather
+// than discovered again by the next reader.
+// ---------------------------------------------------------------------------
+
 /// One matched definition: where it was found and whether the definition line
 /// sits under a `#[cfg(...)]` attribute (mutually exclusive compile branches —
 /// e.g. the durable/no-durable alias pairs in composition's `factory.rs` — are
@@ -908,6 +938,211 @@ fn all_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Remove `#[cfg(test)]`-gated items by brace matching. Only the *production*
+/// edge is an architectural fact: a test double may implement a product trait
+/// through the crate's dev-dependency without the shipped artifact depending on
+/// product.
+///
+/// **Callers must strip comments and string literals first.** This walk finds
+/// the block by counting raw `{`/`}` bytes, so a brace inside a doc comment or a
+/// string literal in a gated block desynchronizes the depth and either leaks a
+/// test-only `impl` into the production set or swallows the production code that
+/// follows. Every caller composes it as
+/// `strip_cfg_test_blocks(&strip_comments_and_strings(source))`, and
+/// `reborn_ratchet_support_scanners.rs` pins that ordering hazard with a
+/// fixture. For a caller that deliberately scans **raw** source, use
+/// [`strip_line_anchored_cfg_test_items`] instead.
+///
+/// `#[cfg(feature = "test-support")]` items are deliberately **not** stripped:
+/// that feature compiles into a real build (CI's `--all-features` lanes enable
+/// it), so an `impl` behind it is a genuine normal-dependency edge. Only
+/// `#[cfg(test)]` is invisible to a shipped artifact.
+///
+/// The `;`-before-`{` guard is what makes a bodiless gated item
+/// (`#[cfg(test)] mod tests;`, `#[cfg(test)] use …;`) end at its own semicolon
+/// instead of brace-balancing from the *next* item's block and eating it.
+/// `reborn_registration_pipeline_boundary.rs`'s copy shipped without that guard;
+/// adopting this body restores it, which can only ever KEEP more production code
+/// (the fail-closed direction).
+#[allow(dead_code)]
+pub fn strip_cfg_test_blocks(source: &str) -> String {
+    const MARKER: &str = "#[cfg(test)]";
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find(MARKER) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + MARKER.len()..];
+        let Some(open) = after.find('{') else {
+            // A `#[cfg(test)] use …;` line: drop through the statement end.
+            match after.find(';') {
+                Some(semi) => {
+                    rest = &after[semi + 1..];
+                    continue;
+                }
+                None => return out,
+            }
+        };
+        // An attribute followed by a `;` before any `{` is a gated statement.
+        if let Some(semi) = after.find(';')
+            && semi < open
+        {
+            rest = &after[semi + 1..];
+            continue;
+        }
+        let bytes = after.as_bytes();
+        let mut depth = 0usize;
+        let mut idx = open;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            return out;
+        }
+        rest = &after[idx + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Remove `#[cfg(test)]`-gated items from **raw** source, anchoring on the
+/// attribute being the first token of its line.
+///
+/// The counterpart to [`strip_cfg_test_blocks`] for the two gates that must read
+/// comments and string literals rather than blank them: `reborn_extension_
+/// specificity` (a vendor name in a comment IS a specificity violation) and
+/// `reborn_manifest_reparse_gate` (which filters comment lines itself, after
+/// this call). Anchoring at line start is what keeps a `#[cfg(test)]` written
+/// inside a doc comment or a string literal from stripping production code —
+/// the byte-scanning family has no way to tell those apart without a
+/// pre-stripped input.
+///
+/// Skips the attribute run, then the annotated item: a braced item ends when the
+/// brace depth returns to zero, a bodiless one (`mod tests;`) at its semicolon.
+#[allow(dead_code)]
+pub fn strip_line_anchored_cfg_test_items(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if !line.trim_start().starts_with("#[cfg(test)]") {
+            kept.push_str(line);
+            kept.push('\n');
+            continue;
+        }
+        // Skip attribute lines, then the annotated item.
+        let mut depth: i64 = 0;
+        let mut opened = false;
+        for skipped in lines.by_ref() {
+            let trimmed = skipped.trim_start();
+            if !opened && trimmed.starts_with("#[") {
+                continue;
+            }
+            depth += skipped.matches('{').count() as i64;
+            depth -= skipped.matches('}').count() as i64;
+            if !opened {
+                if skipped.contains('{') {
+                    opened = true;
+                } else if trimmed.ends_with(';') {
+                    // `mod tests;` — single-line item, nothing else to skip.
+                    break;
+                }
+            }
+            if opened && depth <= 0 {
+                break;
+            }
+        }
+    }
+    kept
+}
+
+/// Whether `ident` is a plain Rust identifier (ASCII, no path separators, no
+/// generics). Used to reject the fragments a substring-oriented scan produces
+/// when it reads a shape it does not understand.
+#[allow(dead_code)]
+pub fn is_rust_identifier(ident: &str) -> bool {
+    let mut chars = ident.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Byte index of the `>` that closes the `<` at index 0, counting nesting.
+/// `None` when the brackets never balance (a truncated slice), which the caller
+/// treats as "not an impl header I can read" rather than guessing.
+#[allow(dead_code)]
+pub fn balanced_angle_close(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            // A `->` inside a bound (`impl<F: Fn(&str) -> bool>`) is a return
+            // arrow, not a closing bracket. `-` never opens one, so a `>`
+            // preceded by `-` is skipped.
+            '>' if index > 0 && bytes[index - 1] == b'-' => {}
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Trait names appearing as the *implemented* trait of an `impl … for …` item,
+/// with any leading path qualifier and generic arguments dropped
+/// (`impl ironclaw_assistant::Foo<T> for Bar` → `Foo`). Inherent impls
+/// (`impl Bar {`) have no `for` and never match.
+///
+/// Composes the two strippers in the only sound order — comments and strings
+/// first, then `#[cfg(test)]` — so callers cannot get it wrong.
+#[allow(dead_code)]
+pub fn implemented_trait_names(source: &str) -> BTreeSet<String> {
+    let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(source));
+    let mut names = BTreeSet::new();
+    for segment in cleaned.split("impl").skip(1) {
+        let Some(head) = segment.split_once(" for ") else {
+            continue;
+        };
+        let mut candidate = head.0.trim();
+        // Drop an `<'a, T>` generic-parameter list that binds the impl itself.
+        // The close must be found by *balancing*, not by the first `>`: a bound
+        // may itself be generic (`impl<T: Iterator<Item = X>> Port for Host<T>`),
+        // and taking the first `>` would leave `> Port` — not an identifier, so
+        // the impl would be skipped and the gate would enforce nothing for it.
+        if candidate.starts_with('<') {
+            let Some(close) = balanced_angle_close(candidate) else {
+                continue;
+            };
+            candidate = candidate[close + 1..].trim();
+        }
+        // Drop generic arguments on the trait itself, then the path qualifier.
+        let candidate = candidate.split('<').next().unwrap_or(candidate).trim();
+        let Some(last) = candidate.rsplit("::").next() else {
+            continue;
+        };
+        let last = last.trim();
+        if is_rust_identifier(last) {
+            names.insert(last.to_string());
+        }
+    }
+    names
 }
 
 /// Replace line comments, block comments (nested), plain/raw string literal

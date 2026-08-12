@@ -11,7 +11,10 @@ use ironclaw_triggers::{
     TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
     TrustedTriggerFireSubmitter,
 };
-use ironclaw_triggers::{TriggerAcceptedFireSettlement, TriggerFireSettlementObserver};
+use ironclaw_triggers::{
+    TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFireSettlementObserver,
+    TriggerRunFailureSettlement,
+};
 use rand::RngExt;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -107,22 +110,32 @@ pub(crate) fn spawn_trigger_poller(
 
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
 
-fn spawn_post_submit_delivery(
-    hook: Arc<dyn PostSubmitDeliveryHook>,
-    event: TriggerAcceptedFireSettlement,
-) {
+enum TriggerFireSettlement {
+    Accepted(TriggerAcceptedFireSettlement),
+    Failed(TriggerFailedFireSettlement),
+}
+
+fn spawn_post_submit_delivery(hook: Arc<dyn PostSubmitDeliveryHook>, event: TriggerFireSettlement) {
     tokio::spawn(async move {
-        hook.on_trigger_submitted(event.fire, event.run_id, event.turn_scope)
-            .await;
+        match event {
+            TriggerFireSettlement::Accepted(event) => {
+                hook.on_trigger_submitted(event.fire, event.run_id, event.turn_scope)
+                    .await;
+            }
+            TriggerFireSettlement::Failed(event) => {
+                hook.on_trigger_failed_before_submit(event).await;
+            }
+        }
     });
 }
 
 /// Bridges trigger-domain settlement notifications to the composition-owned
-/// Slack delivery hook. Delivery is detached from the poller tick only after the
-/// worker has persisted the accepted run/thread mapping.
+/// channel delivery hook. Delivery is detached from the poller tick only after
+/// the worker has persisted either the accepted run/thread mapping or the
+/// permanent pre-submit failure.
 pub(crate) struct PostSubmitHookObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
-    pending: Arc<Mutex<VecDeque<TriggerAcceptedFireSettlement>>>,
+    pending: Arc<Mutex<VecDeque<TriggerFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
     drain_cancel: CancellationToken,
 }
@@ -140,7 +153,7 @@ impl PostSubmitHookObserver {
         }
     }
 
-    fn buffer_until_hook_installed(&self, event: TriggerAcceptedFireSettlement) {
+    fn buffer_until_hook_installed(&self, event: TriggerFireSettlement) {
         {
             let mut pending = self
                 .pending
@@ -149,7 +162,7 @@ impl PostSubmitHookObserver {
             if pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
                 pending.pop_front();
                 tracing::debug!(
-                    target = "ironclaw::reborn::trigger_poller",
+                    target: "ironclaw::reborn::trigger_poller",
                     pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
                     "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
                 );
@@ -204,13 +217,40 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
         let Some(hook) = self.hook_slot.get().cloned() else {
             tracing::debug!(
-                target = "ironclaw::reborn::trigger_poller",
+                target: "ironclaw::reborn::trigger_poller",
                 "post-submit hook not installed; buffering trigger settlement"
             );
-            self.buffer_until_hook_installed(event);
+            self.buffer_until_hook_installed(TriggerFireSettlement::Accepted(event));
             return;
         };
-        spawn_post_submit_delivery(hook, event);
+        spawn_post_submit_delivery(hook, TriggerFireSettlement::Accepted(event));
+    }
+
+    async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement) {
+        let Some(hook) = self.hook_slot.get().cloned() else {
+            tracing::debug!(
+                target: "ironclaw::reborn::trigger_poller",
+                "post-submit hook not installed; buffering failed trigger settlement"
+            );
+            self.buffer_until_hook_installed(TriggerFireSettlement::Failed(event));
+            return;
+        };
+        spawn_post_submit_delivery(hook, TriggerFireSettlement::Failed(event));
+    }
+
+    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
+        // The accepted fire's run reached a terminal failure state. The
+        // canonical delivery watcher owns the creator-facing notice; this
+        // observer only emits structured automation-health telemetry and
+        // must never mint a replacement run or bypass the delivery path.
+        tracing::warn!(
+            target: "ironclaw::reborn::trigger_poller",
+            tenant_id = %event.tenant_id,
+            trigger_id = %event.trigger_id,
+            fire_slot = %event.fire_slot,
+            run_id = %event.run_id,
+            "accepted trigger fire settled with a failed run"
+        );
     }
 }
 
@@ -326,18 +366,21 @@ mod tests {
         use chrono::Utc;
         use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
         use ironclaw_triggers::{
-            TriggerAcceptedFireSettlement, TriggerFire, TriggerFireIdentity,
-            TriggerFireSettlementObserver, TriggerId,
+            TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFire,
+            TriggerFireIdentity, TriggerFireSettlementObserver, TriggerId,
+            TriggerPollerFailureReason, TriggerRunFailureSettlement,
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
         use tokio_util::sync::CancellationToken;
+        use tracing_test::traced_test;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
 
         #[derive(Default)]
         struct RecordingHook {
             calls: Mutex<Vec<(TriggerFire, TurnRunId, TurnScope)>>,
+            failed_calls: Mutex<Vec<TriggerFailedFireSettlement>>,
             notify: Notify,
         }
 
@@ -358,6 +401,23 @@ mod tests {
                     self.notify.notified().await;
                 }
             }
+
+            async fn wait_for_failed_calls(
+                &self,
+                expected: usize,
+            ) -> Vec<TriggerFailedFireSettlement> {
+                loop {
+                    let calls = self
+                        .failed_calls
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    if calls.len() >= expected {
+                        return calls;
+                    }
+                    self.notify.notified().await;
+                }
+            }
         }
 
         #[async_trait]
@@ -372,6 +432,14 @@ mod tests {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .push((fire, run_id, scope));
+                self.notify.notify_one();
+            }
+
+            async fn on_trigger_failed_before_submit(&self, event: TriggerFailedFireSettlement) {
+                self.failed_calls
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(event);
                 self.notify.notify_one();
             }
         }
@@ -412,7 +480,6 @@ mod tests {
                 agent_id: Some(AgentId::new("hook-wrapper-agent").expect("agent")),
                 project_id: None,
                 prompt: "hook wrapper test prompt".to_string(),
-                delivery_target: None,
             };
             let scope = TurnScope::new_with_owner(
                 observer_tenant(),
@@ -426,6 +493,57 @@ mod tests {
                 run_id,
                 turn_scope: scope,
             }
+        }
+
+        fn failed_settlement_event() -> TriggerFailedFireSettlement {
+            let accepted = settlement_event(TurnRunId::new());
+            TriggerFailedFireSettlement {
+                fire: accepted.fire,
+                reason: TriggerPollerFailureReason::InvalidMaterialization,
+            }
+        }
+
+        fn run_failure_settlement_event(run_id: TurnRunId) -> TriggerRunFailureSettlement {
+            TriggerRunFailureSettlement {
+                tenant_id: observer_tenant(),
+                trigger_id: TriggerId::new(),
+                fire_slot: Utc::now(),
+                run_id,
+            }
+        }
+
+        #[tokio::test]
+        #[traced_test]
+        async fn run_failure_settlement_emits_health_warning_without_delivery() {
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
+            let recording = Arc::new(RecordingHook::default());
+            let observer = PostSubmitHookObserver::new(hook_slot.clone(), CancellationToken::new());
+            hook_slot.set(recording.clone()).ok().expect("hook install");
+
+            observer
+                .on_run_failure_settled(run_failure_settlement_event(TurnRunId::new()))
+                .await;
+
+            assert!(
+                logs_contain("accepted trigger fire settled with a failed run"),
+                "production observer must emit the automation-health signal; buffer: {:?}",
+                String::from_utf8(
+                    tracing_test::internal::global_buf()
+                        .lock()
+                        .expect("buf")
+                        .to_vec()
+                )
+                .expect("utf8")
+            );
+            assert!(
+                recording.calls().is_empty()
+                    && recording
+                        .failed_calls
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_empty(),
+                "run-failure observation must not bypass the canonical delivery watcher"
+            );
         }
 
         #[tokio::test]
@@ -538,6 +656,26 @@ mod tests {
                 Some(&recorded_fire.creator_user_id),
                 "post-submit hook must receive a TurnScope owned by the trigger creator"
             );
+        }
+
+        #[tokio::test]
+        async fn filled_slot_failed_settlement_invokes_no_run_hook() {
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
+            let recording = Arc::new(RecordingHook::default());
+            hook_slot
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
+                .ok()
+                .expect("hook install");
+            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
+            let event = failed_settlement_event();
+
+            observer.on_failed_fire_settled(event.clone()).await;
+
+            let calls =
+                tokio::time::timeout(Duration::from_secs(1), recording.wait_for_failed_calls(1))
+                    .await
+                    .expect("failed settlement hook should be invoked asynchronously");
+            assert_eq!(calls, vec![event]);
         }
 
         #[tokio::test]

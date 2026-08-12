@@ -171,6 +171,17 @@ fn regression_artifact_export_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Read once at composition and default off. Independent of the QA-only
+/// regression-export gate: admin cross-user thread scraping is a different
+/// privilege class and must not ride that caller-owned flag (a deployment
+/// enabling QA self-export would otherwise silently mount tenant-wide admin
+/// transcript access).
+fn admin_thread_scrape_enabled() -> bool {
+    std::env::var("IRONCLAW_REBORN_ADMIN_THREAD_SCRAPE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 /// Host-installation composition the Reborn HTTP gateway needs in addition to
 /// the product surface it serves over.
 ///
@@ -189,7 +200,7 @@ pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
     /// [`ProductSurfaceCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
-    /// `crates/ironclaw_assistant/CLAUDE.md`.
+    /// `crates/product/ironclaw_assistant/AGENTS.md`.
     pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
@@ -208,6 +219,12 @@ pub struct WebuiServeConfig {
     /// Content-Security-Policy header value. Defaults to
     /// [`DEFAULT_WEBUI_CSP`] if `None`.
     pub(crate) csp_header: Option<HeaderValue>,
+    /// The extension id of the deployment's authenticated-session channel —
+    /// the value the SPA plugs into the generic session-inbound route
+    /// (`/api/webchat/v2/channels/{extension_id}/messages`). Server-derived
+    /// from the deployment channel registry; the frontend never carries a
+    /// channel name of its own.
+    pub(crate) session_channel_extension_id: Option<String>,
     /// Canonical host the WebChat v2 listener is reachable on (e.g.
     /// `"app.example.com"` or `"127.0.0.1:3000"`). When set, the
     /// WebSocket same-origin middleware compares the request's
@@ -284,6 +301,10 @@ impl WebuiServeConfig {
             max_body_bytes: DEFAULT_WEBUI_MAX_BODY_BYTES,
             allowed_origins,
             csp_header: None,
+            // Composition supplies the exactly-one manifest-declared
+            // authenticated-session channel. No implicit product identity is
+            // invented when the deployment declares none or several.
+            session_channel_extension_id: None,
             canonical_host: None,
             workspace_requires_scoped_projection: false,
             default_agent_id: None,
@@ -378,6 +399,14 @@ impl WebuiServeConfig {
     /// operator config TOML) into the typed `HeaderValue` vector.
     /// Lets host binaries construct [`WebuiServeConfig`] without
     /// pulling axum / http as a direct workspace dependency.
+    /// Advertise the deployment's authenticated-session channel to the SPA
+    /// (surfaced on `GET /session`). `None` disables session sends in the
+    /// browser — fail closed rather than guessing a channel.
+    pub fn with_session_channel_extension_id(mut self, extension_id: String) -> Self {
+        self.session_channel_extension_id = Some(extension_id);
+        self
+    }
+
     pub fn parse_allowed_origins(
         origins: &[String],
     ) -> Result<Vec<HeaderValue>, WebuiServeConfigError> {
@@ -561,8 +590,10 @@ pub fn webui_v2_app_with_lifecycle(
             .collect(),
     );
     let regression_artifact_export_enabled = regression_artifact_export_enabled();
-    let mut descriptors = crate::webui_v2::webui_v2_routes_with_regression_artifact_export(
+    let admin_thread_scrape_enabled = admin_thread_scrape_enabled();
+    let mut descriptors = crate::webui_v2::webui_v2_routes_with_artifact_flags(
         regression_artifact_export_enabled,
+        admin_thread_scrape_enabled,
     );
     let mut operator_descriptors: Vec<IngressRouteDescriptor> = descriptors
         .iter()
@@ -613,8 +644,10 @@ pub fn webui_v2_app_with_lifecycle(
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
         .with_reborn_projects_enabled(reborn_projects_enabled())
+        .with_session_channel_extension_id(config.session_channel_extension_id.clone())
         .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
-        .with_regression_artifact_export_enabled(regression_artifact_export_enabled);
+        .with_regression_artifact_export_enabled(regression_artifact_export_enabled)
+        .with_admin_thread_scrape_enabled(admin_thread_scrape_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -1005,7 +1038,7 @@ fn panic_handler(
         detail
     };
     tracing::error!(
-        target = "ironclaw::reborn::webui_serve",
+        target: "ironclaw::reborn::webui_serve",
         "Handler panicked: {safe_detail}"
     );
     axum::http::Response::builder()

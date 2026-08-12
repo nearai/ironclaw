@@ -137,7 +137,6 @@ Use `--scenario` for a single workload.
 | `api-user-capacity` | End-to-end WebUI API send/read pressure against a running Reborn server. |
 | `cpu-burn` | Process-local CPU pressure control. |
 | `memory-churn` | Process-local allocation/RSS pressure control. |
-
 `api-user-capacity` can use either pre-minted users from `--api-users-jsonl`,
 a shared bearer via `--api-bearer-token`, or real per-user provisioning through
 the WebUI admin surface:
@@ -155,6 +154,103 @@ cargo run -p ironclaw_stress -- \
   --api-read-qps-per-user 2 \
   --mock-llm-bind 127.0.0.1:3911
 ```
+
+### Scripted tool writes (issue #7360)
+
+Scripted mode drives each API operation through a real builtin/memory tool
+sequence: the driver embeds a marker in the user message, the mock LLM sidecar
+emits the scripted tool calls, the server executes them through the production
+capability host, and the driver verifies the read-back verdict in the final
+assistant message. Verdicts:
+
+- `confirmed`: the read-back returned exactly this operation's content marker.
+- `contended`: a concurrent same-user write won the document between write and
+  read (expected under `--api-hot-writers`, counted not failed).
+- `leak`: another user's content marker appeared in the read-back (cross-user
+  isolation violation, hard failure).
+- `missing`: the read-back lost the content (durable write failure, hard
+  failure).
+- `undisclosed`: the required tool was never advertised to the model
+  (disclosure/agent-surface regression, hard failure).
+- `failure`: a write, append, or checkpoint returned a structured tool error.
+  Writes may be emitted up to three times — the initial attempt plus at most
+  two retries — only when the recovery contract permits the identical call;
+  `allowed_after_delay` also requires and honors `retry_after_ms`.
+  Non-retryable errors, missing delay metadata, exhausted attempts, and
+  checkpoint errors are hard failures.
+
+Scripts:
+
+| `--api-scripted-tool` | Tool sequence |
+| --- | --- |
+| `write_file_roundtrip` | `builtin.write_file` then `builtin.read_file` of a unique workspace path. |
+| `memory_roundtrip` | `ironclaw.memory.write` (replace) then a read-back checkpoint of `stress/shared.md`. |
+| `memory_grow` | Write a quarter, append three quarters, then checkpoint — growing-append slope. |
+| `memory_mixed` | Write half, checkpoint, append half, checkpoint — mixed read/write. |
+
+Memory checkpoints use `ironclaw.memory.read` while the document and response
+envelope fit the host's 1 MiB model-visible output cap. Larger documents use
+bounded `ironclaw.memory.search` results for the read-back markers instead;
+the full document remains stored and indexed, while verification cannot fail
+merely because JSON metadata pushes an exact 1 MiB document over that cap.
+
+All memory scripts target the same relative path for every user, so each run
+also exercises same-relative-path isolation. `--api-scripted-doc-sizes` cycles
+document sizes per operation (default `4096,32768,131072,1048576`, minimum
+4096); results are bucketed per size with submit-to-tool-visible and
+submit-to-finalize stage latencies. `--api-hot-writers N` spawns N extra
+concurrent writers on distinct threads of the first user so they contend on
+the same per-user memory document without per-thread turn serialization.
+
+Scripted mode requires `--mock-llm-bind` (the sidecar serves the tool calls)
+and `--api-wait-for-assistant`. Gated tools (`builtin.write_file`, memory
+writes) are exercised through the per-user Tools auto-approve setting, which
+the driver enables during user setup through the same settings API a real
+user would use.
+
+```bash
+cargo run -p ironclaw_stress -- \
+  --backend libsql \
+  --scenario api-user-capacity \
+  --api-base-url http://127.0.0.1:3900 \
+  --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_BEARER_TOKEN" \
+  --users 6 \
+  --concurrency 3 \
+  --operations 2 \
+  --api-scripted-tool memory_roundtrip \
+  --api-scripted-doc-sizes 4096,32768,131072,1048576 \
+  --api-hot-writers 2 \
+  --mock-llm-bind 127.0.0.1:3911
+```
+
+### Nightly scripted memory matrix (CI lane)
+
+`.github/workflows/ironclaw-stress.yml` runs a nightly (03:30 UTC, plus
+`workflow_dispatch`) matrix of the three memory scripts — `memory_roundtrip`,
+`memory_grow`, `memory_mixed` — against a real `ironclaw serve` binary. The
+server profile selects the persistence backend: `hosted-single-tenant` is
+Postgres-backed, `hosted-single-tenant-volume` is embedded libSQL storage
+with no `[storage]` section. The stress runner's `--backend` flag does not
+choose that backend — it only labels the API-report lane for a workload
+driven over the WebUI HTTP API.
+
+Each script runs sequentially (each invocation binds the mock LLM sidecar at
+`127.0.0.1:19090` — the server's LLM base URL — and releases it on exit) at
+document sizes 4096, 32768, 131072, and 1048576 bytes, with users=6,
+concurrency=3, operations=4, hot writers=2, mock latency 250ms, a 10000ms
+timeline polling interval, a 120000ms terminal/p95 ceiling, and the
+zero-tolerance gate `--max-failure-rate 0`: any failed, leaked, missing, or
+undisclosed scripted verdict fails the job.
+
+Per-script outputs are stored under
+`target/ironclaw-stress/ironclaw-stress-libsql-scripted-<script>/` (JSONL,
+summary JSON, report text) and uploaded as
+`ironclaw-stress-libsql-scripted-<script>`. The server log is uploaded once,
+separately, as `ironclaw-stress-libsql-scripted-server-log` (always, even
+when a script fails), so a failed run has a single log artifact to fetch. The
+Postgres job's scripted memory leg is additionally mirrored under
+`ironclaw-stress-postgres-scripted-memory-roundtrip`, alongside its existing
+aggregate `ironclaw-stress-postgres-api-capacity` artifact.
 
 ## Presets
 

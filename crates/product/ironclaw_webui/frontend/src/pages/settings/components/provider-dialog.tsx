@@ -123,6 +123,9 @@ export function ProviderDialog({
             options={modelOptions}
             onChange={(value) => formState.update("model", value)}
             ariaLabel={t("llm.defaultModel")}
+            searchable
+            searchAriaLabel={t("llm.searchModels")}
+            searchPlaceholder={t("llm.searchModels")}
             className="w-full"
             buttonClassName={PROVIDER_SELECT_BUTTON_CLASS_NAME}
             menuClassName="!top-auto bottom-[calc(100%+0.35rem)] max-h-64 overflow-y-auto"

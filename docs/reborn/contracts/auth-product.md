@@ -100,6 +100,11 @@ derive hashes for opaque state/code/verifier values, then call
 claims the flow through `AuthFlowManager`, performs provider exchange through
 `AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
+Once callback completion begins, the host route must keep that work alive if
+the provider-facing HTTP request disconnects: canceling after the durable
+one-time claim can otherwise strand the flow at `callback_received`. Same-host
+retries for one flow are single-flight and observe the first durable outcome;
+they must never exchange the same authorization code concurrently.
 If continuation dispatch fails, the handler returns a sanitized retryable
 error instead of reporting callback success. Lifecycle continuations are
 at-least-once and idempotent on flow id: a process-local single-flight guard
@@ -570,10 +575,16 @@ Rules:
   `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
   also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
   `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
-  the redirect URI opt-in is present. The hint only adds Google's `hd=`
-  authorization parameter; product-auth setup does not treat it as a server-side
-  domain allowlist. The redirect URI must match the static Google callback route
-  exposed by the WebUI listener.
+  the redirect URI opt-in is present. **The hosted-domain hint is currently
+  inert** (measured 2026-08-05): it resolves into
+  `OAuthClientConfig::hosted_domain_hint`, which no production code reads — the
+  auth engine builds its authorization parameters from the vendor recipe's
+  manifest `extra_authorize_params`, and the Google recipes declare no `hd`. So
+  setting it adds nothing to the authorization URL, and product-auth has never
+  treated it as a server-side domain allowlist either. Server-side `hd`
+  enforcement exists only for **WebChat login**, via the separate
+  `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` provider config. The redirect URI
+  must match the static Google callback route exposed by the WebUI listener.
 - All routes project only adapter-safe DTOs (`CredentialAccountProjection`,
   `CredentialAccountListPage`, `CredentialRecoveryProjection`,
   `CredentialRefreshReport`, `SecretCleanupReport`). Raw secret handles,

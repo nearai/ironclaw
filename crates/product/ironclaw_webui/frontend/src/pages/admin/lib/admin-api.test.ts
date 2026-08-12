@@ -19,6 +19,9 @@ import { test, beforeEach, afterEach } from "vitest";
 import {
   fetchAdminUsers,
   fetchAdminUser,
+  fetchThreadScrapeArtifact,
+  fetchThreadScrapeRunArtifact,
+  fetchThreadScrapeThreads,
   createAdminUser,
   updateAdminUser,
   deleteAdminUser,
@@ -201,6 +204,28 @@ test("fetchAdminUser returns null WITHOUT calling apiFetch when the id is empty"
   assert.equal(await fetchAdminUser(undefined), null);
   // A missing id must never hit the wire (no `/users/undefined` request).
   assert.equal(calls.length, 0);
+});
+
+test("thread scraping clients preserve target, thread, run, and pagination scope", async () => {
+  stubFetch((path) => path.endsWith("/threads?limit=25&cursor=next")
+    ? { threads: [], next_cursor: null }
+    : { schema: "artifact" });
+  const controller = new AbortController();
+
+  await fetchThreadScrapeThreads("user a/b", {
+    limit: 25,
+    cursor: "next",
+    signal: controller.signal,
+  });
+  await fetchThreadScrapeArtifact("user a/b", "thread a/b");
+  await fetchThreadScrapeRunArtifact("user a/b", "thread a/b", "run a/b");
+
+  assert.equal(calls[0].init.signal, controller.signal);
+  assert.deepEqual(calls.map((call) => call.path), [
+    "/api/webchat/v2/admin/users/user%20a%2Fb/thread-scrape/threads?limit=25&cursor=next",
+    "/api/webchat/v2/admin/users/user%20a%2Fb/thread-scrape/threads/thread%20a%2Fb/artifact",
+    "/api/webchat/v2/admin/users/user%20a%2Fb/thread-scrape/threads/thread%20a%2Fb/runs/run%20a%2Fb/artifact",
+  ]);
 });
 
 test("deleteAdminUser DELETEs the URL-encoded user route", async () => {

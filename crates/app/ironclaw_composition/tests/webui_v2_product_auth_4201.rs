@@ -1031,7 +1031,7 @@ async fn follow_up_routes_require_invocation_id() {
 
 #[test]
 fn auth_prompt_view_serialises_optional_fields_when_present() {
-    use ironclaw_assistant::{AuthPromptChallengeKind, AuthPromptView};
+    use ironclaw_extension_contracts::auth_prompt::{AuthPromptChallengeKind, AuthPromptView};
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1074,7 +1074,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
 
 #[test]
 fn auth_prompt_view_omits_optional_fields_when_absent() {
-    use ironclaw_assistant::AuthPromptView;
+    use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1125,7 +1125,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
 #[test]
 fn auth_prompt_view_deserialises_without_optional_fields() {
     // Simulate a legacy serialised row (no new fields) — must round-trip as None.
-    use ironclaw_assistant::AuthPromptView;
+    use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 
     let legacy_json = r#"{
         "turn_run_id": "11111111-1111-1111-1111-111111111111",
@@ -1145,12 +1145,12 @@ fn auth_prompt_view_deserialises_without_optional_fields() {
 #[tokio::test]
 async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
     use chrono::Utc;
-    use ironclaw_assistant::AuthPromptChallengeKind;
     use ironclaw_auth::AuthProviderId;
     use ironclaw_auth::{
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
+    use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1519,13 +1519,13 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
 async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
     // Covers the ManualTokenRequired arm of auth_challenge_to_view.
     use chrono::Utc;
-    use ironclaw_assistant::AuthPromptChallengeKind;
     use ironclaw_auth::AuthProviderId;
     use ironclaw_auth::{
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         AuthInteractionId, CredentialAccountLabel, InMemoryAuthProductServices, NewAuthFlow,
         TurnRunRef,
     };
+    use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
     use ironclaw_host_api::ids::ThreadId;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
@@ -1603,12 +1603,12 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
     // Covers the AccountSelectionRequired / ReauthorizeRequired / SetupRequired
     // arms of auth_challenge_to_view (all map to AuthPromptChallengeKind::Other).
     use chrono::Utc;
-    use ironclaw_assistant::AuthPromptChallengeKind;
     use ironclaw_auth::AuthProviderId;
     use ironclaw_auth::{
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, TurnRunRef,
     };
+    use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
     use ironclaw_host_api::ids::ThreadId;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;

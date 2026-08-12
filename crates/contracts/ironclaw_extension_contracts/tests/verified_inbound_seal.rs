@@ -8,10 +8,8 @@
 //! `ironclaw_host_api/tests/authorized_seal.rs`.
 
 use ironclaw_extension_contracts::verified_inbound::{
-    mark_request_signature_verified, mark_request_signature_verified_for_tenant,
-    mark_shared_secret_header_verified, mark_shared_secret_header_verified_for_tenant,
+    mark_request_signature_verified, mark_shared_secret_header_verified,
 };
-use ironclaw_host_api::ids::TenantId;
 use ironclaw_host_api::product_adapter::auth::{
     AuthRequirement, ChannelIngressVerifier, ProtocolAuthEvidence,
 };
@@ -21,10 +19,6 @@ use ironclaw_host_api::product_adapter::auth::{
 /// router just executed.
 struct TestIngressVerifier;
 impl ChannelIngressVerifier for TestIngressVerifier {}
-
-fn tenant() -> TenantId {
-    TenantId::new("tenant-a").expect("tenant")
-}
 
 #[test]
 fn request_signature_evidence_carries_the_recipe_the_router_executed() {
@@ -66,37 +60,6 @@ fn shared_secret_evidence_carries_the_recipe_the_router_executed() {
         }
     );
     assert_eq!(claim.subject(), "bot-1");
-}
-
-/// The tenant a claim carries is host-resolved scope. Both tenant-scoped
-/// variants must thread it through unchanged, or a multi-tenant deployment
-/// admits a verified message into the wrong tenant.
-#[test]
-fn tenant_scoped_variants_thread_the_host_resolved_tenant_through() {
-    let verifier = TestIngressVerifier;
-
-    let signature = mark_request_signature_verified_for_tenant(
-        verifier.verified_inbound_grant(),
-        "X-Slack-Signature",
-        None,
-        "T01ABCDEF",
-        tenant(),
-    );
-    assert_eq!(
-        signature.claim().expect("claim").tenant_id(),
-        Some(&tenant())
-    );
-
-    let shared_secret = mark_shared_secret_header_verified_for_tenant(
-        verifier.verified_inbound_grant(),
-        "X-Telegram-Bot-Api-Secret-Token",
-        "bot-1",
-        tenant(),
-    );
-    assert_eq!(
-        shared_secret.claim().expect("claim").tenant_id(),
-        Some(&tenant())
-    );
 }
 
 /// Minted evidence must never round-trip back in from the wire: an attacker who

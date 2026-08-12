@@ -137,6 +137,48 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
     eprintln!("skill-routing-baseline metrics={metrics:?}");
 }
 
+#[test]
+fn ordinary_reminder_routes_to_routines_without_commitment_capture() {
+    let skills = load_bundled_skills();
+    let selected = prefilter_skills_with_options(
+        "Remind me in two minutes to stretch.",
+        &skills,
+        TOP_K,
+        EVALUATION_TOKEN_BUDGET,
+        &HashSet::new(),
+        SkillSelectionOptions::default(),
+    )
+    .selected
+    .into_iter()
+    .map(|skill| skill.name().to_string())
+    .collect::<Vec<_>>();
+
+    assert!(
+        selected.iter().any(|name| name == "routine-advisor"),
+        "a timed reminder should load routine guidance: {selected:?}"
+    );
+    assert!(
+        !selected.iter().any(|name| name == "commitment-triage"),
+        "ordinary scheduling must not silently write commitment memory: {selected:?}"
+    );
+
+    let explicit_commitment = prefilter_skills_with_options(
+        "Track this commitment: I promised to review the contract by Friday.",
+        &skills,
+        TOP_K,
+        EVALUATION_TOKEN_BUDGET,
+        &HashSet::new(),
+        SkillSelectionOptions::default(),
+    )
+    .selected;
+    assert!(
+        explicit_commitment
+            .iter()
+            .any(|skill| skill.name() == "commitment-triage"),
+        "explicit commitment capture must remain available"
+    );
+}
+
 /// The nearest ancestor holding both `crates/` and `Cargo.toml`.
 ///
 /// A search, not counted `..` hops: the family move

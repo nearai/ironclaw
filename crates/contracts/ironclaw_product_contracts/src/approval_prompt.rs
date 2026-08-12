@@ -52,9 +52,9 @@ pub fn approval_request_id_from_gate_ref(gate_ref: &TurnGateRef) -> Option<Appro
 
 /// The resource scope an approval-prompt lookup reads under.
 ///
-/// An explicit turn owner (a shared/team subject) wins over the acting user,
-/// matching `ApprovalInteractionScope::from_turn`; the equivalence of the two
-/// is pinned in `ironclaw_assistant`
+/// An approval-prompt lookup reads under the run's user — the same identity the
+/// approval-interaction resolve scope uses (`ApprovalInteractionScope::from_turn`);
+/// the equivalence of the two is pinned in `ironclaw_assistant`
 /// (`approval_prompt_lookup_scope_matches_the_interaction_scope_projection`).
 pub fn approval_prompt_lookup_scope(
     turn_scope: &TurnScope,
@@ -62,10 +62,11 @@ pub fn approval_prompt_lookup_scope(
 ) -> ResourceScope {
     ResourceScope {
         tenant_id: turn_scope.tenant_id.clone(),
-        user_id: turn_scope
-            .explicit_owner_user_id()
-            .cloned()
-            .unwrap_or_else(|| owner_user_id.clone()),
+        // The run's user, matching the approval-interaction resolve scope and
+        // the raise store so a run finds its own gate. The caller supplies it
+        // resolved via the acting-user ladder; owner == actor since the
+        // ephemeral-per-ping remodel.
+        user_id: owner_user_id.clone(),
         agent_id: turn_scope.agent_id.clone(),
         project_id: turn_scope.project_id.clone(),
         mission_id: None,

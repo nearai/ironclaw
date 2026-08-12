@@ -3,12 +3,9 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use crate::{
-    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
-    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
-};
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
+use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::{
     dispatch::{
         CapabilityDisplayOutputPreview, CapabilityDisplayText, truncate_capability_display_text,
@@ -16,6 +13,10 @@ use ironclaw_host_api::{
     ids::{CapabilityId, InvocationId},
 };
 use ironclaw_loop_contracts::CapabilityInputRef;
+use ironclaw_product_contracts::outbound::{
+    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
+};
 use ironclaw_safety::{
     sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,
     shell_command_display_text,

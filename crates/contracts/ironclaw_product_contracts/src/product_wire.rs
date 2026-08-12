@@ -28,7 +28,7 @@
 // arch-exempt: large_file, one contract surface — splitting by feature area at move time would give the same names two import paths, plan #7008
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::ids::{ThreadId, UserId};
 use ironclaw_host_api::turn::{AcceptedMessageRef, EventCursor, TurnRunId, TurnStatus};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -563,61 +563,12 @@ fn default_scheduler_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "RebornOutboundPreferencesResponseWire")]
-pub struct RebornOutboundPreferencesResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
-    #[serde(default)]
-    pub final_reply_target_status: RebornOutboundDeliveryTargetStatus,
-    #[serde(default)]
-    pub default_modality: RebornOutboundDeliveryModality,
-}
-
-impl Default for RebornOutboundPreferencesResponse {
-    fn default() -> Self {
-        Self {
-            final_reply_target: None,
-            final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
-            default_modality: RebornOutboundDeliveryModality::Text,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-struct RebornOutboundPreferencesResponseWire {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
-    #[serde(default)]
-    final_reply_target_status: Option<RebornOutboundDeliveryTargetStatus>,
-    #[serde(default)]
-    default_modality: Option<RebornOutboundDeliveryModality>,
-}
-
-impl From<RebornOutboundPreferencesResponseWire> for RebornOutboundPreferencesResponse {
-    fn from(value: RebornOutboundPreferencesResponseWire) -> Self {
-        let final_reply_target_status = match (
-            value.final_reply_target.as_ref(),
-            value.final_reply_target_status,
-        ) {
-            (Some(_), None) => RebornOutboundDeliveryTargetStatus::Available,
-            (_, Some(status)) => status,
-            (None, None) => RebornOutboundDeliveryTargetStatus::NoneConfigured,
-        };
-
-        Self {
-            final_reply_target: value.final_reply_target,
-            final_reply_target_status,
-            default_modality: value.default_modality.unwrap_or_default(),
-        }
-    }
-}
-
-/// Product-safe status for a saved outbound delivery target.
+/// Product-safe status for a stored outbound delivery target.
 ///
-/// This is channel-neutral: it describes whether the configured default can be
+/// This is channel-neutral: it describes whether a stored target can be
 /// resolved through the target authority layer, not how any particular product
-/// surface should render that state.
+/// surface should render that state. `NoneConfigured` is the "nothing stored at
+/// all" default; a per-entry status is only `Available` or `Unavailable`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornOutboundDeliveryTargetStatus {
@@ -848,13 +799,11 @@ pub struct RebornOutboundDeliveryTargetCapabilities {
     pub final_replies: bool,
     pub gate_prompts: bool,
     pub auth_prompts: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornOutboundDeliveryModality {
-    #[default]
-    Text,
+    /// This target can receive blocked-automation notifications. Independent of
+    /// `final_replies`: the notification-channel picker filters on this, the
+    /// model-delivery list filters on `final_replies`.
+    #[serde(default)]
+    pub notifications: bool,
 }
 
 /// Client-safe opaque outbound delivery target id.
@@ -976,15 +925,74 @@ fn has_line_or_paragraph_separator(value: &str) -> bool {
     value.chars().any(|c| matches!(c, '\u{2028}' | '\u{2029}'))
 }
 
+/// Full-replace request for the caller's notification-channel target list
+/// (spec §7). An empty list means notifications stay in the web app only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornSetOutboundPreferencesRequest {
-    /// `Some(id)` sets the final-reply target; `None` clears it.
-    ///
-    /// The field defaults to `None` when omitted, so clients that want to leave
-    /// an existing value unchanged must use the read endpoint instead of
-    /// submitting a partial update without this field.
+pub struct RebornSetNotificationChannelsRequest {
+    // Deliberately NOT `#[serde(default)]`: this is a full-replace request,
+    // and an omitted field must be a 400, never an implicit clear-all. An
+    // explicit empty list is the only way to clear the set.
+    pub target_ids: Vec<RebornOutboundDeliveryTargetId>,
+}
+
+/// One caller notification-channel entry, projected from a stored
+/// notification-target id (or the legacy single-slot fallback, spec §7) with
+/// its resolution status. `option` carries the full channel details only when
+/// `status` is `Available`; a stored id that no longer resolves through the
+/// caller-scoped target registry is still represented — as `Unavailable` with
+/// `option: None` — rather than silently dropped, so a caller can distinguish
+/// "2 channels" from "3, one broken". `status` is never `NoneConfigured` here
+/// (that variant describes the "nothing stored at all" state, not a per-entry
+/// state).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornNotificationChannel {
+    pub target_id: RebornOutboundDeliveryTargetId,
+    pub status: RebornOutboundDeliveryTargetStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_reply_target_id: Option<RebornOutboundDeliveryTargetId>,
+    pub option: Option<RebornOutboundDeliveryTargetOption>,
+}
+
+/// Resolved notification-channel list, projected from the caller's stored
+/// notification-target ids (or the legacy single-slot fallback, spec §7).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornNotificationChannelsResponse {
+    #[serde(default)]
+    pub channels: Vec<RebornNotificationChannel>,
+}
+
+/// Browser query naming the channel one notification-setup read is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebornNotificationSetupRequest {
+    pub extension_id: String,
+}
+
+/// Browser body for the generic notification-setup enable/disable commands.
+/// `payload` is a channel-opaque document only the channel's adapter (and
+/// its own client) interpret — generic code passes it through verbatim.
+/// `extension_id` is defaulted because the ROUTE path is its canonical
+/// source: the handler overwrites whatever the body carries, so a body may
+/// omit it entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebornNotificationSetupMutationRequest {
+    #[serde(default)]
+    pub extension_id: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub payload: serde_json::Value,
+}
+
+/// One channel's per-user notification-setup state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornNotificationSetupStatusResponse {
+    pub extension_id: String,
+    /// Whether this channel needs per-user enrollment at all (from its
+    /// manifest declaration). Channels without setup report `enabled: true`.
+    pub requires_setup: bool,
+    /// Whether notification delivery is enabled for the caller right now.
+    pub enabled: bool,
+    /// Channel-opaque detail for the channel's own client. Never
+    /// interpreted by generic code.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub detail: serde_json::Value,
 }
 
 /// Allowlisted terminal status exposed by automation list projections.
@@ -1852,6 +1860,31 @@ pub struct RebornThreadArtifactRequest {
     pub thread_id: String,
 }
 
+/// Admin-authorized, read-only thread collection request for one tenant user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeListRequest {
+    pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Admin-authorized request for an existing full-thread artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeArtifactRequest {
+    pub user_id: UserId,
+    pub thread_id: String,
+}
+
+/// Admin-authorized request for an existing single-run artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeRunArtifactRequest {
+    pub user_id: UserId,
+    pub thread_id: String,
+    pub run_id: String,
+}
+
 // --- Operator settings vocabulary --------------------------------------------
 
 /// Requested per-capability tool-permission state on the settings surface: the
@@ -1922,60 +1955,6 @@ mod tests {
         assert!(RebornOutboundDeliveryTargetDescription::new("d".repeat(1025)).is_err());
         // Description is the one optional field: empty is a legitimate value.
         assert!(RebornOutboundDeliveryTargetDescription::new("").is_ok());
-    }
-
-    /// `RebornOutboundPreferencesResponse` deserializes through a wire shadow
-    /// so a payload written before `final_reply_target_status` existed still
-    /// reports the right state. Getting this backwards makes a configured
-    /// target render as "none configured" — the exact silent-regression shape
-    /// #6616 produced for extension cards.
-    #[test]
-    fn outbound_preferences_infer_the_status_missing_from_an_older_payload() {
-        let with_target: RebornOutboundPreferencesResponse =
-            serde_json::from_value(serde_json::json!({
-                "final_reply_target": {
-                    "target_id": "t-1",
-                    "channel": "slack",
-                    "display_name": "Ops room",
-                }
-            }))
-            .expect("legacy payload with a target");
-        assert_eq!(
-            with_target.final_reply_target_status,
-            RebornOutboundDeliveryTargetStatus::Available,
-            "a stored target with no status field means the target is usable"
-        );
-
-        let without_target: RebornOutboundPreferencesResponse =
-            serde_json::from_value(serde_json::json!({})).expect("legacy empty payload");
-        assert_eq!(
-            without_target.final_reply_target_status,
-            RebornOutboundDeliveryTargetStatus::NoneConfigured
-        );
-        assert_eq!(
-            without_target.default_modality,
-            RebornOutboundDeliveryModality::Text
-        );
-
-        // An explicit status always wins over the inference.
-        let explicit: RebornOutboundPreferencesResponse =
-            serde_json::from_value(serde_json::json!({
-                "final_reply_target": {
-                    "target_id": "t-1",
-                    "channel": "slack",
-                    "display_name": "Ops room",
-                },
-                "final_reply_target_status": "unavailable"
-            }))
-            .expect("payload with an explicit status");
-        assert_eq!(
-            explicit.final_reply_target_status,
-            RebornOutboundDeliveryTargetStatus::Unavailable
-        );
-        assert_eq!(
-            RebornOutboundPreferencesResponse::default().final_reply_target_status,
-            RebornOutboundDeliveryTargetStatus::NoneConfigured
-        );
     }
 
     /// `RebornAutomationState` hand-writes `Deserialize` so an unrecognized

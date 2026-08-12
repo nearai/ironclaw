@@ -1,12 +1,13 @@
 use std::{cmp::Ordering, collections::HashSet};
 
-use crate::{ProductAdapterError, ProductOutboundPayload};
 use ironclaw_event_log::EventCursor;
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, ProjectionReplay, ProjectionSnapshot,
     RunStatusProjection,
 };
 use ironclaw_host_api::ids::InvocationId;
+use ironclaw_host_api::product_adapter::ProductAdapterError;
+use ironclaw_product_contracts::outbound::ProductOutboundPayload;
 
 use super::PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS;
 

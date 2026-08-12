@@ -1,6 +1,6 @@
 use super::*;
-use ironclaw_assistant::ProductOutboundPayload;
 use ironclaw_loop_contracts::CapabilityInputRef;
+use ironclaw_product_contracts::outbound::ProductOutboundPayload;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
     CapabilityInputRef::new(format!("input:{label}")).unwrap()

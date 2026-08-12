@@ -27,7 +27,7 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelRequest, HostManagedModelResponse, ToolDisclosureMode,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
@@ -551,6 +551,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
         ironclaw_composition::local_filesystem_build_input("runtime-hooks-owner", storage_root)
             .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-hooks-tenant".to_string(),
         agent_id: "runtime-hooks-agent".to_string(),
@@ -1001,6 +1002,7 @@ async fn standalone_test_support_interaction_services_use_supplied_turn_coordina
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tag}-tenant"),
         agent_id: format!("{tag}-agent"),

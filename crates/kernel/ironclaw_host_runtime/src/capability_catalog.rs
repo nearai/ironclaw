@@ -5,8 +5,11 @@ use ironclaw_extension_registry::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor, capability_profile::CapabilityProfileSchemaRef,
-    ids::CapabilityId, path::VirtualPath,
+    capability::CapabilityDescriptor,
+    capability_profile::CapabilityProfileSchemaRef,
+    ids::CapabilityId,
+    messaging::{STANDARD_SCHEMA_REF_PREFIX, resolve_standard_schema_ref},
+    path::VirtualPath,
 };
 use serde_json::Value;
 
@@ -146,6 +149,41 @@ pub(crate) async fn read_json_ref<F>(
 where
     F: RootFilesystem + ?Sized,
 {
+    // A standard-bound tool's schema lives in the compiled-in messaging
+    // registry (`ironclaw_host_api::messaging`), never on the package's
+    // filesystem root. This is the single choke point both `input_schema_ref`
+    // and `output_schema_ref` reads go through, so gating here (rather than
+    // at each call site) resolves both without duplicating the prefix check.
+    // Must run before `resolve_under_root`/the filesystem read below: a
+    // `standard:` ref can never exist on disk, so falling through would hit
+    // the filesystem for a path that can never resolve there instead of
+    // failing closed with the ref named.
+    if reference.as_str().starts_with(STANDARD_SCHEMA_REF_PREFIX) {
+        return match resolve_standard_schema_ref(reference.as_str()) {
+            Some(raw) => {
+                let schema = serde_json::from_str(raw).map_err(|error| {
+                    HostRuntimeError::invalid_request(format!(
+                        "{field} {} must contain valid JSON schema: {error}",
+                        reference.as_str()
+                    ))
+                })?;
+                jsonschema::options()
+                    .should_validate_formats(true)
+                    .build(&schema)
+                    .map_err(|error| {
+                        HostRuntimeError::invalid_request(format!(
+                            "{field} {} must contain valid JSON schema: {error}",
+                            reference.as_str()
+                        ))
+                    })?;
+                Ok(schema)
+            }
+            None => Err(HostRuntimeError::invalid_request(format!(
+                "{field} {} references unknown standard schema",
+                reference.as_str()
+            ))),
+        };
+    }
     let path = resolve_under_root(root, reference)?;
     let bytes = read_bounded(fs, &path, MAX_HOT_SCHEMA_BYTES, field).await?;
     let schema = serde_json::from_slice(&bytes).map_err(|error| {

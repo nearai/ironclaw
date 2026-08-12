@@ -17,7 +17,9 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelConversationContext, MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES, NormalizedInboundMessage,
+};
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
@@ -30,7 +32,7 @@ use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
 };
 use ironclaw_product_contracts::inbound::{
-    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
+    ProductInboundAck, ProductInboundEnvelope, TrustedInboundContext, classify_channel_inbound_text,
 };
 use ironclaw_product_contracts::surface::{
     ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
@@ -462,9 +464,7 @@ impl InboundSink for GenericChannelInboundSink {
         let InboundAdmission {
             extension_id: _,
             installation_id,
-            message,
-            channel_adapter,
-            channel_egress,
+            mut message,
         } = admission;
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
         // Pairing pre-admission gate: a serviced pairing interaction is
@@ -498,6 +498,14 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
         let evidence = self.config.evidence.mint(&installation_id);
+        // The adapter decides whether vendor history is applicable and returns
+        // it with the complete message. The host remains the trust boundary for
+        // that untrusted text and sanitizes it before product admission.
+        message.conversation_context = message
+            .conversation_context
+            .take()
+            .and_then(|context| sanitize_channel_conversation_context(&context.text))
+            .and_then(|text| ChannelConversationContext::new(text).ok());
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
@@ -506,38 +514,18 @@ impl InboundSink for GenericChannelInboundSink {
         // conversation binding → turn submission) is the deepest subtree in
         // this future; boxing keeps instrumented builds off the stack limit.
         let request = ChannelInboundSurfaceRequest {
-            adapter_id: self.config.adapter_id.clone(),
-            source_channel: ProductSourceChannel::new(self.config.adapter_id.as_str())
-                .map_err(Self::permanent)?,
-            installation_id: installation,
-            evidence,
-            received_at: Utc::now(),
+            context: TrustedInboundContext::from_verified_evidence(
+                self.config.adapter_id.clone(),
+                installation,
+                Utc::now(),
+                &evidence,
+            )
+            .map_err(Self::permanent)?,
             classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
+            requested_model: None,
         };
-        let response = if request.message.attachments.is_empty() {
-            Box::pin(self.config.surface.admit_channel_inbound(request)).await
-        } else {
-            // Attachment-bearing admission pins the exact adapter and
-            // manifest-restricted egress that parsed the request, so accepted
-            // intake can fetch bytes after replay dedupe and policy.
-            let Some(channel_egress) = channel_egress else {
-                return Err(InboundSinkError {
-                    retryable: true,
-                    reason: "channel attachment egress is unavailable".to_string(),
-                });
-            };
-            Box::pin(
-                self.config
-                    .surface
-                    .admit_channel_inbound_with_attachment_transfer(
-                        request,
-                        channel_adapter,
-                        channel_egress,
-                    ),
-            )
-            .await
-        };
+        let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
         match response {
             ChannelInboundSurfaceOutcome::Admitted(admission) => {
                 let admission = *admission;
@@ -610,6 +598,65 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
     }
+}
+
+/// Host-side defense over adapter-supplied context text (the adapter is
+/// untrusted for content): normalize newlines, keep only `\n`/`\t` control
+/// characters, and clamp to the contract byte bound by dropping OLDEST lines
+/// (adapters emit oldest-first). Returns `None` when nothing usable remains.
+fn sanitize_channel_conversation_context(raw: &str) -> Option<String> {
+    let mut text = String::with_capacity(raw.len().min(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES));
+    let mut characters = raw.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                text.push('\n');
+            }
+            '\n' | '\t' => text.push(character),
+            // `is_control()` is the Unicode `Cc` category only. Bidi and
+            // zero-width `Cf` format characters pass it, and they let an
+            // untrusted channel message reorder or hide text as the model and
+            // the operator see it — the exact injection this sanitizer exists
+            // to stop. Drop them at the same point.
+            character
+                if character.is_control()
+                    // `U+200C` (ZWNJ) and `U+200D` (ZWJ) are deliberately NOT
+                    // stripped — they are required orthography in Persian,
+                    // Hindi, and other scripts, and carry meaning inside emoji
+                    // sequences. Only the zero-width SPACE and the bidi
+                    // controls/isolates/BOM are injection vectors here.
+                    || matches!(
+                        character,
+                        '\u{200B}'
+                            | '\u{200E}'
+                            | '\u{200F}'
+                            | '\u{202A}'..='\u{202E}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{FEFF}'
+                    ) => {}
+            character => text.push(character),
+        }
+    }
+    let mut remainder = text.trim();
+    while remainder.len() > MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES {
+        match remainder.find('\n') {
+            // Drop the oldest line and retry.
+            Some(newline) => remainder = remainder[newline + 1..].trim_start(),
+            // One oversized line: keep its newest tail on a char boundary.
+            None => {
+                let mut start = remainder.len() - MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES;
+                while start < remainder.len() && !remainder.is_char_boundary(start) {
+                    start += 1;
+                }
+                remainder = &remainder[start..];
+            }
+        }
+    }
+    let remainder = remainder.trim();
+    (!remainder.is_empty()).then(|| remainder.to_string())
 }
 
 /// A static secrets port: fixed candidates for one extension (operator
@@ -877,22 +924,16 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
     use ironclaw_extension_contracts::channel_adapter::{
-        ChannelAttachmentRef, ProductTriggerReason,
+        ChannelConversationContext, ProductTriggerReason,
     };
     use ironclaw_extension_contracts::external::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
-        ProductAttachmentKind,
-    };
-    use ironclaw_extension_contracts::tool_adapter::{
-        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+        ExternalActorRef, ExternalConversationRef, ExternalEventId,
     };
     use ironclaw_host_api::ids::UserId;
     use ironclaw_product_contracts::inbound::{
         AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
-        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, TrustedInboundContext,
-        UserMessagePayload,
+        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, UserMessagePayload,
     };
     use ironclaw_product_contracts::surface::{
         ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
@@ -904,16 +945,19 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
-        transfer_submissions: AtomicUsize,
+        inline_attachments:
+            std::sync::Mutex<Vec<Vec<ironclaw_host_api::attachment::InboundAttachment>>>,
         classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
+        channel_contexts: std::sync::Mutex<Vec<Option<String>>>,
     }
 
     impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
-                transfer_submissions: AtomicUsize::new(0),
+                inline_attachments: std::sync::Mutex::new(Vec::new()),
                 classifications: std::sync::Mutex::new(Vec::new()),
+                channel_contexts: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -921,12 +965,28 @@ mod tests {
             self.submissions.load(Ordering::SeqCst)
         }
 
-        fn transfer_submit_count(&self) -> usize {
-            self.transfer_submissions.load(Ordering::SeqCst)
+        fn inline_attachments(&self) -> Vec<Vec<u8>> {
+            self.inline_attachments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .flat_map(|attachments| {
+                    attachments
+                        .iter()
+                        .map(|attachment| attachment.bytes.clone())
+                })
+                .collect()
         }
 
         fn classifications(&self) -> Vec<Option<ChannelInboundClassification>> {
             self.classifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn channel_contexts(&self) -> Vec<Option<String>> {
+            self.channel_contexts
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
@@ -939,25 +999,33 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
         ) -> ChannelInboundSurfaceOutcome {
+            self.inline_attachments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.message.attachments.clone());
             self.classifications
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request.classification.clone());
+            self.channel_contexts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(
+                    request
+                        .message
+                        .conversation_context
+                        .as_ref()
+                        .map(|context| context.text.clone()),
+                );
             self.submissions.fetch_add(1, Ordering::SeqCst);
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
                 submitted_run_id: TurnRunId::new(),
+                submission: None,
             };
             let envelope = ProductInboundEnvelope::from_trusted_parse(
-                TrustedInboundContext::from_verified_evidence_with_source_channel(
-                    request.adapter_id,
-                    request.source_channel,
-                    request.installation_id,
-                    request.received_at,
-                    &request.evidence,
-                )
-                .expect("verified evidence"),
+                request.context,
                 ParsedProductInbound::new(
                     request.message.event_id,
                     request.message.actor,
@@ -979,56 +1047,19 @@ mod tests {
                 ack,
             }))
         }
-
-        async fn admit_channel_inbound_with_attachment_transfer(
-            &self,
-            request: ChannelInboundSurfaceRequest,
-            _channel_adapter: Arc<dyn ChannelAdapter>,
-            _channel_egress: Arc<dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress>,
-        ) -> ChannelInboundSurfaceOutcome {
-            self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
-            self.admit_channel_inbound(request).await
-        }
-    }
-
-    struct DefaultingAttachmentSurface;
-
-    #[async_trait]
-    impl ChannelInboundProductSurface for DefaultingAttachmentSurface {
-        async fn admit_channel_inbound(
-            &self,
-            _request: ChannelInboundSurfaceRequest,
-        ) -> ChannelInboundSurfaceOutcome {
-            panic!("attachment admission must use the channel-transfer entrypoint")
-        }
-    }
-
-    struct TestRestrictedEgress;
-
-    #[async_trait]
-    impl RestrictedEgress for TestRestrictedEgress {
-        async fn send(
-            &self,
-            _request: RestrictedEgressRequest,
-        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-            Err(RestrictedEgressError::PolicyDenied)
-        }
     }
 
     fn admission_with_attachment() -> InboundAdmission {
         let mut admission = admission_for("review the attached report");
-        admission.message.attachments.push(ChannelAttachmentRef {
-            descriptor: ProductAttachmentDescriptor::new(
-                "file-1",
-                "application/pdf",
-                Some("report.pdf".to_string()),
-                Some(4),
-                ProductAttachmentKind::Document,
-            )
-            .expect("attachment descriptor"),
-            vendor_ref: "opaque-provider-file-reference".to_string(),
-        });
-        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
+        admission
+            .message
+            .attachments
+            .push(ironclaw_host_api::attachment::InboundAttachment {
+                id: "file-1".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: Some("vendor-report.pdf".to_string()),
+                bytes: b"data".to_vec(),
+            });
         admission
     }
 
@@ -1049,8 +1080,6 @@ mod tests {
 
     fn admission_for(text: &str) -> InboundAdmission {
         InboundAdmission {
-            channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
-            channel_egress: None,
             extension_id: "vendorx".to_string(),
             installation_id: "install".to_string(),
             message: NormalizedInboundMessage {
@@ -1061,6 +1090,7 @@ mod tests {
                 text: text.to_string(),
                 trigger: ProductTriggerReason::DirectChat,
                 attachments: Vec::new(),
+                conversation_context: None,
                 reply_context: None,
             },
         }
@@ -1232,66 +1262,19 @@ mod tests {
         assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
     }
 
-    /// A deployment without a channel egress transport cannot fetch bytes.
-    /// That is operator-fixable rather than structural, so it asks the vendor
-    /// to redeliver instead of durably settling the message.
     #[tokio::test]
-    async fn attachment_admission_without_channel_egress_is_retryable() {
-        let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
-        let mut admission = admission_with_attachment();
-        admission.channel_egress = None;
-
-        let error = sink
-            .admit(admission)
-            .await
-            .expect_err("missing channel egress must not claim durable acceptance");
-
-        assert!(error.retryable);
-        assert_eq!(error.reason, "channel attachment egress is unavailable");
-        assert_eq!(workflow.submit_count(), 0);
-        assert_eq!(workflow.transfer_submit_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn attachment_admission_with_egress_uses_the_transfer_entrypoint() {
+    async fn complete_attachment_admission_uses_the_single_surface_door_with_exact_bytes() {
         let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
 
         let ack = sink
             .admit(admission_with_attachment())
             .await
-            .expect("attachment admission with pinned egress is admitted");
+            .expect("complete attachment is admitted");
 
         assert_eq!(ack, InboundAdmissionAck::Accepted);
         sink.drain().await;
-        assert_eq!(workflow.transfer_submit_count(), 1);
-    }
-
-    /// A surface that does not implement attachment transfer will not
-    /// implement it for a redelivery of the same message, so the inherited
-    /// default settles permanently. A retryable outcome here left the vendor
-    /// redelivering forever while the user received nothing at all — not even
-    /// the message text — and it disagreed with the equivalent default on the
-    /// inbound turn service, which was already permanent for this condition.
-    #[tokio::test]
-    async fn inherited_attachment_transfer_failure_settles_permanently() {
-        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
-            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
-            evidence: VerifiedEvidenceMint::SharedSecretHeader {
-                header: "X-Vendor-Secret".to_string(),
-            },
-            surface: Arc::new(DefaultingAttachmentSurface),
-            observer: None,
-        });
-
-        let error = sink
-            .admit(admission_with_attachment())
-            .await
-            .expect_err("an inherited unsupported transfer must not be admitted");
-
-        assert!(
-            !error.retryable,
-            "a structural transfer gap must not ask the vendor to redeliver"
-        );
+        assert_eq!(workflow.submit_count(), 1);
+        assert_eq!(workflow.inline_attachments(), vec![b"data".to_vec()]);
     }
 
     #[tokio::test]
@@ -1326,5 +1309,91 @@ mod tests {
             sink.admit(admission_for(text)).await.expect("admitted");
             assert_eq!(surface.classifications(), vec![expected]);
         }
+    }
+
+    fn shared_admission_with_context(context: &str) -> InboundAdmission {
+        let mut admission = admission_for("<@bot> summarize this thread");
+        admission.message.trigger = ProductTriggerReason::BotMention;
+        admission.message.conversation_context =
+            Some(ChannelConversationContext::new(context.to_string()).expect("scripted context"));
+        admission
+    }
+
+    #[tokio::test]
+    async fn adapter_supplied_context_is_sanitized_before_the_admitted_request() {
+        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+
+        let ack = sink
+            .admit(shared_admission_with_context(
+                "<@U1>: earlier\r\nmessage\u{0007}\n<@U2>: reply",
+            ))
+            .await
+            .expect("admitted");
+
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        assert_eq!(
+            surface.channel_contexts(),
+            vec![Some("<@U1>: earlier\nmessage\n<@U2>: reply".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_adapter_context_stays_absent() {
+        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+        sink.admit(admission_for("hello")).await.expect("admitted");
+
+        assert_eq!(surface.channel_contexts(), vec![None]);
+    }
+
+    #[test]
+    fn conversation_context_sanitizer_normalizes_and_clamps() {
+        // Newline normalization + control stripping.
+        assert_eq!(
+            sanitize_channel_conversation_context("a\r\nb\rc\u{0007}d\te").as_deref(),
+            Some("a\nb\ncd\te")
+        );
+        // Bidi + zero-width `Cf` format characters are stripped alongside `Cc`
+        // controls, so untrusted channel text cannot reorder or hide itself in
+        // the rendered prompt.
+        assert_eq!(
+            sanitize_channel_conversation_context("a\u{200B}b\u{202E}c\u{2066}d\u{FEFF}e\u{200F}f")
+                .as_deref(),
+            Some("abcdef")
+        );
+        // Regression: `U+200C` (ZWNJ) and `U+200D` (ZWJ) are legitimate
+        // orthography (Persian/Hindi word-joining) and emoji-sequence glue, NOT
+        // injection vectors — they must SURVIVE sanitization even though they
+        // sit between the stripped `U+200B` and the bidi controls.
+        assert_eq!(
+            sanitize_channel_conversation_context("با\u{200C}هم").as_deref(),
+            Some("با\u{200C}هم"),
+            "ZWNJ (U+200C) must be preserved as required orthography"
+        );
+        assert_eq!(
+            sanitize_channel_conversation_context("a\u{200D}b").as_deref(),
+            Some("a\u{200D}b"),
+            "ZWJ (U+200D) must be preserved (emoji sequences and script joining)"
+        );
+        // Unusable content degrades to None.
+        assert!(sanitize_channel_conversation_context("").is_none());
+        assert!(sanitize_channel_conversation_context(" \u{0000}\u{001b} ").is_none());
+        // A message that is nothing but format characters degrades to None.
+        assert!(sanitize_channel_conversation_context("\u{200B}\u{202E}\u{2066}").is_none());
+        // Oversized multi-line content drops the OLDEST lines.
+        let oldest = "oldest line".to_string();
+        let newest = "n".repeat(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES - 100);
+        let clamped = sanitize_channel_conversation_context(&format!(
+            "{oldest}\n{}\n{newest}",
+            "middle ".repeat(20_000)
+        ))
+        .expect("clamped context");
+        assert!(clamped.len() <= MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES);
+        assert!(clamped.ends_with(&newest));
+        assert!(!clamped.contains(&oldest));
+        // One oversized line keeps its newest tail on a char boundary.
+        let single = "日".repeat(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES);
+        let clamped = sanitize_channel_conversation_context(&single).expect("clamped line");
+        assert!(clamped.len() <= MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES);
+        assert!(!clamped.is_empty());
     }
 }

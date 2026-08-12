@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
     error::HostApiError,
-    ids::{CapabilityId, RunId},
+    ids::CapabilityId,
     invocation::InvocationOrigin,
     resource::{ResourceScope, ResourceUsage},
 };
@@ -40,7 +40,16 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. When delivery_target_id is omitted, the host first inherits the current source run's authorized delivery route; only when no source route exists does it fall back to the user's default outbound target at fire time. This inheritance uses trusted run state, never prompt parsing or model-authored conversation ids. builtin__outbound_delivery_target_set changes the user-wide fallback default.";
+/// Grounding description for the read path (issue #7246): the model was
+/// observed fabricating automation status ("your digest routine is running")
+/// while the Automations page showed none. Mirrors the outbound
+/// targets-list pattern — the description states the positive
+/// check-before-assert rule tied to the exact claims the model must not
+/// fabricate, and bridges the user vocabulary ("automation", "routine") to
+/// this trigger capability.
+const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, and any active hold. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
+
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine. The prompt is the full task each fire performs, written for a future run with no memory of this conversation. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write that as an explicit step in the prompt naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so end the prompt with the reply itself and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -53,7 +62,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             TRIGGER_LIST_CAPABILITY_ID,
-            "List scheduled triggers owned by the current caller scope",
+            TRIGGER_LIST_DESCRIPTION,
             vec![EffectKind::DispatchCapability],
             PermissionMode::Allow,
             resource_profile(),
@@ -74,7 +83,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             TRIGGER_RESUME_CAPABILITY_ID,
-            "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
+            "Resume a caller-scoped paused trigger so it may fire on its stored schedule. Use only when the user explicitly asks to resume or enable that routine; listing to avoid duplicates or to ensure exactly one routine exists is read-only and must not resume it.",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -168,60 +177,6 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
-    /// Resolve the delivery target that should be sealed into a new trigger.
-    ///
-    /// `requested` is untrusted model input. The default implementation only
-    /// accepts it after [`Self::validate_delivery_target`] succeeds. Hosts may
-    /// additionally derive a target from the authoritative source run when
-    /// `requested` is absent; that derivation must use `run_id` plus trusted
-    /// host state, never prompt text or a model-authored conversation id.
-    async fn resolve_delivery_target(
-        &self,
-        scope: &ResourceScope,
-        run_id: Option<RunId>,
-        requested: Option<ironclaw_triggers::TriggerDeliveryTargetId>,
-    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-        if let Some(target) = requested {
-            self.validate_delivery_target(scope, &target).await?;
-            Ok(Some(target))
-        } else {
-            self.resolve_implicit_delivery_target(scope, run_id).await
-        }
-    }
-
-    /// Resolve an omitted delivery target from trusted host state.
-    ///
-    /// The trigger tool owns the precedence rule: a caller-supplied target is
-    /// always validated and wins. Hosts only adapt the authoritative source
-    /// run into an implicit target through this narrower seam.
-    async fn resolve_implicit_delivery_target(
-        &self,
-        scope: &ResourceScope,
-        run_id: Option<RunId>,
-    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-        let _ = (scope, run_id);
-        Ok(None)
-    }
-
-    /// Validate a model-supplied per-trigger delivery target id before the
-    /// record is persisted (ownership, existence, product availability).
-    ///
-    /// The default fails closed: hosts that can resolve outbound delivery
-    /// targets override this to accept caller-owned targets. Rejections must
-    /// use `TriggerRecordValidationKind::DeliveryTargetInvalid` so the tool
-    /// layer maps them to a `delivery_target_id` input issue.
-    async fn validate_delivery_target(
-        &self,
-        scope: &ResourceScope,
-        target: &ironclaw_triggers::TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        let _ = (scope, target);
-        Err(TriggerError::InvalidRecord {
-            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
-            reason: "per-trigger delivery targets are not supported by this host".to_string(),
-        })
-    }
-
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
@@ -264,7 +219,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         // The PRIMARY structural guarantees live one layer up, in the runner's
         // capability surface (`ironclaw_turn_runner::runtime`):
         //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
-        //     profile, whose `PerSurfaceCapabilityDenyDecorator`
+        //     profile, whose `resolved CapabilitySurfacePolicy`
         //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation
         //     capabilities before the model can see them (`trigger_list` stays);
         //   * a subagent runs on the `subagent_tools` surface, whose per-flavor
@@ -297,7 +252,6 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                     &*self.repository,
                     &*self.create_hook,
                     &request.scope,
-                    request.run_id,
                     request.input,
                     self.clock.now(),
                 )
@@ -421,10 +375,6 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     schedule: TriggerScheduleInput,
-    /// Optional per-trigger outbound delivery target id (from the outbound
-    /// delivery target capabilities). Host-validated before persistence.
-    #[serde(default)]
-    delivery_target_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -447,7 +397,6 @@ async fn create_trigger(
     repository: &dyn TriggerRepository,
     create_hook: &dyn TriggerCreateHook,
     scope: &ResourceScope,
-    run_id: Option<RunId>,
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
@@ -460,15 +409,6 @@ async fn create_trigger(
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
-    let requested_delivery_target = input
-        .delivery_target_id
-        .map(ironclaw_triggers::parse_trigger_delivery_target_id)
-        .transpose()
-        .map_err(trigger_record_error)?;
-    let delivery_target = create_hook
-        .resolve_delivery_target(scope, run_id, requested_delivery_target)
-        .await
-        .map_err(trigger_record_error)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -479,7 +419,11 @@ async fn create_trigger(
         source: TriggerSourceKind::Schedule,
         schedule,
         prompt: input.prompt,
-        delivery_target,
+        // Retired stored routing (spec §8): a routine delivers externally only
+        // by calling `builtin.outbound_deliver` from its own prompt, so nothing
+        // here ever seals a delivery route again. The field survives only to
+        // read pre-removal rows until the boot migration rewrites them.
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -520,6 +464,12 @@ async fn list_triggers(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    // #7246/#7474 review: `limit: 0` would return an empty list while routines
+    // exist, and the description tells the model an empty list proves absence.
+    // Reject zero (schema declares `minimum: 1`) so empty is always evidence.
+    if input.limit == Some(0) {
+        return Err(input_error());
+    }
     let limit = input
         .limit
         .unwrap_or(TRIGGER_LIST_MAX_LIMIT)
@@ -653,7 +603,6 @@ fn trigger_output(
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
-        "delivery_target_id": record.delivery_target.as_ref().map(|target| target.as_str()),
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -720,15 +669,9 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
     let mut issues = Vec::new();
     required_string(root, "name", "name", "string", &mut issues);
     required_string(root, "prompt", "prompt", "string", &mut issues);
-    if let Some(value) = root.get("delivery_target_id")
-        && !value.is_null()
-        && !value.is_string()
-    {
-        issues.push(type_mismatch("delivery_target_id", "string"));
-    }
     unexpected_fields(
         root,
-        &["name", "prompt", "schedule", "delivery_target_id"],
+        &["name", "prompt", "schedule"],
         "unexpected_field",
         &mut issues,
     );
@@ -903,13 +846,6 @@ fn trigger_record_error(error: TriggerError) -> FirstPartyCapabilityError {
         } => invalid_trigger_input(vec![
             invalid_value("prompt").expected("trigger prompt within the allowed byte limit"),
         ]),
-        TriggerError::InvalidRecord {
-            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
-            ..
-        } => invalid_trigger_input(vec![invalid_value("delivery_target_id").expected(
-            "an outbound delivery target id available to this caller (from \
-             builtin__outbound_delivery_targets_list)",
-        )]),
         other => invalid_trigger_input(vec![
             invalid_value("trigger").expected(trigger_error_kind(&other)),
         ]),

@@ -16,7 +16,7 @@
 //! the planner is downstream and forwards faithfully.
 //!
 //! These tests are integration-tier: they live in
-//! `crates/ironclaw_host_runtime/tests/` so they exercise the
+//! `crates/kernel/ironclaw_host_runtime/tests/` so they exercise the
 //! planner's *public* API and survive private-module refactors.
 
 use ironclaw_host_api::runtime_policy::{
@@ -51,6 +51,7 @@ fn descriptor_with_runtime(
         max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
+        standard_op: None,
     }
 }
 
@@ -228,7 +229,7 @@ fn hosted_dev_shell_run_never_plans_against_local_host() {
 
     let shell = builtin_shell_descriptor();
     let plan = plan_capability(&shell, &policy).unwrap();
-    assert_eq!(plan.process_backend, ProcessBackendKind::TenantSandbox);
+    assert_eq!(plan.process_backend, ProcessBackendKind::UserSandbox);
     assert_ne!(plan.process_backend, ProcessBackendKind::LocalHost);
     assert_ne!(
         plan.filesystem_backend,
@@ -288,7 +289,7 @@ fn hosted_multi_tenant_rejects_standalone_at_resolver_before_planner_runs() {
 
 #[test]
 fn hosted_yolo_tenant_scoped_never_plans_against_local_host_or_host_filesystem() {
-    // The "yolo means tenant-sandbox yolo, never provider-host yolo"
+    // The "yolo means user-sandbox yolo, never provider-host yolo"
     // contract: even with the yolo profile selected and disclosure
     // acknowledged, the resolved policy + planner combination must
     // never reach LocalHost shell or HostWorkspace filesystem.
@@ -302,7 +303,7 @@ fn hosted_yolo_tenant_scoped_never_plans_against_local_host_or_host_filesystem()
 
     let shell = descriptor("shell.run", vec![EffectKind::SpawnProcess]);
     let plan = plan_capability(&shell, &policy).unwrap();
-    assert_eq!(plan.process_backend, ProcessBackendKind::TenantSandbox);
+    assert_eq!(plan.process_backend, ProcessBackendKind::UserSandbox);
     assert_ne!(plan.process_backend, ProcessBackendKind::LocalHost);
 
     let read = descriptor("filesystem.read", vec![EffectKind::ReadFilesystem]);

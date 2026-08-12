@@ -9,7 +9,7 @@ use ironclaw_approvals::{
     CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     test_support::{
         in_memory_backed_capability_permission_override_store,
         in_memory_backed_persistent_approval_policy_store,
@@ -985,7 +985,7 @@ async fn always_allow_clears_existing_ask_each_time_override() {
         .await
         .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
-    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
+    let override_store: Arc<dyn CapabilityPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_tool_permission_override_store(override_store);
@@ -1041,7 +1041,7 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         .await
         .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
-    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
+    let override_store: Arc<dyn CapabilityPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {
@@ -2956,3 +2956,9 @@ async fn run_state_read_model_uses_parked_turn_run_id_for_pending_approvals() {
         .expect("other user pending approvals");
     assert!(other_user_pending.is_empty());
 }
+
+// Note: the shared-thread joiner-resolve pin retired with the ephemeral-per-
+// ping remodel (#7377) — its whole point was owner != actor (a gate raised
+// under the acting user, resolved on a turn whose scope owner was the first
+// binder). Ephemeral-per-ping makes owner == actor universally, so the
+// scenario can no longer exist.

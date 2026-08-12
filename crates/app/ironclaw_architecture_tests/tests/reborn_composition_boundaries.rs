@@ -20,14 +20,12 @@ use ratchet_support::{crate_path, workspace_root};
 const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_auth",
     "ironclaw_host_api",
-    "ironclaw_storage",
     "ironclaw_filesystem",
     "ironclaw_event_log",
     "ironclaw_event_projections",
     "ironclaw_event_streams",
     "ironclaw_extension_registry",
     "ironclaw_authorization",
-    "ironclaw_approvals",
     "ironclaw_approvals",
     "ironclaw_resources",
     "ironclaw_trust",
@@ -47,7 +45,6 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_openai_compat",
     "ironclaw_telegram_extension",
     "ironclaw_assistant",
-    "ironclaw_assistant",
     "ironclaw_triggers",
 ];
 
@@ -55,8 +52,14 @@ const SUBSTRATE_CRATES: &[&str] = &[
 fn no_substrate_crate_depends_on_composition_root() {
     let dependencies = workspace_dependencies();
     for substrate in SUBSTRATE_CRATES {
+        // Fail closed on an unresolvable entry: the silent `continue` this
+        // replaces let `ironclaw_storage` sit in this list long after the
+        // crate was deleted — a row that resolves to nothing polices nothing.
         let Some(actual) = dependencies.get(*substrate) else {
-            continue;
+            panic!(
+                "{substrate} is listed in SUBSTRATE_CRATES but is not a workspace package; \
+                 remove the stale entry (or fix the name) so this list keeps matching the tree"
+            );
         };
         assert!(
             !actual.iter().any(|dep| dep == COMPOSITION_CRATE),
@@ -190,13 +193,14 @@ fn composition_public_pub_use_surface_matches_snapshot() {
     let root = workspace_root();
     let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
         .expect("composition lib.rs readable");
-    let snapshot = std::fs::read_to_string(root.join("docs/plans/composition-pubuse.snapshot"))
-        .expect("composition pub-use snapshot readable");
+    let snapshot =
+        std::fs::read_to_string(root.join("docs/internal/plans/composition-pubuse.snapshot"))
+            .expect("composition pub-use snapshot readable");
 
     let actual = extract_pub_use_surface(&lib);
     assert_eq!(
         snapshot, actual,
-        "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
+        "composition public pub-use surface must match docs/internal/plans/composition-pubuse.snapshot; \
          update the snapshot only for intentional public service changes"
     );
 }
@@ -642,10 +646,11 @@ fn is_test_module_file(path: &Path) -> bool {
 /// Is this file crate guidance rather than a shipped asset?
 ///
 /// `CONTRACT.MD` belongs here for the same reason as the other three: the repo
-/// already ships it as crate-local guidance (`ironclaw_identity`,
-/// `ironclaw_trust`) and CLAUDE.md's module-spec table names it. Without it, a
-/// composition `CONTRACT.md` would be reported as prompt content and send the
-/// author to the wrong fix.
+/// ships it as crate-local guidance (`ironclaw_identity`, `ironclaw_trust`,
+/// and the module specs the root `AGENTS.md` Module Specs table names —
+/// including this crate's own `CONTRACT.md`). Without it, the composition
+/// `CONTRACT.md` would be reported as prompt content and send the author to
+/// the wrong fix.
 fn is_crate_guidance(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())

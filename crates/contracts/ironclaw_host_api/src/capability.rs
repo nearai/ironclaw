@@ -16,6 +16,7 @@ use crate::{
     http::RuntimeCredentialTarget,
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle, VendorId},
     invocation::InvocationOrigin,
+    messaging::StandardMessagingOp,
     mount::MountView,
     resource::{ResourceCeiling, ResourceProfile},
     runtime::{RuntimeKind, TrustClass},
@@ -256,6 +257,12 @@ pub struct CapabilityDescriptor {
     /// to declare one. Populated per capability in a later slice.
     #[serde(default)]
     pub origin_gate_matrix: Option<OriginGateMatrix>,
+    /// The standard messaging operation this descriptor is bound to (manifest
+    /// v3 `standard_op`; mirrors `CapabilityDeclV2.standard_op`), or `None`
+    /// for a bespoke capability. `#[serde(default)]` so descriptors persisted
+    /// or serialized before this field existed rehydrate to `None`.
+    #[serde(default)]
+    pub standard_op: Option<StandardMessagingOp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +377,7 @@ mod capability_descriptor_runtime_kind_tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![],
             default_permission: PermissionMode::Ask,
+            standard_op: None,
             runtime_credentials: vec![],
             network_targets: vec![],
             max_egress_bytes: None,

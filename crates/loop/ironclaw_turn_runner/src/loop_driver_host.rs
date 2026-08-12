@@ -19,20 +19,20 @@ use ironclaw_hooks::middleware::{
     HookedLoopTranscriptPort,
 };
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId},
     resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_loop_host::{
-    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityAllowSet,
-    CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, GuardedSystemInferencePort,
-    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, active_task_compaction_prompt_id,
-    host_managed_loop_compaction_port_with_prompt_id,
+    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityResolveError,
+    CapabilitySurfacePolicyFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -47,8 +47,8 @@ mod config;
 
 pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
 use ironclaw_loop_host::{
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
-    ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostManagedPromptDiagnosticSink,
+    NoExtraLoopInputPort, ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
 };
 
 // Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
@@ -131,8 +131,9 @@ use ironclaw_loop_contracts::{
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus,
+    runner::ClaimedTurnRun,
 };
 use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use tokio::task::JoinHandle;
@@ -152,14 +153,14 @@ impl LoopCapabilityPortFactory for SurfaceFilteringCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let allow_set = Arc::new(
+        let policy = Arc::new(
             self.surface_resolver
                 .resolve(run_context)
                 .await
                 .map_err(capability_resolve_error_to_agent_host_error)?,
         );
         let capabilities = self.inner.create_capability_port(run_context).await?;
-        Ok(apply_capability_surface_profile(capabilities, allow_set))
+        Ok(apply_capability_surface_policy(capabilities, policy))
     }
 }
 
@@ -281,6 +282,10 @@ fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.inner.requires_ordered_batch_invocation()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.inner.tool_definitions()
     }
@@ -1017,9 +1022,14 @@ where
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
     model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
     cancellation_factory: Arc<dyn RunCancellationFactory>,
+    /// The journal-backed ownership authority. Held so every host this factory
+    /// builds can fence its transcript writes on the claimed run's lease still
+    /// being live (`ThreadBackedLoopTranscriptPort::with_run_lease_fence`).
+    agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
@@ -1115,15 +1125,16 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
+        agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
         safety_context: InstructionSafetyContext,
     ) -> Self {
-        let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
-            AgentTurnRunCancellationFactory::new(Arc::clone(&agent_turn_runtime)),
-        );
+        let cancellation_factory: Arc<dyn RunCancellationFactory> =
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                Arc::clone(&agent_turn_runtime) as Arc<dyn AgentTurnRuntimePort>,
+            ));
         Self {
             thread_service,
             thread_scope,
@@ -1134,9 +1145,11 @@ where
             model_accountant: Arc::new(NoOpBudgetAccountant),
             model_policy_guard: Arc::new(NoOpPolicyGuard),
             cancellation_factory,
+            agent_turn_runtime,
             config,
             skill_context_source: None,
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
@@ -1230,6 +1243,14 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_prompt_diagnostic_sink(
+        mut self,
+        sink: Arc<dyn HostManagedPromptDiagnosticSink>,
+    ) -> Self {
+        self.prompt_diagnostic_sink = Some(sink);
         self
     }
 
@@ -1535,14 +1556,14 @@ where
         &self,
         request: RebornLoopDriverHostRequest,
         capabilities: Arc<dyn LoopCapabilityPort>,
-        allow_set: Arc<CapabilityAllowSet>,
+        policy: Arc<CapabilitySurfacePolicy>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
         validate_thread_scope(
             &self.effective_thread_scope(&request.loop_run_context),
             &request.loop_run_context,
         )?;
-        let capabilities = apply_capability_surface_profile(capabilities, allow_set);
+        let capabilities = apply_capability_surface_policy(capabilities, policy);
         self.build_text_only_host_with_capabilities(request, capabilities)
             .await
     }
@@ -1617,6 +1638,17 @@ where
         }
         if let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
+        }
+        // Channel-origin runs carry host-fetched conversation history on the
+        // persisted product context; the port renders it as one framed
+        // UNTRUSTED system-context block beside identity/skill context.
+        if let Some(channel_context) = run_context
+            .product_context
+            .as_ref()
+            .and_then(|product| product.channel_context.as_ref())
+        {
+            context_adapter =
+                context_adapter.with_channel_conversation_context(channel_context.clone());
         }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
@@ -1771,16 +1803,19 @@ where
                 return Err(error);
             }
         };
-        // The rendered guidance names BOTH the lister and the setter; require both
+        // The rendered guidance names BOTH the delivery tool and the lister; require both
         // capabilities to be visible before setting the flag, so we never prompt
-        // the model to call a tool that is not actually in the surface.
+        // the model to call a tool that is not actually in the surface. The pair is the
+        // delivery verb plus its address book: a lister with no way to deliver is not a
+        // delivery surface, and `builtin.notification_channels_set` is a settings tool
+        // that configures notice fan-out — it delivers nothing and does not qualify.
         let delivery_tools_visible = {
             let ids: std::collections::HashSet<&str> = visible_surface
                 .descriptors
                 .iter()
                 .map(|d| d.capability_id.as_str())
                 .collect();
-            ids.contains("builtin.outbound_delivery_target_set")
+            ids.contains("builtin.outbound_deliver")
                 && ids.contains("builtin.outbound_delivery_targets_list")
         };
         // Join the fetch started at loop entry and stamp the surface-derived
@@ -1907,6 +1942,7 @@ where
                         prompt_authority,
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
+                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
                     },
                 ))
             } else {
@@ -1925,6 +1961,7 @@ where
                         prompt_authority,
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
+                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
                     },
                 ))
             };
@@ -1946,6 +1983,13 @@ where
             effective_scope.clone(),
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
+        )
+        // The lease this run was claimed under. A transcript append carries no
+        // lease of its own, so without this a worker whose lease recovery
+        // already reclaimed could still append beside the replacement's reply.
+        .with_run_lease_fence(
+            Arc::clone(&self.agent_turn_runtime),
+            request.claimed_run.lease_token,
         );
         if let Some(port) = self.reply_attachment_intent_port.as_ref() {
             transcript_adapter =
@@ -2185,6 +2229,10 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.capabilities.requires_ordered_batch_invocation()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.capabilities.tool_definitions()
     }
@@ -2554,16 +2602,11 @@ pub(crate) fn capability_resolve_error_to_agent_host_error(
     AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, host_error.to_string())
 }
 
-pub(crate) fn apply_capability_surface_profile(
+pub(crate) fn apply_capability_surface_policy(
     capabilities: Arc<dyn LoopCapabilityPort>,
-    allow_set: Arc<CapabilityAllowSet>,
+    policy: Arc<CapabilitySurfacePolicy>,
 ) -> Arc<dyn LoopCapabilityPort> {
-    // #5647: bridge meta-tool ids are host-synthesized, not granted
-    // capabilities — exempt them so narrowed profiles keep bridged disclosure.
-    Arc::new(
-        CapabilitySurfaceProfileFilter::new(capabilities, allow_set)
-            .with_host_exempt_capability_ids(ironclaw_loop_host::bridge_capability_ids()),
-    )
+    Arc::new(CapabilitySurfacePolicyFilter::new(capabilities, policy))
 }
 
 fn slot_for_model_profile(
@@ -2607,9 +2650,11 @@ fn validate_thread_scope(
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is not part of the
     // on-disk thread path, so a wrong owner silently reads an empty subtree.
-    // Actor-fallback turns still require owner=actor. Explicit-owner turns
-    // intentionally allow actor/subject divergence for shared Slack/team
-    // routes, but the explicit subject must match the resolved thread owner.
+    // Explicit-owner turns (host/trigger creators, subagent parent→child
+    // propagation) must match the resolved thread owner; actor-fallback turns
+    // (multi-user WebChat) require owner==actor. Since the ephemeral-per-ping
+    // remodel owner IS the actor, so the actor-fallback check passes trivially
+    // and stays as a real scope-mismatch safety guard.
     if run_context.scope.has_explicit_thread_owner() {
         if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
             return Err(RebornLoopDriverHostError::ScopeMismatch {
@@ -2868,6 +2913,10 @@ mod thread_scope_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/compaction_tests.rs"]
 mod compaction_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/run_lease_fence_tests.rs"]
+mod run_lease_fence_tests;
 
 #[cfg(test)]
 mod tests {
