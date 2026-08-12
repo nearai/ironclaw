@@ -431,6 +431,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
 
     assert!(
         compile_workflow.contains("fail-fast: false")
+            && compile_workflow.contains("cache-on-failure: true")
             && compile_workflow.contains("cargo build --locked --profile dist")
             && compile_workflow.contains("--package ironclaw")
             && compile_workflow.contains("            --bin ironclaw \\\n")

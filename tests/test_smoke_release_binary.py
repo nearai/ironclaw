@@ -155,6 +155,15 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(SMOKE.SmokeFailure, "exited 7"):
             SMOKE.smoke_release_binary(self.binary, self.runner)
 
+    def test_invalid_json_reports_the_captured_stdout_prefix(self) -> None:
+        with self.assertRaisesRegex(
+            SMOKE.SmokeFailure, "processed file: master-key"
+        ):
+            SMOKE._parse_json_object(
+                'processed file: master-key\n{"payload": {}}',
+                "extension search --json",
+            )
+
     def test_missing_profile_fails(self) -> None:
         self.runner.responses[("profile", "list", "--json")] = completed(
             json.dumps({"profiles": [{"name": "local-dev"}]})

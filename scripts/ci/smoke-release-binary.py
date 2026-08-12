@@ -87,7 +87,10 @@ def _parse_json_object(output: str, label: str) -> dict[str, object]:
     try:
         value = json.loads(output)
     except json.JSONDecodeError as error:
-        raise SmokeFailure(f"{label} did not emit valid JSON: {error}") from error
+        prefix = output[:500]
+        raise SmokeFailure(
+            f"{label} did not emit valid JSON: {error}; stdout prefix: {prefix!r}"
+        ) from error
     if not isinstance(value, dict):
         raise SmokeFailure(f"{label} must emit a JSON object")
     return value

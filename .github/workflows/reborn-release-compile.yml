@@ -101,6 +101,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-release-${{ matrix.target }}
+          cache-on-failure: true
 
       - id: build
         name: Compile ironclaw
