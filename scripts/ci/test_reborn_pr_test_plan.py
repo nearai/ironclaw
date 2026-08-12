@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -934,6 +938,72 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 plan = self.plan("pull_request", [name])
                 self.assertEqual(plan["root_partitions"], [inventory[name]])
 
+    def test_root_partition_runner_selects_exactly_what_the_planner_schedules(
+        self,
+    ) -> None:
+        """The planner and `run-reborn-root-partition.sh` share one inventory.
+
+        Both index a sorted list of root tests and take `index % partitions`,
+        so any difference in what they discover shifts every assignment. When
+        the planner globbed every `tests/*.rs` while the runner globbed only
+        `reborn_*.rs`, the planner scheduled the partition holding the changed
+        test and the runner executed a different set — the changed test never
+        ran, and the job passed anyway.
+
+        Drives the real script with a stubbed `cargo`/`timeout` so the check
+        is on executed behavior, not on the script's text.
+        """
+        script = ROOT / "scripts/ci/run-reborn-root-partition.sh"
+        partitions = 4
+        stub_dir = Path(tempfile.mkdtemp())
+        try:
+            cargo = stub_dir / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env bash\n"
+                'while [ "$#" -gt 0 ]; do\n'
+                '  if [ "$1" = "--test" ]; then echo "$2"; exit 0; fi\n'
+                "  shift\n"
+                "done\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            timeout = stub_dir / "timeout"
+            timeout.write_text(
+                "#!/usr/bin/env bash\n"
+                '# Drop this stub\'s own leading options and the duration.\n'
+                'while [ "$#" -gt 0 ] && [ "$1" != "cargo" ]; do shift; done\n'
+                'exec "$@"\n',
+                encoding="utf-8",
+            )
+            for stub in (cargo, timeout):
+                stub.chmod(0o755)
+
+            executed: dict[str, int] = {}
+            for index in range(partitions):
+                result = subprocess.run(
+                    ["bash", str(script)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+                        "REBORN_ROOT_TEST_PARTITIONS": str(partitions),
+                        "REBORN_ROOT_TEST_PARTITION": str(index),
+                    },
+                )
+                if "mapfile" in result.stderr:
+                    self.skipTest("bash without `mapfile` (bash 3.x) cannot run the runner")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for line in result.stdout.splitlines():
+                    name = line.strip()
+                    if name and not name.startswith("::"):
+                        executed[f"tests/{name}.rs"] = index
+        finally:
+            shutil.rmtree(stub_dir, ignore_errors=True)
+
+        self.assertEqual(executed, planner._root_test_partitions())
+
     def test_unmapped_crate_path_widens_instead_of_refusing(self) -> None:
         """A crate path with no owning package widens to the exhaustive plan.
 
@@ -1194,25 +1264,23 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["mode"], "none", path)
                 self.assertEqual(plan["crate_buckets"], [], path)
 
-    def test_container_and_hook_inputs_are_owned_by_static_gates(self) -> None:
-        """`Dockerfile`, `.dockerignore` and `.githooks/**` select no Rust lane.
+    def test_hook_inputs_are_owned_by_static_gates(self) -> None:
+        """`.githooks/**` selects no Rust lane.
 
         Regression for the #7087 gap, the same class #7064 fixed for
-        `.claude/`: the planner had no rule for the container build inputs or
-        the git hooks, so its fail-closed arm rejected any PR that touched
-        them — which made a `Dockerfile` edit unmergeable even when the edit
-        was required (Wave 3's `wit/` move had to drop a `COPY wit/ wit/` that
-        no longer resolved, #7084). The image build belongs to
-        `platform-and-compat.yml`'s `has_docker_risk` lane and the hooks to
-        Code Style; no Reborn Rust lane builds an image or runs a hook.
+        `.claude/`: the planner had no rule for the git hooks, so its
+        fail-closed arm rejected any PR that touched them. The hooks belong to
+        Code Style; no Reborn Rust lane runs a hook.
 
         Paired assertion, as in the `.claude/` regression: accepted AND
         selecting nothing, so a later "classification" that quietly escalates
         these to a full matrix fails here too.
+
+        `Dockerfile` and `.dockerignore` were asserted here until they gained
+        a real Rust owner — see
+        `test_container_image_paths_select_the_dockerfile_root_test`.
         """
         for path in (
-            "Dockerfile",
-            ".dockerignore",
             ".githooks/pre-commit",
             ".githooks/commit-msg",
         ):
@@ -1221,6 +1289,30 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["mode"], "none", path)
                 self.assertEqual(plan["crate_buckets"], [], path)
                 self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+    def test_container_image_paths_select_the_dockerfile_root_test(self) -> None:
+        """Image build inputs schedule the root test that asserts them.
+
+        `Dockerfile` and `.dockerignore` were static control paths (#7084) on
+        the premise that no Reborn Rust lane reads the image definition. That
+        premise was wrong: `tests/dockerfile_runtime_home.rs` asserts the
+        runtime packages, the entrypoint's behavior, and the seed configs.
+        `platform-and-compat.yml` builds the image but never runs those
+        assertions, so dropping a runtime package built green and shipped
+        broken — the 1.1.0 orchestrator-healthcheck outage (#7303).
+        """
+        expected = planner._root_test_partitions()[planner.DOCKERFILE_ROOT_TEST]
+        for path in (
+            "Dockerfile",
+            ".dockerignore",
+            "docker/reborn/config.hosted-single-tenant.toml",
+            "docker/reborn/config.hosted-single-tenant-volume.toml",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["root_partitions"], [expected], path)
+                self.assertEqual(plan["crate_buckets"], [], path)
                 self.assertEqual(plan["integration_lanes"], [], path)
 
     def test_embedded_package_assets_schedule_the_crate_that_compiles_them(

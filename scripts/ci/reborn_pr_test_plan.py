@@ -355,13 +355,15 @@ PR_STATIC_CONTROL_PATHS = {
     # `codebase-graph.sh` inspects agent-only graph metadata. It does not
     # execute or select a Reborn product test surface. (Arrived with #7215.)
     "scripts/codebase-graph.sh",
-    # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
-    # off exactly this pair and owns the image build; Code Style additionally
-    # proves every `include_str!` target is inside each build context
-    # (`scripts/ci/check-include-str-paths.sh`, the #5603 outage class). A
-    # Reborn Rust lane never builds an image.
-    "Dockerfile",
-    ".dockerignore",
+    # `Dockerfile` and `.dockerignore` used to sit here. They now route to the
+    # root test that asserts the image's contents — see the
+    # `container image definition changed` branch in `build_plan`.
+    # `platform-and-compat.yml` still keys `has_docker_risk` off that pair and
+    # owns the image build, and Code Style still proves every `include_str!`
+    # target is inside each build context
+    # (`scripts/ci/check-include-str-paths.sh`, the #5603 outage class);
+    # neither runs the assertions, which is how #7303 shipped.
+    #
     # `.gitignore` is decided the same way, and belongs here rather than with
     # the repo-root prose above precisely because something *does* read it:
     # Code Style's `Reject tracked files that match .gitignore` guard
@@ -604,6 +606,24 @@ def _bound_pr_buckets(
     return bounded
 
 
+DOCKERFILE_ROOT_TEST = "tests/dockerfile_runtime_home.rs"
+# Exactly the build inputs that root test reads and asserts on. Enumerated
+# rather than globbed as `docker/**` on purpose: `docker/` is classified
+# per-file here (see `test_sibling_container_inputs_still_require_a_decision`),
+# and a blanket prefix would silently absorb `config.production.toml` and
+# `process-sandbox-entrypoint.sh`, which no lane covers. `entrypoint.sh` is
+# exercised by the same root test but keeps its earlier static-control
+# decision, matched before this branch is reached.
+DOCKERFILE_ROOT_TEST_INPUTS = frozenset(
+    {
+        "Dockerfile",
+        ".dockerignore",
+        "docker/reborn/config.hosted-single-tenant.toml",
+        "docker/reborn/config.hosted-single-tenant-volume.toml",
+    }
+)
+
+
 def _root_test_partitions() -> dict[str, int]:
     # Every root test target, not just the `reborn_*` ones. Cargo
     # auto-discovers `tests/*.rs` for the root package, so a narrower glob left
@@ -814,6 +834,23 @@ def build_plan(
         if path in root_inventory:
             root_partitions.add(root_inventory[path])
             reasons.append(f"root test changed: {path}")
+            continue
+        if path in DOCKERFILE_ROOT_TEST_INPUTS:
+            # The shipped container image *is* asserted by a Reborn root test
+            # (`tests/dockerfile_runtime_home.rs`: runtime packages, entrypoint
+            # behavior, seed configs), so schedule that test's partition.
+            #
+            # These were static control paths until this rule (#7084's premise
+            # was that no Reborn Rust lane reads the image definition — that
+            # stopped being true). `platform-and-compat.yml` still owns the
+            # image *build*; it does not run the assertions, so a package
+            # dropped from the runtime stage built green and shipped broken
+            # (#7303, the 1.1.0 healthcheck outage).
+            #
+            # `docker/reborn/entrypoint.sh` is unaffected: it is matched by the
+            # static-control branch above, which runs first.
+            root_partitions.add(root_inventory.get(DOCKERFILE_ROOT_TEST, 0))
+            reasons.append(f"container image definition changed: {path}")
             continue
         if (
             path.startswith("tests/support/reborn_parity_qa/")

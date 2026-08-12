@@ -24,13 +24,14 @@ if [ "${partition_index_int}" -ge "${partition_count_int}" ]; then
   exit 1
 fi
 
+# Every root test target, matching `_root_test_partitions()` in
+# `reborn_pr_test_plan.py` exactly: cargo auto-discovers every `tests/*.rs`
+# for the root package, and the planner assigns partitions over that same
+# list. Discovering a narrower set here silently shifts every index — the
+# planner schedules the partition holding the changed test while this runner
+# executes a different set and never runs it.
 mapfile -t test_names < <(
-  {
-    find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print
-    if [ -f tests/support_unit_tests.rs ]; then
-      printf '%s\n' tests/support_unit_tests.rs
-    fi
-  } \
+  find tests -maxdepth 1 -type f -name '*.rs' -print \
     | sed -E 's#^tests/##; s#\.rs$##' \
     | LC_ALL=C sort
 )
