@@ -1424,8 +1424,9 @@ where
         }
         if !tool_definitions.is_empty() {
             let unavailable_capability_guard =
-                unavailable_requested_capability_guard(&completion.messages, &tool_definitions)
-                    .filter(|guard| {
+                requested_unadvertised_capability_guards(&completion.messages, &tool_definitions)
+                    .into_iter()
+                    .find(|guard| {
                         !requested_capability_is_resolvable(capabilities.as_ref(), guard)
                     });
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
@@ -2031,14 +2032,27 @@ fn requested_capability_is_resolvable(
         })
 }
 
+#[cfg(test)]
 fn unavailable_requested_capability_guard(
     messages: &[ChatMessage],
     tool_definitions: &[ProviderToolDefinition],
 ) -> Option<UnavailableCapabilityGuard> {
+    requested_unadvertised_capability_guards(messages, tool_definitions)
+        .into_iter()
+        .next()
+}
+
+fn requested_unadvertised_capability_guards(
+    messages: &[ChatMessage],
+    tool_definitions: &[ProviderToolDefinition],
+) -> Vec<UnavailableCapabilityGuard> {
     let latest_user = messages
         .iter()
         .rev()
-        .find(|message| message.role == Role::User)?;
+        .find(|message| message.role == Role::User);
+    let Some(latest_user) = latest_user else {
+        return Vec::new();
+    };
     let visible_capability_ids = tool_definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
@@ -2055,8 +2069,9 @@ fn unavailable_requested_capability_guard(
 
     extract_explicit_capability_request_ids(&latest_user.content, &visible_namespaces)
         .into_iter()
-        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
+        .filter(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
+        .collect()
 }
 
 fn extract_explicit_capability_request_ids(

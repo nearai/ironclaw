@@ -1038,6 +1038,39 @@ async fn gateway_allows_prerequisite_and_discovery_for_named_deferred_capability
 }
 
 #[tokio::test]
+async fn gateway_suppresses_substitute_when_later_named_capability_is_unavailable() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_substitute".to_string(),
+        name: "demo__echo".to_string(),
+        arguments: serde_json::json!({"message": "substitute"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_deferred_prerequisite_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content =
+        "Use the demo.hidden capability, then use the builtin.disabled capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected unavailable capability reply");
+    };
+    assert!(reply.content.contains("unavailable or disabled"));
+}
+
+#[tokio::test]
 async fn gateway_allows_exact_named_deferred_capability_for_policy_resolution() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_hidden".to_string(),
