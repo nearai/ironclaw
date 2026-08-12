@@ -101,6 +101,17 @@ test("completed card shows a Completed chip + '+ Automation' and no Revert/Modif
   assert.equal(containsScalar(tree, "chat.oobe.action.revert"), false);
   assert.equal(containsScalar(tree, "chat.oobe.action.modify"), false);
   assert.equal(containsScalar(tree, "chat.oobe.action.approve"), false);
+  // Without `scheduled` the automation is still on offer, not yet a status chip.
+  assert.equal(containsScalar(tree, "chat.oobe.status.scheduled"), false);
+});
+
+test("completed + scheduled swaps '+ Automation' for the 'Automation scheduled' chip (slice 4)", () => {
+  const { tree } = renderCard({ ...baseTask, state: "completed" }, { scheduled: true });
+  // The optimistic status chip replaces the action button entirely…
+  assert.equal(containsScalar(tree, "chat.oobe.status.scheduled"), true);
+  assert.equal(containsScalar(tree, "chat.oobe.action.automation"), false);
+  // …while the Completed chip stays (the card is still a finished result).
+  assert.equal(containsScalar(tree, "chat.oobe.status.completed"), true);
 });
 
 test("failed card shows a 'Couldn't complete' chip + Try again", () => {

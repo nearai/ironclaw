@@ -338,6 +338,19 @@ export function Chat({
     [handleSend]
   );
 
+  // "+ Automation" on a completed OOBE card schedules a recurring automation:
+  // it submits the task's `automationPrompt` through the same send path, so the
+  // agent calls `builtin.trigger_create` (prompt injection is the design — no
+  // REST create).
+  const handleAutomationTask = React.useCallback(
+    (task) => {
+      void handleSend(task.automationPrompt, {
+        displayContent: `Set up automation — ${task.title}`,
+      });
+    },
+    [handleSend]
+  );
+
   const handleCancelRun = React.useCallback(
     async () => {
       try {
@@ -437,6 +450,7 @@ export function Chat({
             onSuggestion={handleSuggestion}
             onSend={handleSend}
             onApproveTask={handleApproveTask}
+            onAutomationTask={handleAutomationTask}
             commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}

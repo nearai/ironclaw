@@ -12,6 +12,12 @@
  * running the agent as a real foreground turn whose activity streams in the
  * thread by reuse. The just-approved card flips to `running` optimistically;
  * its live completed/failed status arrives via the thread in a later slice.
+ *
+ * Slice 4 wires "+ Automation" the same way: a completed card's automation
+ * action submits the task's `automationPrompt` (via `onAutomationTask`) so the
+ * agent schedules a recurring automation (it calls `builtin.trigger_create` —
+ * prompt injection is the design, no REST create). The card flips to a
+ * "scheduled" chip optimistically.
  */
 import React from "react";
 
@@ -31,6 +37,8 @@ const DEMO_TASKS: SuggestedTask[] = [
     state: "unconnected",
     connectLabel: "Gmail",
     approvePrompt: "Triage my inbox — reply to routine mail and archive newsletters.",
+    automationPrompt:
+      "Set this up as a recurring automation: triage my inbox every morning — reply to routine mail and archive newsletters.",
   },
   {
     id: "demo-calendar-suggested",
@@ -40,6 +48,8 @@ const DEMO_TASKS: SuggestedTask[] = [
     state: "suggested",
     approvePrompt:
       "Reschedule my “Design sync” so it no longer overlaps my 1:1 with Dana — move it to a free slot.",
+    automationPrompt:
+      "Set this up as a recurring automation: each morning, scan my calendar for conflicts and reschedule them to free slots.",
   },
   {
     id: "demo-docs-completed",
@@ -49,13 +59,17 @@ const DEMO_TASKS: SuggestedTask[] = [
     state: "completed",
     approvePrompt:
       "Summarize this week's docs — pull the key insights from the launch retro and the two incoming PRDs.",
+    automationPrompt:
+      "Set this up as a recurring automation: summarize my docs each week and share the key insights.",
   },
 ];
 
 export function SuggestedTaskSurface({
   onApproveTask,
+  onAutomationTask,
 }: {
   onApproveTask?: (task: SuggestedTask) => void;
+  onAutomationTask?: (task: SuggestedTask) => void;
 } = {}) {
   const enabled = useOobeSuggestionsEnabled();
   const t = useT();
@@ -63,6 +77,9 @@ export function SuggestedTaskSurface({
   // the surface reflects the kicked-off turn immediately (live status lands in
   // a later slice via the thread).
   const [runningId, setRunningId] = React.useState<string | null>(null);
+  // The id of the just-scheduled card, flipped to its "scheduled" chip
+  // optimistically once "+ Automation" fires (same pattern as `runningId`).
+  const [scheduledId, setScheduledId] = React.useState<string | null>(null);
   if (!enabled) return null;
 
   return (
@@ -78,9 +95,14 @@ export function SuggestedTaskSurface({
           <SuggestedTaskCard
             key={task.id}
             task={runningId === task.id ? { ...task, state: "running" } : task}
+            scheduled={scheduledId === task.id}
             onApprove={() => {
               setRunningId(task.id);
               onApproveTask?.(task);
+            }}
+            onAutomation={() => {
+              setScheduledId(task.id);
+              onAutomationTask?.(task);
             }}
           />
         ))}

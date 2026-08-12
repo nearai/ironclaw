@@ -84,3 +84,15 @@ test("EmptyState forwards onApproveTask to the suggestion surface so approving a
   const props = componentProps(surface, components.SuggestedTaskSurface);
   assert.equal(props.onApproveTask, onApproveTask);
 });
+
+test("EmptyState forwards onAutomationTask to the suggestion surface so scheduling a card runs it", () => {
+  // Test through the caller: EmptyState must hand the automation callback down
+  // to the surface (which wires it onto each completed card), exactly as it
+  // forwards onApproveTask above.
+  const onAutomationTask = () => {};
+  const { tree, components } = renderEmptyState({ onAutomationTask });
+
+  const surface = findComponent(tree, components.SuggestedTaskSurface);
+  const props = componentProps(surface, components.SuggestedTaskSurface);
+  assert.equal(props.onAutomationTask, onAutomationTask);
+});

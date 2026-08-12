@@ -19,12 +19,26 @@ function surfaceSourceForTest() {
   );
 }
 
-function renderSurface({ enabled, runningId = null, onApproveTask } = {}) {
-  // Capture the id passed to `setRunningId` so we can assert the optimistic
-  // "flip to running" request, and control the current `runningId` so we can
-  // observe the resulting render (the vm harness calls the component once, so
-  // state is driven, not re-rendered).
+function renderSurface({
+  enabled,
+  runningId = null,
+  scheduledId = null,
+  onApproveTask,
+  onAutomationTask,
+} = {}) {
+  // Capture the ids passed to `setRunningId` / `setScheduledId` so we can assert
+  // the optimistic "flip" requests, and control the current `runningId` /
+  // `scheduledId` so we can observe the resulting render (the vm harness calls
+  // the component once, so state is driven, not re-rendered). The surface calls
+  // `useState` twice in order — runningId then scheduledId — so hand back the
+  // matching tuple per call index.
   const setRunningIdCalls = [];
+  const setScheduledIdCalls = [];
+  const states = [
+    [runningId, (next) => setRunningIdCalls.push(next)],
+    [scheduledId, (next) => setScheduledIdCalls.push(next)],
+  ];
+  let stateIndex = 0;
   const components = { SuggestedTaskCard() {} };
   const context = {
     ...components,
@@ -32,14 +46,15 @@ function renderSurface({ enabled, runningId = null, onApproveTask } = {}) {
     useT: () => (key) => key,
     useOobeSuggestionsEnabled: () => enabled,
     React: {
-      useState: () => [runningId, (next) => setRunningIdCalls.push(next)],
+      useState: () => states[stateIndex++],
     },
   };
   vm.runInNewContext(surfaceSourceForTest(), context);
-  const tree = context.globalThis.__testExports.SuggestedTaskSurface(
-    onApproveTask ? { onApproveTask } : {},
-  );
-  return { tree, components, setRunningIdCalls };
+  const props = {};
+  if (onApproveTask) props.onApproveTask = onApproveTask;
+  if (onAutomationTask) props.onAutomationTask = onAutomationTask;
+  const tree = context.globalThis.__testExports.SuggestedTaskSurface(props);
+  return { tree, components, setRunningIdCalls, setScheduledIdCalls };
 }
 
 test("surface renders nothing when the oobe_suggestions flag is off", () => {
@@ -83,4 +98,34 @@ test("approving a card reports the task upward AND flips that card to running", 
   const runningCard = findComponent(second.tree, second.components.SuggestedTaskCard);
   const runningProps = componentProps(runningCard, second.components.SuggestedTaskCard);
   assert.equal(runningProps.task.state, "running");
+});
+
+test("+ Automation reports the task upward AND flips that card to scheduled", () => {
+  const scheduled = [];
+  // Pass 1: no card is scheduled yet. Invoking a card's automation action must
+  // both report the exact task to `onAutomationTask` (so the parent submits its
+  // `automationPrompt` through the send path) and request the optimistic flip
+  // via setScheduledId(task.id).
+  const first = renderSurface({
+    enabled: true,
+    onAutomationTask: (task) => scheduled.push(task),
+  });
+  const card = findComponent(first.tree, first.components.SuggestedTaskCard);
+  const props = componentProps(card, first.components.SuggestedTaskCard);
+  assert.notEqual(props.scheduled, true, "card is not scheduled before automation");
+
+  props.onAutomation();
+  assert.deepEqual(scheduled, [props.task], "automation reports the exact task");
+  assert.deepEqual(
+    first.setScheduledIdCalls,
+    [props.task.id],
+    "automation requests the optimistic scheduled flip for that card",
+  );
+
+  // Pass 2: with that id marked scheduled, the surface passes `scheduled` to
+  // THAT card so it swaps the button for the "Automation scheduled" chip.
+  const second = renderSurface({ enabled: true, scheduledId: props.task.id });
+  const scheduledCard = findComponent(second.tree, second.components.SuggestedTaskCard);
+  const scheduledProps = componentProps(scheduledCard, second.components.SuggestedTaskCard);
+  assert.equal(scheduledProps.scheduled, true);
 });

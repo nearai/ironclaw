@@ -107,6 +107,7 @@ registerPack("ko", {
   "chat.oobe.status.running": "Working — activity in the thread",
   "chat.oobe.status.completed": "Completed",
   "chat.oobe.status.failed": "Couldn't complete",
+  "chat.oobe.status.scheduled": "Automation scheduled",
 
   // Chat — input
   "chat.placeholder": "IronClaw에 메시지 보내기...",

@@ -11,6 +11,8 @@
  *   completed   → Completed chip + "+ Automation" (onAutomation) — no Revert/Modify
  *   failed      → "Couldn't complete" chip + Try again (onApprove)
  *
+ * `scheduled` (the completed card's automation was just kicked off — slice 4)
+ * swaps the "+ Automation" button for an "Automation scheduled" status chip.
  * `locked` (another job is running — §2A change 3) visually disables the card.
  */
 import { Button } from "../../../design-system/button";
@@ -25,6 +27,7 @@ export function SuggestedTaskCard({
   onApprove,
   onAutomation,
   onDismiss,
+  scheduled = false,
   locked = false,
 }: {
   task: SuggestedTask;
@@ -32,6 +35,7 @@ export function SuggestedTaskCard({
   onApprove?: () => void;
   onAutomation?: () => void;
   onDismiss?: () => void;
+  scheduled?: boolean;
   locked?: boolean;
 }) {
   const t = useT();
@@ -127,15 +131,22 @@ export function SuggestedTaskCard({
               <Icon name="check" className="h-3 w-3" />
               {t("chat.oobe.status.completed")}
             </span>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => onAutomation?.()}
-              disabled={locked}
-            >
-              <Icon name="plus" className="mr-1 h-3.5 w-3.5" />
-              {t("chat.oobe.action.automation")}
-            </Button>
+            {scheduled ? (
+              <span className="inline-flex items-center gap-1 rounded-full border border-[color-mix(in_srgb,var(--v2-positive-text)_45%,transparent)] bg-[var(--v2-positive-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--v2-positive-text)]">
+                <Icon name="check" className="h-3 w-3" />
+                {t("chat.oobe.status.scheduled")}
+              </span>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onAutomation?.()}
+                disabled={locked}
+              >
+                <Icon name="plus" className="mr-1 h-3.5 w-3.5" />
+                {t("chat.oobe.action.automation")}
+              </Button>
+            )}
           </div>
         );
       case "failed":

@@ -44,6 +44,13 @@ export interface SuggestedTask {
    * card's `title` is shown as the message's display content instead.
    */
   approvePrompt: string;
+  /**
+   * Scheduling instruction submitted through the normal send path when the user
+   * clicks "+ Automation" on a completed card — the agent turns this into a
+   * recurring automation (it calls `builtin.trigger_create`; there is no REST
+   * create path, the prompt injection is the design).
+   */
+  automationPrompt: string;
   /** Tool name shown in the Connect CTA when `state === "unconnected"`. */
   connectLabel?: string;
 }

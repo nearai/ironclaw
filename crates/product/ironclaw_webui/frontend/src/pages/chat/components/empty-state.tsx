@@ -7,6 +7,7 @@ export function EmptyState({
   onSuggestion,
   onSend,
   onApproveTask,
+  onAutomationTask,
   commands = [],
   disabled,
   sendDisabled,
@@ -54,7 +55,10 @@ export function EmptyState({
         </p>
       </div>
 
-      <SuggestedTaskSurface onApproveTask={onApproveTask} />
+      <SuggestedTaskSurface
+        onApproveTask={onApproveTask}
+        onAutomationTask={onAutomationTask}
+      />
 
       <div className="mt-9 w-full max-w-5xl">
         <ChatInput
