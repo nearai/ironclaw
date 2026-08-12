@@ -190,6 +190,94 @@ pub(crate) fn delivered_messages_from_outcome(
     }
 }
 
+/// What one best-effort notice actually achieved. `Option<DeliveredChannelMessage>`
+/// answered only "did the vendor hand back a retraction handle?", which is not
+/// the same question as "did anything reach the user" — an adapter may report
+/// `Sent` with no vendor ref (web push always does; Slack does when
+/// `chat.postMessage` returns `ok` without a `ts`). Throttles and
+/// duplicate-suppression reservations MUST key off [`Self::reached_vendor`],
+/// never off the handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NoticeEgress {
+    /// Nothing reached the vendor: no target, policy rejection, terminal
+    /// failure, or the coordinator itself errored before egress.
+    NotSent,
+    /// The provider accepted the notice. It exists in the channel; never resend it.
+    Sent {
+        /// `true` when the durable `Delivered` row committed; `false` for
+        /// [`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`].
+        durably_recorded: bool,
+        /// The vendor's retraction handle, absent on a ref-less accept.
+        message: Option<DeliveredChannelMessage>,
+    },
+}
+
+impl NoticeEgress {
+    /// True under any confirmation strength. Releasing a duplicate-suppression
+    /// reservation when this is true readmits a message the user already received.
+    pub(crate) fn reached_vendor(&self) -> bool {
+        matches!(self, Self::Sent { .. })
+    }
+
+    /// The retraction handle, when the vendor returned a usable ref. `None`
+    /// on a ref-less accept: the notice was sent, it just cannot be retracted.
+    pub(crate) fn into_retraction_handle(self) -> Option<DeliveredChannelMessage> {
+        match self {
+            Self::NotSent => None,
+            Self::Sent { message, .. } => message,
+        }
+    }
+}
+
+/// Classify one NOTICE outcome into what the caller may claim. Keyed off the
+/// outcome VARIANT first: for `Delivered`/`DeliveredUnconfirmed`/
+/// `AlreadyDelivered`, an empty `vendor_message_refs` is NOT evidence that
+/// nothing was sent (those variants are only reached once the vendor
+/// accepted something). `Failed` carries reachability separately because an
+/// accepted chunk may have no vendor reference.
+pub(crate) fn notice_egress_from_outcome(outcome: &CoordinatedDeliveryOutcome) -> NoticeEgress {
+    match outcome {
+        CoordinatedDeliveryOutcome::Delivered { .. } => NoticeEgress::Sent {
+            durably_recorded: true,
+            message: delivered_messages_from_outcome(outcome).into_iter().next(),
+        },
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => NoticeEgress::Sent {
+            durably_recorded: false,
+            message: delivered_messages_from_outcome(outcome).into_iter().next(),
+        },
+        // Refs are not retained on the durable row, so there is no handle —
+        // but this exact notice demonstrably reached the user in an earlier
+        // invocation, which is the strongest possible reason NOT to release a
+        // duplicate-suppression reservation.
+        CoordinatedDeliveryOutcome::AlreadyDelivered { .. } => NoticeEgress::Sent {
+            durably_recorded: true,
+            message: None,
+        },
+        CoordinatedDeliveryOutcome::NoDelivery | CoordinatedDeliveryOutcome::Rejected { .. } => {
+            NoticeEgress::NotSent
+        }
+        // A notice's envelope carries exactly one `OutboundPart`, but
+        // `ChannelAdapter::deliver` owns vendor splitting (module docs,
+        // `channel_adapter.rs`): Slack and Telegram both chunk oversized
+        // text into several vendor-level posts, and manifest-provided
+        // notice copy (e.g. `connect_required`) has no length bound. So
+        // `Failed` can still follow an earlier chunk that reached the
+        // vendor. `vendor_reached` carries that evidence even when an
+        // accepted chunk returned no ref. This mapping is notice-path-specific;
+        // do not lift it to a general outcome classifier without revisiting that.
+        CoordinatedDeliveryOutcome::Failed { vendor_reached, .. } => {
+            if *vendor_reached {
+                NoticeEgress::Sent {
+                    durably_recorded: false,
+                    message: None,
+                }
+            } else {
+                NoticeEgress::NotSent
+            }
+        }
+    }
+}
+
 /// Failures raised while watching a run and delivering its outputs.
 #[derive(Debug, thiserror::Error)]
 pub enum RunDeliveryError {
@@ -390,7 +478,14 @@ pub(crate) fn turn_scope_from_thread_scope(
 impl RunDeliveryServices {
     /// Best-effort source-routed system notice on `conversation`. Failures
     /// are logged, never propagated — a notice must not break the flow that
-    /// raised it.
+    /// raised it. Every `CoordinatedDeliveryError` reachable from
+    /// `deliver_notice` is raised strictly before vendor egress (policy/
+    /// validation failures, store errors on `record_delivery_attempt` or
+    /// `claim_delivery_attempt_for_send`, an `AlreadyInFlight` single-flight
+    /// miss, or `ChannelUnavailable` from channel resolution — all before
+    /// `drive_prepared` ever calls the adapter), so `NoticeEgress::NotSent`
+    /// on `Err` is sound: no error path can be reached after the notice
+    /// already left for the vendor.
     pub(crate) async fn post_notice(
         &self,
         intent: DeliveryIntent,
@@ -399,7 +494,7 @@ impl RunDeliveryServices {
         conversation: &ExternalConversationRef,
         text: &str,
         notice_ref: String,
-    ) -> Option<DeliveredChannelMessage> {
+    ) -> NoticeEgress {
         match self
             .coordinator
             .deliver_notice(NoticeDeliveryRequest {
@@ -414,14 +509,14 @@ impl RunDeliveryServices {
             })
             .await
         {
-            Ok(outcome) => delivered_messages_from_outcome(&outcome).into_iter().next(),
+            Ok(outcome) => notice_egress_from_outcome(&outcome),
             Err(error) => {
                 tracing::debug!(
                     target: "ironclaw::reborn::run_delivery",
                     %error,
                     "channel notice delivery failed (best-effort)"
                 );
-                None
+                NoticeEgress::NotSent
             }
         }
     }
@@ -534,5 +629,206 @@ impl RunDeliveryServices {
                 "channel reaction delivery failed (best-effort)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod notice_egress_tests {
+    use super::*;
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
+    use ironclaw_outbound::{
+        DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus,
+        OutboundPushCandidate, OutboundPushKind,
+    };
+    use ironclaw_turns::ReplyTargetBindingRef;
+
+    fn test_scope() -> TurnScope {
+        TurnScope::new_with_owner(
+            TenantId::new("tenant-test").expect("tenant"),
+            Some(AgentId::new("agent-test").expect("agent")),
+            None,
+            ThreadId::new("thread-test").expect("thread"),
+            None,
+        )
+    }
+
+    fn test_attempt(status: OutboundDeliveryStatus) -> OutboundDeliveryAttempt {
+        let scope = test_scope();
+        OutboundDeliveryAttempt {
+            delivery_id: OutboundDeliveryId::new(),
+            scope: scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: None,
+                target: ReplyTargetBindingRef::new("reply:test".to_string()).expect("ref"),
+                kind: OutboundPushKind::DeliveryStatus,
+                projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                    "projection:test".to_string(),
+                )
+                .expect("projection ref"),
+                requires_reply_target_revalidation: false,
+            },
+            status,
+            attempted_at: chrono::Utc::now(),
+            failure_kind: None,
+        }
+    }
+
+    fn test_conversation() -> ExternalConversationRef {
+        ExternalConversationRef::new(Some("space-1"), "conv-1", None, None).expect("conversation")
+    }
+
+    /// Directly exercises [`notice_egress_from_outcome`] against every
+    /// [`CoordinatedDeliveryOutcome`] variant, explicitly including a
+    /// `Delivered` with an empty `vendor_message_refs` (web push, or a Slack
+    /// accept with no `ts`) and `AlreadyDelivered` (no refs retained on the
+    /// durable row) — both must classify as `Sent`, never `NotSent`.
+    #[test]
+    fn notice_egress_from_outcome_covers_every_variant() {
+        let conversation = test_conversation();
+
+        let delivered = CoordinatedDeliveryOutcome::Delivered {
+            attempt: test_attempt(OutboundDeliveryStatus::Delivered),
+            conversation: conversation.clone(),
+            vendor_message_refs: vec!["ts-1".to_string()],
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&delivered),
+            NoticeEgress::Sent {
+                durably_recorded: true,
+                message: Some(DeliveredChannelMessage {
+                    conversation: conversation.clone(),
+                    vendor_message_ref: "ts-1".to_string(),
+                }),
+            }
+        );
+
+        let delivered_no_ref = CoordinatedDeliveryOutcome::Delivered {
+            attempt: test_attempt(OutboundDeliveryStatus::Delivered),
+            conversation: conversation.clone(),
+            vendor_message_refs: vec![],
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&delivered_no_ref),
+            NoticeEgress::Sent {
+                durably_recorded: true,
+                message: None,
+            },
+            "a ref-less accept (web push; Slack `ok` with no `ts`) must still be Sent"
+        );
+
+        let delivered_unconfirmed = CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
+            attempt: test_attempt(OutboundDeliveryStatus::Sending),
+            conversation: conversation.clone(),
+            vendor_message_refs: vec!["ts-2".to_string()],
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&delivered_unconfirmed),
+            NoticeEgress::Sent {
+                durably_recorded: false,
+                message: Some(DeliveredChannelMessage {
+                    conversation: conversation.clone(),
+                    vendor_message_ref: "ts-2".to_string(),
+                }),
+            }
+        );
+
+        let already_delivered = CoordinatedDeliveryOutcome::AlreadyDelivered {
+            attempt: test_attempt(OutboundDeliveryStatus::Delivered),
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&already_delivered),
+            NoticeEgress::Sent {
+                durably_recorded: true,
+                message: None,
+            },
+            "a durably-confirmed prior delivery must be Sent even with no retained ref"
+        );
+
+        assert_eq!(
+            notice_egress_from_outcome(&CoordinatedDeliveryOutcome::NoDelivery),
+            NoticeEgress::NotSent
+        );
+
+        let rejected = CoordinatedDeliveryOutcome::Rejected {
+            attempt: test_attempt(OutboundDeliveryStatus::Failed),
+        };
+        assert_eq!(notice_egress_from_outcome(&rejected), NoticeEgress::NotSent);
+
+        let failed = CoordinatedDeliveryOutcome::Failed {
+            attempt: test_attempt(OutboundDeliveryStatus::Failed),
+            failure_kind: DeliveryFailureKind::TransportUnavailable,
+            vendor_reached: false,
+            vendor_message_refs: Vec::new(),
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&failed),
+            NoticeEgress::NotSent,
+            "no vendor evidence at all must stay NotSent"
+        );
+
+        // Partial multipart (OUT-7): an adapter split one `OutboundPart`
+        // into several vendor chunks and an earlier chunk landed before a
+        // later one failed. This is reachable for a notice — Slack and
+        // Telegram both chunk oversized text, and manifest-provided notice
+        // copy (e.g. `connect_required`) has no length bound — so `Failed`
+        // must NOT collapse to `NotSent` when the coordinator reports
+        // evidence that something already reached the vendor.
+        let partial_failed = CoordinatedDeliveryOutcome::Failed {
+            attempt: test_attempt(OutboundDeliveryStatus::Failed),
+            failure_kind: DeliveryFailureKind::Rejected,
+            vendor_reached: true,
+            vendor_message_refs: vec!["ts-partial-1".to_string()],
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&partial_failed),
+            NoticeEgress::Sent {
+                durably_recorded: false,
+                message: None,
+            },
+            "a partial multipart send must hold the reservation, not release it"
+        );
+
+        let ref_less_partial_failed = CoordinatedDeliveryOutcome::Failed {
+            attempt: test_attempt(OutboundDeliveryStatus::Failed),
+            failure_kind: DeliveryFailureKind::Rejected,
+            vendor_reached: true,
+            vendor_message_refs: Vec::new(),
+        };
+        assert_eq!(
+            notice_egress_from_outcome(&ref_less_partial_failed),
+            NoticeEgress::Sent {
+                durably_recorded: false,
+                message: None,
+            },
+            "a ref-less partial send must use reachability evidence, not ref presence"
+        );
+    }
+
+    #[test]
+    fn reached_vendor_and_retraction_handle_agree_with_the_variant() {
+        assert!(!NoticeEgress::NotSent.reached_vendor());
+        assert_eq!(NoticeEgress::NotSent.into_retraction_handle(), None);
+
+        let sent_no_ref = NoticeEgress::Sent {
+            durably_recorded: true,
+            message: None,
+        };
+        assert!(sent_no_ref.reached_vendor());
+        assert_eq!(sent_no_ref.into_retraction_handle(), None);
+
+        let message = DeliveredChannelMessage {
+            conversation: test_conversation(),
+            vendor_message_ref: "ts-3".to_string(),
+        };
+        let sent_with_ref = NoticeEgress::Sent {
+            durably_recorded: true,
+            message: Some(message.clone()),
+        };
+        assert!(sent_with_ref.reached_vendor());
+        assert_eq!(sent_with_ref.into_retraction_handle(), Some(message));
     }
 }

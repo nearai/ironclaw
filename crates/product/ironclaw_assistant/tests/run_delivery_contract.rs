@@ -410,6 +410,106 @@ impl DeliveryReplyContextSource for NoStoredReplyContext {
     }
 }
 
+/// Delegating store whose terminal `Delivered` status write fails — the
+/// durable shape behind a vendor accept that never gets durably confirmed
+/// ([`ironclaw_assistant::CoordinatedDeliveryOutcome::DeliveredUnconfirmed`]).
+/// Mirrors `outbound_delivery_contract.rs`'s `TerminalDeliveredWriteFailingStore`
+/// (each test binary compiles independently, so the fixture is duplicated
+/// rather than shared).
+struct TerminalDeliveredWriteFailingStore {
+    inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ironclaw_outbound::ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+    async fn load_thread_notification_policy(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<ironclaw_outbound::ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+    async fn upsert_subscription(
+        &self,
+        record: ironclaw_outbound::ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+    async fn load_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+    async fn advance_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.advance_subscription_cursor(request).await
+    }
+    async fn record_delivery_attempt(
+        &self,
+        attempt: ironclaw_outbound::OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+    async fn update_delivery_status(
+        &self,
+        request: ironclaw_outbound::UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        if matches!(
+            request.status,
+            ironclaw_outbound::OutboundDeliveryStatus::Delivered
+        ) {
+            return Err(OutboundError::Backend);
+        }
+        self.inner.update_delivery_status(request).await
+    }
+    async fn list_delivery_attempts(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::OutboundDeliveryAttempt>, OutboundError> {
+        self.inner.list_delivery_attempts(scope).await
+    }
+}
+
 #[derive(Default)]
 struct ScriptedProjectFilesystemReader {
     files: Mutex<HashMap<String, Result<WorkspaceFile, ProjectFsError>>>,
@@ -917,6 +1017,40 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         None,
+        None,
+    )
+}
+
+/// Same as `build_harness`, but with an explicit `OutboundStateStorePort`
+/// override in place of the harness's own in-memory store — for a test that
+/// must observe a downstream store failure (e.g.
+/// `TerminalDeliveredWriteFailingStore`) while keeping every other seam
+/// (adapter, coordinator, observer, connection notices) wired identically to
+/// every other connect-nudge test, instead of hand-assembling a parallel
+/// `RunDeliveryServices`/`DeliveryCoordinator`/`RunDeliveryObserver`.
+fn build_harness_with_outbound_store(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    max_wait: Duration,
+    outbound_store: Arc<dyn OutboundStateStorePort>,
+) -> Harness {
+    build_harness_with_gate_ports(
+        states,
+        bind_fails,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait,
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        None,
+        None,
+        Some(outbound_store),
     )
 }
 
@@ -935,16 +1069,25 @@ fn build_harness_with_gate_ports(
     resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+    // Overrides the coordinator's/services' `outbound_store` (the
+    // `RunDeliveryServices::communication_preferences` reader stays on the
+    // in-memory `store` below either way — a decorator like
+    // `TerminalDeliveredWriteFailingStore` only implements
+    // `OutboundStateStorePort`, not `CommunicationPreferenceRepository`).
+    // `None` reproduces today's behavior exactly.
+    outbound_store_override: Option<Arc<dyn OutboundStateStorePort>>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let outbound_store = outbound_store_override
+        .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn OutboundStateStorePort>);
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        Arc::clone(&outbound_store),
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -961,7 +1104,7 @@ fn build_harness_with_gate_ports(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        outbound_store: Arc::clone(&outbound_store),
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
@@ -1413,6 +1556,54 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         attempts
             .iter()
             .all(|a| a.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
+    );
+}
+
+/// Pins `NoticeEgress::into_retraction_handle()` at the `working_message`
+/// call site: a vendor accept with no message ref (web push; a Slack `ok`
+/// with no `ts`) still delivers the working indicator, but leaves no handle
+/// to retract — the working-indicator retraction after the final reply must
+/// be skipped, not attempted against a nonexistent ref.
+#[tokio::test]
+async fn observer_working_indicator_skips_retraction_when_the_vendor_omits_a_message_ref() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            }],
+        });
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "done thinking").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-working-no-ref"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert_eq!(texts[1], "done thinking");
+    assert!(
+        harness.adapter.retracted_refs().is_empty(),
+        "a ref-less working indicator has no retraction handle and must not be retracted: {:?}",
+        harness.adapter.retracted_refs()
     );
 }
 
@@ -2356,6 +2547,233 @@ async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry()
         attempts.last().map(|attempt| attempt.status),
         Some(ironclaw_outbound::OutboundDeliveryStatus::Delivered)
     ));
+}
+
+/// Headline regression for #7473: `post_notice` used to collapse "nothing
+/// sent" and "sent, but no vendor ref came back" into the same `None`, so the
+/// connect-nudge throttle released its reservation on ANY ref-less result —
+/// including a genuinely-delivered notice. web push always omits a message
+/// ref, and Slack does whenever `chat.postMessage` succeeds without a `ts`;
+/// either one used to reopen the reservation and let a duplicate "please
+/// connect" nudge through. This must fail on the pre-fix release condition
+/// (`delivered.is_none()`) and pass once the release is keyed off
+/// `NoticeEgress::reached_vendor()` instead.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_the_vendor_accepts_without_a_message_ref() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    // The vendor accepted the notice — `Sent` — but returned no ref.
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            }],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-no-ref-1"),
+            rejected.clone(),
+        )
+        .await;
+    // A second unbound ping in the same conversation, still inside the
+    // throttle window: must NOT draw a second nudge — the first one already
+    // reached the user, ref or no ref.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-no-ref-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "a ref-less vendor accept must hold the reservation, not release it for a duplicate: {texts:?}"
+    );
+}
+
+/// `DeliveredUnconfirmed` (vendor accepted, refs came back, but the durable
+/// `Delivered` write failed) is the other outcome the pre-fix code
+/// mishandled: `delivered_messages_from_outcome` DOES return a message for
+/// it, so that half was accidentally correct — but the mapping needed to be
+/// principled (keyed off the outcome variant), not lucky. Assert the
+/// reservation is held here too.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_delivery_is_unconfirmed() {
+    let inner_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let store = Arc::new(TerminalDeliveredWriteFailingStore {
+        inner: Arc::clone(&inner_store),
+    });
+    let harness = build_harness_with_outbound_store(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        Duration::from_millis(20),
+        store as Arc<dyn OutboundStateStorePort>,
+    );
+
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unconfirmed-1"),
+            rejected.clone(),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unconfirmed-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "an unconfirmed-but-sent delivery must hold the reservation, not release it: {texts:?}"
+    );
+}
+
+/// Review finding (PR #7475, ironloopai): `Failed` is not always evidence
+/// that nothing reached the vendor. `ChannelAdapter::deliver` owns vendor
+/// splitting (Slack and Telegram both chunk oversized text into several
+/// vendor-level posts), so a notice's single `OutboundPart::Text` can still
+/// land partially — an earlier chunk accepted, a later one failing —
+/// before the coordinator returns `Failed` for the whole attempt (OUT-7:
+/// retrying would duplicate the accepted chunk). The connect-nudge
+/// reservation must stay held in that case exactly as it does for a
+/// ref-less `Sent`, or a duplicate "please connect" nudge follows a notice
+/// the user partially already received.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_a_multipart_notice_partially_sends() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    // One chunk reached the vendor before a later chunk failed retryably —
+    // the coordinator's OUT-7 rule makes this terminal `Failed`, not another
+    // retry attempt.
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![
+                PartDeliveryOutcome::Sent {
+                    vendor_message_ref: Some("ts-chunk-1".to_string()),
+                },
+                PartDeliveryOutcome::Retryable {
+                    reason: "rate limited".to_string(),
+                },
+            ],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-1"),
+            rejected.clone(),
+        )
+        .await;
+    // A second unbound ping in the same conversation, still inside the
+    // throttle window: must NOT draw a second nudge — the first chunk
+    // already reached the user.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "a partial multipart send must hold the reservation, not release it for a duplicate: {texts:?}"
+    );
+}
+
+/// A partial multipart send remains vendor egress even when the accepted
+/// chunk has no provider reference. Reachability and retractability are
+/// separate facts: the missing handle must not release the nudge reservation.
+#[tokio::test]
+async fn observer_connect_nudge_holds_reservation_when_a_ref_less_chunk_partially_sends() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![
+                PartDeliveryOutcome::Sent {
+                    vendor_message_ref: None,
+                },
+                PartDeliveryOutcome::Retryable {
+                    reason: "rate limited".to_string(),
+                },
+            ],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-no-ref-1"),
+            rejected.clone(),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-partial-no-ref-2"),
+            rejected,
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec![harness.connection_notices.connect_required.clone()],
+        "a ref-less partial send must hold the reservation, not release it for a duplicate: {texts:?}"
+    );
 }
 
 #[tokio::test]

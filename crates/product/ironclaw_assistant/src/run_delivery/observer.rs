@@ -733,7 +733,8 @@ impl RunDeliveryObserver {
                             prompts::working_message(notice_seed),
                             format!("working:{run_id}"),
                         )
-                        .await;
+                        .await
+                        .into_retraction_handle();
                     self.set_source_reaction(
                         scope,
                         run_id,
@@ -765,7 +766,8 @@ impl RunDeliveryObserver {
                             prompts::long_running_message(notice_seed, nudge_count),
                             format!("working:{run_id}:{nudge_count}"),
                         )
-                        .await;
+                        .await
+                        .into_retraction_handle();
                 }
             }
             tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
@@ -1237,7 +1239,7 @@ impl RunDeliveryObserver {
         let Some(reserved_at) = self.reserve_connect_nudge(conversation_key.clone()) else {
             return true;
         };
-        let delivered = self
+        let egress = self
             .services
             .post_notice(
                 DeliveryIntent::ConnectRequired,
@@ -1248,7 +1250,12 @@ impl RunDeliveryObserver {
                 format!("connect-nudge:{}", envelope.external_event_id().as_str()),
             )
             .await;
-        if delivered.is_none() {
+        // Release ONLY on proven non-delivery. A vendor accept with no
+        // message ref (web push, a Slack `ok` without `ts`) and an
+        // unconfirmed-but-sent delivery both put the nudge in front of the
+        // user; releasing either readmits a duplicate — the same rule
+        // `reserve_connect_nudge` fails closed on at saturation.
+        if !egress.reached_vendor() {
             self.release_connect_nudge(&conversation_key, reserved_at);
         }
         true
