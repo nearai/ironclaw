@@ -9,9 +9,10 @@ use crate::{
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
     BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
     ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
@@ -31,6 +32,21 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError>;
+
+    /// Accept an inbound transcript row together with product-routing metadata
+    /// that must be committed atomically and returned on idempotent replay.
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        if replay_metadata == InboundMessageReplayMetadata::default() {
+            return self.accept_inbound_message(request).await;
+        }
+        Err(SessionThreadError::Backend(
+            "thread service does not support durable inbound replay metadata".to_string(),
+        ))
+    }
 
     async fn replay_accepted_inbound_message(
         &self,
@@ -389,6 +405,16 @@ where
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         self.as_ref().accept_inbound_message(request).await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.as_ref()
+            .accept_inbound_message_with_replay_metadata(request, replay_metadata)
+            .await
     }
 
     async fn replay_accepted_inbound_message(

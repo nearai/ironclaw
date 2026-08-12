@@ -10,10 +10,11 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
     EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, InMemorySessionThreadService,
-    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
+    InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
@@ -1072,6 +1073,75 @@ async fn duplicate_external_event_returns_same_message_without_duplicate_history
         .unwrap();
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].content.as_deref(), Some("hello once"));
+}
+
+#[tokio::test]
+async fn accepted_inbound_replay_preserves_resolved_model_metadata() {
+    let service = InMemorySessionThreadService::default();
+    let request_scope = scope("model-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id,
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-model-replay".into()),
+        reply_target_binding_id: Some("reply-model-replay".into()),
+        external_event_id: Some("event-model-replay".into()),
+        content: user_message("hello"),
+    };
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let duplicate = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.idempotent_replay);
+    assert_eq!(
+        duplicate.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope,
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-model-replay".into(),
+            external_event_id: "event-model-replay".into(),
+        })
+        .await
+        .unwrap()
+        .expect("accepted replay");
+    assert_eq!(
+        replay.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
 }
 
 #[tokio::test]

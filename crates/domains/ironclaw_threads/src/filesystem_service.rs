@@ -76,14 +76,15 @@ use crate::{
     BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
-    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_read::{MessageReadBudget, MessageReadResult};
@@ -139,6 +140,8 @@ struct InboundIdempotencyRecord {
     external_event_id: String,
     thread_id: ThreadId,
     message_id: ThreadMessageId,
+    #[serde(default)]
+    replay_metadata: InboundMessageReplayMetadata,
 }
 
 /// Filesystem-backed [`SessionThreadService`].
@@ -1164,6 +1167,7 @@ where
             message_id: record.message_id,
             sequence: existing.sequence,
             idempotent_replay: true,
+            replay_metadata: record.replay_metadata,
         })
     }
 
@@ -1496,6 +1500,18 @@ where
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata::default(),
+        )
+        .await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         let AcceptInboundMessageRequest {
             scope,
             thread_id,
@@ -1571,6 +1587,7 @@ where
                     external_event_id: idempotency_key.external_event_id.clone(),
                     thread_id: thread_id.clone(),
                     message_id,
+                    replay_metadata: replay_metadata.clone(),
                 };
                 let entry = Self::idempotency_entry(&idem_record)?;
                 Some((path.clone(), entry))
@@ -1671,6 +1688,7 @@ where
             message_id,
             sequence,
             idempotent_replay: false,
+            replay_metadata,
         })
     }
 
@@ -1723,6 +1741,7 @@ where
             source_binding_id: message.source_binding_id,
             reply_target_binding_id: message.reply_target_binding_id,
             turn_run_id: message.turn_run_id,
+            replay_metadata: record.replay_metadata,
         }))
     }
 
@@ -3653,8 +3672,35 @@ impl From<FilesystemError> for SessionThreadError {
 mod tests {
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
-    use super::{InboundIdempotencyKey, idempotency_record_key};
-    use crate::ThreadScope;
+    use super::{
+        InboundIdempotencyKey, InboundIdempotencyRecord, deserialize, idempotency_record_key,
+    };
+    use crate::{InboundMessageReplayMetadata, ThreadScope};
+
+    #[test]
+    fn legacy_idempotency_record_defaults_replay_metadata() {
+        let record = deserialize::<InboundIdempotencyRecord>(
+            br#"{
+                "scope": {
+                    "tenant_id": "tenant-a",
+                    "agent_id": "agent-a",
+                    "project_id": null,
+                    "owner_user_id": "user-a",
+                    "mission_id": null
+                },
+                "source_binding_id": "source-a",
+                "external_event_id": "event-a",
+                "thread_id": "thread-a",
+                "message_id": "00000000-0000-0000-0000-000000000001"
+            }"#,
+        )
+        .expect("legacy idempotency record remains readable");
+
+        assert_eq!(
+            record.replay_metadata,
+            InboundMessageReplayMetadata::default()
+        );
+    }
 
     #[test]
     fn idempotency_record_key_is_fixed_size_for_long_external_ids() {

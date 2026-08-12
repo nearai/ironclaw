@@ -2306,6 +2306,7 @@ impl SessionThreadService for ScriptedThreadService {
                     message_id: *message_id,
                     sequence: 1,
                     idempotent_replay: false,
+                    replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
                 })
             }
             _ => scripted_stub_unreachable("accept_inbound_message"),
@@ -2328,6 +2329,7 @@ impl SessionThreadService for ScriptedThreadService {
                     source_binding_id: Some(request.source_binding_id),
                     reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                     turn_run_id: turn_run_id.clone(),
+                    replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
                 }))
             }
             ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
@@ -2340,6 +2342,7 @@ impl SessionThreadService for ScriptedThreadService {
                 source_binding_id: Some(request.source_binding_id),
                 reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                 turn_run_id: None,
+                replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
             })),
             ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
                 // replay_webui_send_message probes with two source-binding variants
@@ -2364,6 +2367,7 @@ impl SessionThreadService for ScriptedThreadService {
                         source_binding_id: Some(request.source_binding_id),
                         reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                         turn_run_id: None,
+                        replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
                     }))
                 }
             }
@@ -2389,6 +2393,7 @@ impl SessionThreadService for ScriptedThreadService {
                         source_binding_id: Some(request.source_binding_id),
                         reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                         turn_run_id: None,
+                        replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
                     }))
                 }
             }

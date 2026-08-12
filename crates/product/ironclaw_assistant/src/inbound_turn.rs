@@ -742,22 +742,12 @@ where
             return Ok(None);
         };
 
-        let mut handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
+        let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
             replay,
             prepared.submit_idempotency_key.clone(),
             envelope.received_at(),
             prepared,
         )?;
-        if let ProductInboundTurnHandoff::NeedsSubmission(submission) = &mut handoff {
-            let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
-                return Err(ProductSurfaceFailure::UnsupportedActionKind {
-                    kind: "non_user_message".into(),
-                });
-            };
-            submission.requested_model = self
-                .resolve_user_model(&prepared.binding, payload.requested_model.clone())
-                .await?;
-        }
         handoff
             .submit_or_replay(
                 &self.thread_service,
@@ -824,15 +814,20 @@ where
         let reply_target_binding_id = prepared.reply_target_binding_id.clone();
         let accepted = match self
             .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: prepared.thread_scope.clone(),
-                thread_id: prepared.binding.thread_id.clone(),
-                actor_id: prepared.binding.actor_user_id.as_str().to_string(),
-                source_binding_id: Some(prepared.source_binding_id.clone()),
-                reply_target_binding_id: Some(reply_target_binding_id.clone()),
-                external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content,
-            })
+            .accept_inbound_message_with_replay_metadata(
+                AcceptInboundMessageRequest {
+                    scope: prepared.thread_scope.clone(),
+                    thread_id: prepared.binding.thread_id.clone(),
+                    actor_id: prepared.binding.actor_user_id.as_str().to_string(),
+                    source_binding_id: Some(prepared.source_binding_id.clone()),
+                    reply_target_binding_id: Some(reply_target_binding_id.clone()),
+                    external_event_id: Some(envelope.external_event_id().as_str().to_string()),
+                    content,
+                },
+                ironclaw_threads::InboundMessageReplayMetadata {
+                    resolved_model: requested_model,
+                },
+            )
             .await
         {
             Ok(accepted) => accepted,
@@ -875,7 +870,7 @@ where
                 adapter_id: prepared.adapter_id,
                 source_channel: prepared.source_channel,
                 surface_type: prepared.surface_type,
-                requested_model,
+                requested_model: accepted.replay_metadata.resolved_model,
                 channel_context: payload.channel_context.clone(),
             }))
             .submit_or_replay(
@@ -1158,10 +1153,7 @@ impl ProductInboundTurnHandoff {
                 adapter_id,
                 source_channel,
                 surface_type,
-                // The requested model is not persisted in the message store, so an
-                // idempotent resubmission of an accepted message falls back to the
-                // deployment's active model rather than recovering the original hint.
-                requested_model: None,
+                requested_model: replay.replay_metadata.resolved_model,
                 // Channel conversation context is likewise not persisted in the
                 // message store; an idempotent resubmission degrades to no
                 // context (it is advisory).

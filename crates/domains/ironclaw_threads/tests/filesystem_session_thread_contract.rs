@@ -39,13 +39,13 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
-    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -2155,6 +2155,72 @@ async fn filesystem_session_thread_service_isolates_two_tenants_with_same_user_p
     assert!(
         replay.is_none(),
         "tenant B must NOT replay tenant A's inbound idempotency record"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_accepted_inbound_replay_preserves_resolved_model_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-model-replay", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("model-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-model-replay").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id,
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-model-replay".into()),
+        reply_target_binding_id: Some("reply-model-replay".into()),
+        external_event_id: Some("event-model-replay".into()),
+        content: MessageContent::text("hello"),
+    };
+
+    service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let duplicate = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.idempotent_replay);
+    assert_eq!(
+        duplicate.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope,
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-model-replay".into(),
+            external_event_id: "event-model-replay".into(),
+        })
+        .await
+        .unwrap()
+        .expect("accepted replay");
+    assert_eq!(
+        replay.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
     );
 }
 
