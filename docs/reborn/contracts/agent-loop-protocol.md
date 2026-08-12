@@ -243,6 +243,18 @@ Private-key patterns cover the complete bounded block (or, within one message,
 the bounded remainder when the matching end sentinel is missing or mislabeled),
 never only the begin sentinel.
 
+The bounded recent-message window reports the exact sequence and typed kind of
+its newest omitted durable message. The canonical loop treats an omitted user
+message or finalized tool-result reference as a forced compaction watermark and
+requests the dedicated `window_eviction` mode. It selects the newest stable user
+or tool-result boundary in the retained prompt, falling back to the reported
+watermark when no later safe boundary remains. The mode may compact through a
+finalized tool result because its durable reference reconstructs the complete
+assistant-call/result exchange; ordinary `fresh` compaction keeps its user-only
+terminal-boundary rule. Assistant, system, summary, checkpoint, ephemeral, and
+unstable terminal boundaries remain invalid or deferred. A deferred eviction is
+not retried against an unchanged prompt fingerprint.
+
 Successful persistence returns an additive `redacted_leak_count`. The field is
 defaulted and omitted at zero so legacy checkpoint and wire shapes remain
 compatible. A nonzero count emits one typed, safe

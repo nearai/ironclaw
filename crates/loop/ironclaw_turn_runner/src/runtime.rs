@@ -723,7 +723,11 @@ where
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let agent_turn_runtime_port: Arc<dyn AgentTurnRuntimePort> = agent_turn_runtime.clone();
+    // The host factory needs the spawn-tree superset: besides cancellation
+    // observation it reads the claimed run's journal record to fence transcript
+    // writes on the lease the run was actually claimed under.
+    let agent_turn_runtime_port: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
+        agent_turn_runtime.clone();
     let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
         Arc::new(GateBackedSubagentPromptMaterialSource::new(
             process_system.inputs(),

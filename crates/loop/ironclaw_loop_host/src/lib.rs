@@ -200,16 +200,17 @@ use tokio::sync::{Mutex, OnceCell};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, RunId};
+use ironclaw_host_api::turn::TurnLeaseToken;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
     CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
     LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
     LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-    LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-    LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch,
-    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+    LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind, LoopHostMilestoneEmitter,
+    LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
+    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
+    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
     MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
@@ -226,7 +227,9 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
     ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
-use ironclaw_turns::{LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
+};
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
@@ -493,15 +496,14 @@ where
         let mode = request.mode;
         let context_window = async {
             let started_at = ironclaw_observability::live_latency_started_at();
-            let context = self
-                .thread_service
-                .load_context_window(LoadContextWindowRequest {
-                    scope: self.thread_scope.clone(),
-                    thread_id: self.run_context.thread_id.clone(),
-                    max_messages,
-                })
-                .await
-                .map_err(context_read_error)?;
+            let context = load_task_pinned_context_window(
+                self.thread_service.as_ref(),
+                &self.thread_scope,
+                &self.run_context,
+                max_messages,
+            )
+            .await
+            .map_err(context_read_error)?;
             trace_loop_host_latency_ok(
                 "context_load_window",
                 &self.run_context,
@@ -605,10 +607,20 @@ where
             .iter()
             .filter_map(context_message_to_compaction_metadata)
             .collect();
+        let recent_window_truncation =
+            context
+                .recent_window_truncation
+                .map(|truncation| LoopContextWindowTruncation {
+                    omitted_through_sequence: truncation.omitted_through_sequence,
+                    omitted_through_kind: compaction_kind_for_message(
+                        truncation.omitted_through_kind,
+                    ),
+                });
         let messages = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
-        );
+            accepted_task_message_id(&self.run_context),
+        )?;
         trace_loop_host_latency_ok(
             "context_select_messages",
             &self.run_context,
@@ -624,6 +636,7 @@ where
                 .filter_map(context_message_to_loop_message)
                 .collect(),
             compaction_message_index,
+            recent_window_truncation,
             instruction_snippets,
             memory_snippets,
         })
@@ -778,9 +791,29 @@ where
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
+    run_lease_fence: Option<RunLeaseFence>,
     // Only successful milestone publications are recorded here: if best-effort
     // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
+}
+
+/// The claimed lease this transcript adapter writes under, plus the authority
+/// that can say whether it is still the live one.
+///
+/// Unlike a journal transition, a transcript append carries no lease of its
+/// own, so nothing stops a worker whose lease recovery already reclaimed from
+/// appending a second assistant message beside the replacement worker's. The
+/// fence closes that by asking the journal — the only authority on ownership —
+/// immediately before the write.
+///
+/// Production always installs one
+/// (`RebornLoopDriverHostFactory::build_text_only_host_with_capabilities`).
+/// It is optional only because adapters constructed outside a claimed run
+/// (crate tests) have no lease to check.
+#[derive(Clone)]
+struct RunLeaseFence {
+    runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+    lease_token: TurnLeaseToken,
 }
 
 const TRANSCRIPT_WRITE_MAX_ATTEMPTS: usize = 3;
@@ -801,6 +834,7 @@ where
             run_context,
             milestone_sink: None,
             reply_attachment_intent_port: None,
+            run_lease_fence: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -817,6 +851,7 @@ where
             run_context,
             milestone_sink: Some(milestone_sink),
             reply_attachment_intent_port: None,
+            run_lease_fence: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -827,6 +862,71 @@ where
     ) -> Self {
         self.reply_attachment_intent_port = Some(port);
         self
+    }
+
+    /// Fence transcript finalization on `lease_token` still being the run's
+    /// live lease. See [`RunLeaseFence`].
+    #[must_use]
+    pub fn with_run_lease_fence(
+        mut self,
+        runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+        lease_token: TurnLeaseToken,
+    ) -> Self {
+        self.run_lease_fence = Some(RunLeaseFence {
+            runtime,
+            lease_token,
+        });
+        self
+    }
+
+    /// Refuse the caller when the journal no longer records this adapter's
+    /// lease as the run's live one.
+    ///
+    /// One bounded, exact-key journal read per call — cheap at today's call
+    /// rates. If `update_assistant_draft` ever becomes a per-token streaming
+    /// path, revisit whether the draft paths should keep paying it.
+    ///
+    /// Fails closed on both answers that are not "yes": a stale lease and a
+    /// backend error that leaves ownership unknown. The refusal is explicit —
+    /// the model output is not dropped silently, it is returned to the agent
+    /// loop as a transcript-write failure, which the loop carries into its exit
+    /// claim; that exit is itself lease-fenced by the journal, so a stale
+    /// worker's failure can never land on the run the replacement completed.
+    async fn ensure_run_lease_is_current(&self) -> Result<(), AgentLoopHostError> {
+        let Some(fence) = self.run_lease_fence.as_ref() else {
+            return Ok(());
+        };
+        // Bounded, exact-key journal read — the journal is the only authority
+        // on who holds the lease. A run that recovery reclaimed carries either
+        // no lease (requeued, not yet re-claimed) or the replacement worker's
+        // token; both compare unequal, which is exactly the answer wanted.
+        let record = fence
+            .runtime
+            .get_run_record(&self.run_context.scope, self.run_context.run_id)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    run_id = %self.run_context.run_id,
+                    %error,
+                    "run lease ownership check failed; refusing the transcript write"
+                );
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::TranscriptWriteFailed,
+                    "run lease ownership could not be verified",
+                )
+            })?;
+        // A missing run (or one outside this scope) is not ours to write for.
+        if record.is_some_and(|record| record.lease_token == Some(fence.lease_token)) {
+            return Ok(());
+        }
+        tracing::debug!(
+            run_id = %self.run_context.run_id,
+            "run lease was reclaimed by recovery; refusing this worker's transcript write"
+        );
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::TranscriptWriteFailed,
+            "run lease was reclaimed; this worker no longer owns the run",
+        ))
     }
 }
 
@@ -849,6 +949,7 @@ where
         request: BeginAssistantDraft,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         let draft = self
             .thread_service
             .append_assistant_draft(AppendAssistantDraftRequest {
@@ -867,6 +968,7 @@ where
         request: UpdateAssistantDraft,
     ) -> Result<(), AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         let message_id = message_id_from_ref(&request.message_ref)?;
         self.load_current_run_message(message_id).await?;
         self.thread_service
@@ -886,6 +988,11 @@ where
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        // Ownership before durability: a worker whose lease recovery already
+        // reclaimed must not append a second answer beside the replacement's.
+        // Every transcript write on this adapter carries the same fence — a
+        // zombie must not reach the transcript through any of its four doors.
+        self.ensure_run_lease_is_current().await?;
         let reply_content = self.finalized_reply_content(request.reply.content).await?;
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendFinalizedAssistantMessageRequest {
@@ -935,6 +1042,7 @@ where
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        self.ensure_run_lease_is_current().await?;
         // Fail soft on a summary that trips either strict validator: the
         // summary is only the inline label for the result reference (the model
         // sees the real output via the result ref / observation), so a
@@ -1764,7 +1872,8 @@ where
             let context_messages = prompt_context_budget::select_prompt_context_messages(
                 context.messages,
                 self.prompt_context_budget,
-            );
+                accepted_task_message_id(&self.run_context),
+            )?;
             let mut messages = Vec::with_capacity(context_messages.len());
             for (message, _) in context_messages {
                 let Some(content_ref) = message_ref_from_context(&message) else {
@@ -1980,15 +2089,14 @@ where
         );
 
         let started_at = ironclaw_observability::live_latency_started_at();
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                max_messages: self.max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
+        let context = load_task_pinned_context_window(
+            self.thread_service.as_ref(),
+            &self.thread_scope,
+            &self.run_context,
+            self.max_messages,
+        )
+        .await
+        .map_err(context_read_error)?;
         trace_loop_host_latency_ok(
             "model_context_load_window",
             &self.run_context,
@@ -2822,6 +2930,85 @@ fn bounded_limit(requested: usize, configured: usize) -> usize {
     }
 }
 
+fn accepted_task_message_id(run_context: &LoopRunContext) -> Option<ThreadMessageId> {
+    let message_ref = run_context.accepted_message_ref.as_ref()?.as_str();
+    let raw_message_id = message_ref.strip_prefix("msg:")?;
+    ThreadMessageId::parse(raw_message_id).ok()
+}
+
+async fn load_task_pinned_context_window<S>(
+    thread_service: &S,
+    thread_scope: &ThreadScope,
+    run_context: &LoopRunContext,
+    max_messages: usize,
+) -> Result<ironclaw_threads::ContextWindow, SessionThreadError>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    let mut context = thread_service
+        .load_context_window(LoadContextWindowRequest {
+            scope: thread_scope.clone(),
+            thread_id: run_context.thread_id.clone(),
+            max_messages,
+        })
+        .await?;
+    let Some(message_id) = accepted_task_message_id(run_context) else {
+        return Ok(context);
+    };
+    if max_messages == 0
+        || context.messages.iter().any(|message| {
+            message.message_id == Some(message_id) && message.kind == MessageKind::User
+        })
+    {
+        return Ok(context);
+    }
+    let mut pinned = thread_service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope: thread_scope.clone(),
+            thread_id: run_context.thread_id.clone(),
+            message_ids: vec![message_id],
+        })
+        .await?
+        .messages
+        .into_iter()
+        .find(|message| {
+            message.message_id == Some(message_id) && message.kind == MessageKind::User
+        });
+    let Some(pinned) = pinned.take() else {
+        return Ok(context);
+    };
+    if context.messages.len() >= max_messages {
+        let mut displaced = context.messages.remove(0);
+        // The pinned task consumes one recent-window slot. If that slot is the
+        // assistant half of a durable assistant/tool-result exchange, evict
+        // the adjacent finalized result as well. This keeps the newest omitted
+        // boundary exact while making it safe for window-eviction compaction;
+        // retaining an orphaned result would also give the model an incomplete
+        // exchange.
+        if displaced.kind == MessageKind::Assistant
+            && context
+                .messages
+                .first()
+                .is_some_and(|message| message.kind == MessageKind::ToolResultReference)
+        {
+            displaced = context.messages.remove(0);
+        }
+        if context
+            .recent_window_truncation
+            .as_ref()
+            .is_none_or(|current| current.omitted_through_sequence < displaced.sequence)
+        {
+            context.recent_window_truncation = Some(ironclaw_threads::ContextWindowTruncation {
+                omitted_through_sequence: displaced.sequence,
+                omitted_through_kind: displaced.kind,
+            });
+        }
+    }
+    context.messages.push(pinned);
+    context.messages.sort_by_key(|message| message.sequence);
+    Ok(context)
+}
+
 fn validate_context_cursor(
     cursor: Option<&LoopInputCursor>,
     run_context: &LoopRunContext,
@@ -2972,11 +3159,12 @@ fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
     match kind {
         MessageKind::User => LoopContextCompactionKind::User,
         MessageKind::Assistant => LoopContextCompactionKind::Assistant,
+        MessageKind::ToolResultReference => LoopContextCompactionKind::ToolResult,
         MessageKind::System => LoopContextCompactionKind::System,
         MessageKind::Summary => LoopContextCompactionKind::Summary,
-        MessageKind::CheckpointReference
-        | MessageKind::ToolResultReference
-        | MessageKind::CapabilityDisplayPreview => LoopContextCompactionKind::Other,
+        MessageKind::CheckpointReference | MessageKind::CapabilityDisplayPreview => {
+            LoopContextCompactionKind::Other
+        }
     }
 }
 
