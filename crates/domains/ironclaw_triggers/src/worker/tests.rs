@@ -179,6 +179,30 @@ fn worker_with_config(
     .expect("valid worker")
 }
 
+/// Like [`worker_with_config`] but with a custom settlement observer, so the
+/// `on_run_failure_settled` hook (#6896) can be asserted on active-cleanup
+/// terminal-failure clears.
+fn worker_with_observer(
+    repo: Arc<dyn TriggerRepository>,
+    materializer: Arc<RecordingMaterializer>,
+    submitter: Arc<RecordingSubmitter>,
+    active_lookup: Arc<RecordingActiveRunLookup>,
+    observer: Arc<RecordingSettlementObserver>,
+) -> TriggerPollerWorker {
+    TriggerPollerWorker::new(
+        TriggerPollerWorkerConfig::default(),
+        TriggerPollerWorkerDeps {
+            repository: repo,
+            source_provider: Arc::new(crate::ScheduleTriggerSourceProvider),
+            materializer,
+            trusted_submitter: submitter,
+            active_run_lookup: active_lookup,
+            fire_settlement_observer: observer as Arc<dyn TriggerFireSettlementObserver>,
+        },
+    )
+    .expect("valid worker")
+}
+
 #[tokio::test]
 async fn tick_once_serializes_overlapping_calls_for_one_worker() {
     let repo = Arc::new(TickConcurrencyRepository::default());
@@ -761,6 +785,84 @@ async fn tick_records_failed_terminal_active_run_as_error() {
     assert!(runs[0].completed_at.is_some());
 }
 
+/// A terminal-failed active fire must surface to the settlement observer's
+/// `on_run_failure_settled` hook so automation-health telemetry can see
+/// post-accept failures (#6896). `Ok`/`Running` and already-cleared fires
+/// must NOT fire the hook.
+#[tokio::test]
+async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5e").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert active");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
+    );
+    let failed = observer.run_failure_events();
+    assert_eq!(failed.len(), 1, "exactly one failed-fire settlement");
+    assert_eq!(failed[0].tenant_id, tenant("tenant-a"));
+    assert_eq!(failed[0].trigger_id, trigger_id);
+    assert_eq!(failed[0].fire_slot, fire_slot);
+    assert_eq!(failed[0].run_id, run_id);
+    assert!(
+        observer.events().is_empty(),
+        "a failed terminal fire never fires on_accepted_fire_settled"
+    );
+}
+
+/// A terminal-`Ok` active fire clears but must NOT fire `on_run_failure_settled`
+/// — the hook is failure-only.
+#[tokio::test]
+async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZW").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5f").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert active");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(
+        observer.run_failure_events().is_empty(),
+        "a successful terminal fire must not fire the failure hook"
+    );
+}
+
 #[tokio::test]
 async fn tick_keeps_blocked_active_run_locked_until_terminal() {
     // A recurring fire parked on an approval/auth gate must keep its active
@@ -1146,6 +1248,41 @@ async fn tick_reports_terminal_active_clear_race() {
     assert_eq!(
         report.results.last().map(|result| &result.outcome),
         Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
+    );
+}
+
+#[tokio::test]
+async fn tick_does_not_surface_failed_terminal_fire_when_clear_loses_race() {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZV").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f50").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        Arc::new(ActiveClearRaceRepository {
+            active_record: record,
+        }),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
+    );
+    assert!(
+        observer.run_failure_events().is_empty(),
+        "a lost clear race must not emit duplicate failure telemetry"
     );
 }
 
@@ -2978,6 +3115,7 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
     failed_events: Mutex<Vec<TriggerFailedFireSettlement>>,
+    run_failure_events: Mutex<Vec<TriggerRunFailureSettlement>>,
     visibility_assertion: Option<SettlementVisibilityAssertion>,
 }
 
@@ -3002,6 +3140,7 @@ impl RecordingSettlementObserver {
         Self {
             events: Mutex::new(Vec::new()),
             failed_events: Mutex::new(Vec::new()),
+            run_failure_events: Mutex::new(Vec::new()),
             visibility_assertion: Some(SettlementVisibilityAssertion {
                 repository,
                 tenant_id,
@@ -3021,6 +3160,13 @@ impl RecordingSettlementObserver {
         self.failed_events
             .lock()
             .expect("failed events lock")
+            .clone()
+    }
+
+    fn run_failure_events(&self) -> Vec<TriggerRunFailureSettlement> {
+        self.run_failure_events
+            .lock()
+            .expect("run failure events lock")
             .clone()
     }
 }
@@ -3058,6 +3204,13 @@ impl TriggerFireSettlementObserver for RecordingSettlementObserver {
         self.failed_events
             .lock()
             .expect("failed events lock")
+            .push(event);
+    }
+
+    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
+        self.run_failure_events
+            .lock()
+            .expect("run failure events lock")
             .push(event);
     }
 }

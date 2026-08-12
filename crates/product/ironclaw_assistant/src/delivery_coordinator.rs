@@ -76,6 +76,9 @@ pub enum DeliveryIntent {
     Working,
     /// Remove an earlier delivery (e.g. delete the working indicator).
     Cleanup,
+    /// Add or clear a run-lifecycle reaction on the triggering message
+    /// (👀 while working, ✅/⚠️ at the end). Best-effort, source-routed.
+    Reaction,
     /// A background (routine) run needs the user's attention on a
     /// notification channel: it failed, or it is parked on an auth gate whose
     /// authorization URL cannot be shown on this channel. Fanned out over the
@@ -119,6 +122,7 @@ impl DeliveryIntent {
             Self::CommandFeedback => "command-feedback",
             Self::Working => "working",
             Self::Cleanup => "cleanup",
+            Self::Reaction => "reaction",
             Self::BackgroundRunNotice => "background-run-notice",
             Self::ModelDelivery => "model-delivery",
         }
@@ -1034,9 +1038,10 @@ fn validate_final_workspace_files(parts: &[OutboundPart]) -> Result<(), Coordina
     let mut total_bytes = 0usize;
     for file in parts.iter().filter_map(|part| match part {
         OutboundPart::File(file) => Some(file),
-        OutboundPart::Text(_) | OutboundPart::AuthPrompt { .. } | OutboundPart::Retract { .. } => {
-            None
-        }
+        OutboundPart::Text(_)
+        | OutboundPart::AuthPrompt { .. }
+        | OutboundPart::Retract { .. }
+        | OutboundPart::React { .. } => None,
     }) {
         count = count
             .checked_add(1)

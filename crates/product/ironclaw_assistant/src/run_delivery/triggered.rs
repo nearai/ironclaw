@@ -13,6 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::OutboundPart;
+use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
@@ -25,8 +26,10 @@ use ironclaw_outbound::{
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    ReplyTargetBindingRef, TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
+    TurnScope, TurnStatus,
 };
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use super::observer::AllowNoProjectionAccess;
@@ -57,6 +60,14 @@ use ironclaw_extension_contracts::preference_target::{
 // declared where its vocabulary already lives. Every field is either outbound's
 // own triggered-delivery vocabulary or `ironclaw_host_api` turn vocabulary, so
 // the move cost no type weakening.
+
+/// Bounded grace period after the actionable-state wait backstop: the run
+/// may have crossed into a terminal state during the final wait (cancellation
+/// in flight, failure landing just after the last poll). Within this window
+/// the timeout arm keeps polling and delivers the correct terminal notice
+/// instead of the timeout copy. Capped by `max_wait` so short-wait
+/// configurations (and tests) stay fast.
+const TERMINAL_RACE_GRACE: Duration = Duration::from_secs(5);
 
 const TRACE_TARGET: &str = "ironclaw::reborn::run_delivery";
 
@@ -499,6 +510,9 @@ struct PreSubmitFailureDeliveryContext<'a> {
 /// terminal-for-delivery outcome (`Delivered`) — never record `Failed` for
 /// it. The backstop is the failure signal ONLY for runs that never reached
 /// an actionable state at all, distinguished by `delivered_blocked_marker`.
+/// For those runs the backstop now delivers a terminal timeout notice and
+/// records the delivery outcome; `Failed` is reserved for notice delivery
+/// failure.
 async fn notify_background_run(
     services: &RunDeliveryServices,
     settings: &RunDeliverySettings,
@@ -593,6 +607,27 @@ async fn notify_background_run(
     // extensions, so retraction is per-message.
     let mut messages_to_delete_after_final: Vec<(String, DeliveredChannelMessage)> = Vec::new();
 
+    // The reply authority, codec resolver, and notification context are
+    // loop-invariant for one fire: scope, actor, run id, and the codec
+    // snapshot never change across polls. Built once so the watcher loop,
+    // the race-grace arm, and the timeout arm share one construction.
+    let authority = TriggeredReplyTargetAuthority {
+        scope: scope.clone(),
+        actor: actor.clone(),
+    };
+    let target_resolver = CodecChannelTargetResolver::with_context_label(
+        target_codecs.to_vec(),
+        "background run notification",
+    );
+    let notification_context = TriggeredNotificationContext {
+        scope: &scope,
+        thread_scope: &thread_scope,
+        actor: &actor,
+        run_id,
+        authority: &authority,
+        target_resolver: &target_resolver,
+    };
+
     loop {
         let state = match wait_for_actionable_state(
             services.turn_coordinator.as_ref(),
@@ -615,6 +650,116 @@ async fn notify_background_run(
                     "background run parked awaiting user after notifying; recording Delivered"
                 );
                 let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                return outcome;
+            }
+            Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
+                // The run never reached an actionable state before `max_wait`.
+                // A scheduled/triggered fire has no user watching the channel,
+                // so silence here is the exact gap #6896 closes: deliver the
+                // timeout notice as a terminal reply so the creator sees the
+                // run is hung, then record the delivery outcome rather than a
+                // bare `Failed` (which would hide the notice).
+                tracing::warn!(
+                    target: TRACE_TARGET,
+                    %run_id,
+                    "background run timed out before reaching an actionable state; delivering timeout notice"
+                );
+                let trigger_label = prompts::triggered_label_from_prompt(&prompt);
+                // Race guard: the run may have crossed into a terminal state
+                // during the final wait (a cancellation in flight, or a
+                // failure landing just after the last poll). Give it a short
+                // bounded grace period; if it reaches a terminal state now,
+                // deliver the correct terminal notice instead of the timeout
+                // copy so a just-cancelled/failed run is not mislabeled as
+                // hung. Bounded by `max_wait` so tests and short-wait
+                // configurations stay fast.
+                let grace_deadline =
+                    tokio::time::Instant::now() + settings.max_wait.min(TERMINAL_RACE_GRACE);
+                loop {
+                    let fresh = match services
+                        .turn_coordinator
+                        .get_run_state(GetRunStateRequest {
+                            scope: scope.clone(),
+                            run_id,
+                        })
+                        .await
+                    {
+                        Ok(state) => Some(state),
+                        Err(err) => {
+                            // silent-ok: the state poll during the race-grace
+                            // window failed; fall back to the timeout notice.
+                            tracing::debug!(
+                                target: TRACE_TARGET,
+                                %run_id,
+                                error = %err,
+                                "terminal race grace poll failed; using timeout notice"
+                            );
+                            None
+                        }
+                    };
+                    match fresh {
+                        Some(state) if state.status.is_terminal() => {
+                            let plan = notification_plan_for_state(
+                                services,
+                                &scope,
+                                &actor,
+                                &state,
+                                run_id,
+                                &trigger_label,
+                            )
+                            .await;
+                            if let Err(err) = &plan {
+                                // silent-ok: the terminal notice could not be
+                                // built during the grace window; fall back to
+                                // the timeout copy.
+                                tracing::warn!(
+                                    target: TRACE_TARGET,
+                                    %run_id,
+                                    error = %err,
+                                    "terminal race notification build failed; using timeout notice"
+                                );
+                            }
+                            if let Ok(Some(plan)) = plan {
+                                let fan =
+                                    fan_out_plan(services, &notification_context, &plan, &targets)
+                                        .await;
+                                let outcome = delivery_outcome_for_fan(&fan);
+                                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                                return outcome;
+                            }
+                            // Terminal state produced no deliverable notice
+                            // (e.g. completed with no assistant message);
+                            // fall through to the timeout copy.
+                            break;
+                        }
+                        Some(_) if tokio::time::Instant::now() >= grace_deadline => break,
+                        Some(_) => {
+                            tokio::time::sleep(settings.poll_interval).await;
+                        }
+                        // State read failed; do not invent a terminal outcome.
+                        None => break,
+                    }
+                }
+                let timeout_plan = TriggeredNotificationPlan {
+                    notifications: vec![TriggeredNotification {
+                        event_kind: RunNotificationEventKind::RunBlocked,
+                        intent: DeliveryIntent::BackgroundRunNotice,
+                        notice_discriminator: Some("timeout".to_string()),
+                        text: format!(
+                            "{}{}",
+                            prompts::DELIVERY_TIMEOUT_MESSAGE,
+                            prompts::triggered_update_footer(&trigger_label)
+                        ),
+                        audience: TargetAudience::All,
+                        require_direct_message_target: false,
+                    }],
+                    gate_ref_for_routing: None,
+                    keeps_run_parked: false,
+                };
+                let fan =
+                    fan_out_plan(services, &notification_context, &timeout_plan, &targets).await;
+                let outcome = delivery_outcome_for_fan(&fan);
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -671,68 +816,15 @@ async fn notify_background_run(
         };
 
         let next_blocked_marker = blocked_actionable_marker(&state);
-        let authority = TriggeredReplyTargetAuthority {
-            scope: scope.clone(),
-            actor: actor.clone(),
-        };
-        let target_resolver = CodecChannelTargetResolver::with_context_label(
-            target_codecs.to_vec(),
-            "background run notification",
-        );
-        let notification_context = TriggeredNotificationContext {
-            scope: &scope,
-            thread_scope: &thread_scope,
-            actor: &actor,
-            run_id,
-            authority: &authority,
-            target_resolver: &target_resolver,
-        };
 
-        let mut delivered_for_gate_route: Vec<DeliveredChannelMessage> = Vec::new();
-        let mut any_delivered = false;
-        // A permanent `Denied` from ANY channel must survive later transient
-        // failures: only the recorded outcome distinguishes "denied" from
-        // "failed", and last-writer-wins would lose the permanent signal.
-        let mut any_denied = false;
-        for notification in &plan.notifications {
-            for target in targets
-                .iter()
-                .filter(|target| notification.audience.includes(target))
-            {
-                match deliver_notification_to_target(
-                    services,
-                    &notification_context,
-                    notification,
-                    target,
-                )
-                .await
-                {
-                    Ok(delivered) => {
-                        any_delivered = true;
-                        if notification.event_kind == RunNotificationEventKind::AuthRequired {
-                            messages_to_delete_after_final.extend(
-                                delivered
-                                    .iter()
-                                    .map(|message| (target.extension_id.clone(), message.clone())),
-                            );
-                        }
-                        delivered_for_gate_route.extend(delivered);
-                    }
-                    Err(failure) => {
-                        tracing::warn!(
-                            target: TRACE_TARGET,
-                            %run_id,
-                            extension_id = %target.extension_id,
-                            reason = %failure,
-                            "background run notification failed for one channel"
-                        );
-                        if matches!(failure, TriggeredNotificationFailure::Denied) {
-                            any_denied = true;
-                        }
-                    }
-                }
-            }
-        }
+        let fan = fan_out_plan(services, &notification_context, &plan, &targets).await;
+        messages_to_delete_after_final.extend(fan.messages_to_retract_after_final);
+        let PlanFanOut {
+            any_delivered,
+            any_denied,
+            delivered_for_gate_route,
+            ..
+        } = fan;
 
         // Every conversation the prompt landed in becomes a reply route for
         // this gate, so a bare `approve` from ANY notification channel
@@ -893,13 +985,15 @@ async fn resolve_notification_targets(
 /// ## Background-run channel surface contract
 ///
 /// A background run is **notification-only, plus gate-resolution input** — it
-/// is NOT a conversational surface and it never pushes results. Only three
-/// states produce output:
+/// is NOT a conversational surface and it never pushes results. The
+/// deliverable states are:
 ///
 /// - `BlockedApproval` → gate prompt (approve/deny) on every channel
 /// - `BlockedAuth`     → OAuth prompt to personal DMs + a redacted notice
 ///   elsewhere, or (manual token) cancel + the auth-unavailable notice
-/// - `Failed`          → a failure notice on every channel
+/// - `Failed` / `RecoveryRequired` → a sanitized per-category failure notice
+///   on every channel (generic fallback when no category is recorded)
+/// - `Cancelled`       → a fixed cancellation notice on every channel
 ///
 /// Anything else yields `None`. In particular `Completed` delivers NOTHING:
 /// the answer lives in the fire's run thread, and putting it on a channel is
@@ -1062,23 +1156,46 @@ async fn notification_plan_for_state(
                 }
             }
         }
-        TurnStatus::Failed => Ok(Some(TriggeredNotificationPlan {
-            notifications: vec![TriggeredNotification {
-                event_kind: RunNotificationEventKind::RunBlocked,
-                intent: DeliveryIntent::BackgroundRunNotice,
-                // Terminal: one failure notice per run, no gate to key by.
-                notice_discriminator: Some("failed".to_string()),
-                text: format!(
-                    "{}{}",
-                    prompts::BACKGROUND_RUN_FAILED_MESSAGE,
-                    prompts::triggered_update_footer(trigger_label)
+        TurnStatus::Failed | TurnStatus::RecoveryRequired | TurnStatus::Cancelled => {
+            // Terminal outcome: deliver the final word instead of silence
+            // (#6896). Failed/RecoveryRequired runs surface the sanitized
+            // per-category summary so the creator sees *why* the scheduled
+            // run died; a missing category falls back to the generic
+            // summary. A cancelled run always gets the fixed cancellation
+            // notice — cancelled runs never carry a failure category in the
+            // real system, and a failure summary would mislabel a host or
+            // operator cancel as a failed run.
+            let failure_summary = || {
+                reborn_failure_summary_for_category(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                )
+                .to_string()
+            };
+            let (text, discriminator) = match state.status {
+                TurnStatus::Cancelled => (
+                    prompts::TRIGGERED_RUN_CANCELED_MESSAGE.to_string(),
+                    "cancelled",
                 ),
-                audience: TargetAudience::All,
-                require_direct_message_target: false,
-            }],
-            gate_ref_for_routing: None,
-            keeps_run_parked: false,
-        })),
+                TurnStatus::RecoveryRequired => (failure_summary(), "recovery-required"),
+                TurnStatus::Failed => (failure_summary(), "failed"),
+                // Unreachable: the enclosing arm narrows to the three
+                // terminal statuses; named arms keep new statuses
+                // compiler-visible instead of silently inheriting "failed".
+                _ => return Ok(None),
+            };
+            Ok(Some(TriggeredNotificationPlan {
+                notifications: vec![TriggeredNotification {
+                    event_kind: RunNotificationEventKind::RunBlocked,
+                    intent: DeliveryIntent::BackgroundRunNotice,
+                    notice_discriminator: Some(discriminator.to_string()),
+                    text: format!("{text}{}", prompts::triggered_update_footer(trigger_label)),
+                    audience: TargetAudience::All,
+                    require_direct_message_target: false,
+                }],
+                gate_ref_for_routing: None,
+                keeps_run_parked: false,
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -1138,6 +1255,89 @@ async fn deliver_pre_submit_failure_to_target(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
         _ => Ok(()),
+    }
+}
+
+/// The aggregate of fanning one plan out to every matching target.
+struct PlanFanOut {
+    /// At least one channel accepted a delivery.
+    any_delivered: bool,
+    /// A permanent `Denied` from ANY channel — it must survive later
+    /// transient failures: only the recorded outcome distinguishes "denied"
+    /// from "failed", and last-writer-wins would lose the permanent signal.
+    any_denied: bool,
+    /// Every conversation the plan's notifications landed in, for gate-route
+    /// recording.
+    delivered_for_gate_route: Vec<DeliveredChannelMessage>,
+    /// Auth prompts that must be retracted once the run is terminal.
+    messages_to_retract_after_final: Vec<(String, DeliveredChannelMessage)>,
+}
+
+/// Fan a plan out to every matching target. Shared by the main watcher loop
+/// and the timeout arm so the delivery aggregation cannot drift.
+async fn fan_out_plan(
+    services: &RunDeliveryServices,
+    notification_context: &TriggeredNotificationContext<'_>,
+    plan: &TriggeredNotificationPlan,
+    targets: &[NotificationTarget],
+) -> PlanFanOut {
+    let mut out = PlanFanOut {
+        any_delivered: false,
+        any_denied: false,
+        delivered_for_gate_route: Vec::new(),
+        messages_to_retract_after_final: Vec::new(),
+    };
+    for notification in &plan.notifications {
+        for target in targets
+            .iter()
+            .filter(|target| notification.audience.includes(target))
+        {
+            match deliver_notification_to_target(
+                services,
+                notification_context,
+                notification,
+                target,
+            )
+            .await
+            {
+                Ok(delivered) => {
+                    out.any_delivered = true;
+                    if notification.event_kind == RunNotificationEventKind::AuthRequired {
+                        out.messages_to_retract_after_final.extend(
+                            delivered
+                                .iter()
+                                .map(|message| (target.extension_id.clone(), message.clone())),
+                        );
+                    }
+                    out.delivered_for_gate_route.extend(delivered);
+                }
+                Err(failure) => {
+                    tracing::warn!(
+                        target: TRACE_TARGET,
+                        extension_id = %target.extension_id,
+                        reason = %failure,
+                        "background run notification failed for one channel"
+                    );
+                    if matches!(failure, TriggeredNotificationFailure::Denied) {
+                        out.any_denied = true;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Reduce a plan fan-out to the recorded outcome kind. Nothing delivered is
+/// `Failed` (or `Denied` when any channel denied); anything delivered is
+/// `Delivered` — a delivered notice is the creator-visible terminal signal.
+fn delivery_outcome_for_fan(fan: &PlanFanOut) -> TriggeredRunDeliveryOutcomeKind {
+    if fan.any_delivered {
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    } else if fan.any_denied {
+        TriggeredRunDeliveryOutcomeKind::Denied
+    } else {
+        TriggeredRunDeliveryOutcomeKind::Failed
     }
 }
 

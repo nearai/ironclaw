@@ -734,6 +734,7 @@ impl ironclaw_loop_contracts::LoopContextPort for MockAgentLoopDriverHost {
             identity_messages: Vec::new(),
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         })
@@ -762,6 +763,7 @@ impl ironclaw_loop_contracts::LoopPromptPort for MockAgentLoopDriverHost {
             compaction_message_index: lock_or_panic(&self.prompt_compaction_indexes)
                 .pop_front()
                 .unwrap_or_default(),
+            recent_window_truncation: None,
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

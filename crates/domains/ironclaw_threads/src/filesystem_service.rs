@@ -210,6 +210,7 @@ where
         let context = ContextWindow {
             thread_id: thread_id.clone(),
             messages: context_messages_with_summary_replacements(&messages, &[]),
+            recent_window_truncation: None,
         };
         if let Ok(mut cache) = self.one_shot_context_windows.lock() {
             let key = one_shot_context_window_cache_key(scope, thread_id);
@@ -230,10 +231,10 @@ where
     ) -> Option<ContextWindow> {
         let key = one_shot_context_window_cache_key(scope, thread_id);
         let mut context = self.one_shot_context_windows.lock().ok()?.remove(&key)?;
-        if max_messages < context.messages.len() {
-            let start = context.messages.len() - max_messages;
-            context.messages = context.messages.split_off(start);
-        }
+        let (messages, recent_window_truncation) =
+            crate::contract::truncate_context_window(context.messages, max_messages);
+        context.messages = messages;
+        context.recent_window_truncation = recent_window_truncation;
         Some(context)
     }
 
@@ -839,42 +840,88 @@ where
         Ok(messages)
     }
 
-    async fn list_latest_thread_messages(
+    async fn list_effective_context_messages(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
-        limit: usize,
-    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        max_messages: usize,
+        summaries: &[SummaryArtifact],
+    ) -> Result<Vec<ContextMessage>, SessionThreadError> {
         self.ensure_transcript_indexes_migrated(scope).await?;
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let limit = u32::try_from(limit)
+        // Read enough durable rows to produce `max_messages + 1` effective
+        // model-visible entries. Capability previews and other hidden rows do
+        // not consume the model-context limit.
+        let limit = u32::try_from(max_messages.saturating_add(1))
             .unwrap_or(Page::MAX_LIMIT)
-            .min(Page::MAX_LIMIT);
+            .clamp(1, Page::MAX_LIMIT);
         let root = messages_root(scope, thread_id)?;
         let index = message_sequence_index_spec()?;
-        let page = OrderedPage::new(
-            index.name,
-            fs_index_key("sequence")?,
-            fs_index_key("message_id")?,
-            SortDirection::Descending,
-            limit,
-        );
-        let mut messages = self
-            .filesystem
-            .query_ordered(
-                &scope.to_resource_scope(),
-                &root,
-                &thread_partition_filter(thread_id)?,
-                &page,
-            )
-            .await?
-            .into_iter()
-            .map(|entry| deserialize::<ThreadMessageRecord>(&entry.entry.body))
-            .collect::<Result<Vec<_>, _>>()?;
-        messages.reverse();
-        Ok(messages)
+        let sequence_key = fs_index_key("sequence")?;
+        let message_id_key = fs_index_key("message_id")?;
+        let mut cursor = None;
+        let mut newest_first = Vec::new();
+
+        loop {
+            let mut page = OrderedPage::new(
+                index.name.clone(),
+                sequence_key.clone(),
+                message_id_key.clone(),
+                SortDirection::Descending,
+                limit,
+            );
+            if let Some(after) = cursor.take() {
+                page = page.after(after);
+            }
+            let entries = self
+                .filesystem
+                .query_ordered(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &thread_partition_filter(thread_id)?,
+                    &page,
+                )
+                .await?;
+            let entry_count = entries.len();
+            cursor = entries.last().and_then(|entry| {
+                Some(OrderedQueryCursor {
+                    value: entry.entry.indexed.get(&sequence_key)?.clone(),
+                    tie_breaker: entry.entry.indexed.get(&message_id_key)?.clone(),
+                })
+            });
+            newest_first.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| deserialize::<ThreadMessageRecord>(&entry.entry.body))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+
+            let chronological = newest_first.iter().rev().cloned().collect::<Vec<_>>();
+            let context = context_messages_with_summary_replacements(&chronological, summaries);
+            let oldest_loaded_sequence = newest_first
+                .last()
+                .map(|message| message.sequence)
+                .unwrap_or(u64::MAX);
+            let retained_boundary_start =
+                context.len().saturating_sub(max_messages.saturating_add(1));
+            let tail_has_unvalidated_summary = context[retained_boundary_start..]
+                .iter()
+                .filter_map(|message| message.summary_id)
+                .any(|summary_id| {
+                    summaries.iter().any(|summary| {
+                        summary.summary_id == summary_id
+                            && summary.start_sequence < oldest_loaded_sequence
+                    })
+                });
+            // A replacement summary inside the retained suffix can move the
+            // exact truncation watermark. Do not stop until its whole durable
+            // range has been read, otherwise an older Draft/redaction can be
+            // missed and a synthetic summary sequence reported as the boundary.
+            if (context.len() > max_messages && !tail_has_unvalidated_summary)
+                || entry_count < limit as usize
+            {
+                return Ok(context);
+            }
+        }
     }
 
     async fn latest_thread_message_by_kind_status(
@@ -2496,20 +2543,23 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        let messages = self
-            .list_latest_thread_messages(&request.scope, &request.thread_id, request.max_messages)
-            .await?;
         let summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
-        let mut context = context_messages_with_summary_replacements(&messages, &summaries);
-        if request.max_messages < context.len() {
-            let start = context.len() - request.max_messages;
-            context = context.split_off(start);
-        }
+        let context = self
+            .list_effective_context_messages(
+                &request.scope,
+                &request.thread_id,
+                request.max_messages,
+                &summaries,
+            )
+            .await?;
+        let (messages, recent_window_truncation) =
+            crate::contract::truncate_context_window(context, request.max_messages);
         Ok(ContextWindow {
             thread_id: request.thread_id,
-            messages: context,
+            messages,
+            recent_window_truncation,
         })
     }
 

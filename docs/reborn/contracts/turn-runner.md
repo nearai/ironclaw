@@ -27,11 +27,17 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 
 ## 3. Expired lease recovery
 
-- A reconciler scans runner-owned `Running` and `CancelRequested` leases using durable `lease_expires_at` metadata.
-- Expired `Running` or `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted `RecoveryRequired` event with reason `lease_expired`, and keep the same canonical-thread active lock.
-- `RecoveryRequired` runs are not returned by the normal process-claim path. The system must not auto-retry uncertain side-effecting work.
-- A duplicate/new submit for the same canonical thread remains `ThreadBusy` while recovery is required.
-- Explicit cancellation of `RecoveryRequired` is terminal `Cancelled` and releases the active lock so a new turn can be submitted.
+- A reconciler scans runner-owned `Running` and `CancelRequested` leases using durable `lease_expires_at` metadata. A lease is expired once `lease_expires_at` is at or before the sweep instant.
+- Recovery converges an expired lease directly to a settled state rather than parking it in a distinct recovery status. A branch that resolves to `Cancelled`, `Queued`, or `Failed` clears current runner ownership and emits the matching redacted lifecycle event; a safe checkpoint still inside its grace window remains unchanged, including its expired ownership metadata, until a later sweep resolves it. The canonical-thread active lock is released exactly when the resulting status is terminal. The transition table:
+  - `CancelRequested` with an expired lease → terminal `Cancelled`, immediately, with no grace window. Cancellation re-enters no committed work.
+  - `Running` with **no** checkpoint, and `claim_count` below `max_crash_recovery_reclaims` → `Queued` (`Resumed`), immediately. There is nothing committed to replay, so the reclaim is safe at once.
+  - `Running` parked at a checkpoint that replays no side effect (`BeforeModel`, `BeforeBlock`), and `claim_count` below `max_crash_recovery_reclaims` → `Queued` (`Resumed`), but only after a **grace window of one full lease TTL past expiry**. Inside that window the reconciler leaves the process untouched — an expired lease and a heartbeat-starved but still-live worker look identical, and a live worker would have renewed inside one TTL. A later sweep picks it up. The requeue carries `claim_count` forward as the durable `crash_reclaim_count`, so checkpointed and checkpointless reclaims share one bounded budget. Two further fences bound the zombie case: the supervisor never starts a replacement executor in-process while the reclaimed run's prior executor is still running, and transcript writes are lease-fenced at the write seam, so a worker that outlived every timing bound still cannot land output on the reclaimed run.
+  - `Running` parked at a side-effecting checkpoint (`BeforeSideEffect`), or at a checkpoint whose kind this build does not recognize → terminal `Failed` with sanitized category `lease_expired`. An unknown kind fails closed as side-effecting. Side-effect checkpoints are never re-executed.
+  - Any expired `Running` lease whose `claim_count` has reached `max_crash_recovery_reclaims` → terminal `Failed`, with category `lease_expired` when a checkpoint exists and `crash_retry_exhausted` when none does. The budget bounds crash-loop reclaims; it is not an unbounded retry.
+- The checkpoint kind is carried on the durable process snapshot, not only on the checkpoint row, so a sweep can make this judgement without reading checkpoint payloads, and it survives a store reopen.
+- Requeued runs re-enter the normal process-claim path; failed and cancelled runs are terminal and are never re-claimed. The system must not auto-retry uncertain side-effecting work.
+- A duplicate/new submit for the same canonical thread remains `ThreadBusy` while a recovered run still holds the active lock.
+- Expired-lease recovery never produces `RecoveryRequired`; the transition table above is applied directly. `RecoveryRequired` remains an explicit runner-side outcome (loop-exit validation) and a legacy import/migration status — it is terminal, releases the active lock, and explicit cancellation of it is terminal `Cancelled`.
 
 ### 3.1 Checkpointless pre-model failure re-drive
 

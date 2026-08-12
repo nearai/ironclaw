@@ -131,8 +131,9 @@ use ironclaw_loop_contracts::{
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus,
+    runner::ClaimedTurnRun,
 };
 use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use tokio::task::JoinHandle;
@@ -1017,6 +1018,10 @@ where
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
     model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
     cancellation_factory: Arc<dyn RunCancellationFactory>,
+    /// The journal-backed ownership authority. Held so every host this factory
+    /// builds can fence its transcript writes on the claimed run's lease still
+    /// being live (`ThreadBackedLoopTranscriptPort::with_run_lease_fence`).
+    agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
@@ -1116,15 +1121,16 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
+        agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
         safety_context: InstructionSafetyContext,
     ) -> Self {
-        let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
-            AgentTurnRunCancellationFactory::new(Arc::clone(&agent_turn_runtime)),
-        );
+        let cancellation_factory: Arc<dyn RunCancellationFactory> =
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                Arc::clone(&agent_turn_runtime) as Arc<dyn AgentTurnRuntimePort>,
+            ));
         Self {
             thread_service,
             thread_scope,
@@ -1135,6 +1141,7 @@ where
             model_accountant: Arc::new(NoOpBudgetAccountant),
             model_policy_guard: Arc::new(NoOpPolicyGuard),
             cancellation_factory,
+            agent_turn_runtime,
             config,
             skill_context_source: None,
             attachment_read_port: None,
@@ -1972,6 +1979,13 @@ where
             effective_scope.clone(),
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
+        )
+        // The lease this run was claimed under. A transcript append carries no
+        // lease of its own, so without this a worker whose lease recovery
+        // already reclaimed could still append beside the replacement's reply.
+        .with_run_lease_fence(
+            Arc::clone(&self.agent_turn_runtime),
+            request.claimed_run.lease_token,
         );
         if let Some(port) = self.reply_attachment_intent_port.as_ref() {
             transcript_adapter =
@@ -2891,6 +2905,10 @@ mod thread_scope_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/compaction_tests.rs"]
 mod compaction_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/run_lease_fence_tests.rs"]
+mod run_lease_fence_tests;
 
 #[cfg(test)]
 mod tests {

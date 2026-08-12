@@ -189,31 +189,7 @@ impl ChannelDescriptor {
                         host: egress.host.clone(),
                     });
                 }
-                let well_formed = match injection {
-                    ironclaw_host_api::http::RuntimeCredentialTarget::Header { name, .. } => {
-                        ironclaw_host_api::http::valid_http_field_name(name)
-                    }
-                    ironclaw_host_api::http::RuntimeCredentialTarget::QueryParam { name } => {
-                        !name.trim().is_empty() && !name.contains(char::is_whitespace)
-                    }
-                    ironclaw_host_api::http::RuntimeCredentialTarget::PathPlaceholder {
-                        placeholder,
-                    } => {
-                        !placeholder.is_empty()
-                            && placeholder
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    }
-                    ironclaw_host_api::http::RuntimeCredentialTarget::BodyJsonPointer {
-                        pointer,
-                        ..
-                    } => pointer.starts_with('/'),
-                    // Field-free: the host derives everything (audience,
-                    // expiry, header value) from the request at the
-                    // injection chokepoint.
-                    ironclaw_host_api::http::RuntimeCredentialTarget::VapidAuthorization => true,
-                };
-                if !well_formed {
+                if injection.validate_declaration().is_err() {
                     return Err(ChannelDescriptorError::InvalidEgressInjection {
                         host: egress.host.clone(),
                     });
@@ -838,6 +814,37 @@ max_message_chars = 40000
         );
         let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
         channel.validate().unwrap();
+    }
+
+    #[test]
+    fn basic_egress_injection_parses_and_rejects_invalid_usernames() {
+        let source = |username: &str| {
+            documented_channel_toml().replace(
+                "credential_handle = \"vendor_bot_token\"",
+                &format!(
+                    "credential_handle = \"vendor_bot_token\"\n\
+                     injection = {{ type = \"basic\", username = \"{username}\" }}"
+                ),
+            )
+        };
+
+        let channel: ChannelDescriptor = toml::from_str(&source("api-user")).unwrap();
+        channel.validate().unwrap();
+        assert!(matches!(
+            channel.egress[0].injection,
+            Some(ironclaw_host_api::http::RuntimeCredentialTarget::Basic { .. })
+        ));
+
+        for invalid in [" ", "user:name", r"user\u000Aname"] {
+            let channel: ChannelDescriptor = toml::from_str(&source(invalid)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidEgressInjection {
+                    host: "vendor.example".to_string(),
+                },
+                "expected Basic username rejection for {invalid:?}"
+            );
+        }
     }
 
     #[test]

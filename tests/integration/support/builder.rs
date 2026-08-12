@@ -461,6 +461,12 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
+        self
+    }
+
     /// Exercise the production enum default without making the general
     /// integration harness depend on ambient process configuration.
     pub fn with_tool_disclosure_production_default(mut self) -> Self {
@@ -724,14 +730,7 @@ impl RebornIntegrationHarnessBuilder {
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
-        match self.tool_disclosure {
-            ToolDisclosureMode::Bridged => {
-                group_builder = group_builder.with_tool_disclosure_bridged();
-            }
-            ToolDisclosureMode::Off => {
-                group_builder = group_builder.with_tool_disclosure_off();
-            }
-        }
+        group_builder = group_builder.with_tool_disclosure_mode(self.tool_disclosure);
         if let Some(policy) = self.bridged_policy_override {
             group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
         }

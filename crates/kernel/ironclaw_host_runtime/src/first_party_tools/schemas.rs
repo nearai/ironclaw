@@ -940,12 +940,13 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({
             "type": "object",
+            "description": "List the caller's scheduled routines (automations) with state, schedule, next/last fire, and recent runs. The response is the authoritative current routine state for this caller; an empty `triggers` array means no routines exist.",
             "properties": {
                 "limit": {
                     "type": "integer",
-                    "minimum": 0,
+                    "minimum": 1,
                     "maximum": 100,
-                    "description": "Maximum triggers to return. Defaults to 100."
+                    "description": "Maximum triggers to return. Defaults to 100. Must be at least 1: a zero limit is rejected, so an empty `triggers` array is always proof that no routines exist rather than an artifact of the limit."
                 },
                 "run_limit": {
                     "type": "integer",
