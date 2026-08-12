@@ -708,8 +708,16 @@ mod tests {
 
         let sidebar_nav = source_text("components/sidebar-nav.tsx");
         assert!(sidebar_nav.contains("isAdmin = false"));
-        assert!(sidebar_nav.contains("subRoute.id === \"users\""));
+        assert!(sidebar_nav.contains("export function visibleSidebarSubRoutes"));
+        assert!(sidebar_nav.contains("!(routeId === \"settings\" && subRoute.id === \"users\")"));
+        assert!(sidebar_nav.contains("visibleSidebarSubRoutes(route.id, isAdmin)"));
         assert!(!sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
+
+        let routes = source_text("app/routes.ts");
+        assert!(
+            routes
+                .contains(r#"{ id: "inference", labelKey: "settings.inference", icon: "spark" }"#)
+        );
 
         let settings_page = source_text("pages/settings/settings-page.tsx");
         assert!(settings_page.contains("isAdmin = false"));
