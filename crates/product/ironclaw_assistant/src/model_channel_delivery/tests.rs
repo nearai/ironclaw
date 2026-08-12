@@ -24,7 +24,7 @@ use ironclaw_outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryAttempt, OutboundDeliveryId,
     OutboundDeliveryStatus, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry, OutboundDeliveryTargetSummary,
-    OutboundPushCandidate, OutboundPushKind,
+    OutboundPushCandidate, OutboundPushKind, VendorEgressProvenance,
 };
 use ironclaw_product_contracts::delivery::{ChannelDeliveryResolver, ResolvedChannelDelivery};
 use ironclaw_turns::{
@@ -474,6 +474,7 @@ fn sample_attempt() -> OutboundDeliveryAttempt {
         status: OutboundDeliveryStatus::Delivered,
         attempted_at: Utc::now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::Attempted),
     }
 }
 
@@ -829,14 +830,28 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
     );
     assert_eq!(rejected, Err(ModelChannelDeliveryError::Rejected));
 
-    for kind in [
-        DeliveryFailureKind::AuthorizationRevoked,
-        DeliveryFailureKind::TransientValidatorError,
-        DeliveryFailureKind::TransportUnavailable,
-        DeliveryFailureKind::RateLimited,
-        DeliveryFailureKind::Rejected,
-        DeliveryFailureKind::Unknown,
-    ] {
+    // G2: a lost sole-writer claim (no vendor evidence from this call) must
+    // stay model-visible and model-correctable, exactly as the removed
+    // `AlreadyInFlight` coordinator error was treated. It must not assert a
+    // definite `Rejected`: the blocking row may be `Sending`, so the vendor
+    // could already have accepted the message.
+    let existing_unconfirmed = classify_delivery_outcome(
+        target.clone(),
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            attempt: sample_attempt(),
+        },
+    );
+    assert_eq!(
+        existing_unconfirmed,
+        Err(ModelChannelDeliveryError::Failed {
+            kind: DeliveryFailureKind::VendorContactAmbiguous
+        })
+    );
+
+    // G3: iterate `DeliveryFailureKind::ALL` instead of a hand-maintained
+    // array literal, so a future variant addition without updating this test
+    // surfaces here rather than silently under-testing the mapping.
+    for kind in DeliveryFailureKind::ALL.iter().copied() {
         let failed = classify_delivery_outcome(
             target.clone(),
             CoordinatedDeliveryOutcome::Failed {
@@ -862,16 +877,11 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         }
     );
 
-    // A concurrent duplicate is model-correctable (retry later / don't
-    // duplicate), so it must stay model-visible rather than masking as an
-    // internal host fault (rules/tools.md).
-    let other = classify_coordinator_error(CoordinatedDeliveryError::AlreadyInFlight);
-    assert_eq!(
-        other,
-        ModelChannelDeliveryError::Failed {
-            kind: DeliveryFailureKind::Rejected
-        }
-    );
+    // A concurrent duplicate is now reported as
+    // `CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed` (asserted
+    // above via `classify_delivery_outcome`), not a `CoordinatedDeliveryError`
+    // — the coordinator's former `AlreadyInFlight` error variant no longer
+    // exists.
     let dm_guard = classify_coordinator_error(CoordinatedDeliveryError::Workflow(
         crate::ProductSurfaceFailure::OutboundTargetNotDirectMessage,
     ));

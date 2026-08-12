@@ -19,6 +19,21 @@
 //! - Once any part of a multipart delivery is sent, a later retryable part
 //!   failure is terminal — a whole-envelope retry would duplicate the parts
 //!   the vendor already accepted (OUT-7).
+//!
+//! On a deterministic-id row, `Failed(TransportUnavailable)` (and the other
+//! `DeliveryFailureKind::permits_reopen()`-true kinds) implies no vendor
+//! egress was ever attempted for that delivery id — this codebase only ever
+//! settles those kinds before any `adapter.deliver` call is made. That
+//! invariant is what makes reopening them safe: [`ironclaw_outbound::OutboundStateStore`]
+//! (via `record_delivery_attempt`) may CAS a stale `Failed` row of that kind
+//! back to a fresh `Prepared` reservation for a replay to claim, without
+//! risking a duplicate send. Note this is a narrower claim than "before the
+//! vendor-egress claim": `TransportUnavailable` is written post-claim, on
+//! channel-resolution failure (`resolve_channel_context`), but that failure
+//! path never reaches `adapter.deliver`. Anything settled after an
+//! `adapter.deliver` call that cannot prove the vendor was never contacted
+//! uses [`DeliveryFailureKind::VendorContactAmbiguous`] instead, which never
+//! permits reopen.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -34,10 +49,11 @@ use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{
-    ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind, OutboundDeliveryAttempt,
-    OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
-    OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
-    ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    ClaimDeliveryAttemptForSendOutcome, ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind,
+    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
+    OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
+    PrepareCommunicationDeliveryRequest, ReplyAttachmentIntent, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding, VendorEgressProvenance,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -212,6 +228,28 @@ pub enum CoordinatedDeliveryOutcome {
     NoDelivery,
     /// Policy rejected the candidate; the attempt records the rejection.
     Rejected { attempt: OutboundDeliveryAttempt },
+    /// Another caller already advanced the durable delivery row past
+    /// `Prepared` without reaching a status this call recognizes as
+    /// resolved, so this call lost the sole-writer claim and performed no
+    /// vendor egress of its own — it holds no vendor evidence to report.
+    /// `attempt` is the exact authoritative row that blocked the claim
+    /// (read atomically as part of the losing CAS attempt, never from a
+    /// separate subsequent read — see [`DeliveryCoordinator::claim_delivery_attempt`]).
+    ///
+    /// In practice this only ever carries `attempt.status` of `Prepared` or
+    /// `Sending`: `Delivered`, `Failed`, `DeadLettered`, `Unknown`, and
+    /// `Pending` all resolve to a more specific outcome instead (see
+    /// [`DeliveryCoordinator::outcome_for_existing_delivery`]). The
+    /// `Prepared` case is defensive-only and should be unobservable once the
+    /// claim atomically returns the exact CAS-blocking row: the claim's own
+    /// CAS targets `Prepared -> Sending`, so a row it lost against can never
+    /// itself be `Prepared` at the moment of that read — either the row was
+    /// already past `Prepared` (blocking the CAS), or it was `Prepared` and
+    /// the CAS would have won. This variant is kept success-shaped (not an
+    /// error) because a `Sending` row may mean the vendor call already
+    /// succeeded; reporting it as an error would be misleading and could
+    /// invite an incorrect resend decision upstream.
+    ExistingDeliveryUnconfirmed { attempt: OutboundDeliveryAttempt },
     /// The adapter reported every part sent.
     Delivered {
         attempt: OutboundDeliveryAttempt,
@@ -253,8 +291,6 @@ pub enum CoordinatedDeliveryError {
     Workflow(#[from] ProductSurfaceFailure),
     #[error("no active channel for extension `{extension_id}`")]
     ChannelUnavailable { extension_id: String },
-    #[error("delivery is already in flight for this attempt")]
-    AlreadyInFlight,
     #[error("intent {intent:?} does not belong to this delivery path")]
     IntentClassMismatch { intent: DeliveryIntent },
     #[error("notice request is invalid: {reason}")]
@@ -302,8 +338,6 @@ pub struct DeliveryCoordinator {
     resolver: Arc<dyn ChannelDeliveryResolver>,
     reply_context: Arc<dyn DeliveryReplyContextSource>,
     retry: DeliveryRetryPolicy,
-    /// Per-delivery single-flight: a delivery id enters once.
-    in_flight: Mutex<HashSet<ironclaw_outbound::OutboundDeliveryId>>,
     /// Scopes whose interrupted (`Sending`) attempts from prior lifetimes
     /// have been reconciled this lifetime. The store enumerates attempts per
     /// scope only, so recovery runs lazily before a scope's first delivery.
@@ -325,7 +359,6 @@ impl DeliveryCoordinator {
             resolver,
             reply_context,
             retry,
-            in_flight: Mutex::new(HashSet::new()),
             recovered_scopes: Mutex::new(HashSet::new()),
         }
     }
@@ -372,6 +405,10 @@ impl DeliveryCoordinator {
                     status: OutboundDeliveryStatus::Unknown,
                     updated_at: chrono::Utc::now(),
                     failure_kind: None,
+                    // A `Sending` row means a claim was taken and the
+                    // process could have called the adapter before
+                    // crashing — provenance can't prove otherwise.
+                    vendor_egress: Some(VendorEgressProvenance::Attempted),
                 })
                 .await?;
             recovered += 1;
@@ -424,45 +461,31 @@ impl DeliveryCoordinator {
         // or workspace materialization. A replay of a terminal delivery must
         // not depend on the target still being configured, and it must never
         // let a later resolution failure overwrite the terminal row.
-        if !self.claim_delivery_attempt(&attempt).await? {
-            return self.outcome_for_claimed_delivery(&attempt).await;
-        }
-
-        // Single-flight per delivery id.
-        let delivery_id = attempt.delivery_id;
-        {
-            let mut in_flight = self
-                .in_flight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !in_flight.insert(delivery_id) {
-                return Err(CoordinatedDeliveryError::AlreadyInFlight);
+        match self.claim_delivery_attempt(&attempt).await? {
+            ClaimDeliveryAttemptForSendOutcome::Claimed => {}
+            ClaimDeliveryAttemptForSendOutcome::Existing(existing) => {
+                return Ok(Self::outcome_for_existing_delivery(*existing));
             }
         }
-        let result = self
-            .drive_authorized(
-                target_resolver,
-                attempt,
-                AuthorizedDeliveryTarget {
-                    binding: target,
-                    require_direct_message: request.require_direct_message_target,
-                    thread_anchor: request.thread_anchor,
-                },
-                request.parts,
-                request.extension_id,
-                WorkspaceMaterialization {
-                    intent: request.intent,
-                    project_filesystem,
-                    thread_scope: request.thread_scope,
-                    attachments: request.attachments,
-                },
-            )
-            .await;
-        self.in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&delivery_id);
-        result
+
+        self.drive_authorized(
+            target_resolver,
+            attempt,
+            AuthorizedDeliveryTarget {
+                binding: target,
+                require_direct_message: request.require_direct_message_target,
+                thread_anchor: request.thread_anchor,
+            },
+            request.parts,
+            request.extension_id,
+            WorkspaceMaterialization {
+                intent: request.intent,
+                project_filesystem,
+                thread_scope: request.thread_scope,
+                attachments: request.attachments,
+            },
+        )
+        .await
     }
 
     /// Deliver one notice-class intent to its source conversation, under the
@@ -511,38 +534,25 @@ impl DeliveryCoordinator {
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: chrono::Utc::now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         };
         self.store.record_delivery_attempt(attempt.clone()).await?;
 
-        if !self.claim_delivery_attempt(&attempt).await? {
-            return self.outcome_for_claimed_delivery(&attempt).await;
-        }
-
-        // Single-flight per delivery id (uniform with the policy path).
-        let delivery_id = attempt.delivery_id;
-        {
-            let mut in_flight = self
-                .in_flight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !in_flight.insert(delivery_id) {
-                return Err(CoordinatedDeliveryError::AlreadyInFlight);
+        match self.claim_delivery_attempt(&attempt).await? {
+            ClaimDeliveryAttemptForSendOutcome::Claimed => {}
+            ClaimDeliveryAttemptForSendOutcome::Existing(existing) => {
+                return Ok(Self::outcome_for_existing_delivery(*existing));
             }
         }
-        let result = self
-            .drive_resolved(
-                attempt,
-                request.extension_id,
-                request.conversation,
-                request.thread_anchor,
-                request.parts,
-            )
-            .await;
-        self.in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&delivery_id);
-        result
+
+        self.drive_resolved(
+            attempt,
+            request.extension_id,
+            request.conversation,
+            request.thread_anchor,
+            request.parts,
+        )
+        .await
     }
 
     async fn drive_authorized(
@@ -566,7 +576,7 @@ impl DeliveryCoordinator {
             Err(error) => {
                 let kind =
                     crate::outbound_delivery::delivery_failure_kind_for_surface_error(&error);
-                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
+                self.mark_terminal_pre_egress(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                     .await;
                 return Err(CoordinatedDeliveryError::Workflow(error));
             }
@@ -583,8 +593,12 @@ impl DeliveryCoordinator {
             Ok(parts) => parts,
             Err(error) => {
                 let failure_kind = workspace_materialization_failure_kind(&error);
-                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(failure_kind))
-                    .await;
+                self.mark_terminal_pre_egress(
+                    &attempt,
+                    OutboundDeliveryStatus::Failed,
+                    Some(failure_kind),
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -633,7 +647,7 @@ impl DeliveryCoordinator {
     ) -> Result<(ResolvedChannelDelivery, Option<Vec<u8>>), CoordinatedDeliveryError> {
         // Resolve the channel from ONE snapshot read (generation-pinned).
         let Some(channel) = self.resolver.resolve_channel_delivery(extension_id) else {
-            self.mark_terminal(
+            self.mark_terminal_pre_egress(
                 attempt,
                 OutboundDeliveryStatus::Failed,
                 Some(DeliveryFailureKind::TransportUnavailable),
@@ -716,7 +730,11 @@ impl DeliveryCoordinator {
 
                     if all_sent && !report.parts.is_empty() {
                         let confirmed = self
-                            .mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
+                            .mark_terminal_post_egress(
+                                &attempt,
+                                OutboundDeliveryStatus::Delivered,
+                                None,
+                            )
                             .await;
                         if !confirmed {
                             return Ok(CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
@@ -733,8 +751,12 @@ impl DeliveryCoordinator {
                     }
                     if unauthorized {
                         let kind = DeliveryFailureKind::AuthorizationRevoked;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -744,18 +766,37 @@ impl DeliveryCoordinator {
                         // Partial multipart (OUT-7): retrying the whole
                         // envelope would duplicate already-accepted parts.
                         let kind = DeliveryFailureKind::Rejected;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
                         });
                     }
-                    // Fully-retryable report (nothing sent).
+                    // Fully-retryable report (nothing sent), exhausted.
                     if attempts_used >= self.retry.max_attempts {
-                        let kind = DeliveryFailureKind::TransportUnavailable;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        // A `Retryable` part outcome does not prove nothing
+                        // reached the vendor: both in-tree adapters (Slack,
+                        // Telegram) report post-send ambiguity — e.g. a
+                        // timeout after the request was sent, or a 2xx
+                        // response with an unparseable body — as `Retryable`
+                        // rather than `Sent` or `Permanent`. So a "fully
+                        // retryable" report does not type-level guarantee
+                        // nothing was sent, and this must not settle as
+                        // `TransportUnavailable` (which a replay can safely
+                        // reopen) — see
+                        // `DeliveryFailureKind::VendorContactAmbiguous`.
+                        let kind = DeliveryFailureKind::VendorContactAmbiguous;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -770,9 +811,19 @@ impl DeliveryCoordinator {
                         "delivery coordinator: adapter deliver failed"
                     );
                     if attempts_used >= self.retry.max_attempts {
-                        let kind = DeliveryFailureKind::TransportUnavailable;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
+                        // Unlike the fully-retryable `Ok(DeliveryReport)` arm
+                        // above, a bare adapter `Err` carries no proof the
+                        // vendor was never contacted, so this must not
+                        // settle as `TransportUnavailable` (which a replay
+                        // can safely reopen) — see
+                        // `DeliveryFailureKind::VendorContactAmbiguous`.
+                        let kind = DeliveryFailureKind::VendorContactAmbiguous;
+                        self.mark_terminal_post_egress(
+                            &attempt,
+                            OutboundDeliveryStatus::Failed,
+                            Some(kind),
+                        )
+                        .await;
                         return Ok(CoordinatedDeliveryOutcome::Failed {
                             attempt,
                             failure_kind: kind,
@@ -791,7 +842,7 @@ impl DeliveryCoordinator {
     async fn claim_delivery_attempt(
         &self,
         attempt: &OutboundDeliveryAttempt,
-    ) -> Result<bool, CoordinatedDeliveryError> {
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, CoordinatedDeliveryError> {
         self.store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id: attempt.delivery_id,
@@ -801,43 +852,45 @@ impl DeliveryCoordinator {
             .map_err(CoordinatedDeliveryError::Outbound)
     }
 
-    /// Classify an atomic-claim miss from the authoritative persisted row.
-    /// This preserves terminal failure semantics and distinguishes confirmed
-    /// prior delivery from an in-flight or ambiguous attempt without ever
-    /// reopening provider egress.
-    async fn outcome_for_claimed_delivery(
-        &self,
-        requested: &OutboundDeliveryAttempt,
-    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        let existing = self
-            .store
-            .load_delivery_attempt(requested.scope.clone(), requested.delivery_id)
-            .await
-            .map_err(CoordinatedDeliveryError::Outbound)?
-            .ok_or(CoordinatedDeliveryError::Outbound(
-                ironclaw_outbound::OutboundError::DeliveryNotFound,
-            ))?;
+    /// Classify the authoritative row a lost claim returned
+    /// ([`ClaimDeliveryAttemptForSendOutcome::Existing`]). This is a pure
+    /// function over the row the claim already handed back — no re-read, so
+    /// the TOCTOU window a separate post-claim read would reopen (a
+    /// concurrent caller reopening the row between the failed CAS and a
+    /// re-read) cannot occur here by construction.
+    fn outcome_for_existing_delivery(
+        existing: OutboundDeliveryAttempt,
+    ) -> CoordinatedDeliveryOutcome {
         match existing.status {
             OutboundDeliveryStatus::Delivered => {
-                Ok(CoordinatedDeliveryOutcome::AlreadyDelivered { attempt: existing })
+                CoordinatedDeliveryOutcome::AlreadyDelivered { attempt: existing }
             }
             OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered => {
                 let failure_kind = existing
                     .failure_kind
                     .unwrap_or(DeliveryFailureKind::Unknown);
-                Ok(CoordinatedDeliveryOutcome::Failed {
+                CoordinatedDeliveryOutcome::Failed {
                     attempt: existing,
                     failure_kind,
-                })
+                }
             }
             OutboundDeliveryStatus::Unknown | OutboundDeliveryStatus::Pending => {
-                Ok(CoordinatedDeliveryOutcome::Failed {
+                CoordinatedDeliveryOutcome::Failed {
                     attempt: existing,
                     failure_kind: DeliveryFailureKind::Unknown,
-                })
+                }
             }
+            // A `Sending` row here means another caller (or this same caller
+            // in a prior lifetime) owns — or owned — vendor egress; the
+            // vendor call may already have succeeded, so this must not be
+            // reported as an error (which could invite a misguided resend
+            // upstream). `Prepared` is defensive-only and should be
+            // unobservable in practice: the claim's own CAS targets exactly
+            // `Prepared -> Sending`, so a row that blocked that CAS was
+            // already past `Prepared` at the moment of the read that
+            // produced it — see the `ExistingDeliveryUnconfirmed` doc.
             OutboundDeliveryStatus::Prepared | OutboundDeliveryStatus::Sending => {
-                Err(CoordinatedDeliveryError::AlreadyInFlight)
+                CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { attempt: existing }
             }
         }
     }
@@ -848,11 +901,20 @@ impl DeliveryCoordinator {
     /// the `Delivered` caller must downgrade to
     /// [`CoordinatedDeliveryOutcome::DeliveredUnconfirmed`] — a success it
     /// cannot durably confirm is not a success it may claim.
+    ///
+    /// `vendor_egress` is not `Option` and has no default: every caller must
+    /// state explicitly whether an `adapter.deliver` call was made for this
+    /// delivery id, so a future call site can't silently omit it. Prefer the
+    /// [`Self::mark_terminal_pre_egress`] / [`Self::mark_terminal_post_egress`]
+    /// wrappers over calling this directly — they hardcode the provenance
+    /// for their respective call sites and remove the chance of a
+    /// copy-paste mistake picking the wrong one.
     async fn mark_terminal(
         &self,
         attempt: &OutboundDeliveryAttempt,
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
+        vendor_egress: VendorEgressProvenance,
     ) -> bool {
         match self
             .store
@@ -862,6 +924,7 @@ impl DeliveryCoordinator {
                 status,
                 updated_at: chrono::Utc::now(),
                 failure_kind,
+                vendor_egress: Some(vendor_egress),
             })
             .await
         {
@@ -875,6 +938,44 @@ impl DeliveryCoordinator {
                 false
             }
         }
+    }
+
+    /// Terminal write for a failure settled before any `adapter.deliver`
+    /// call was made (surface-error, workspace-materialization, and
+    /// channel-resolution failure paths in `drive_authorized` /
+    /// `resolve_channel_context`).
+    async fn mark_terminal_pre_egress(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        status: OutboundDeliveryStatus,
+        failure_kind: Option<DeliveryFailureKind>,
+    ) -> bool {
+        self.mark_terminal(
+            attempt,
+            status,
+            failure_kind,
+            VendorEgressProvenance::NotAttempted,
+        )
+        .await
+    }
+
+    /// Terminal write for an outcome settled during or after `drive_prepared`
+    /// has called `adapter.deliver` at least once — the `Delivered` success
+    /// path and every failure classification reached after that call,
+    /// including `VendorContactAmbiguous`.
+    async fn mark_terminal_post_egress(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        status: OutboundDeliveryStatus,
+        failure_kind: Option<DeliveryFailureKind>,
+    ) -> bool {
+        self.mark_terminal(
+            attempt,
+            status,
+            failure_kind,
+            VendorEgressProvenance::Attempted,
+        )
+        .await
     }
 }
 

@@ -780,7 +780,7 @@ impl OutboundStateStorePort for FailingOutboundStore {
     async fn claim_delivery_attempt_for_send(
         &self,
         _request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ironclaw_outbound::ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         Err(self.error())
     }
 

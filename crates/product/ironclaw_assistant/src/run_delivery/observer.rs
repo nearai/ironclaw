@@ -1071,6 +1071,19 @@ impl RunDeliveryObserver {
             CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
                 Err(RunDeliveryError::DeliveryFailed { failure_kind })
             }
+            // A lost sole-writer claim carries no evidence this call
+            // delivered anything (see the identical reasoning at
+            // `run_delivery/triggered.rs::deliver_notification_to_target`).
+            // Give it the same treatment `Failed` gets rather than letting
+            // the wildcard arm below silently report zero delivered
+            // messages as an ordinary non-failure outcome.
+            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { attempt } => {
+                Err(RunDeliveryError::DeliveryFailed {
+                    failure_kind: attempt
+                        .failure_kind
+                        .unwrap_or(ironclaw_outbound::DeliveryFailureKind::Unknown),
+                })
+            }
             outcome => Ok(delivered_messages_from_outcome(&outcome)),
         }
     }

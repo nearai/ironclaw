@@ -224,7 +224,103 @@ pub enum DeliveryFailureKind {
     TransportUnavailable,
     RateLimited,
     Rejected,
+    /// Unclassified failure — this codebase never wrote a more specific
+    /// [`DeliveryFailureKind`] for this row. Contrast with
+    /// [`Self::VendorContactAmbiguous`], which is a specific, deliberately
+    /// classified kind: it does not mean "we don't know what happened", it
+    /// means "we know retries were exhausted after the vendor-egress claim,
+    /// and that state provides no proof the vendor was never contacted."
     Unknown,
+    /// Retry exhaustion after the vendor-egress claim, settled without proof
+    /// that no part of this delivery reached the vendor: either the adapter's
+    /// `deliver` call returned a bare `Err` (no typed report at all), or it
+    /// returned a typed report whose parts were all `Retryable` but retries
+    /// were still exhausted. Both in-tree channel adapters (Slack, Telegram)
+    /// use `Retryable` for post-send ambiguity (e.g. a timeout after the
+    /// request was already sent), not just pre-send failure, so neither path
+    /// proves the vendor was never contacted the way a preflight
+    /// `TransportUnavailable`/`RateLimited`/`TransientValidatorError` does.
+    ///
+    /// This is distinct from [`Self::Unknown`]: `Unknown` means this codebase
+    /// never assigned a specific kind to the row (an unclassified gap).
+    /// `VendorContactAmbiguous` means the row *was* classified, precisely as
+    /// "reached the point of no return and cannot prove the vendor wasn't
+    /// contacted." A reopen must treat both as permanently terminal, but for
+    /// different reasons — this variant exists so a reader auditing "why did
+    /// this delivery id stay Failed forever" finds an explicit answer instead
+    /// of an `Unknown` catch-all.
+    VendorContactAmbiguous,
+    /// A `failure_kind` this binary does not model — e.g. a row written by a
+    /// newer release. Deserialization of a delivery row is all-or-nothing and
+    /// `list_delivery_attempts` fails the whole scope on one bad row, so an
+    /// unrecognized kind must fold here rather than making crash recovery
+    /// unloadable for every delivery in the scope. Never written by this
+    /// codebase; never reopenable, because an unknown kind proves nothing
+    /// about vendor contact.
+    ///
+    /// Round-trips lossily: `#[serde(other)]` does not preserve the original
+    /// unknown tag string, so re-serializing a loaded `Unrecognized` value
+    /// does not reproduce the wire form that produced it. This is expected
+    /// and harmless — no write path in this codebase re-serializes a
+    /// previously-read `failure_kind` unchanged; every write constructs a
+    /// fresh value from current logic (see `update_delivery_status`, which
+    /// always takes `failure_kind` from the incoming request, never from a
+    /// prior read of the row it's overwriting).
+    #[serde(other)]
+    Unrecognized,
+}
+
+impl DeliveryFailureKind {
+    /// Every [`DeliveryFailureKind`] variant, for exhaustiveness-style tests
+    /// that need to iterate the type instead of hand-maintaining a literal
+    /// array that silently drifts when a variant is added.
+    pub const ALL: &'static [Self] = &[
+        Self::AuthorizationRevoked,
+        Self::TransientValidatorError,
+        Self::TransportUnavailable,
+        Self::RateLimited,
+        Self::Rejected,
+        Self::Unknown,
+        Self::VendorContactAmbiguous,
+        Self::Unrecognized,
+    ];
+
+    /// Whether a `Failed` row carrying this kind may be reopened to a fresh
+    /// `Prepared` reservation under the same deterministic delivery id.
+    /// True only for kinds this codebase provably never writes after an
+    /// `adapter.deliver` call has been made, so a reopen cannot duplicate an
+    /// accepted send. This is a narrower boundary than "before the
+    /// vendor-egress claim": `TransportUnavailable` is written post-claim, on
+    /// channel-resolution failure, but that failure path never reaches
+    /// `adapter.deliver` — so no vendor egress was ever attempted.
+    pub const fn permits_reopen(self) -> bool {
+        match self {
+            Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => true,
+            Self::AuthorizationRevoked
+            | Self::Rejected
+            | Self::Unknown
+            | Self::VendorContactAmbiguous
+            | Self::Unrecognized => false,
+        }
+    }
+}
+
+/// Whether the writer of an [`OutboundDeliveryAttempt`] row could prove, at
+/// write time, that no `adapter.deliver` call had been made for this
+/// delivery id. Recorded by the code that knows the answer, at the moment it
+/// knows it — never re-derived from `failure_kind`, whose meaning can change
+/// across releases (pre-this-PR binaries wrote `TransportUnavailable` for
+/// post-`adapter.deliver` retry exhaustion too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorEgressProvenance {
+    /// No `adapter.deliver` call was made before this row settled.
+    NotAttempted,
+    /// An `adapter.deliver` call was made, or the writer cannot prove one
+    /// wasn't. Also the `#[serde(other)]` landing spot, so an unrecognized
+    /// future value fails closed.
+    #[serde(other)]
+    Attempted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +414,10 @@ pub struct OutboundDeliveryAttempt {
     pub status: OutboundDeliveryStatus,
     pub attempted_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+    /// `None` means a binary predating this field wrote the row — fail
+    /// closed (never reopen). See [`VendorEgressProvenance`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_egress: Option<VendorEgressProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -339,15 +439,31 @@ pub struct UpdateDeliveryStatusRequest {
     pub status: OutboundDeliveryStatus,
     pub updated_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_egress: Option<VendorEgressProvenance>,
 }
 
 /// Atomic ownership claim for the sole vendor-egress writer of a prepared
-/// delivery. Stores transition `Prepared -> Sending` exactly once and return
-/// `false` for replays or already-terminal attempts.
+/// delivery. Stores transition `Prepared -> Sending` exactly once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimDeliveryAttemptForSendRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
+}
+
+/// Result of atomically claiming the sole vendor-egress drive for a prepared
+/// delivery. `Existing` carries the exact row that blocked the claim, read
+/// atomically inside the same CAS attempt that lost — never from a separate
+/// subsequent read, which would reopen a TOCTOU window between the failed
+/// CAS and the re-read (a concurrent caller could reopen the row in between,
+/// and a claim-loser reading it afterward could misclassify a freshly
+/// reopened `Prepared` row as still in flight).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimDeliveryAttemptForSendOutcome {
+    /// This caller persisted `Prepared -> Sending` and owns vendor egress.
+    Claimed,
+    /// The authoritative attempt no longer permits the transition.
+    Existing(Box<OutboundDeliveryAttempt>),
 }
 
 /// Guarded crash-recovery transition for an interrupted send. The store
@@ -360,4 +476,74 @@ pub struct ClaimDeliveryAttemptForSendRequest {
 pub struct RecoverInterruptedDeliveryRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeliveryFailureKind;
+
+    /// G4: an exhaustive match in the test itself (not an array literal), so
+    /// adding a future `DeliveryFailureKind` variant without updating this
+    /// test is a compile error, not a silent gap.
+    #[test]
+    fn permits_reopen_is_exhaustively_classified() {
+        for kind in DeliveryFailureKind::ALL {
+            let expected = match kind {
+                DeliveryFailureKind::TransientValidatorError
+                | DeliveryFailureKind::TransportUnavailable
+                | DeliveryFailureKind::RateLimited => true,
+                DeliveryFailureKind::AuthorizationRevoked
+                | DeliveryFailureKind::Rejected
+                | DeliveryFailureKind::Unknown
+                | DeliveryFailureKind::VendorContactAmbiguous
+                | DeliveryFailureKind::Unrecognized => false,
+            };
+            assert_eq!(kind.permits_reopen(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // Checks `ALL` for internal consistency against the `witnesses`
+        // array below: a duplicate entry in `ALL` (same discriminant twice)
+        // fails the `seen.insert` assert, and any witness missing from `ALL`
+        // fails the `seen.contains` assert. Discriminant comparison also
+        // means this is immune to the old failure mode of a Debug-string
+        // key silently merging two variants with identical output, and
+        // there's no hardcoded expected count to fall out of sync.
+        //
+        // What this does NOT guarantee: `witnesses` is a plain array
+        // literal, not a match, so it isn't compiler-checked against the
+        // enum. A variant added to `DeliveryFailureKind` but omitted from
+        // *both* `ALL` and `witnesses` passes silently — nothing here
+        // forces a new binding to exist. Closing that gap for real needs
+        // either a derive like `strum::EnumIter` (not a workspace
+        // dependency today) or restructuring this test around an actual
+        // exhaustive match, as `permits_reopen_is_exhaustively_classified`
+        // above does.
+        let witnesses = [
+            DeliveryFailureKind::AuthorizationRevoked,
+            DeliveryFailureKind::TransientValidatorError,
+            DeliveryFailureKind::TransportUnavailable,
+            DeliveryFailureKind::RateLimited,
+            DeliveryFailureKind::Rejected,
+            DeliveryFailureKind::Unknown,
+            DeliveryFailureKind::VendorContactAmbiguous,
+            DeliveryFailureKind::Unrecognized,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for kind in DeliveryFailureKind::ALL {
+            assert!(
+                seen.insert(std::mem::discriminant(kind)),
+                "duplicate entry: {kind:?}"
+            );
+        }
+        for witness in witnesses {
+            assert!(
+                seen.contains(&std::mem::discriminant(&witness)),
+                "ALL omits {witness:?}"
+            );
+        }
+        assert_eq!(seen.len(), witnesses.len());
+    }
 }

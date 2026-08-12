@@ -567,6 +567,21 @@ fn classify_delivery_outcome(
             durably_recorded: true,
             already_delivered: true,
         }),
+        // Another caller already owns (or owned) this delivery id's
+        // sole-writer claim; this call performed no vendor egress and holds
+        // no evidence to report. The blocking row is `Sending` in practice
+        // (delivery_coordinator.rs's `ExistingDeliveryUnconfirmed` doc), so
+        // the vendor may already have accepted the message — reporting a
+        // definite `Rejected` would be the mirror-image of fabricating
+        // `Delivered` (tool-evidence.md's explicit-weaker-evidence rule cuts
+        // both ways). `VendorContactAmbiguous` states the true ambiguity
+        // without asserting an outcome that didn't happen; it is equally
+        // terminal and non-reopenable, so no duplicate-resend risk changes.
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { .. } => {
+            Err(ModelChannelDeliveryError::Failed {
+                kind: DeliveryFailureKind::VendorContactAmbiguous,
+            })
+        }
         CoordinatedDeliveryOutcome::Rejected { .. } => Err(ModelChannelDeliveryError::Rejected),
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
             Err(ModelChannelDeliveryError::Failed { kind: failure_kind })
@@ -580,14 +595,6 @@ fn classify_coordinator_error(error: CoordinatedDeliveryError) -> ModelChannelDe
     match error {
         CoordinatedDeliveryError::ChannelUnavailable { .. } => ModelChannelDeliveryError::Failed {
             kind: DeliveryFailureKind::TransportUnavailable,
-        },
-        // Model-correctable classes stay model-visible (rules/tools.md): a
-        // concurrent duplicate, a policy/target-validation rejection, and
-        // model-supplied attachment misuse can all be retried or repaired by
-        // the model. `Internal` is reserved for host faults (backend errors,
-        // unreadable workspace, intent-classification bugs).
-        CoordinatedDeliveryError::AlreadyInFlight => ModelChannelDeliveryError::Failed {
-            kind: DeliveryFailureKind::Rejected,
         },
         // Workflow wraps both model-correctable target-validation rejections
         // and host-side failures; only the former may surface as Rejected.

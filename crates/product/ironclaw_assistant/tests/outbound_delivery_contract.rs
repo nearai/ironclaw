@@ -277,6 +277,13 @@ struct ScriptedChannelAdapter {
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
+    /// Present only for [`Self::new_paused`]: the adapter signals
+    /// `delivery_started` right after observing the durable status, then
+    /// blocks on `delivery_release` before returning the scripted report —
+    /// giving a concurrent test caller a deterministic window in which to
+    /// race a second claim against the same delivery id.
+    delivery_started: Option<Arc<tokio::sync::Semaphore>>,
+    delivery_release: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ScriptedChannelAdapter {
@@ -291,7 +298,41 @@ impl ScriptedChannelAdapter {
             observed_status: Mutex::new(Vec::new()),
             store,
             scope,
+            delivery_started: None,
+            delivery_release: None,
         }
+    }
+
+    /// Like [`Self::new`], but the adapter pauses mid-`deliver` until the
+    /// caller adds a permit to the returned `delivery_release` semaphore.
+    /// The returned `delivery_started` semaphore signals once the adapter
+    /// has observed the durable `Sending` status and is about to pause, so a
+    /// concurrent caller can deterministically wait for "the owner has
+    /// claimed egress and is mid-flight" before racing a second claim.
+    fn new_paused(
+        store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+        scope: TurnScope,
+        reports: Vec<Result<DeliveryReport, ChannelError>>,
+    ) -> (
+        Self,
+        Arc<tokio::sync::Semaphore>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let delivery_started = Arc::new(tokio::sync::Semaphore::new(0));
+        let delivery_release = Arc::new(tokio::sync::Semaphore::new(0));
+        (
+            Self {
+                reports: Mutex::new(reports.into_iter().collect()),
+                envelopes: Mutex::new(Vec::new()),
+                observed_status: Mutex::new(Vec::new()),
+                store,
+                scope,
+                delivery_started: Some(Arc::clone(&delivery_started)),
+                delivery_release: Some(Arc::clone(&delivery_release)),
+            },
+            delivery_started,
+            delivery_release,
+        )
     }
 
     fn deliver_calls(&self) -> usize {
@@ -333,6 +374,14 @@ impl ChannelAdapter for ScriptedChannelAdapter {
             .lock()
             .expect("envelopes lock")
             .push(envelope);
+        if let (Some(started), Some(release)) = (&self.delivery_started, &self.delivery_release) {
+            started.add_permits(1);
+            let permit = release
+                .acquire()
+                .await
+                .expect("test delivery release remains open");
+            permit.forget();
+        }
         self.reports
             .lock()
             .expect("reports lock")
@@ -1590,7 +1639,7 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ironclaw_outbound::ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         self.inner.claim_delivery_attempt_for_send(request).await
     }
     async fn recover_interrupted_delivery_attempt(
@@ -1694,6 +1743,613 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
     );
 }
 
+/// Fix A: a claim loser must never misreport the owner's later-settled
+/// `Failed` outcome as its own success, and must not drive a second adapter
+/// call. `ScriptedChannelAdapter::new_paused` pauses the owner mid-`deliver`
+/// (after the durable claim already committed `Sending`) so the loser's
+/// claim attempt deterministically races against a still-`Sending` row.
+#[tokio::test]
+async fn claim_loser_observes_sending_without_reporting_the_owners_later_failure_as_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let resolver = FakeProductOutboundTargetResolver;
+    let (adapter, delivery_started, delivery_release) = ScriptedChannelAdapter::new_paused(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "owner failed after claiming egress".to_string(),
+            }],
+        })],
+    );
+    let adapter = Arc::new(adapter);
+    let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let owner_thread_scope = project_thread_scope();
+    let loser_thread_scope = project_thread_scope();
+
+    let owner = coordinator.deliver(
+        &policy,
+        &resolver,
+        &NO_PROJECT_FILESYSTEM,
+        CoordinatedDeliveryRequest {
+            intent: DeliveryIntent::FinalReply,
+            delivery: delivery.clone(),
+            parts: vec![
+                ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                ),
+            ],
+            attachments: Vec::new(),
+            thread_anchor: None,
+            require_direct_message_target: false,
+            extension_id: "vendorx",
+            thread_scope: &owner_thread_scope,
+        },
+    );
+    let loser = async {
+        let started = delivery_started
+            .acquire()
+            .await
+            .expect("test delivery start remains open");
+        started.forget();
+        let outcome = coordinator
+            .deliver(
+                &policy,
+                &resolver,
+                &NO_PROJECT_FILESYSTEM,
+                CoordinatedDeliveryRequest {
+                    intent: DeliveryIntent::FinalReply,
+                    delivery,
+                    parts: vec![
+                        ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                            "one durable fact".to_string(),
+                        ),
+                    ],
+                    attachments: Vec::new(),
+                    thread_anchor: None,
+                    require_direct_message_target: false,
+                    extension_id: "vendorx",
+                    thread_scope: &loser_thread_scope,
+                },
+            )
+            .await;
+        delivery_release.add_permits(1);
+        outcome
+    };
+
+    let (owner, loser) = tokio::join!(owner, loser);
+    assert!(matches!(
+        owner.expect("owner returns its terminal adapter outcome"),
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Rejected,
+            ..
+        }
+    ));
+    match loser.expect("claim loss is a typed non-success outcome") {
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { attempt } => {
+            assert_eq!(
+                attempt.status,
+                ironclaw_outbound::OutboundDeliveryStatus::Sending
+            );
+            assert_eq!(attempt.failure_kind, None);
+        }
+        other => panic!("expected ExistingDeliveryUnconfirmed, got {other:?}"),
+    }
+    assert_eq!(
+        adapter.deliver_calls(),
+        1,
+        "the losing coordinator must not drive a second adapter call"
+    );
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load settled attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
+    );
+}
+
+/// Sibling of the failure case above, for the crash-instead-of-settle path:
+/// the owner never returns at all (simulating a process crash mid-adapter
+/// call), yet the claim loser still must not fabricate success. Recovery
+/// later reconciles the stray `Sending` row to `Unknown`, never resending.
+#[tokio::test]
+async fn claim_loser_observes_sending_without_reporting_the_owners_later_crash_as_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let resolver = FakeProductOutboundTargetResolver;
+    let (adapter, delivery_started, _delivery_release) = ScriptedChannelAdapter::new_paused(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("owner-never-settles")],
+        })],
+    );
+    let adapter = Arc::new(adapter);
+    let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let owner_thread_scope = project_thread_scope();
+    let loser_thread_scope = project_thread_scope();
+    let mut owner = Box::pin(coordinator.deliver(
+        &policy,
+        &resolver,
+        &NO_PROJECT_FILESYSTEM,
+        CoordinatedDeliveryRequest {
+            intent: DeliveryIntent::FinalReply,
+            delivery: delivery.clone(),
+            parts: vec![
+                ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                ),
+            ],
+            attachments: Vec::new(),
+            thread_anchor: None,
+            require_direct_message_target: false,
+            extension_id: "vendorx",
+            thread_scope: &owner_thread_scope,
+        },
+    ));
+
+    tokio::select! {
+        result = &mut owner => panic!("owner unexpectedly settled before the crash: {result:?}"),
+        started = delivery_started.acquire() => {
+            started.expect("test delivery start remains open").forget();
+        }
+    }
+    let loser = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![
+                    ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                        "one durable fact".to_string(),
+                    ),
+                ],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &loser_thread_scope,
+            },
+        )
+        .await
+        .expect("claim loss is a typed non-success outcome");
+    match loser {
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed { attempt } => {
+            assert_eq!(
+                attempt.status,
+                ironclaw_outbound::OutboundDeliveryStatus::Sending
+            );
+            assert_eq!(attempt.failure_kind, None);
+        }
+        other => panic!("expected ExistingDeliveryUnconfirmed, got {other:?}"),
+    }
+
+    drop(owner);
+    assert_eq!(
+        coordinator
+            .recover_interrupted_deliveries(scope.clone())
+            .await
+            .expect("crash recovery"),
+        1
+    );
+    assert_eq!(adapter.deliver_calls(), 1);
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load recovered attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Unknown
+    );
+    assert_eq!(attempts[0].failure_kind, None);
+}
+
+/// G9 (partial — the adapter-`Err`-exhaustion half of the invariant that no
+/// post-egress-claim code path ever writes a `permits_reopen()`-true kind):
+/// a bare adapter `Err` carries no proof the vendor was never contacted, so
+/// retry exhaustion must settle `VendorContactAmbiguous`, not
+/// `TransportUnavailable` — and a replay of the same logical delivery must
+/// never reopen the resulting row.
+#[tokio::test]
+async fn coordinator_marks_vendor_contact_ambiguous_on_exhausted_adapter_errors_and_never_reopens()
+{
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Err(ChannelError::Configuration {
+                reason: "scripted vendor error".to_string(),
+            }),
+            Err(ChannelError::Configuration {
+                reason: "scripted vendor error".to_string(),
+            }),
+            Err(ChannelError::Configuration {
+                reason: "scripted vendor error".to_string(),
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("delivery drives");
+
+    let CoordinatedDeliveryOutcome::Failed {
+        attempt,
+        failure_kind,
+    } = outcome
+    else {
+        panic!("expected a terminal Failed outcome once adapter Err retries were exhausted");
+    };
+    assert_eq!(
+        failure_kind,
+        ironclaw_outbound::DeliveryFailureKind::VendorContactAmbiguous,
+        "a bare adapter Err carries no proof the vendor was never contacted"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        3,
+        "all retries were consumed against repeated adapter errors"
+    );
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::VendorContactAmbiguous)
+    );
+
+    // Replaying the same logical delivery must NOT reopen this row: unlike
+    // TransportUnavailable (which is only ever settled before the egress
+    // claim, so it type-level guarantees nothing reached the vendor),
+    // VendorContactAmbiguous gives no such guarantee, so
+    // record_delivery_attempt must treat this as an idempotent no-op rather
+    // than resetting it to a fresh Prepared reservation a caller could claim
+    // and resend.
+    let mut replay = attempt.clone();
+    replay.status = ironclaw_outbound::OutboundDeliveryStatus::Prepared;
+    replay.failure_kind = None;
+    store
+        .record_delivery_attempt(replay)
+        .await
+        .expect("replay is accepted as an idempotent no-op");
+    let after_replay = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempt after replay");
+    assert_eq!(after_replay.len(), 1);
+    assert_eq!(
+        after_replay[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed,
+        "a VendorContactAmbiguous row must stay terminal, unlike TransportUnavailable"
+    );
+    assert_eq!(
+        after_replay[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::VendorContactAmbiguous)
+    );
+}
+
+/// G9 (the other half): a typed report whose parts are all `Retryable` is
+/// not type-level proof that nothing reached the vendor either — both
+/// in-tree adapters (Slack, Telegram) report post-send ambiguity (e.g. a
+/// timeout after the request was sent) as `Retryable` rather than `Sent` or
+/// `Permanent`. So a fully-retryable exhaustion must also settle
+/// `VendorContactAmbiguous`, never `TransportUnavailable`/`RateLimited`, and
+/// must never reopen on replay — exactly like the bare-`Err` sibling above.
+#[tokio::test]
+async fn coordinator_marks_vendor_contact_ambiguous_on_exhausted_retryable_reports_and_never_reopens()
+ {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("delivery drives");
+
+    let CoordinatedDeliveryOutcome::Failed {
+        attempt,
+        failure_kind,
+    } = outcome
+    else {
+        panic!(
+            "expected a terminal Failed outcome once fully-retryable report retries were exhausted"
+        );
+    };
+    assert_eq!(
+        failure_kind,
+        ironclaw_outbound::DeliveryFailureKind::VendorContactAmbiguous,
+        "a fully-retryable report carries no proof the vendor was never contacted"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        3,
+        "all retries were consumed against repeated Retryable reports"
+    );
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::VendorContactAmbiguous)
+    );
+
+    // Replaying the same logical delivery must NOT reopen this row, for the
+    // same reason as the bare-Err sibling case: a fresh Prepared clone of the
+    // same attempt (same delivery_id/scope/candidate) must be accepted as an
+    // idempotent no-op, not a reopen a caller could claim and resend.
+    let mut replay = attempt.clone();
+    replay.status = ironclaw_outbound::OutboundDeliveryStatus::Prepared;
+    replay.failure_kind = None;
+    store
+        .record_delivery_attempt(replay)
+        .await
+        .expect("replay is accepted as an idempotent no-op");
+    let after_replay = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load attempt after replay");
+    assert_eq!(after_replay.len(), 1);
+    assert_eq!(
+        after_replay[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed,
+        "a VendorContactAmbiguous row must stay terminal, unlike TransportUnavailable"
+    );
+    assert_eq!(
+        after_replay[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::VendorContactAmbiguous)
+    );
+}
+
+/// G6: an end-to-end proof of the reopen mechanism through main's actual
+/// claim-first path. In this codebase a `TransportUnavailable` settlement
+/// only ever happens before the egress claim (`ChannelUnavailable` /
+/// workspace-materialization preflight failures — see
+/// `workspace_materialization_failure_kind` and
+/// `resolve_channel_context`), which is exactly the invariant that makes
+/// reopening it safe. This test drives that preflight path (channel
+/// unavailable), then replays the same logical delivery: the reopen
+/// resurfaces the `Failed(TransportUnavailable)` row as a fresh `Prepared`
+/// reservation, and a second attempt with a healthy channel claims it and
+/// delivers.
+#[tokio::test]
+async fn transient_preflight_failure_reopens_and_replay_delivers() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-reopen-replay")],
+        })],
+    ));
+
+    // First attempt: the channel is unavailable, a preflight failure before
+    // any egress claim. This settles Failed(TransportUnavailable) directly
+    // on the `Prepared` row (no claim was ever taken).
+    let unavailable_coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: true,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+    // Both attempts must share one `PrepareCommunicationDeliveryRequest` (in
+    // particular one `turn_run_id`): the durable delivery id is derived from
+    // scope/actor/modality/candidate, and `delivery_request` mints a fresh
+    // random `turn_run_id` on every call, so calling it twice would produce
+    // two unrelated delivery ids instead of exercising a reopen of the same
+    // logical delivery.
+    let delivery = delivery_request(scope.clone());
+    let thread_scope = project_thread_scope();
+    let request = || CoordinatedDeliveryRequest {
+        intent: DeliveryIntent::FinalReply,
+        delivery: delivery.clone(),
+        parts: vec![
+            ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+                "final reply".to_string(),
+            ),
+        ],
+        attachments: Vec::new(),
+        thread_anchor: Some("thread-1".to_string()),
+        require_direct_message_target: false,
+        extension_id: "vendorx",
+        thread_scope: &thread_scope,
+    };
+
+    let first_error = unavailable_coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request())
+        .await
+        .expect_err("unavailable channel fails closed");
+    assert!(matches!(
+        first_error,
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+    ));
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+    );
+    let reopened_delivery_id = attempts[0].delivery_id;
+
+    // Second attempt: same logical delivery (same scope/actor/modality/
+    // candidate, hence the same deterministic delivery id), this time
+    // through a healthy channel. `record_delivery_attempt` reopens the stale
+    // `TransportUnavailable` row to a fresh `Prepared` reservation instead of
+    // treating the replay as a no-op, so this claim succeeds and delivers.
+    let healthy_coordinator = coordinator_over(&store, &adapter);
+    let outcome = healthy_coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request())
+        .await
+        .expect("replay drives after reopen");
+    match outcome {
+        CoordinatedDeliveryOutcome::Delivered {
+            attempt,
+            vendor_message_refs,
+            ..
+        } => {
+            assert_eq!(attempt.delivery_id, reopened_delivery_id);
+            assert_eq!(vendor_message_refs, vec!["ts-reopen-replay".to_string()]);
+        }
+        other => panic!("expected Delivered after reopen, got {other:?}"),
+    }
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1, "the reopen reuses the same durable row");
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+/// G8: notice-class deliveries (`deliver_notice`) mint a fresh random
+/// delivery id on every call (unlike policy-class deliveries, whose id is
+/// deterministic from scope/actor/modality/candidate) — so two notices can
+/// never collide on the same durable row, and a reopen can never trigger for
+/// them. This is a regression guard: if a future change made notice ids
+/// derive deterministically from scope/extension/notice_ref, a second
+/// failing notice could silently reopen and resend the first's row instead
+/// of recording an independent attempt.
+#[tokio::test]
+async fn notice_deliveries_never_trigger_a_reopen() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: true,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let first_error = coordinator
+        .deliver_notice(working_notice(scope.clone(), "vendorx"))
+        .await
+        .expect_err("unavailable channel fails closed");
+    assert!(matches!(
+        first_error,
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+    ));
+    let second_error = coordinator
+        .deliver_notice(working_notice(scope.clone(), "vendorx"))
+        .await
+        .expect_err("unavailable channel fails closed");
+    assert!(matches!(
+        second_error,
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+    ));
+
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "each notice must record an independent row, never reopen a sibling's"
+    );
+    assert_ne!(attempts[0].delivery_id, attempts[1].delivery_id);
+    for attempt in &attempts {
+        assert_eq!(
+            attempt.status,
+            ironclaw_outbound::OutboundDeliveryStatus::Failed
+        );
+        assert_eq!(
+            attempt.failure_kind,
+            Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+        );
+    }
+}
+
 #[tokio::test]
 async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
     let scope = scope();
@@ -1731,6 +2387,7 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
             status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
             updated_at: Utc::now(),
             failure_kind: None,
+            vendor_egress: Some(ironclaw_outbound::VendorEgressProvenance::Attempted),
         })
         .await
         .unwrap();
@@ -2026,6 +2683,7 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
         status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
         attempted_at: Utc::now(),
         failure_kind: None,
+        vendor_egress: Some(ironclaw_outbound::VendorEgressProvenance::Attempted),
     };
     store
         .record_delivery_attempt(stray.clone())

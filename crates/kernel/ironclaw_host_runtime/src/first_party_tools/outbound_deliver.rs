@@ -223,6 +223,10 @@ fn delivery_failure_summary(kind: DeliveryFailureKind) -> &'static str {
         DeliveryFailureKind::RateLimited => "the delivery attempt failed: rate_limited",
         DeliveryFailureKind::Rejected => "the delivery attempt failed: rejected",
         DeliveryFailureKind::Unknown => "the delivery attempt failed: unknown",
+        DeliveryFailureKind::VendorContactAmbiguous => {
+            "the delivery attempt failed: vendor_contact_ambiguous"
+        }
+        DeliveryFailureKind::Unrecognized => "the delivery attempt failed: unrecognized",
     }
 }
 
@@ -634,6 +638,13 @@ mod tests {
                 Some("the delivery attempt failed: rate_limited"),
             ),
             (
+                ModelChannelDeliveryError::Failed {
+                    kind: DeliveryFailureKind::VendorContactAmbiguous,
+                },
+                RuntimeDispatchErrorKind::OperationFailed,
+                Some("the delivery attempt failed: vendor_contact_ambiguous"),
+            ),
+            (
                 ModelChannelDeliveryError::AccessDenied,
                 RuntimeDispatchErrorKind::PolicyDenied,
                 None,
@@ -782,6 +793,21 @@ mod tests {
             assert!(
                 delivery.seen.lock().unwrap().is_empty(),
                 "empty content must never reach the delivery port"
+            );
+        }
+    }
+
+    /// G1: `delivery_failure_summary`'s match is exhaustive over fixed
+    /// literals precisely so every arm can be reviewed and known to satisfy
+    /// `LoopSafeSummary` (no `/ < > [ ] { } \``). Prove that invariant
+    /// directly for every current `DeliveryFailureKind`, including the new
+    /// `VendorContactAmbiguous` arm, rather than relying on review alone.
+    #[test]
+    fn delivery_failure_summary_satisfies_loop_safe_charset_for_every_kind() {
+        for kind in DeliveryFailureKind::ALL.iter().copied() {
+            let summary = delivery_failure_summary(kind);
+            ironclaw_loop_contracts::LoopSafeSummary::new(summary.to_string()).unwrap_or_else(
+                |error| panic!("{kind:?} summary {summary:?} is not loop-safe: {error}"),
             );
         }
     }

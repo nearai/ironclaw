@@ -9,7 +9,7 @@ use crate::{
     PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
-    ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
+    ThreadProjectionAccessRequest, ValidatedReplyTargetBinding, VendorEgressProvenance,
 };
 
 #[async_trait]
@@ -120,6 +120,7 @@ impl<'a> OutboundPolicyService<'a> {
                     status: OutboundDeliveryStatus::Prepared,
                     attempted_at: request.attempted_at,
                     failure_kind: None,
+                    vendor_egress: Some(VendorEgressProvenance::NotAttempted),
                 };
                 self.store.record_delivery_attempt(attempt.clone()).await?;
                 Ok(OutboundDeliveryDecision::Authorized { attempt, target })
@@ -132,6 +133,7 @@ impl<'a> OutboundPolicyService<'a> {
                     status: OutboundDeliveryStatus::Failed,
                     attempted_at: request.attempted_at,
                     failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+                    vendor_egress: Some(VendorEgressProvenance::NotAttempted),
                 };
                 self.store.record_delivery_attempt(attempt.clone()).await?;
                 Ok(OutboundDeliveryDecision::Rejected { attempt })
@@ -148,6 +150,7 @@ impl<'a> OutboundPolicyService<'a> {
                     status: OutboundDeliveryStatus::Failed,
                     attempted_at: request.attempted_at,
                     failure_kind: Some(DeliveryFailureKind::TransientValidatorError),
+                    vendor_egress: Some(VendorEgressProvenance::NotAttempted),
                 };
                 self.store.record_delivery_attempt(attempt.clone()).await?;
                 Ok(OutboundDeliveryDecision::Rejected { attempt })

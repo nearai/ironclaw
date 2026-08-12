@@ -63,6 +63,50 @@ fn build_outbound_store_with_permissions<F: RootFilesystem>(
     OutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
+fn prepared_delivery_attempt(
+    delivery_id: OutboundDeliveryId,
+    scope: TurnScope,
+    marker: &str,
+) -> OutboundDeliveryAttempt {
+    delivery_attempt_with_status(
+        delivery_id,
+        scope,
+        marker,
+        OutboundDeliveryStatus::Prepared,
+        None,
+    )
+}
+
+fn delivery_attempt_with_status(
+    delivery_id: OutboundDeliveryId,
+    scope: TurnScope,
+    marker: &str,
+    status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+) -> OutboundDeliveryAttempt {
+    OutboundDeliveryAttempt {
+        delivery_id,
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            target: reply_ref(marker),
+            kind: OutboundPushKind::FinalReply,
+            projection_ref: ProjectionUpdateRef::new(format!("projection:{marker}")).unwrap(),
+            requires_reply_target_revalidation: true,
+        },
+        status,
+        attempted_at: now(),
+        failure_kind,
+        // `prepared_delivery_attempt` (the only caller) always builds a
+        // fresh `Prepared` reservation — pre-egress by construction.
+        vendor_egress: Some(VendorEgressProvenance::NotAttempted),
+    }
+}
+
 fn reply_attachment_scope() -> ironclaw_host_api::resource::ResourceScope {
     turn_scope().to_resource_scope()
 }
@@ -450,6 +494,7 @@ async fn delivery_attempt_point_read_returns_only_the_exact_scoped_row() {
         status: OutboundDeliveryStatus::Delivered,
         attempted_at: now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::Attempted),
     };
     store
         .record_delivery_attempt(attempt.clone())
@@ -498,6 +543,7 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -511,12 +557,454 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
         first.claim_delivery_attempt_for_send(first_request),
         second.claim_delivery_attempt_for_send(second_request),
     );
-    let claims = [first_claim.unwrap(), second_claim.unwrap()];
-    assert_eq!(claims.into_iter().filter(|claimed| *claimed).count(), 1);
+    let outcomes = [first_claim.unwrap(), second_claim.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ClaimDeliveryAttemptForSendOutcome::Claimed))
+            .count(),
+        1
+    );
+    // G7: the losing claimant's `Existing` snapshot must never carry
+    // `Prepared` — that is the property that makes the TOCTOU fix (fix A)
+    // sound. If it could, a claim-loser could misclassify a freshly
+    // reopened row as still in flight instead of it being safe to retry.
+    let existing = outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            ClaimDeliveryAttemptForSendOutcome::Existing(attempt) => Some(attempt),
+            ClaimDeliveryAttemptForSendOutcome::Claimed => None,
+        })
+        .expect("the losing claimant receives the winner's authoritative state");
+    assert_ne!(existing.status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(existing.status, OutboundDeliveryStatus::Sending);
 
     let attempts = first.list_delivery_attempts(scope).await.unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
+}
+
+/// Fix A, deterministically: a claim loser must receive the exact
+/// authoritative row that blocked its CAS, read atomically inside the losing
+/// CAS attempt — never from a separate subsequent read. The racing backend
+/// enforces this by rejecting a third read and a second `put` outright, so
+/// this test fails if the implementation ever re-reads after the loss.
+#[tokio::test]
+async fn send_claim_cas_loser_returns_exact_winner_snapshot_without_post_resolution_read() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(DeliveryTransitionRaceBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(
+        delivery_id,
+        scope.clone(),
+        "reply-deterministic-claim-loser",
+    );
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("seed prepared attempt");
+
+    let mut winner = prepared;
+    winner.status = OutboundDeliveryStatus::Failed;
+    winner.failure_kind = Some(DeliveryFailureKind::AuthorizationRevoked);
+    racing.arm(delivery_id, winner.clone()).await;
+
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope,
+            })
+            .await
+            .expect("claim loser observes the racing settlement"),
+        ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(winner))
+    );
+    racing.assert_resolved_in_retry_read().await;
+}
+
+/// A reopen CAS-write that loses to a concurrent winner (another worker
+/// already reopened and claimed the same delivery id for `Sending`) must
+/// defer to that winner, not clobber it back to `Prepared`. Mirrors
+/// `send_claim_cas_loser_returns_exact_winner_snapshot_without_post_resolution_read`'s
+/// racing-backend technique, applied to the `record_delivery_attempt` reopen
+/// branch instead of the claim CAS.
+#[tokio::test]
+async fn record_delivery_attempt_reopen_race_loser_defers_to_concurrent_winner() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(DeliveryTransitionRaceBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-reopen-race-loser");
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("seed prepared attempt");
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("claim first send attempt"),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
+    );
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Failed,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+            // Pre-egress channel-resolution failure shape — required so the
+            // subsequent `record_delivery_attempt(prepared)` call below
+            // actually attempts a reopen (the behavior this test exercises)
+            // instead of no-opping on the new `vendor_egress` gate.
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
+        })
+        .await
+        .expect("settle the exhausted-retry terminal failure");
+
+    // By the time this reopen's CAS write lands, a concurrent worker already
+    // reopened and claimed the same delivery id for `Sending`. The reopen
+    // must observe that winner and defer to it instead of clobbering it back
+    // to `Prepared` — verified by the racing backend rejecting any second
+    // `put` after the first CAS loss.
+    let mut winner = prepared.clone();
+    winner.status = OutboundDeliveryStatus::Sending;
+    racing.arm(delivery_id, winner).await;
+
+    store
+        .record_delivery_attempt(prepared)
+        .await
+        .expect("reopen loser must defer, not error");
+    racing.assert_resolved_in_retry_read().await;
+}
+
+/// G5: a reopen no-op matrix. Only a `Failed` row whose kind's
+/// `permits_reopen()` is `true` may be reopened by an incoming fresh
+/// `Prepared` attempt; every other existing status is untouched.
+///
+/// Each case reuses one `base` attempt (built once via
+/// `prepared_delivery_attempt`) for both the seed and the replay so the two
+/// calls carry an identical `candidate` — `validate_delivery_identity`
+/// requires this, and building the candidate twice would bake in two
+/// different `turn_run_id`s and fail identity validation regardless of the
+/// reopen logic under test.
+#[tokio::test]
+async fn record_delivery_attempt_reopens_only_reopen_permitted_failed_rows() {
+    let non_failed_statuses = [
+        OutboundDeliveryStatus::Prepared,
+        OutboundDeliveryStatus::Sending,
+        OutboundDeliveryStatus::Delivered,
+        OutboundDeliveryStatus::Unknown,
+        OutboundDeliveryStatus::DeadLettered,
+    ];
+    for status in non_failed_statuses {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(backend);
+        let scope = turn_scope();
+        let delivery_id = OutboundDeliveryId::new();
+        let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-no-op-matrix");
+        let mut seeded = base.clone();
+        seeded.status = status;
+        if status == OutboundDeliveryStatus::DeadLettered {
+            // `DeadLettered` requires a failure kind (any kind); it is not
+            // itself a `Failed` row and must never be reopened regardless.
+            seeded.failure_kind = Some(DeliveryFailureKind::Rejected);
+        }
+        store
+            .record_delivery_attempt(seeded)
+            .await
+            .expect("seed row");
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error for a no-op");
+
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status, status,
+            "a non-Failed existing row of status {status:?} must never be touched by a replay"
+        );
+    }
+
+    for kind in DeliveryFailureKind::ALL.iter().copied() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(backend);
+        let scope = turn_scope();
+        let delivery_id = OutboundDeliveryId::new();
+        let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-no-op-matrix-kind");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(kind);
+        store
+            .record_delivery_attempt(seeded)
+            .await
+            .expect("seed failed row");
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error");
+
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        if kind.permits_reopen() {
+            assert_eq!(
+                attempts[0].status,
+                OutboundDeliveryStatus::Prepared,
+                "{kind:?} permits reopen and must be reopened to a fresh Prepared row"
+            );
+            assert_eq!(attempts[0].failure_kind, None);
+        } else {
+            assert_eq!(
+                attempts[0].status,
+                OutboundDeliveryStatus::Failed,
+                "{kind:?} does not permit reopen and must stay Failed"
+            );
+            assert_eq!(attempts[0].failure_kind, Some(kind));
+        }
+    }
+}
+
+/// Rollout duplicate-send guard: `vendor_egress` is a second, independent
+/// reopen gate alongside `failure_kind::permits_reopen()`. A
+/// `Failed(TransportUnavailable)` row written by a binary predating this
+/// field has no `vendor_egress` key on the wire at all — indistinguishable
+/// by byte shape from a pre-this-PR binary's now-removed, ambiguous
+/// post-`adapter.deliver` retry-exhaustion write, which used to settle the
+/// same kind before this PR reclassified that case to
+/// `VendorContactAmbiguous`. That legacy shape must never reopen. The
+/// identical row WITH `vendor_egress: Some(NotAttempted)` — the shape this
+/// PR's binary actually writes for a pre-claim `TransportUnavailable`
+/// failure — must reopen exactly as before this field existed.
+///
+/// Each case reuses one `base` `Prepared` attempt (built via
+/// `prepared_delivery_attempt`) for both the seed and the replay, mirroring
+/// `record_delivery_attempt_reopens_only_reopen_permitted_failed_rows`
+/// above: `validate_delivery_identity` requires the two calls to carry an
+/// identical `candidate`, and building it twice would bake in two different
+/// `turn_run_id`s.
+#[tokio::test]
+async fn record_delivery_attempt_reopen_gate_requires_vendor_egress_not_attempted() {
+    let scope = turn_scope();
+
+    // Legacy shape: `vendor_egress` stripped from the wire entirely (not
+    // just left at its struct default), simulating a row written before
+    // this field existed. `#[serde(default)]` deserializes the missing key
+    // to `None`, which must fail closed.
+    //
+    // Seeded through the normal indexed write path first (so the delivery
+    // scope/tenant index projections — opaque `Entry::indexed` metadata the
+    // backend keys `list_delivery_attempts` queries on, not derived from
+    // `body` — land correctly), then the durable JSON body is overwritten
+    // in place with `vendor_egress` stripped, preserving the entry's index
+    // and version.
+    {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(Arc::clone(&backend));
+        let delivery_id = OutboundDeliveryId::new();
+        let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-legacy-provenance");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+        store
+            .record_delivery_attempt(seeded.clone())
+            .await
+            .expect("seed failed row");
+
+        let legacy_path = VirtualPath::new(format!(
+            "{TEST_OUTBOUND_ROOT}/deliveries/{delivery_id}.json"
+        ))
+        .unwrap();
+        let versioned = backend
+            .get(&legacy_path)
+            .await
+            .unwrap()
+            .expect("seeded row exists");
+        let mut legacy_json = serde_json::to_value(&seeded).unwrap();
+        legacy_json
+            .as_object_mut()
+            .expect("attempt serializes to a JSON object")
+            .remove("vendor_egress");
+        let legacy_entry = Entry {
+            body: serde_json::to_vec(&legacy_json).unwrap(),
+            ..versioned.entry
+        };
+        backend
+            .put(
+                &legacy_path,
+                legacy_entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
+            .unwrap();
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error for a no-op");
+        let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            OutboundDeliveryStatus::Failed,
+            "a legacy row missing vendor_egress on the wire must fail closed and never reopen"
+        );
+        assert_eq!(attempts[0].vendor_egress, None);
+    }
+
+    // Modern shape: `vendor_egress: Some(NotAttempted)` present, exactly as
+    // this PR's pre-claim `TransportUnavailable` writer produces. Must
+    // reopen.
+    {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(backend);
+        let delivery_id = OutboundDeliveryId::new();
+        let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-modern-provenance");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+        assert_eq!(
+            seeded.vendor_egress,
+            Some(VendorEgressProvenance::NotAttempted),
+            "prepared_delivery_attempt must build the modern, provenance-carrying shape"
+        );
+        store
+            .record_delivery_attempt(seeded)
+            .await
+            .expect("seed failed row");
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error");
+        let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            OutboundDeliveryStatus::Prepared,
+            "a modern row with vendor_egress: Some(NotAttempted) must reopen"
+        );
+        assert_eq!(attempts[0].failure_kind, None);
+    }
+
+    // Post-egress shape with a reopen-permitted kind: `Some(Attempted)` must
+    // block reopen on its own, independent of `permits_reopen()`. This is
+    // the shape a future writer would produce if it settled
+    // `TransportUnavailable` after `adapter.deliver` — exactly the class of
+    // bug the provenance gate exists to catch.
+    {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(backend);
+        let delivery_id = OutboundDeliveryId::new();
+        let base =
+            prepared_delivery_attempt(delivery_id, scope.clone(), "reply-post-egress-provenance");
+        let mut seeded = base.clone();
+        seeded.status = OutboundDeliveryStatus::Failed;
+        seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+        seeded.vendor_egress = Some(VendorEgressProvenance::Attempted);
+        store
+            .record_delivery_attempt(seeded)
+            .await
+            .expect("seed failed row");
+
+        store
+            .record_delivery_attempt(base)
+            .await
+            .expect("record call must not error for a no-op");
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            OutboundDeliveryStatus::Failed,
+            "Some(Attempted) must block reopen even for a permits_reopen kind"
+        );
+        assert_eq!(
+            attempts[0].vendor_egress,
+            Some(VendorEgressProvenance::Attempted)
+        );
+    }
+}
+
+/// Issue 2 hygiene guard: `DeliveryFailureKind::Unrecognized` (the
+/// `#[serde(other)]` catch-all for a kind this binary does not model) must
+/// never permit reopen — an unknown kind proves nothing about vendor
+/// contact. Constructed via raw JSON with a `failure_kind` tag this enum
+/// does not define, simulating a row written by a binary with a kind this
+/// one predates (e.g. read during a rollback).
+///
+/// Seeded through the normal indexed write path first (so the delivery
+/// scope/tenant index projections land correctly — see the comment in
+/// `record_delivery_attempt_reopen_gate_requires_vendor_egress_not_attempted`
+/// above), then the durable JSON body is overwritten in place with an
+/// unrecognized `failure_kind` tag, preserving the entry's index and
+/// version.
+#[tokio::test]
+async fn record_delivery_attempt_never_reopens_a_row_with_unrecognized_failure_kind() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let base = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-unrecognized-kind");
+    let mut seeded = base.clone();
+    seeded.status = OutboundDeliveryStatus::Failed;
+    seeded.failure_kind = Some(DeliveryFailureKind::TransportUnavailable);
+    store
+        .record_delivery_attempt(seeded.clone())
+        .await
+        .expect("seed failed row");
+
+    let path = VirtualPath::new(format!(
+        "{TEST_OUTBOUND_ROOT}/deliveries/{delivery_id}.json"
+    ))
+    .unwrap();
+    let versioned = backend
+        .get(&path)
+        .await
+        .unwrap()
+        .expect("seeded row exists");
+    let mut seeded_json = serde_json::to_value(&seeded).unwrap();
+    seeded_json["failure_kind"] = serde_json::json!("a_future_kind_this_binary_predates");
+    let unrecognized_entry = Entry {
+        body: serde_json::to_vec(&seeded_json).unwrap(),
+        ..versioned.entry
+    };
+    backend
+        .put(
+            &path,
+            unrecognized_entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .unwrap();
+
+    // The unrecognized tag must not break `list_delivery_attempts` for the
+    // whole scope (Issue 2's actual bug) — it folds to `Unrecognized`.
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(DeliveryFailureKind::Unrecognized)
+    );
+
+    store
+        .record_delivery_attempt(base)
+        .await
+        .expect("record call must not error for a no-op");
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        OutboundDeliveryStatus::Failed,
+        "an unrecognized failure kind must never permit reopen"
+    );
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
@@ -1330,6 +1818,7 @@ async fn delivery_send_claim_fails_closed_on_unsupported_cas_mount() {
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -1500,6 +1989,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
         status: OutboundDeliveryStatus::Pending,
         attempted_at: now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::NotAttempted),
     };
     store
         .record_delivery_attempt(initial_attempt.clone())
@@ -1512,6 +2002,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await;
     assert!(matches!(
@@ -1526,6 +2017,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -1553,6 +2045,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await;
     assert!(matches!(
@@ -1798,11 +2291,12 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
 
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id,
@@ -1810,18 +2304,28 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             })
             .await
             .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Claimed,
         "the first caller atomically owns vendor egress"
     );
-    assert!(
-        !store
-            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
-                delivery_id,
-                scope: scope.clone(),
-            })
-            .await
-            .unwrap(),
-        "a replay cannot claim the same durable attempt"
-    );
+    let replay_claim = store
+        .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+            delivery_id,
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    match replay_claim {
+        ClaimDeliveryAttemptForSendOutcome::Existing(existing) => {
+            assert_eq!(
+                existing.status,
+                OutboundDeliveryStatus::Sending,
+                "a replay cannot claim the same durable attempt"
+            );
+        }
+        ClaimDeliveryAttemptForSendOutcome::Claimed => {
+            panic!("a replay cannot claim the same durable attempt")
+        }
+    }
     let wrong_scope_claim = store
         .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
             delivery_id,
@@ -1848,6 +2352,7 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             status: OutboundDeliveryStatus::Unknown,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await;
     assert!(matches!(
@@ -1862,6 +2367,7 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             status: OutboundDeliveryStatus::Unknown,
             updated_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await
         .unwrap();
@@ -1902,17 +2408,19 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id: interrupted,
                 scope: scope.clone(),
             })
             .await
-            .unwrap()
+            .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
     );
     assert!(
         store
@@ -1947,17 +2455,19 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
             status: OutboundDeliveryStatus::Prepared,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id: delivered,
                 scope: scope.clone(),
             })
             .await
-            .unwrap()
+            .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
     );
     store
         .update_delivery_status(UpdateDeliveryStatusRequest {
@@ -1966,6 +2476,7 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
             status: OutboundDeliveryStatus::Delivered,
             updated_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await
         .unwrap();
@@ -2016,6 +2527,7 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
         status: OutboundDeliveryStatus::Pending,
         attempted_at: now(),
         failure_kind: None,
+        vendor_egress: Some(VendorEgressProvenance::NotAttempted),
     };
     store.record_delivery_attempt(attempt).await.unwrap();
 
@@ -2026,6 +2538,7 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
             status: OutboundDeliveryStatus::Delivered,
             updated_at: now(),
             failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+            vendor_egress: Some(VendorEgressProvenance::Attempted),
         })
         .await;
     assert!(matches!(
@@ -2040,10 +2553,30 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
             status: OutboundDeliveryStatus::Failed,
             updated_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await;
     assert!(matches!(
         failed_without_failure,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    // A `Failed` write must carry `vendor_egress` provenance: omitting it
+    // would silently strip provenance from the durable row, and
+    // `attempt_reopens_stale_failure` treats a provenance-less row as legacy
+    // and refuses to reopen it forever.
+    let failed_without_vendor_egress = store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Failed,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+            vendor_egress: None,
+        })
+        .await;
+    assert!(matches!(
+        failed_without_vendor_egress,
         Err(OutboundError::InvalidRequest { .. })
     ));
 
@@ -2127,6 +2660,7 @@ async fn full_turn_scope_isolation(store: &impl OutboundStateStorePort, original
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -2320,6 +2854,153 @@ impl RootFilesystem for VersionRacingBackend {
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+/// Deterministically models another store consuming `Prepared` (or
+/// reopening a `Failed` row) between this store's versioned read and CAS
+/// write. Once armed for one delivery, the permitted sequence is exactly:
+/// read (whatever status is currently persisted); lose the guarded write
+/// while this backend commits `winner`; retry-read the complete winner
+/// record. A third read or second write fails, rejecting post-resolution
+/// polling or a reclaim attempt without counting unrelated filesystem
+/// operations. Used to prove fix A's claim (`claim_delivery_attempt_for_send`)
+/// and the reopen branch of `record_delivery_attempt` never perform a
+/// separate post-CAS-loss read — the retry read inside the existing CAS loop
+/// is the only read, which is what closes the TOCTOU window.
+struct DeliveryTransitionRaceBackend {
+    inner: Arc<InMemoryBackend>,
+    state: Mutex<DeliveryTransitionRaceState>,
+}
+
+struct DeliveryTransitionRaceState {
+    target_path: Option<String>,
+    winner: Option<OutboundDeliveryAttempt>,
+    reads: u8,
+    conflicts: u8,
+}
+
+impl DeliveryTransitionRaceBackend {
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            state: Mutex::new(DeliveryTransitionRaceState {
+                target_path: None,
+                winner: None,
+                reads: 0,
+                conflicts: 0,
+            }),
+        }
+    }
+
+    async fn arm(&self, delivery_id: OutboundDeliveryId, winner: OutboundDeliveryAttempt) {
+        let mut state = self.state.lock().await;
+        state.target_path = Some(format!(
+            "{TEST_OUTBOUND_ROOT}/deliveries/{delivery_id}.json"
+        ));
+        state.winner = Some(winner);
+        state.reads = 0;
+        state.conflicts = 0;
+    }
+
+    async fn assert_resolved_in_retry_read(&self) {
+        let state = self.state.lock().await;
+        assert_eq!(state.reads, 2, "initial read plus one CAS retry read");
+        assert_eq!(state.conflicts, 1, "one deterministic racing winner");
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for DeliveryTransitionRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let injected_winner = {
+            let mut state = self.state.lock().await;
+            if state.target_path.as_deref() != Some(path.as_str()) {
+                None
+            } else if state.conflicts == 0 {
+                state.conflicts = 1;
+                state.winner.clone()
+            } else {
+                return Err(FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::WriteFile,
+                    reason: "unexpected delivery reclaim after CAS loss".to_string(),
+                });
+            }
+        };
+
+        if let Some(winner) = injected_winner {
+            let winner_entry = Entry {
+                body: serde_json::to_vec(&winner).expect("serialize deterministic race winner"),
+                ..entry
+            };
+            let found = self.inner.put(path, winner_entry, cas).await?;
+            let expected = match cas {
+                CasExpectation::Version(version) => Some(version),
+                CasExpectation::Absent | CasExpectation::Any => None,
+            };
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected,
+                found: Some(found),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        {
+            let mut state = self.state.lock().await;
+            if state.target_path.as_deref() == Some(path.as_str()) {
+                state.reads += 1;
+                if state.reads > 2 {
+                    return Err(FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::ReadFile,
+                        reason: "unexpected post-resolution delivery read".to_string(),
+                    });
+                }
+            }
+        }
         self.inner.get(path).await
     }
 
@@ -2716,6 +3397,7 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
                 status: OutboundDeliveryStatus::Pending,
                 attempted_at: now(),
                 failure_kind: None,
+                vendor_egress: Some(VendorEgressProvenance::NotAttempted),
             })
             .await
             .unwrap();
@@ -2834,6 +3516,7 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();
@@ -2892,6 +3575,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
             status: OutboundDeliveryStatus::Pending,
             attempted_at: now(),
             failure_kind: None,
+            vendor_egress: Some(VendorEgressProvenance::NotAttempted),
         })
         .await
         .unwrap();

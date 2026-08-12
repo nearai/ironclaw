@@ -74,15 +74,16 @@ use crate::validation::{
     validate_subscription_identity, validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
-    DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
-    MAX_RUN_DELIVERY_CLEANUP_RECORDS, OutboundDeliveryAttempt, OutboundDeliveryId,
-    OutboundDeliveryStatus, OutboundError, OutboundStateStorePort, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
-    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, ThreadNotificationPolicy,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
-    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    CommunicationPreferenceVersion, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    DeliveryDefaultScope, LoadSubscriptionCursorRequest, MAX_RUN_DELIVERY_CLEANUP_RECORDS,
+    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus, OutboundError,
+    OutboundStateStorePort, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
+    ReplyAttachmentIntent, ReplyAttachmentIntentPort, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -931,12 +932,40 @@ where
             .await?;
         let path = delivery_path(&attempt.delivery_id)?;
         for _ in 0..MAX_CAS_RETRIES {
-            if let Some(existing) = self
-                .get_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+            if let Some((existing, versioned)) = self
+                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
                 .await?
             {
                 validate_delivery_identity(&existing, &attempt)?;
-                return Ok(());
+                if !attempt_reopens_stale_failure(&existing, &attempt) {
+                    return Ok(());
+                }
+                // The stable delivery id already settled `Failed` with a
+                // kind whose `permits_reopen()` is true — no part of this
+                // delivery reached the vendor. Reopen it to the incoming
+                // fresh `Prepared` reservation so a caller replaying the
+                // same logical delivery can claim a new send attempt
+                // instead of being stuck behind `ExistingDeliveryUnconfirmed`
+                // forever. This must use versioned CAS, not the byte-only
+                // fallback: a concurrent reopen racing a send claim must
+                // never clobber a `Sending`/terminal row a different worker
+                // already advanced past `Failed`.
+                let entry = delivery_attempt_entry(&attempt)?;
+                match self
+                    .filesystem
+                    .put(
+                        &resource_scope,
+                        &path,
+                        entry,
+                        CasExpectation::Version(versioned.version),
+                    )
+                    .await
+                    .map_err(map_fs_error)
+                {
+                    Ok(_) => return Ok(()),
+                    Err(OutboundError::CasConflict) => continue,
+                    Err(error) => return Err(error),
+                }
             }
             match self
                 .put_delivery_attempt_indexed(
@@ -958,7 +987,7 @@ where
     async fn claim_delivery_attempt_for_send(
         &self,
         request: crate::ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         let path = delivery_path(&request.delivery_id)?;
         let resource_scope = request.scope.to_resource_scope();
         for _ in 0..MAX_CAS_RETRIES {
@@ -972,7 +1001,15 @@ where
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
             if attempt.status != OutboundDeliveryStatus::Prepared {
-                return Ok(false);
+                // This read — including any retry read after a lost CAS
+                // below — is the sole source of the returned row. There is
+                // no separate subsequent read: that is what closes the
+                // TOCTOU window between a failed CAS and a caller
+                // re-reading (during which a concurrent reopen could have
+                // moved the row back to `Prepared`).
+                return Ok(ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(
+                    attempt,
+                )));
             }
             attempt.status = OutboundDeliveryStatus::Sending;
             attempt.failure_kind = None;
@@ -992,7 +1029,7 @@ where
                 .await
                 .map_err(map_fs_error)
             {
-                Ok(_) => return Ok(true),
+                Ok(_) => return Ok(ClaimDeliveryAttemptForSendOutcome::Claimed),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
             }
@@ -1026,6 +1063,11 @@ where
             }
             attempt.status = OutboundDeliveryStatus::Unknown;
             attempt.failure_kind = None;
+            // A `Sending` row means a claim was taken and the process could
+            // have called the adapter before crashing — provenance can't
+            // prove otherwise, so this settles `Attempted`, not a reused
+            // pre-claim value.
+            attempt.vendor_egress = Some(crate::VendorEgressProvenance::Attempted);
             let entry = delivery_attempt_entry(&attempt)?;
             match self
                 .filesystem
@@ -1065,6 +1107,7 @@ where
             }
             attempt.status = request.status;
             attempt.failure_kind = request.failure_kind;
+            attempt.vendor_egress = request.vendor_egress;
             match self
                 .put_delivery_attempt_indexed(
                     &resource_scope,
@@ -1310,6 +1353,38 @@ fn subscription_path(
 fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(format!("/outbound/deliveries/{delivery_id}.json"))
         .map_err(|_| OutboundError::Backend)
+}
+
+/// Returns whether `record_delivery_attempt` may replace `existing` (already
+/// durable under the incoming attempt's deterministic delivery id) with
+/// `incoming` instead of treating the call as an idempotent no-op.
+///
+/// Reopening is limited to genuine retries: `incoming` must be a fresh
+/// `Prepared` reservation (every current caller constructs one this way),
+/// `existing` must be `Failed`, its recorded [`crate::VendorEgressProvenance`]
+/// must prove no `adapter.deliver` call was ever made for this row, and its
+/// failure kind must independently permit reopen (see
+/// [`crate::DeliveryFailureKind::permits_reopen`]). Both gates are required:
+/// `vendor_egress` distinguishes a row written by this codebase's current,
+/// provably-safe pre-claim writers from a byte-identical row an older binary
+/// wrote for a since-reclassified, ambiguous case (pre-this-PR binaries wrote
+/// `TransportUnavailable` for post-`adapter.deliver` retry exhaustion too) —
+/// `None` (a row from a binary predating this field) fails closed. Any other
+/// existing status — including a `Failed` row with a kind that does not
+/// permit reopen, or one whose provenance cannot prove no egress occurred —
+/// keeps the existing no-op behavior, so this never reopens a row another
+/// worker already advanced to `Sending`, `Delivered`, or a permanently
+/// terminal state, and never reopens a row this binary cannot prove is safe.
+fn attempt_reopens_stale_failure(
+    existing: &OutboundDeliveryAttempt,
+    incoming: &OutboundDeliveryAttempt,
+) -> bool {
+    incoming.status == OutboundDeliveryStatus::Prepared
+        && existing.status == OutboundDeliveryStatus::Failed
+        && existing.vendor_egress == Some(crate::VendorEgressProvenance::NotAttempted)
+        && existing
+            .failure_kind
+            .is_some_and(crate::DeliveryFailureKind::permits_reopen)
 }
 
 fn delivery_attempt_entry(attempt: &OutboundDeliveryAttempt) -> Result<Entry, OutboundError> {

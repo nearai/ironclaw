@@ -137,7 +137,18 @@ pub(crate) fn validate_delivery_scope_candidate(
 pub(crate) fn validate_delivery_status_request(
     request: &UpdateDeliveryStatusRequest,
 ) -> Result<(), OutboundError> {
-    validate_delivery_status(request.status, request.failure_kind)
+    validate_delivery_status(request.status, request.failure_kind)?;
+    // `vendor_egress` is `Option` with `#[serde(default)]` so a caller can
+    // omit it; without this gate that silently strips provenance from the
+    // durable row and `attempt_reopens_stale_failure` then treats the row as
+    // legacy, permanently refusing to reopen it. Make provenance a write-time
+    // invariant for `Failed` rather than a caller convention.
+    if request.status == OutboundDeliveryStatus::Failed && request.vendor_egress.is_none() {
+        return Err(OutboundError::InvalidRequest {
+            reason: "failed delivery status must record vendor egress provenance",
+        });
+    }
+    Ok(())
 }
 
 fn validate_delivery_status(
