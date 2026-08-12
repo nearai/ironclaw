@@ -91,6 +91,22 @@ registerPack("ja", {
   "chat.suggestion2Desc": "正確性のリスク、ブロックされた承認、フォローアップを探します。",
   "chat.suggestion3": "拡張の準備状況チェックを下書きする",
   "chat.suggestion3Desc": "セットアップ、認証、ペアリング、利用可能な機能を確認します。",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.app.gmail": "Gmail",
+  "chat.oobe.app.calendar": "Google Calendar",
+  "chat.oobe.app.docs": "Google Docs",
+  "chat.oobe.app.slack": "Slack",
+  "chat.oobe.app.notion": "Notion",
+  "chat.oobe.app.unknown": "App",
+  "chat.oobe.action.connect": "Connect {tool}",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.automation": "Automation",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.running": "Working — activity in the thread",
+  "chat.oobe.status.completed": "Completed",
+  "chat.oobe.status.failed": "Couldn't complete",
 
   // Chat — input
   "chat.placeholder": "IronClaw にメッセージ…",

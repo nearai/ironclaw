@@ -26,6 +26,7 @@ function renderEmptyState(props = {}) {
   const components = {
     Icon() {},
     ChatInput() {},
+    SuggestedTaskSurface() {},
   };
   const context = {
     ...components,
@@ -59,4 +60,15 @@ test("EmptyState forwards a non-empty commands list to its composer so the menu 
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.deepEqual(props.commands, commands);
+});
+
+test("EmptyState mounts the OOBE suggestion surface so the flag-gated cards render above the composer", () => {
+  const { tree, components } = renderEmptyState();
+
+  // The surface owns its own feature-flag gate (renders null when off), so the
+  // landing is unchanged for real users; EmptyState's only job is to mount it.
+  assert.ok(
+    findComponent(tree, components.SuggestedTaskSurface),
+    "the suggestion surface must be mounted in the landing view",
+  );
 });

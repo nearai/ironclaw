@@ -1,6 +1,7 @@
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
+import { SuggestedTaskSurface } from "./suggested-task-surface";
 
 export function EmptyState({
   onSuggestion,
@@ -51,6 +52,8 @@ export function EmptyState({
           {t("chat.heroDesc")}
         </p>
       </div>
+
+      <SuggestedTaskSurface />
 
       <div className="mt-9 w-full max-w-5xl">
         <ChatInput

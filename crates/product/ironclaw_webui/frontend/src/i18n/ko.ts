@@ -91,6 +91,22 @@ registerPack("ko", {
   "chat.suggestion2Desc": "정확성 위험, 막힌 승인, 후속 조치를 확인합니다.",
   "chat.suggestion3": "확장 준비 상태 점검 초안 작성",
   "chat.suggestion3Desc": "설정, 인증, 페어링, 사용 가능한 기능을 확인합니다.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.app.gmail": "Gmail",
+  "chat.oobe.app.calendar": "Google Calendar",
+  "chat.oobe.app.docs": "Google Docs",
+  "chat.oobe.app.slack": "Slack",
+  "chat.oobe.app.notion": "Notion",
+  "chat.oobe.app.unknown": "App",
+  "chat.oobe.action.connect": "Connect {tool}",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.automation": "Automation",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.running": "Working — activity in the thread",
+  "chat.oobe.status.completed": "Completed",
+  "chat.oobe.status.failed": "Couldn't complete",
 
   // Chat — input
   "chat.placeholder": "IronClaw에 메시지 보내기...",

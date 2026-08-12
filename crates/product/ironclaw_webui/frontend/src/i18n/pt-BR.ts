@@ -91,6 +91,22 @@ registerPack("pt-BR", {
   "chat.suggestion2Desc": "Procurar riscos de correcao, aprovacoes bloqueadas e acompanhamentos.",
   "chat.suggestion3": "Rascunhar uma checagem de prontidão de extensões",
   "chat.suggestion3Desc": "Verificar configuracao, autenticacao, pareamento e capacidades disponiveis.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.app.gmail": "Gmail",
+  "chat.oobe.app.calendar": "Google Calendar",
+  "chat.oobe.app.docs": "Google Docs",
+  "chat.oobe.app.slack": "Slack",
+  "chat.oobe.app.notion": "Notion",
+  "chat.oobe.app.unknown": "App",
+  "chat.oobe.action.connect": "Connect {tool}",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.automation": "Automation",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.running": "Working — activity in the thread",
+  "chat.oobe.status.completed": "Completed",
+  "chat.oobe.status.failed": "Couldn't complete",
 
   // Chat — input
   "chat.placeholder": "Mensagem para o IronClaw...",

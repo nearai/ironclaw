@@ -91,6 +91,22 @@ registerPack("hi", {
   "chat.suggestion2Desc": "सहीपन के जोखिम, रुकी हुई स्वीकृतियां और फॉलो-अप देखें.",
   "chat.suggestion3": "एक्सटेंशन readiness check ड्राफ्ट करें",
   "chat.suggestion3Desc": "सेटअप, ऑथ, पेयरिंग और उपलब्ध क्षमताओं की पुष्टि करें.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.app.gmail": "Gmail",
+  "chat.oobe.app.calendar": "Google Calendar",
+  "chat.oobe.app.docs": "Google Docs",
+  "chat.oobe.app.slack": "Slack",
+  "chat.oobe.app.notion": "Notion",
+  "chat.oobe.app.unknown": "App",
+  "chat.oobe.action.connect": "Connect {tool}",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.automation": "Automation",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.running": "Working — activity in the thread",
+  "chat.oobe.status.completed": "Completed",
+  "chat.oobe.status.failed": "Couldn't complete",
 
   // Chat — input
   "chat.placeholder": "IronClaw को संदेश...",
