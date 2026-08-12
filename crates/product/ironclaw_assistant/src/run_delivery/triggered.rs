@@ -131,14 +131,26 @@ struct TriggeredNotification {
     /// DM; `audience` pre-filters, and this keeps the send-time resolver check
     /// as defense in depth against a stale snapshot.
     require_direct_message_target: bool,
-    /// Distinguishes durable delivery identities within one
-    /// `(run_id, event_kind)` — the pair the projection ref (and so the
-    /// delivery id) is derived from. Two notices that collapse to one id
-    /// have the second answered `AlreadyDelivered` and silently never sent,
-    /// so: gate prompts carry their GATE REF here (a run that parks on
-    /// several gates announces each one — the observer lane keys the same
-    /// way), `RunBlocked` stand-ins compose a fixed label with the gate ref,
-    /// and the terminal failure notice keeps its fixed label.
+    /// Distinguishes notices that share an [`RunNotificationEventKind`].
+    ///
+    /// The delivery id is derived from the projection ref, which is derived
+    /// from `(run_id, event_kind)` — and one run can legitimately produce
+    /// SEVERAL `RunBlocked` notices (a re-auth stand-in, an unserviceable-auth
+    /// cancellation, a run-failure notice). Without this discriminator they
+    /// collide on one durable identity, so the second is answered
+    /// `AlreadyDelivered` and silently never sent while still being recorded
+    /// as delivered. `None` keeps the historical id shape for kinds that occur
+    /// at most once per run. A run that parks on a SECOND gate of the same
+    /// kind (a re-auth stand-in following an earlier one, say) needs its own
+    /// discriminator too, so the `RunBlocked` stand-ins compose their fixed
+    /// label with the gate ref rather than using the label alone.
+    ///
+    /// `ApprovalNeeded` and `AuthRequired` additionally require this to carry
+    /// the notice's canonical gate ref: [`prompts::run_notification_projection_id`]
+    /// fails closed rather than silently falling back to the legacy identity
+    /// for those two kinds. Owned rather than `&'static str` so it can carry
+    /// either a fixed vocabulary word, a fixed label composed with a runtime
+    /// gate ref, or a bare runtime gate ref.
     notice_discriminator: Option<String>,
 }
 
@@ -1104,7 +1116,11 @@ async fn notification_plan_for_state(
                                 intent: DeliveryIntent::BackgroundRunNotice,
                                 // Per-gate, like its AuthRequired sibling: a
                                 // second auth gate's redacted notice must not
-                                // dedupe against the first gate's.
+                                // dedupe against the first gate's. The
+                                // `RunBlocked` bare-label discriminator is
+                                // bounded/hashed if this ever overflows the
+                                // projection ref's length cap (see
+                                // `prompts::bounded_discriminator`).
                                 notice_discriminator: Some(format!("reauth:{}", gate_ref.as_str())),
                                 text: format!(
                                     "{}{}",
@@ -1138,6 +1154,9 @@ async fn notification_plan_for_state(
                         notifications: vec![TriggeredNotification {
                             event_kind: RunNotificationEventKind::RunBlocked,
                             intent: DeliveryIntent::BackgroundRunNotice,
+                            // Per-gate, for the same reason as the reauth
+                            // stand-in above: a second unserviceable auth
+                            // gate must not dedupe against the first's.
                             notice_discriminator: Some(format!(
                                 "auth-unavailable:{}",
                                 gate_ref.as_str()
@@ -1359,7 +1378,10 @@ async fn deliver_notification_to_target(
         context.run_id,
         notification.event_kind,
         notification.notice_discriminator.as_deref(),
-    );
+    )
+    .map_err(|reason| {
+        TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
+    })?;
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;

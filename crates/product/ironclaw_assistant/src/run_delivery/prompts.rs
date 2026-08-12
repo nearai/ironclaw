@@ -9,6 +9,7 @@ use ironclaw_extension_contracts::auth_prompt::{AuthPromptChallengeKind, AuthPro
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
 use ironclaw_outbound::RunNotificationEventKind;
 use ironclaw_product_contracts::outbound::{ApprovalPromptContextView, GatePromptView};
+use sha2::{Digest, Sha256};
 
 use crate::is_approval_gate_ref;
 
@@ -95,18 +96,53 @@ pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending
 /// lookup fails.
 pub(crate) const BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
-/// Stable per-(run, kind) projection id for run-notification deliveries.
+const RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN: &str =
+    "ironclaw_product:run_notification_gate_projection:v1";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RunNotificationProjectionIdError {
+    #[error("gate notification requires a canonical gate ref")]
+    MissingGateRef,
+    #[error("gate notification has an invalid gate ref: {reason}")]
+    InvalidGateRef { reason: String },
+}
+
+/// Stable projection id for run-notification deliveries.
 ///
-/// `discriminator` separates notices that share an event kind within one run.
-/// The delivery id hashes this ref, so two notices that collapse to the same
-/// string share a durable delivery identity: the second is reported
-/// `AlreadyDelivered` and never actually sent. `None` preserves the historical
-/// id shape for kinds that can only occur once per run.
+/// `discriminator` separates notices that share an event kind within one run
+/// -- e.g. the several `RunBlocked` notices one run can legitimately produce
+/// (a re-auth stand-in, an unserviceable-auth cancellation, a run failure).
+/// For those kinds it is embedded into the id verbatim when short, or folded
+/// into a stable content hash via [`bounded_discriminator`] when it would
+/// overflow `ProjectionUpdateRef`'s length cap; `None` preserves the
+/// historical id shape for kinds that occur at most once per run.
+///
+/// `ApprovalNeeded` and `AuthRequired` additionally require `discriminator`
+/// to be the canonical gate ref and bind it through a domain-separated,
+/// length-framed digest, so distinct same-kind gates cannot suppress one
+/// another without persisting the gate ref itself.
+///
+/// Rollout caveat: this id is a durable delivery-dedup key (the outbound
+/// store's `OutboundDeliveryId` is derived from it, precisely so a replay
+/// after a process restart lands on the same durable attempt). Introducing
+/// the gate-ref-bound digest changed the id shape for `ApprovalNeeded` and
+/// `AuthRequired` from the historical `run-notification:{suffix}:{run_id}`
+/// (undiscriminated). A run that is already `BlockedApproval`/`BlockedAuth`
+/// -- with its one gate prompt already durably `Delivered` under the OLD id
+/// -- at the moment this change deploys will, if its delivery loop is
+/// re-entered before the gate resolves (process restart, redeploy), compute
+/// the NEW id, find no durable row there, and send one extra copy of the
+/// same still-outstanding prompt. This is a one-time, self-healing artifact
+/// of the deploy boundary, not a recurring bug: gate resolution is
+/// preconditioned on run state (`ResumeTurnPrecondition::Blocked*Gate`), so
+/// replying to either copy resolves the gate and the second becomes stale.
+/// No compatibility shim is provided for the legacy id shape; this is an
+/// accepted, bounded cost of the migration.
 pub(crate) fn run_notification_projection_id(
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
     discriminator: Option<&str>,
-) -> String {
+) -> Result<String, RunNotificationProjectionIdError> {
     let suffix = match event_kind {
         RunNotificationEventKind::FinalReplyReady => "final",
         RunNotificationEventKind::ProgressUpdate => "progress",
@@ -116,13 +152,53 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
         RunNotificationEventKind::ModelDelivery => "model-delivery",
     };
-    match discriminator {
-        Some(discriminator) => {
-            let discriminator = bounded_discriminator(discriminator);
-            format!("run-notification:{suffix}:{discriminator}:{run_id}")
-        }
-        None => format!("run-notification:{suffix}:{run_id}"),
+
+    if !matches!(
+        event_kind,
+        RunNotificationEventKind::ApprovalNeeded | RunNotificationEventKind::AuthRequired
+    ) {
+        return Ok(match discriminator {
+            Some(discriminator) => {
+                let discriminator = bounded_discriminator(discriminator);
+                format!("run-notification:{suffix}:{discriminator}:{run_id}")
+            }
+            None => format!("run-notification:{suffix}:{run_id}"),
+        });
     }
+
+    let gate_ref = discriminator.ok_or(RunNotificationProjectionIdError::MissingGateRef)?;
+    let gate_ref = TurnGateRef::new(gate_ref.to_string())
+        .map_err(|reason| RunNotificationProjectionIdError::InvalidGateRef { reason })?;
+    let mut digest_input = Vec::with_capacity(
+        RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN.len() + suffix.len() + gate_ref.as_str().len() + 24,
+    );
+    push_length_framed_part(
+        &mut digest_input,
+        RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN.as_bytes(),
+    );
+    push_length_framed_part(&mut digest_input, suffix.as_bytes());
+    push_length_framed_part(&mut digest_input, gate_ref.as_str().as_bytes());
+    let digest = Sha256::digest(digest_input);
+
+    Ok(format!(
+        "run-notification:{suffix}:{run_id}:{}",
+        lower_hex(&digest)
+    ))
+}
+
+fn push_length_framed_part(output: &mut Vec<u8>, part: &[u8]) {
+    output.extend_from_slice(&(part.len() as u64).to_be_bytes());
+    output.extend_from_slice(part);
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[(byte >> 4) as usize]));
+        output.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    output
 }
 
 /// Longest discriminator embedded verbatim in a projection id. The composed
@@ -363,6 +439,7 @@ mod tests {
                     RunNotificationEventKind::RunBlocked,
                     Some(discriminator),
                 )
+                .expect("a RunBlocked discriminator is not a gate identity")
             })
             .collect();
 
@@ -378,76 +455,6 @@ mod tests {
                 "{id} must stay run-scoped"
             );
         }
-    }
-
-    /// Kinds that occur at most once per run keep the historical id shape, so
-    /// this change does not re-identify existing deliveries.
-    #[test]
-    fn undiscriminated_projection_ids_keep_their_historical_shape() {
-        let run_id = TurnRunId::new();
-        assert_eq!(
-            run_notification_projection_id(run_id, RunNotificationEventKind::ApprovalNeeded, None),
-            format!("run-notification:approval:{run_id}")
-        );
-        assert_eq!(
-            run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
-            format!("run-notification:auth:{run_id}")
-        );
-        // FinalReplyReady is the kind production always sends refless: its
-        // suffix keys the in-flight final-reply delivery identities, so a
-        // rename would double-post final replies across a deploy.
-        assert_eq!(
-            run_notification_projection_id(run_id, RunNotificationEventKind::FinalReplyReady, None),
-            format!("run-notification:final:{run_id}")
-        );
-    }
-
-    #[test]
-    fn discriminated_projection_ids_embed_short_gate_refs_verbatim() {
-        let run_id = TurnRunId::new();
-        assert_eq!(
-            run_notification_projection_id(
-                run_id,
-                RunNotificationEventKind::ApprovalNeeded,
-                Some("gate:approval-1234"),
-            ),
-            format!("run-notification:approval:gate:approval-1234:{run_id}")
-        );
-    }
-
-    /// A legal `TurnGateRef` can be up to 256 bytes while `ProjectionUpdateRef`
-    /// caps at 256: over-long discriminators must compress rather than make
-    /// the gate notice undeliverable, without colliding distinct gates.
-    #[test]
-    fn over_long_discriminators_stay_deliverable_and_distinct() {
-        let run_id = TurnRunId::new();
-        let shared_prefix = "g".repeat(240);
-        let ref_a = format!("{shared_prefix}-a");
-        let ref_b = format!("{shared_prefix}-b");
-        let id_a = run_notification_projection_id(
-            run_id,
-            RunNotificationEventKind::ApprovalNeeded,
-            Some(&ref_a),
-        );
-        let id_b = run_notification_projection_id(
-            run_id,
-            RunNotificationEventKind::ApprovalNeeded,
-            Some(&ref_b),
-        );
-        assert!(
-            id_a.len() <= 256,
-            "composed id must fit the ref cap: {id_a}"
-        );
-        assert_ne!(id_a, id_b, "prefix-sharing gates must not collide");
-        // Deterministic: the same gate re-announced computes the same id.
-        assert_eq!(
-            id_a,
-            run_notification_projection_id(
-                run_id,
-                RunNotificationEventKind::ApprovalNeeded,
-                Some(&ref_a),
-            )
-        );
     }
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
@@ -475,6 +482,122 @@ mod tests {
             code: code.to_string(),
             deep_link: None,
             expires_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn non_gate_run_notification_projection_ids_remain_byte_for_byte_stable() {
+        let run_id = TurnRunId::new();
+
+        for (kind, suffix) in [
+            (RunNotificationEventKind::FinalReplyReady, "final"),
+            (RunNotificationEventKind::ProgressUpdate, "progress"),
+            (RunNotificationEventKind::RunBlocked, "blocked"),
+            (RunNotificationEventKind::DeliveryStatus, "delivery-status"),
+            (RunNotificationEventKind::ModelDelivery, "model-delivery"),
+        ] {
+            assert_eq!(
+                run_notification_projection_id(run_id, kind, None)
+                    .expect("non-gate notification identity remains infallible"),
+                format!("run-notification:{suffix}:{run_id}"),
+                "gate identity hardening must not rewrite legacy non-gate delivery identities"
+            );
+        }
+    }
+
+    #[test]
+    fn non_gate_discriminated_projection_ids_embed_short_discriminators_verbatim() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::RunBlocked,
+                Some("reauth:gate:approval-1234"),
+            )
+            .expect("a RunBlocked discriminator is not a gate identity"),
+            format!("run-notification:blocked:reauth:gate:approval-1234:{run_id}")
+        );
+    }
+
+    /// A `RunBlocked` discriminator can embed a full gate ref (the
+    /// `reauth:`/`auth-unavailable:` stand-ins do exactly this, so a run
+    /// parked on a SECOND auth gate announces distinctly), and a legal
+    /// `TurnGateRef` can itself be up to 256 bytes -- so the composed
+    /// discriminator must compress rather than make the notice undeliverable
+    /// at `ProjectionUpdateRef`'s length cap, without colliding distinct
+    /// discriminators.
+    #[test]
+    fn over_long_non_gate_discriminators_stay_deliverable_and_distinct() {
+        let run_id = TurnRunId::new();
+        let shared_prefix = "g".repeat(240);
+        let discriminator_a = format!("{shared_prefix}-a");
+        let discriminator_b = format!("{shared_prefix}-b");
+        let id_a = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::RunBlocked,
+            Some(&discriminator_a),
+        )
+        .expect("a RunBlocked discriminator is not a gate identity");
+        let id_b = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::RunBlocked,
+            Some(&discriminator_b),
+        )
+        .expect("a RunBlocked discriminator is not a gate identity");
+        assert!(
+            id_a.len() <= 256,
+            "composed id must fit the ref cap: {id_a}"
+        );
+        assert_ne!(id_a, id_b, "prefix-sharing discriminators must not collide");
+        // Deterministic: the same discriminator recomputes the same id.
+        assert_eq!(
+            id_a,
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::RunBlocked,
+                Some(&discriminator_a),
+            )
+            .expect("a RunBlocked discriminator is not a gate identity")
+        );
+    }
+
+    #[test]
+    fn approval_projection_preserves_the_safe_canonical_invalid_gate_reason() {
+        let error = run_notification_projection_id(
+            TurnRunId::new(),
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(""),
+        )
+        .expect_err("an empty approval gate ref must be rejected");
+
+        let RunNotificationProjectionIdError::InvalidGateRef { reason } = &error else {
+            panic!("expected the invalid-gate-ref error, got {error:?}");
+        };
+        assert_eq!(reason, "turn_gate_ref must not be empty");
+        assert_eq!(
+            error.to_string(),
+            "gate notification has an invalid gate ref: turn_gate_ref must not be empty"
+        );
+    }
+
+    /// `notification_for_actionable_state` in `observer.rs`/`triggered.rs`
+    /// never calls this function with `gate_ref: None` for a gate kind — it
+    /// short-circuits to `Ok(None)` first when `state.gate_ref` is absent.
+    /// This function must still fail closed on its own if a future caller
+    /// reaches it without a gate ref, so the branch is pinned directly here
+    /// rather than through that upstream guard.
+    #[test]
+    fn gate_kinds_reject_an_absent_gate_ref() {
+        for kind in [
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationEventKind::AuthRequired,
+        ] {
+            let error = run_notification_projection_id(TurnRunId::new(), kind, None)
+                .expect_err("a gate notification without a gate ref must fail closed");
+            assert!(
+                matches!(error, RunNotificationProjectionIdError::MissingGateRef),
+                "{kind:?} must not fall back to the collision-prone legacy identity, got {error:?}"
+            );
         }
     }
 

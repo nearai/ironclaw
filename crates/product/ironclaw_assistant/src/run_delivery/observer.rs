@@ -1014,12 +1014,16 @@ impl RunDeliveryObserver {
         // gates in sequence, and each is its own durable delivery fact (a
         // repeat announcement of the SAME gate still dedupes to
         // `AlreadyDelivered`). Kinds that carry no gate ref keep the
-        // historical undiscriminated id shape.
+        // historical undiscriminated id shape; `ApprovalNeeded`/`AuthRequired`
+        // fail closed instead if no gate ref reaches this call.
         let projection_id = prompts::run_notification_projection_id(
             run_id,
             notification.event_kind,
             notification.gate_ref_for_routing.as_deref(),
-        );
+        )
+        .map_err(|reason| RunDeliveryError::InvalidProjectionRef {
+            reason: reason.to_string(),
+        })?;
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {
