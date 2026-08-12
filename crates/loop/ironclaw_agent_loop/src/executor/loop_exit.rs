@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use ironclaw_host_api::turn::{ModelInvalidOutputDetailReason, SanitizedFailure, TurnOriginKind};
 use ironclaw_loop_contracts::{
-    LoopExit, LoopFailureKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
+    AgentLoopDriverHost, LoopExit, LoopFailureKind, LoopInlineMessage, LoopInlineMessageBody,
+    LoopInlineMessageRole,
 };
 
 use crate::{
@@ -30,10 +32,20 @@ pub(super) const COMPLETION_NUDGE_LIMIT: u32 = 2;
 /// step — "Let me write the file:" — but emitted no tool call, so the turn ended
 /// mid-intent). Mirrors nearai-bench's `trailed_off_without_answer` so the
 /// in-loop nudge fires on the same signal the out-of-loop bench nudge used.
-pub(super) fn reply_trailed_off(content: &str) -> bool {
+pub(super) struct ReplyCompletionSignals {
+    pub(super) trailed_off: bool,
+    pub(super) empty: bool,
+    pub(super) ended_with_question: bool,
+}
+
+pub(super) fn reply_completion_signals(content: &str) -> ReplyCompletionSignals {
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return true;
+        return ReplyCompletionSignals {
+            trailed_off: true,
+            empty: true,
+            ended_with_question: false,
+        };
     }
     let last_line = trimmed.lines().next_back().unwrap_or(trimmed).trim_start();
     // A block quote at the end is displayed content, not narration of a next
@@ -41,7 +53,38 @@ pub(super) fn reply_trailed_off(content: &str) -> bool {
     // prefix and then quote it (for example `> Daily summary:`); treating that
     // literal colon as a trail-off caused two completion nudges and three
     // user-visible confirmations from one run.
-    !last_line.starts_with('>') && trimmed.ends_with(':')
+    ReplyCompletionSignals {
+        trailed_off: !last_line.starts_with('>') && trimmed.ends_with(':'),
+        empty: false,
+        ended_with_question: last_line.ends_with('?'),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reply_trailed_off(content: &str) -> bool {
+    reply_completion_signals(content).trailed_off
+}
+
+pub(super) fn scheduled_trigger_run(host: &(dyn AgentLoopDriverHost + Send + Sync)) -> bool {
+    host.run_context()
+        .product_context
+        .as_ref()
+        .is_some_and(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+}
+
+fn invalid_scheduled_final_output(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &LoopExecutionState,
+) -> Option<ModelInvalidOutputDetailReason> {
+    if !scheduled_trigger_run(host) {
+        return None;
+    }
+    if state.last_reply_empty {
+        return Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse);
+    }
+    state
+        .last_reply_ended_with_question
+        .then_some(ModelInvalidOutputDetailReason::UnattendedQuestionEndingResponse)
 }
 
 /// Inline control message carrying the completion-nudge instruction. Delivered
@@ -89,6 +132,33 @@ impl ExitStage {
         state: LoopExecutionState,
         kind: StopKind,
     ) -> Result<LoopExit, AgentLoopExecutorError> {
+        if matches!(kind, StopKind::GracefulStop)
+            && let Some(detail_reason) = invalid_scheduled_final_output(ctx.host, &state)
+        {
+            let mut state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
+            let failure_kind = LoopFailureKind::InvalidModelOutput;
+            let explanation_message_ref =
+                attach_failure_explanation(ctx, &mut state, failure_kind).await?;
+            let checked = CheckpointStage
+                .write(ctx, state, CheckpointKind::Final)
+                .await?;
+            return failed_exit(
+                ctx.host,
+                checked.state,
+                failure_kind,
+                Some(checked.checkpoint_id),
+                FailedExitDetails {
+                    safe_summary: Some(
+                        SanitizedFailure::from_trusted_static(failure_kind.as_str())
+                            .with_detail(detail_reason.safe_summary()),
+                    ),
+                    explanation_message_ref,
+                },
+            );
+        }
         match kind {
             StopKind::GracefulStop => {
                 let checked = CheckpointStage

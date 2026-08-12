@@ -34,7 +34,10 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
         // Record whether this reply trailed off without a real closing answer so
         // the stop handling can decide a graceful stop warrants a tools-capable
         // completion nudge. Captured before `reply` is moved into the transcript.
-        state.last_reply_trailed_off = super::reply_trailed_off(&input.reply.content);
+        let completion_signals = super::reply_completion_signals(&input.reply.content);
+        state.last_reply_trailed_off = completion_signals.trailed_off;
+        state.last_reply_empty = completion_signals.empty;
+        state.last_reply_ended_with_question = completion_signals.ended_with_question;
         let reply_ref = ctx
             .host
             .finalize_assistant_message(FinalizeAssistantMessage { reply: input.reply })
