@@ -27,7 +27,7 @@ mod tests;
 
 pub use install_bundle::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
-    SkillInstallFile,
+    SkillInstallFile, normalize_install_bundle_relative_path,
 };
 pub(crate) use install_bundle::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle};
 
@@ -38,7 +38,8 @@ use install_bundle::{
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
-pub(super) const SKILL_FILE_NAME: &str = "SKILL.md";
+/// Canonical primary filename generated for every installed skill.
+pub const SKILL_FILE_NAME: &str = "SKILL.md";
 const SKILL_SEARCH_ENTRY_SCAN_LIMIT: usize = 250;
 type SkillMutationLock = Arc<tokio::sync::Mutex<()>>;
 

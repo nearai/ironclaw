@@ -52,6 +52,9 @@ dumping ground.
 - Message identity and per-thread sequence survive redaction/deletion;
   model-visible reads go through policy-filtered APIs — pinned by the contract
   suites below (see `AGENTS.md` for the full working rules).
+- Context-window limits count the effective model-visible transcript, not
+  hidden durable rows. Truncated windows report the exact last omitted
+  sequence and kind so loop policy can react without guessing.
 - Backend-neutral by construction: persistence is `ScopedFilesystem` only;
   backend choice happens in composition (`.claude/rules/database.md`).
 

@@ -13,6 +13,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_triggers::{
     TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFireSettlementObserver,
+    TriggerRunFailureSettlement,
 };
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -236,6 +237,21 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         };
         spawn_post_submit_delivery(hook, TriggerFireSettlement::Failed(event));
     }
+
+    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
+        // The accepted fire's run reached a terminal failure state. The
+        // canonical delivery watcher owns the creator-facing notice; this
+        // observer only emits structured automation-health telemetry and
+        // must never mint a replacement run or bypass the delivery path.
+        tracing::warn!(
+            target: "ironclaw::reborn::trigger_poller",
+            tenant_id = %event.tenant_id,
+            trigger_id = %event.trigger_id,
+            fire_slot = %event.fire_slot,
+            run_id = %event.run_id,
+            "accepted trigger fire settled with a failed run"
+        );
+    }
 }
 
 async fn run_trigger_poller(
@@ -352,11 +368,12 @@ mod tests {
         use ironclaw_triggers::{
             TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFire,
             TriggerFireIdentity, TriggerFireSettlementObserver, TriggerId,
-            TriggerPollerFailureReason,
+            TriggerPollerFailureReason, TriggerRunFailureSettlement,
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
         use tokio_util::sync::CancellationToken;
+        use tracing_test::traced_test;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
 
@@ -484,6 +501,49 @@ mod tests {
                 fire: accepted.fire,
                 reason: TriggerPollerFailureReason::InvalidMaterialization,
             }
+        }
+
+        fn run_failure_settlement_event(run_id: TurnRunId) -> TriggerRunFailureSettlement {
+            TriggerRunFailureSettlement {
+                tenant_id: observer_tenant(),
+                trigger_id: TriggerId::new(),
+                fire_slot: Utc::now(),
+                run_id,
+            }
+        }
+
+        #[tokio::test]
+        #[traced_test]
+        async fn run_failure_settlement_emits_health_warning_without_delivery() {
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
+            let recording = Arc::new(RecordingHook::default());
+            let observer = PostSubmitHookObserver::new(hook_slot.clone(), CancellationToken::new());
+            hook_slot.set(recording.clone()).ok().expect("hook install");
+
+            observer
+                .on_run_failure_settled(run_failure_settlement_event(TurnRunId::new()))
+                .await;
+
+            assert!(
+                logs_contain("accepted trigger fire settled with a failed run"),
+                "production observer must emit the automation-health signal; buffer: {:?}",
+                String::from_utf8(
+                    tracing_test::internal::global_buf()
+                        .lock()
+                        .expect("buf")
+                        .to_vec()
+                )
+                .expect("utf8")
+            );
+            assert!(
+                recording.calls().is_empty()
+                    && recording
+                        .failed_calls
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_empty(),
+                "run-failure observation must not bypass the canonical delivery watcher"
+            );
         }
 
         #[tokio::test]

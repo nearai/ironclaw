@@ -20,6 +20,7 @@ use reborn_support::scripted_provider::{
     CONTEXT_OVERFLOW_USED_TOKENS, ModelProviderCallProbe, RecoverableModelFailure,
 };
 use serde_json::json;
+use std::num::NonZeroU32;
 
 const UNPERSISTED_ASSISTANT_REPLY: &str =
     "raw assistant transcript that must never be reported as a reply";
@@ -135,6 +136,43 @@ async fn content_filtered_completion_recovers_with_model_visible_observation() {
         .assert_model_message_content_not_contains("model response was blocked by provider policy")
         .await
         .expect("gateway summaries do not enter the recovery prompt");
+}
+
+#[tokio::test]
+async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_limit() {
+    const ORIGINAL_TASK: &str = "retain this exact original task through the long tool run";
+    let mut script = (0..130)
+        .map(|index| {
+            RebornScriptedReply::tool_call(
+                "test_echo",
+                json!({"message": format!("iteration {index}")}),
+            )
+        })
+        .collect::<Vec<_>>();
+    script.push(RebornScriptedReply::text("long tool run complete"));
+    let harness = RebornIntegrationHarness::test_default()
+        .with_iteration_limit_for_test(NonZeroU32::new(140).expect("non-zero test limit"))
+        .script(script)
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn(ORIGINAL_TASK)
+        .await
+        .expect("long tool run completes");
+    harness
+        .assert_conversation_history_message_count_at_least(132)
+        .await
+        .expect("durable tool results exceed the 128-message window");
+    harness
+        .assert_last_model_message_content_contains(ORIGINAL_TASK)
+        .await
+        .expect("the final interactive request still carries the accepted task");
+    harness
+        .assert_reply_contains("long tool run complete")
+        .await
+        .expect("the final reply persists");
 }
 
 #[tokio::test]

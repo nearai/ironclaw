@@ -272,24 +272,37 @@ async fn credential_readiness_for_extension(
     .await
 }
 
-fn extension_info(
-    installed: LifecycleInstalledExtensionSummary,
-    readiness: ExtensionCredentialReadiness,
+/// The caller's channel-connection verdict for one lifecycle summary — shared
+/// by the extensions card (`extension_info`) and the model-facing
+/// communication context so the two can never diverge on what "connected for
+/// this caller" means.
+pub(crate) struct CallerChannelConnection {
+    /// The caller's projected §6.3 vendor account, when the channel binds one.
+    pub(crate) projected_account: Option<(AuthAccountState, Option<AuthAccountLastError>)>,
+    /// A channel surface the calling user has not personally connected — via
+    /// the vendor's OAuth or a pairing/proof-code binding. Always `false` for
+    /// non-channel extensions and channels that need no personal connection.
+    pub(crate) channel_unconnected: bool,
+}
+
+/// Compute [`CallerChannelConnection`] from the caller's per-channel
+/// connection and auth-account maps.
+///
+/// Absence of a connection signal is NOT consent: a pairing/OAuth channel
+/// with no binding row reads as unconnected (`connected != Some(true)`),
+/// because the generic connections map is populated per discovered channel
+/// and a missing entry means "no proof this caller connected", not
+/// "connected".
+pub(crate) fn caller_channel_connection(
+    summary: &LifecycleExtensionSummary,
     connections: &HashMap<ExtensionId, bool>,
     account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
-    activation_errors: &HashMap<ExtensionId, String>,
-) -> RebornExtensionInfo {
-    let phase = installed.phase;
-    let onboarding =
-        extension_onboarding::for_installed_with_credential_status(&installed, readiness);
-    let install_scope = installed.install_scope;
-    let summary = installed.summary;
-    let has_external_channel_surface = has_external_channel_surface(&summary);
-    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
-    // All three per-extension maps are keyed by `ExtensionId`; a package id that
-    // is not valid extension vocabulary cannot be a key in any of them, so it
-    // reports no connection, no account state, and no activation error rather
-    // than being looked up as a string that could never have matched.
+) -> CallerChannelConnection {
+    let has_external_channel_surface = has_external_channel_surface(summary);
+    // Maps are keyed by `ExtensionId`; a package id that is not valid
+    // extension vocabulary cannot be a key, so it reports no connection and no
+    // account state rather than being looked up as a string that could never
+    // have matched.
     let extension_id = ExtensionId::new(summary.package_ref.id.as_str()).ok();
     let connected = if has_external_channel_surface {
         extension_id
@@ -300,21 +313,8 @@ fn extension_info(
         None
     };
     let account_state = extension_id.as_ref().and_then(|id| account_states.get(id));
-    // Redacted activation error for this extension (host installation record's
-    // typed `last_error`), threaded onto the card slot the frontend already
-    // renders. `None` when the service surfaces no failure for this extension.
-    let activation_error = extension_id
-        .as_ref()
-        .and_then(|id| activation_errors.get(id).cloned());
-    // A channel extension the calling user has not personally connected — via
-    // the vendor's OAuth or a pairing/proof-code binding — is not ready for
-    // that caller, whatever the host record says. Absence of a connection
-    // signal is NOT consent: a pairing/OAuth channel with no binding row reads
-    // as unconnected (`connected != Some(true)`), because the generic
-    // connections map is populated per discovered channel and a missing entry
-    // means "no proof this caller connected", not "connected".
-    let requires_personal_account = channel_requires_personal_account(&summary);
-    let requires_personal_binding = channel_requires_personal_binding(&summary);
+    let requires_personal_account = channel_requires_personal_account(summary);
+    let requires_personal_binding = channel_requires_personal_binding(summary);
     let projected_account = if requires_personal_account || requires_personal_binding {
         projected_channel_account(
             connected,
@@ -329,6 +329,120 @@ fn extension_info(
                 && projected_account
                     .as_ref()
                     .is_some_and(|(state, _)| *state != AuthAccountState::Connected)));
+    CallerChannelConnection {
+        projected_account,
+        channel_unconnected,
+    }
+}
+
+/// Per-caller authentication verdict for one installed extension, composed
+/// from the same primitives the extensions card projects into
+/// `installation_state` (`caller_public_state`): required-credential
+/// readiness plus, for channel surfaces, the caller's personal
+/// connection/binding proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallerExtensionAuth {
+    /// Every required credential is configured for this caller and any
+    /// personal channel connection is proven. Includes extensions that
+    /// require nothing per-caller.
+    Authenticated,
+    /// The caller is missing a required credential or has not personally
+    /// connected a channel surface that needs it.
+    Unauthenticated,
+    /// The verdict cannot be established: a needed readiness/connection port
+    /// is unavailable or a lookup failed. Callers must claim nothing.
+    Unknown,
+}
+
+/// The caller's per-channel connection + auth-account maps, borrowed
+/// together (as returned by `ChannelConnectionService`'s two lookups).
+pub(crate) type CallerChannelMaps<'a> = (
+    &'a HashMap<ExtensionId, bool>,
+    &'a HashMap<ExtensionId, ChannelAuthAccountState>,
+);
+
+/// Compute the caller's auth verdict for one installed extension.
+///
+/// `channel_connections` carries the caller's per-channel connection and
+/// auth-account maps; `None` means connection data is unavailable, which is
+/// distinct from empty maps ("no connections"). Fail-closed: absence of proof
+/// where proof is required yields `Unauthenticated`; inability to check
+/// yields `Unknown`, never a fabricated positive.
+pub(crate) async fn caller_extension_auth(
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    channel_connections: Option<CallerChannelMaps<'_>>,
+    caller: &ProductSurfaceCaller,
+    installed: &LifecycleInstalledExtensionSummary,
+) -> CallerExtensionAuth {
+    let readiness =
+        match credential_readiness_for_extension(extension_credentials, caller, installed).await {
+            Ok(readiness) => readiness,
+            Err(error) => {
+                tracing::debug!(
+                    extension = %installed.summary.package_ref.id.as_str(),
+                    status_code = error.status_code,
+                    "credential readiness lookup failed; extension auth verdict is unknown"
+                );
+                return CallerExtensionAuth::Unknown;
+            }
+        };
+    let summary = &installed.summary;
+    let needs_personal_channel_proof = has_external_channel_surface(summary)
+        && (channel_requires_personal_account(summary)
+            || channel_requires_personal_binding(summary));
+    let channel_unconnected = if needs_personal_channel_proof {
+        match channel_connections {
+            Some((connections, account_states)) => {
+                caller_channel_connection(summary, connections, account_states).channel_unconnected
+            }
+            // Proof is required but no connection data exists to prove it —
+            // the verdict is unknowable, not "connected".
+            None => return CallerExtensionAuth::Unknown,
+        }
+    } else {
+        false
+    };
+    match readiness {
+        ExtensionCredentialReadiness::Unknown => CallerExtensionAuth::Unknown,
+        ExtensionCredentialReadiness::MissingRequired => CallerExtensionAuth::Unauthenticated,
+        ExtensionCredentialReadiness::Configured | ExtensionCredentialReadiness::NotRequired => {
+            if channel_unconnected {
+                CallerExtensionAuth::Unauthenticated
+            } else {
+                CallerExtensionAuth::Authenticated
+            }
+        }
+    }
+}
+
+fn extension_info(
+    installed: LifecycleInstalledExtensionSummary,
+    readiness: ExtensionCredentialReadiness,
+    connections: &HashMap<ExtensionId, bool>,
+    account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
+    activation_errors: &HashMap<ExtensionId, String>,
+) -> RebornExtensionInfo {
+    let phase = installed.phase;
+    let onboarding =
+        extension_onboarding::for_installed_with_credential_status(&installed, readiness);
+    let install_scope = installed.install_scope;
+    let summary = installed.summary;
+    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
+    // The per-extension maps are keyed by `ExtensionId`; a package id that is
+    // not valid extension vocabulary cannot be a key in any of them, so it
+    // reports no connection, no account state, and no activation error rather
+    // than being looked up as a string that could never have matched.
+    let extension_id = ExtensionId::new(summary.package_ref.id.as_str()).ok();
+    // Redacted activation error for this extension (host installation record's
+    // typed `last_error`), threaded onto the card slot the frontend already
+    // renders. `None` when the service surfaces no failure for this extension.
+    let activation_error = extension_id
+        .as_ref()
+        .and_then(|id| activation_errors.get(id).cloned());
+    let CallerChannelConnection {
+        projected_account,
+        channel_unconnected,
+    } = caller_channel_connection(&summary, connections, account_states);
     let auth_accounts = vendor_auth_accounts(&summary, projected_account);
     let resolved_account_id = auth_accounts
         .first()

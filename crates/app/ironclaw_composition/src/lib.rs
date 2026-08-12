@@ -109,7 +109,9 @@ pub use input::{
 // consumer: `ironclaw_cli` extension command (no `ironclaw_assistant` dep) · pinned by: `ironclaw_cli` build
 pub use ironclaw_assistant::LifecycleProductResponse;
 // consumer: `ironclaw_cli` runtime (no `ironclaw_turn_runner` dep) · pinned by: `ironclaw_cli` build
-pub use ironclaw_turn_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use ironclaw_turn_runner::{
+    runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT, turn_scheduler::MAX_HEARTBEAT_INTERVAL_WITHIN_LEASE,
+};
 // consumer: `ironclaw_cli` skills command (no `ironclaw_skills` dep) · pinned by: `ironclaw_cli` build
 pub use ironclaw_skills::{
     SkillSummary as RebornSkillSummary, skill_summary_json as reborn_skill_summary_json,

@@ -508,7 +508,7 @@ pub(super) async fn build_backend_production(
     } = build_budget_sinks();
     let process_journal_store = Arc::new(
         ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::clone(
-            &stores.filesystem,
+            &stores.process_journal_filesystem,
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
@@ -1533,6 +1533,7 @@ where
 async fn finish_production_backend(
     context: RebornProductionBuildContext,
     filesystem: Arc<CompositeRootFilesystem>,
+    process_journal_filesystem: Option<Arc<CompositeRootFilesystem>>,
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
@@ -1545,7 +1546,8 @@ async fn finish_production_backend(
         secret_master_key,
         event_store_config,
     )
-    .await?;
+    .await?
+    .with_process_journal_filesystem(process_journal_filesystem);
     build_backend_production(context, stores, trigger_repository, leader_lock).await
 }
 
@@ -1582,6 +1584,8 @@ pub(super) async fn build_libsql_production(
     finish_production_backend(
         context,
         filesystem,
+        // libSQL is single-writer by design; a second handle buys nothing.
+        None,
         trigger_repository,
         secret_master_key,
         event_store_config,
@@ -1593,6 +1597,7 @@ pub(super) async fn build_libsql_production(
 pub(super) async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
+    process_journal_pool: Option<deadpool_postgres::Pool>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
@@ -1629,9 +1634,17 @@ pub(super) async fn build_postgres_production(
         &ironclaw_host_api::path::VirtualPath::new("/system/skills")?,
     )
     .await?;
+    let process_journal_filesystem = process_journal_pool
+        .map(|pool| {
+            crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+                PostgresRootFilesystem::new(pool),
+            ))
+        })
+        .transpose()?;
     finish_production_backend(
         context,
         filesystem,
+        process_journal_filesystem,
         trigger_repository,
         secret_master_key,
         ironclaw_event_store::RebornEventStoreConfig::PostgresPool {
