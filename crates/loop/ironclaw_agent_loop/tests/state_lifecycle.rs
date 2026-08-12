@@ -309,7 +309,7 @@ async fn legacy_terminal_ready_warning_resumes_as_advisory_only() {
         .build();
     let signature = CapabilityCallSignature::from_call(
         capability_id("demo.echo"),
-        &json!({ "input_ref": "input:demo.echo" }),
+        &json!({ "input_ref": "input:demo-echo" }),
     )
     .expect("signature should build");
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
@@ -342,6 +342,31 @@ async fn legacy_terminal_ready_warning_resumes_as_advisory_only() {
         host.finalized_assistant_messages(),
         vec!["completed after legacy warning"]
     );
+    let payloads = host.staged_checkpoint_payloads();
+    let checkpoint_states = payloads
+        .iter()
+        .map(|payload| {
+            serde_json::from_slice::<LoopExecutionState>(payload)
+                .expect("staged checkpoint payload should decode")
+        })
+        .collect::<Vec<_>>();
+    let normalized_at = checkpoint_states
+        .iter()
+        .position(|state| {
+            state
+                .stop_state
+                .repeated_call_warning
+                .as_ref()
+                .is_some_and(|warning| warning.phase == RepeatedCallWarningPhase::Rendered)
+        })
+        .expect("a live checkpoint should record the normalized rendered warning");
+    assert!(checkpoint_states[normalized_at..].iter().all(|state| {
+        state
+            .stop_state
+            .repeated_call_warning
+            .as_ref()
+            .is_none_or(|warning| warning.phase != RepeatedCallWarningPhase::TerminalReady)
+    }));
 }
 
 #[test]

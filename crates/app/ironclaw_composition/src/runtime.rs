@@ -3778,6 +3778,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
+            parallel_tool_batch: default_runtime_config.parallel_tool_batch,
             tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",

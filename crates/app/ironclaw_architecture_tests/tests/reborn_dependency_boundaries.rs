@@ -733,15 +733,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
-        // truncation-watermark DTO carried across the existing context and
-        // prompt contracts. Window selection and task-pinning behavior remain
-        // in ironclaw_threads and ironclaw_loop_host.
-        // 13_316 -> 13_324 (2026-08-11, #7484 eviction compaction): typed
+        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // one defaulted port capability declares when ordered batch middleware
+        // must retain batch entry. Scheduling and hook behavior remain in their
+        // owning loop crates. Count read from this test's own failure message.
+        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // one bounded truncation-watermark DTO carried across the existing
+        // context and prompt contracts. Window selection and task-pinning
+        // behavior remain in ironclaw_threads and ironclaw_loop_host.
+        // 13_326 -> 13_334 (2026-08-11, #7484 eviction compaction): typed
         // tool-result compaction metadata plus window-eviction initiator/mode
         // variants. Cut-point policy and execution remain in agent_loop and
         // loop_host. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_324),
+        // 13_334 -> 13_345 (2026-08-12, #7416 fail-closed batch ordering):
+        // the batch-ordering port contract now defaults to ordered entry and
+        // documents the explicit opt-in required for concurrent singles.
+        // Scheduling and wrapper behavior remain in their owning loop crates.
+        ("ironclaw_loop_contracts", 13_345),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

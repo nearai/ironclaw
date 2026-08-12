@@ -320,6 +320,10 @@ impl PromotionScopeKey {
 
 #[async_trait]
 impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.inner.requires_ordered_batch_invocation()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let state = self.turn_state()?;
         let Some(state) = state.as_ref() else {

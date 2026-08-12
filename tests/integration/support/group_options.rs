@@ -1,8 +1,9 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
-//! `with_narrowed_capability_surface_policy_for_bridged_test`, `budget_accounting`,
-//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! `with_parallel_tool_batches`, `with_narrowed_capability_surface_policy_for_bridged_test`,
+//! `budget_accounting`, `communication_context_provider`,
+//! `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -19,7 +20,9 @@ use std::time::Duration;
 use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
 use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_loop_host::ToolDisclosureMode;
-use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_turn_runner::{
+    loop_driver_host::HookDispatcherBuilderFactory, runtime::ParallelToolBatchMode,
+};
 use ironclaw_turns::InMemoryTurnEventSink;
 
 use super::super::builder::StorageMode;
@@ -90,6 +93,13 @@ impl RebornIntegrationGroupBuilder {
     /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
         self.tool_disclosure = ToolDisclosureMode::Bridged;
+        self
+    }
+
+    /// Enable the production bounded-parallel batch path without an ambient
+    /// process-wide environment variable.
+    pub fn with_parallel_tool_batches(mut self) -> Self {
+        self.parallel_tool_batch = ParallelToolBatchMode::On;
         self
     }
 
