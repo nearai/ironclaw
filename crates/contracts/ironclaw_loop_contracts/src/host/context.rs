@@ -68,6 +68,7 @@ pub struct LoopContextCompactionMetadata {
 pub enum LoopContextCompactionKind {
     User,
     Assistant,
+    ToolResult,
     System,
     Summary,
     Other,

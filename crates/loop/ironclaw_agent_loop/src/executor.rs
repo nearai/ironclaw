@@ -155,7 +155,7 @@ fn debug_host_unavailable(stage: HostStage, error: &AgentLoopHostError) {
         Err(validation_error) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            validation_error = %validation_error,
+            invalid_summary_error = %validation_error,
             "agent loop host call unavailable with invalid safe summary"
         ),
     }
