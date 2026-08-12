@@ -36,6 +36,10 @@ struct HostSurfaceDisclosurePort {
 
 #[async_trait::async_trait]
 impl LoopCapabilityPort for HostSurfaceDisclosurePort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.inner.requires_ordered_batch_invocation()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         for definition in &mut definitions {

@@ -458,11 +458,14 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_loop_family::build_loop_family_registry;
+    use crate::app_loop_family::{
+        build_loop_family_registry, build_loop_family_registry_with_overrides,
+    };
     use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
+    use ironclaw_agent_loop::families::DEFAULT_FAMILY_DIGEST;
     use ironclaw_agent_loop::test_support::{
-        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
-        test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, test_run_context,
     };
     use ironclaw_host_api::failure::categories::{
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
@@ -482,7 +485,7 @@ mod tests {
         VisibleCapabilitySurface,
     };
     use ironclaw_turns::{LoopMessageRef, TurnCheckpointId};
-    use std::sync::Mutex;
+    use std::{collections::VecDeque, sync::Mutex};
 
     #[test]
     fn default_planned_driver_descriptor_uses_default_family_identity() {
@@ -589,6 +592,102 @@ mod tests {
             detail.contains("pre-model checkpoint")
                 && detail.contains("No model or capability ran after the rejection")
                 && detail.contains("Start a new run")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_planned_driver_uses_individual_parallel_capability_calls() {
+        let registry =
+            build_loop_family_registry_with_overrides(None, None, true).expect("registry");
+        let family = registry
+            .get(&LoopFamilyId::DEFAULT)
+            .expect("default family");
+        // Pin the family's replay identity to the bounded-parallel
+        // composition: the override must recompose the family (digest differs
+        // from the host-batch default) and must do so deterministically (the
+        // same digest on rebuild). If the override were silently ignored and
+        // execution stayed sequential, this assertion fails outright — the
+        // family would carry the static DEFAULT_FAMILY_DIGEST.
+        assert_ne!(
+            family.version().digest,
+            DEFAULT_FAMILY_DIGEST,
+            "the bounded-parallel override must recompose the family identity"
+        );
+        let rebuilt =
+            build_loop_family_registry_with_overrides(None, None, true).expect("rebuilt registry");
+        assert_eq!(
+            rebuilt
+                .get(&LoopFamilyId::DEFAULT)
+                .expect("rebuilt default family")
+                .version()
+                .digest,
+            family.version().digest,
+            "the bounded-parallel family identity must be a pure function of the selected strategy"
+        );
+        let descriptor = descriptor_for_driver_id(
+            planned_default_driver_id().expect("driver id"),
+            RunProfileVersion::new(PLANNED_DRIVER_VERSION),
+        )
+        .expect("descriptor");
+        let driver = PlannedDriver::from_family_with_descriptor(
+            family,
+            Arc::new(CanonicalAgentLoopExecutor),
+            descriptor,
+        )
+        .expect("driver");
+        let context = run_context_for_driver(&driver);
+        let script = ScenarioScript {
+            model_responses: VecDeque::from([
+                ScriptedModelResponse::Calls(vec![
+                    ScriptedCapabilityCall::new("demo.echo"),
+                    ScriptedCapabilityCall::new("demo.echo"),
+                ]),
+                ScriptedModelResponse::Reply {
+                    text: "done".to_string(),
+                },
+            ]),
+            capability_outcomes: VecDeque::new(),
+            single_call_retry_outcomes: VecDeque::from([
+                ScriptedCapabilityOutcome::completed("result:first"),
+                ScriptedCapabilityOutcome::completed("result:second"),
+            ]),
+            pending_inputs: VecDeque::new(),
+        };
+        let (host, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .script(script)
+            .build();
+
+        let exit = driver
+            .run(
+                AgentLoopDriverRunRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await
+            .expect("driver run");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        let calls = host.call_log();
+        // Under the host-batch (sequential) family the executor would have
+        // routed the two calls through the host's batch method, which the
+        // mock records as `InvokeCapabilityBatch` — so these call-log pins
+        // fail if the bounded-parallel strategy were ignored, independently
+        // of the family-identity assertions above.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call, MockHostCall::InvokeCapabilityBatch { .. }))
         );
     }
 

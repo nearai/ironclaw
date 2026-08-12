@@ -1287,6 +1287,10 @@ pub struct EmptyLoopCapabilityPort;
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        false
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
