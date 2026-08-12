@@ -1,4 +1,10 @@
-use ironclaw_loop_contracts::{LoopContextSnippet, MemoryPromptContextRequest};
+use std::sync::Arc;
+
+use ironclaw_loop_contracts::{
+    LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopSafeSummary,
+    MemoryPromptContextLoad, MemoryPromptContextRequest, MemoryRetrievalDegradation,
+    MemoryRetrievalFailureKind, MemoryRetrievalLane,
+};
 use ironclaw_threads::{ContextMessage, MessageKind, SessionThreadService};
 
 use crate::ThreadBackedLoopContextPort;
@@ -20,13 +26,30 @@ where
     /// per-iteration calls reuse the cached snippets (the "fetch once per run"
     /// guarantee). When no service is wired, or there is no actor / user message
     /// to scope a query to, this returns empty. A fetch failure degrades to empty
-    /// and never fails the turn.
+    /// and never fails the turn — but it is recorded, not laundered: see
+    /// [`Self::load_memory_context_once`].
     pub(super) async fn load_memory_snippets_once(
         &self,
         context_messages: &[ContextMessage],
     ) -> Vec<LoopContextSnippet> {
+        self.load_memory_context_once(context_messages)
+            .await
+            .snippets
+    }
+
+    /// The full memory load for this run: the admitted snippets plus every lane
+    /// that FAILED rather than simply matching nothing.
+    ///
+    /// The distinction matters because both used to look identical downstream.
+    /// A memory backend that is down produced the same empty prompt section as
+    /// a user with nothing relevant stored, so "it forgot" and "retrieval broke"
+    /// were indistinguishable in tests and in operator diagnostics.
+    pub(super) async fn load_memory_context_once(
+        &self,
+        context_messages: &[ContextMessage],
+    ) -> MemoryPromptContextLoad {
         let Some(service) = self.memory_context_service.as_deref() else {
-            return Vec::new();
+            return MemoryPromptContextLoad::default();
         };
         // Build the request BEFORE touching the cache. When there is no actor or no
         // user message yet, there is nothing to query: return empty WITHOUT seeding
@@ -35,31 +58,104 @@ where
         // memory to empty for the rest of the run). Only seed the cell once a real
         // request exists.
         let Some(request) = self.build_memory_prompt_context_request(context_messages) else {
-            return Vec::new();
+            return MemoryPromptContextLoad::default();
         };
-        // Fetch exactly once per run and CACHE the outcome - including an empty vec
-        // on failure. A down or slow memory service must not be re-hit on every
-        // model step of the run: the prior `get_or_try_init` left the cell
-        // uninitialized on error, so each iteration retried and could stack
-        // timeouts into latency spikes. A retrieval failure degrades to empty memory
-        // for the rest of the run rather than failing the turn; the per-run cache
-        // makes that decision exactly once.
-        let snippets = self
+        // Fetch exactly once per run and CACHE the outcome. A down or slow memory
+        // service must not be re-hit on every model step of the run: the prior
+        // `get_or_try_init` left the cell uninitialized on error, so each iteration
+        // retried and could stack timeouts into latency spikes.
+        //
+        // The cache therefore still holds a failed fetch for the rest of the run —
+        // but it caches the whole `MemoryPromptContextLoad`, so the cached value
+        // RECORDS that it failed instead of being indistinguishable from "no
+        // matching memory". A hard error from the service is folded into the same
+        // shape with an `Unavailable` degradation covering both lanes.
+        let load = self
             .memory_snippets_cache
             .get_or_init(|| async {
                 match service.load_memory_snippets(request).await {
-                    Ok(snippets) => snippets,
+                    Ok(load) => load,
                     Err(error) => {
                         tracing::debug!(
                             kind = ?error.kind,
                             "memory context fetch failed; degrading to empty memory for this run"
                         );
-                        Vec::new()
+                        MemoryPromptContextLoad {
+                            snippets: Vec::new(),
+                            degradations: vec![
+                                MemoryRetrievalDegradation::new(
+                                    MemoryRetrievalLane::ShortTerm,
+                                    MemoryRetrievalFailureKind::Unavailable,
+                                ),
+                                MemoryRetrievalDegradation::new(
+                                    MemoryRetrievalLane::LongTerm,
+                                    MemoryRetrievalFailureKind::Unavailable,
+                                ),
+                            ],
+                        }
                     }
                 }
             })
-            .await;
-        snippets.clone()
+            .await
+            .clone();
+        self.publish_memory_retrieval_degraded(&load.degradations);
+        load
+    }
+
+    /// Surface a degraded memory retrieval to the operator as a driver note.
+    ///
+    /// The note is the operator-visible half of the typed degradation: it rides
+    /// the milestone sink this port already holds and reaches the live work
+    /// summary, the same route `publish_personal_context_admitted` uses and the
+    /// same rationale as `EventSubscriptionTerminated` — a subsystem that
+    /// stopped contributing must not be silently invisible.
+    ///
+    /// Deliberately NOT `warn!`/`info!`: those levels render in the REPL and
+    /// corrupt the terminal UI, and this fires from a background prompt build.
+    /// The summary carries only closed-vocabulary lane and failure labels, never
+    /// a backend message, a query, or a path.
+    ///
+    /// The per-run `OnceCell` above means the fetch happens once, but this is
+    /// called on every prompt build that reads the cache, so it is guarded by
+    /// its own cell to stay at one note per run.
+    fn publish_memory_retrieval_degraded(&self, degradations: &[MemoryRetrievalDegradation]) {
+        if degradations.is_empty() {
+            return;
+        }
+        let Some(milestone_sink) = self.milestone_sink.as_ref() else {
+            return;
+        };
+        if self.memory_degradation_note_emitted.set(()).is_err() {
+            return;
+        }
+        let lanes = degradations
+            .iter()
+            .map(|degradation| {
+                format!(
+                    "{}:{}",
+                    degradation.lane.as_str(),
+                    degradation.kind.as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let summary = match LoopSafeSummary::new(format!("memory retrieval degraded ({lanes})")) {
+            Ok(summary) => summary,
+            Err(error) => {
+                tracing::debug!("failed to build memory degradation milestone: {error}");
+                return;
+            }
+        };
+        let context = self.run_context.clone();
+        let milestone_sink = Arc::clone(milestone_sink);
+        tokio::spawn(async move {
+            if let Err(error) = LoopHostMilestoneEmitter::new(context, milestone_sink)
+                .driver_note(LoopDriverNoteKind::Context, summary)
+                .await
+            {
+                tracing::debug!("failed to emit memory degradation milestone: {error}");
+            }
+        });
     }
 
     /// Build the memory request from the run context. Returns `None` (no memory

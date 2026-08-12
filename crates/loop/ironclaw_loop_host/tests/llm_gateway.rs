@@ -4202,16 +4202,18 @@ impl MemoryPromptContextService for CountingMemoryContextService {
     async fn load_memory_snippets(
         &self,
         request: MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
         self.fetches.fetch_add(1, Ordering::SeqCst);
         *self.last_query.lock().unwrap() = Some(request.query.clone());
         let content = format!("Untrusted memory content: {}", request.query);
-        Ok(vec![LoopContextSnippet {
-            snippet_ref: "memory-snippet:caller-test".to_string(),
-            model_content: content.clone(),
-            safe_summary: content,
-            metadata: None,
-        }])
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad::healthy(
+            vec![LoopContextSnippet {
+                snippet_ref: "memory-snippet:caller-test".to_string(),
+                model_content: content.clone(),
+                safe_summary: content,
+                metadata: None,
+            }],
+        ))
     }
 }
 

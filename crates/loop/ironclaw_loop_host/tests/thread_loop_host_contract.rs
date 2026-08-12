@@ -6898,14 +6898,16 @@ impl ironclaw_loop_contracts::MemoryPromptContextService for RecordingMemoryProm
     async fn load_memory_snippets(
         &self,
         request: ironclaw_loop_contracts::MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
         self.calls.lock().expect("memory calls lock").push(request);
-        Ok(vec![LoopContextSnippet {
-            snippet_ref: "memory-snippet:test".to_string(),
-            model_content: "remembered fact".to_string(),
-            safe_summary: "remembered fact".to_string(),
-            metadata: None,
-        }])
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad::healthy(
+            vec![LoopContextSnippet {
+                snippet_ref: "memory-snippet:test".to_string(),
+                model_content: "remembered fact".to_string(),
+                safe_summary: "remembered fact".to_string(),
+                metadata: None,
+            }],
+        ))
     }
 }
 
