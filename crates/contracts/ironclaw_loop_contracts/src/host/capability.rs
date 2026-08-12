@@ -544,6 +544,16 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 
 #[async_trait]
 pub trait LoopCapabilityPort: Send + Sync {
+    /// Whether a logical batch must enter through [`Self::invoke_capability_batch`].
+    ///
+    /// Middleware that performs ordered preflight or observation across a batch
+    /// must return `true`; the loop executor will then avoid decomposing a
+    /// parallel-safe batch into concurrent single invocations. Decorators must
+    /// preserve the value reported by their inner port.
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        false
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         Ok(Vec::new())
     }

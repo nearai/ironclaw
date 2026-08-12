@@ -212,6 +212,7 @@ impl CapabilityStage {
     ) -> Result<InvokedCapabilityBatch, ironclaw_loop_contracts::AgentLoopHostError> {
         if ctx.planner.batch().execution_mode() != CapabilityBatchExecutionMode::BoundedParallel
             || policy != BatchPolicy::Parallel
+            || ctx.host.requires_ordered_batch_invocation()
         {
             return ctx
                 .host
@@ -957,9 +958,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 Some((_, SelectedParallelTerminal::Loop(LoopExit::Cancelled(_))))
             );
             if !cancellation_selected
-                && !selected
+                && selected
                     .as_ref()
-                    .is_some_and(|(selected_index, _)| *selected_index < gate_index)
+                    .is_none_or(|(selected_index, _)| *selected_index >= gate_index)
             {
                 match GateStage
                     .process(

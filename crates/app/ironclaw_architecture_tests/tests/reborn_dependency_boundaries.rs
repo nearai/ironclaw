@@ -733,7 +733,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_306),
+        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // one defaulted port capability declares when ordered batch middleware
+        // must retain batch entry. Scheduling and hook behavior remain in their
+        // owning loop crates. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_316),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

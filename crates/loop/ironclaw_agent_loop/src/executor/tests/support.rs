@@ -106,6 +106,7 @@ pub(super) struct MockHost {
     fail_visible_capabilities: bool,
     prompt_bundle_failure: Option<AgentLoopHostError>,
     default_concurrency_hint: ConcurrencyHint,
+    requires_ordered_batch_invocation: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     extra_capability_descriptors: Vec<CapabilityDescriptorView>,
@@ -156,6 +157,7 @@ impl MockHost {
             fail_checkpoint: Arc::new(Mutex::new(None)),
             fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
             default_concurrency_hint: ConcurrencyHint::SafeForParallel,
+            requires_ordered_batch_invocation: false,
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             prompt_bundle_failure: None,
@@ -200,6 +202,11 @@ impl MockHost {
         outcomes: Vec<ironclaw_host_api::resolution::ResolutionBatch>,
     ) -> Self {
         *self.batch_outcomes.lock().expect("lock") = outcomes.into();
+        self
+    }
+
+    pub(super) fn requiring_ordered_batch_invocation(mut self) -> Self {
+        self.requires_ordered_batch_invocation = true;
         self
     }
 
@@ -842,6 +849,10 @@ impl ironclaw_loop_contracts::LoopModelPort for MockHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockHost {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.requires_ordered_batch_invocation
+    }
+
     async fn register_provider_tool_call(
         &self,
         request: RegisterProviderToolCallRequest,

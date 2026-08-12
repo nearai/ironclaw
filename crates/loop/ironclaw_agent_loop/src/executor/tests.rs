@@ -3298,6 +3298,58 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
     );
 }
 
+#[tokio::test]
+async fn parallel_batch_uses_batch_port_when_ordered_middleware_requires_it() {
+    let first_ref = LoopResultRef::new("result:ordered-first").expect("valid");
+    let second_ref = LoopResultRef::new("result:ordered-second").expect("valid");
+    let host = MockHost::new(vec![two_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![
+                resolution::completed(
+                    first_ref.clone(),
+                    "first".to_string(),
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ),
+                resolution::completed(
+                    second_ref.clone(),
+                    "second".to_string(),
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ),
+            ],
+            stopped_on_suspension: false,
+        }])
+        .requiring_ordered_batch_invocation();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &support::family_with_parallel_batch_execution(),
+            &host,
+            state,
+        )
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.batch_invocations().len(), 1);
+    assert!(host.single_invocations().is_empty());
+    assert_eq!(
+        host.appended_result_refs()
+            .into_iter()
+            .map(|request| request.result_ref)
+            .collect::<Vec<_>>(),
+        vec![first_ref, second_ref]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn parallel_batch_stops_launching_new_calls_after_a_park() {
     let mut outcomes = vec![
