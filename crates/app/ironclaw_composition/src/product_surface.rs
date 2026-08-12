@@ -49,7 +49,6 @@ use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
 use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
 use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
-use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
@@ -309,26 +308,26 @@ pub(crate) fn build_product_surface_with_channel_connection(
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn LlmConfigService>> {
-    runtime.llm_config_service.clone()
+    runtime
+        .llm_config_service
+        .clone()
+        .map(|service| service as _)
 }
 
 pub(crate) fn compose_llm_config_service(
     boot: Option<&RebornBootConfig>,
-    secret_store: Arc<dyn SecretStorePort>,
+    keys: ironclaw_operator::LlmKeyStore,
     scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     llm_reload: Option<&RebornLlmReloadParts>,
-) -> Option<Arc<dyn LlmConfigService>> {
+) -> Option<Arc<ironclaw_operator::RebornLlmConfigService>> {
     let boot = boot?;
-    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
-        Arc::clone(&secret_store),
-    ));
     let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
     let user_model_preference_store = Arc::new(
         ironclaw_operator::FilesystemUserModelPreferenceStore::new(scoped_filesystem),
     );
-    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys)
+    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys.clone())
         .with_model_policy_store(model_policy_store)
         .with_user_model_preference_store(user_model_preference_store);
     if let Some(parts) = llm_reload {
@@ -336,9 +335,7 @@ pub(crate) fn compose_llm_config_service(
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
-            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
-                secret_store,
-            )),
+            keys.clone(),
         ));
         llm_config = llm_config
             .with_reload_trigger(reload)

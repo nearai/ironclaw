@@ -556,8 +556,7 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) llm_config_service:
-        Option<Arc<dyn ironclaw_product_contracts::operator_llm::LlmConfigService>>,
+    pub(crate) llm_config_service: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
@@ -3983,7 +3982,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
 
     let llm_config_service = crate::product_surface::compose_llm_config_service(
         boot.as_ref(),
-        Arc::clone(&services.secret_store),
+        ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+            Arc::clone(&services.secret_store),
+        )),
         Arc::clone(&scoped_filesystem),
         llm_reload.as_ref(),
     );
