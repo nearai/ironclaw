@@ -927,6 +927,7 @@ SLACK_PROVIDER_OPERATION_CASES = (
         # no-result shape is the typed model-visible miss, not an empty
         # completed payload — see ExpectedCapabilityStatus.
         expected_status="failed",
+        expected_failed_tool_result_contains="messaging.unknown_message",
         expected_request_count=2,
         setup_provider_proxy=_setup_missing_message,
         expect_provider_forward=False,

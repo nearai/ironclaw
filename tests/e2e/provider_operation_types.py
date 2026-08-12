@@ -43,6 +43,11 @@ class ProviderOperationCase:
     assert_outcome: OutcomeAssertion
     outcome_class: OutcomeClass = "success"
     expected_status: ExpectedCapabilityStatus = "completed"
+    # Required whenever expected_status == "failed": the substring the failed
+    # tool result must carry, forwarded to the mock-LLM trace replayer as
+    # `expected_failed_tool_result_contains` (the replayer otherwise treats
+    # ANY failed capability result as a replay error).
+    expected_failed_tool_result_contains: str | None = None
     expected_request_count: int = 1
     setup_provider_proxy: ProviderProxySetup | None = None
     expect_provider_forward: bool = True

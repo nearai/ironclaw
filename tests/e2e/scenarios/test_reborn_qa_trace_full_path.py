@@ -722,6 +722,14 @@ async def test_provider_operation_case_executes_with_provider_readback(
     if operation_case.setup_provider_proxy is not None:
         operation_case.setup_provider_proxy(proxy)
     trace = _provider_operation_trace(operation_case, arguments)
+    if operation_case.expected_failed_tool_result_contains is not None:
+        # Same mechanism the fault cases below use: without the hint the
+        # replayer treats any failed capability result as a replay error.
+        trace["steps"][-1]["request_hint"] = {
+            "expected_failed_tool_result_contains": (
+                operation_case.expected_failed_tool_result_contains
+            )
+        }
     await _install_inline_trace(mock_llm_server, source, trace)
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
