@@ -389,6 +389,15 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
+    #   * `preflight-gates.sh` is the local pre-push gate gauntlet proposed by
+    #     the 2026-08 gate audit (docs/internal/gate-audit-2026-08.md §4.3);
+    #     referenced by no workflow, so no lane can be selected for it.
+    "scripts/preflight-gates.sh",
+    #   * `check-boundaries.sh` was DELETED by the same audit (measured broken
+    #     on a clean tree, run by nothing). The entry stays so the deletion
+    #     diff — and any revert — classifies instead of tripping the
+    #     fail-closed arm; the audit's own PR was the first to hit it.
+    "scripts/check-boundaries.sh",
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,
     #     driven by its own lane rather than by a crate/integration selection.
     "scripts/test-mutation-audit.sh",

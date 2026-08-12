@@ -1424,10 +1424,12 @@ async fn context_port_renders_channel_conversation_context_as_one_framed_block()
 }
 
 #[tokio::test]
-async fn context_port_omits_channel_context_that_fails_prompt_safety() {
+async fn context_port_preserves_secret_like_channel_context_for_gateway_redaction() {
     let fixture = ThreadFixture::new().await;
-    // The loop prompt denylist rejects credential vocabulary; the port must
-    // degrade to no context instead of failing the prompt build later.
+    // The context port retains the raw conversation so false positives cannot
+    // erase useful context. The model gateway owns the final provider-bound
+    // redaction and its contract tests assert that the value never reaches the
+    // provider.
     let adapter = ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -1445,11 +1447,16 @@ async fn context_port_omits_channel_context_that_fails_prompt_safety() {
             mode: PromptMode::TextOnly,
         })
         .await
-        .expect("unsafe advisory context must never fail the context load");
+        .expect("secret-like advisory context must not fail the context load");
 
+    let snippet = bundle
+        .instruction_snippets
+        .iter()
+        .find(|snippet| snippet.snippet_ref == "channel-context:conversation")
+        .expect("channel context must remain available before gateway redaction");
     assert!(
-        bundle.instruction_snippets.is_empty(),
-        "unsafe channel context must be omitted, not rendered"
+        snippet.model_content.contains("the password is hunter2"),
+        "the raw context seam must preserve the original conversation"
     );
 }
 

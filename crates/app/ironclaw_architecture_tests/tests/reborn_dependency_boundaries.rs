@@ -594,29 +594,94 @@ fn reborn_crate_dependency_boundaries_hold() {
 /// with slack is an unclaimed budget for the specific debt it names (#7147); a
 /// line ceiling with slack just means the crate got smaller, which is the
 /// direction wanted, and equality here would red the build on every routine
-/// deletion. What must not happen silently is *growth*, so each ceiling sits a
-/// bounded `TOLERANCE` above the measured count and a crate that eats through it
-/// forces a reviewer to say so in writing.
+/// deletion.
 ///
-/// The ceiling is also bounded from *below*: a crate more than one tolerance
-/// window under its ceiling has banked slack, which is how a ratchet goes inert
-/// (the exact way `composition-budget.toml`'s share ceiling did — 17.4pp of
-/// slack, constraining nothing, #7151). Re-capture at every wave close.
+/// Each ceiling is **pinned at the measured count** ("set to current, not
+/// padded") and the pass window extends [`GROWTH_TOLERANCE`] above it and
+/// [`TOLERANCE`] below it. The upward slack exists because a hard cap at the
+/// observed count reds **every open branch** the moment anyone lands a line
+/// in a contracts crate on main — measured, not hypothetical: PR #7157
+/// re-captured `ironclaw_loop_contracts` four times, roughly once per fold
+/// onto main, every delta ≤105 lines (gate audit 2026-08,
+/// `docs/internal/gate-audit-2026-08.md` §3.2). The tolerance is sized to
+/// absorb that routine drift while staying far under the growth this gate
+/// exists to force into review (the reviewed raises it has caught were
+/// +1,069 and +1,214 lines; `composition-budget.toml` uses the same 150).
+/// Growth past the window is the reviewed decision; re-pin to the new
+/// measured count in the same PR, with the reason, and keep the dated
+/// re-capture notes below **append-only** — an overwritten rationale is a
+/// lost audit trail.
+///
+/// The ceiling is also bounded from *below*: a crate more than one
+/// [`TOLERANCE`] window under its ceiling has banked slack, which is how a
+/// ratchet goes inert (the exact way `composition-budget.toml`'s share
+/// ceiling did — 17.4pp of slack, constraining nothing, #7151). Re-capture at
+/// every wave close.
 ///
 /// Measured through [`production_rust_files`], the suite's single definition of
 /// a production source file, so the numbers agree with every sibling gate
 /// rather than with a private walk.
+/// The banked-slack window below each ceiling: a crate sitting more than
+/// this far under its ceiling forces a re-capture (anti-inertness).
+const TOLERANCE: usize = 400;
+
+/// Working slack ABOVE each pinned count, so routine drift — a fold from
+/// main, a few lines of wiring — passes while real growth still forces a
+/// reviewed re-pin. Before 2026-08-07 this direction had NO tolerance
+/// (the check was a bare `lines > ceiling`), which combined with
+/// "set to current" pins to red every open branch on any main-side
+/// contracts-crate growth (see the module doc and the gate audit).
+const GROWTH_TOLERANCE: usize = 150;
+
+/// One crate's measured production line count judged against its pinned
+/// ceiling. The pass window is `[ceiling - TOLERANCE, ceiling +
+/// GROWTH_TOLERANCE]`; both jaws are enforced by the size-ceiling gate and
+/// the arithmetic is pinned by `contracts_size_ceiling_window_edges_hold`.
+#[derive(Debug, PartialEq, Eq)]
+enum CeilingVerdict {
+    /// Inside the window — the routine-drift case the working slack exists
+    /// for.
+    Within,
+    /// Growth past the working slack: a reviewed re-pin is required.
+    Over,
+    /// More than one banked-slack window under the ceiling: re-capture in
+    /// the PR that shrank the crate (anti-inertness).
+    Banked,
+}
+
+fn contracts_ceiling_verdict(lines: usize, ceiling: usize) -> CeilingVerdict {
+    if lines > ceiling + GROWTH_TOLERANCE {
+        CeilingVerdict::Over
+    } else if ceiling.saturating_sub(lines) > TOLERANCE {
+        CeilingVerdict::Banked
+    } else {
+        CeilingVerdict::Within
+    }
+}
+
 #[test]
 fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
-    /// How far above the measured count each ceiling sits, and the width of
-    /// the banked-slack window below it.
-    const TOLERANCE: usize = 400;
-
     /// `(crate, production line ceiling)` — captured 2026-08-05 by running this
     /// test with every ceiling at `0` and reading the counts out of its own
     /// failure message. Never counted by eye.
+    /// Re-pinned 2026-08-07 (gate audit): all six set to the counts this
+    /// test reported with every ceiling at 0 on this tree. Three had been
+    /// seeded at measured+400 (common, loop_contracts, prompt_envelope) —
+    /// the maximum non-tripping pad, contradicting the capture rule above —
+    /// and three at measured+0. With `GROWTH_TOLERANCE` carrying the working
+    /// slack, every pin now follows the one rule: set to current.
+    /// ✎ Union re-captured on the #7373 merge (2026-08-08): every value below
+    /// is the merged tree's own report (ceilings-at-0 procedure); #7157's and
+    /// this audit's chains fold together, and product_contracts ratchets down.
+    /// ✎ Union re-captured on the 2026-08-12 refresh merge of main: the
+    /// ceilings-at-0 procedure on the merged tree reports common 3_393,
+    /// extension_contracts 7_892, host_api 19_017, loop_contracts 13_345,
+    /// product_contracts 16_024, prompt_envelope 432 — five rows' surviving
+    /// pins already equal the merged tree's report exactly; prompt_envelope
+    /// re-pins from main's 832 (the last row still carrying the +400 seed
+    /// pad) to its measured count per the capture rule above.
     const SIZE_CEILINGS: &[(&str, usize)] = &[
-        ("ironclaw_common", 3_793),
+        ("ironclaw_common", 3_393),
         // 7_727 -> 7_748 (2026-08-05, #7157): +21 lines for the
         // `ActivePreferenceTargetCodecs` port beside its sibling
         // `PreferenceTargetCodec` — a trait plus a test-shape blanket impl,
@@ -676,6 +741,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // attachment fetch, persistence, and delivery behavior remain in their
         // owning package/host/domain crates. Count read from this test's own
         // failure message.
+        // 7_892 -> 7_947 on main (2026-08-11, #7185 provider-shipped memory
+        // guidance): the optional `[memory].guidance_doc` field on
+        // `MemoryDescriptor`, its doc comment, and two parse tests — a field
+        // name and no behavior.
+        // Union re-measured on the merged tree (2026-08-12): the branch's
+        // channel-contract vocabulary and main's memory-guidance field are
+        // disjoint. Count read from this test's own failure message.
         ("ironclaw_extension_contracts", 8_772),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
@@ -712,10 +784,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 18_994 -> 19_003 (2026-08-11, unified channel model): +9 lines of
         // VAPID credential-target doc corrections referencing the renamed
         // `ironclaw_web_app` domain crate. Comment-adjacent churn only.
-        // 19_003 -> 19_026 (#7525, merged 2026-08-12): add the typed
+        // 18_994 -> 19_063 on main (2026-08-11, #7509 plus #7484's merged
+        // host-context contract): `ModelResultPreview` now redacts
+        // credential-keyed values inside nested and line-numbered JSON before
+        // marker masking can destroy the key/value relationship, plus the
+        // bounded context-window watermark DTO.
+        // Both sides then add #7525's typed
         // `UnattendedQuestionEndingResponse` invalid-output reason and its
-        // sanitized user-facing summary. Classification and recovery remain in
-        // ironclaw_agent_loop; this crate owns only shared failure vocabulary.
+        // sanitized user-facing summary. Classification and recovery remain
+        // in ironclaw_agent_loop; this crate owns only shared failure
+        // vocabulary. Union re-measured on the merged tree (2026-08-12);
+        // count read from this test's own failure message.
         ("ironclaw_host_api", 19_026),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
@@ -788,15 +867,24 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the batch-ordering port contract now defaults to ordered entry and
         // documents the explicit opt-in required for concurrent singles.
         // Scheduling and wrapper behavior remain in their owning loop crates.
-        ("ironclaw_loop_contracts", 13_345),
+        // 13_345 -> 13_524 (2026-08-12, #7509 prompt recovery hardening):
+        // production prompt validation checks structural limits and control
+        // characters only; decoded Basic-auth samples remain test-only. Count
+        // read from this test's own failure message after merging #7416.
+        ("ironclaw_loop_contracts", 13_524),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
         // non-contract crates.
+        // 15_758 -> 15_715 (2026-08-08, #7373 merge re-capture): the crate came
+        // back 43 lines lighter from main-side work, so the pin ratchets DOWN
+        // with it. Count read from this test's own failure message.
         // Raised 15_758 -> 15_800 by #7228 (audited admin thread scraping): the
         // growth is the three admin scrape request DTOs and the wire
         // `RebornListThreadsResponse` reuse — declarations only; authorization,
-        // audit, and artifact building stay in ironclaw_assistant.
+        // audit, and artifact building stay in ironclaw_assistant. Folded with
+        // the ratchet-down above on the second #7373 merge (2026-08-08); the
+        // value below is the merged tree's own report.
         // Raised 15_800 -> 15_840 by the web-app channel: the browser
         // enrollment wire DTO family (`RebornWebApp*` status/subscribe/
         // unsubscribe shapes) — declarations only; validation and storage stay
@@ -838,7 +926,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unparameterized session lane), and `#[serde(rename_all)]` on the
         // two ledger-persisted inbound enums. Count read from this gate.
         ("ironclaw_product_contracts", 16_167),
-        ("ironclaw_prompt_envelope", 832),
+        // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
+        // measured count — this row still carried the +400 seed pad the
+        // 2026-08-07 re-pin removed from its siblings.
+        ("ironclaw_prompt_envelope", 432),
     ];
 
     let root = workspace_root();
@@ -863,16 +954,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
             })
             .sum();
 
-        if lines > *ceiling {
-            over.push(format!(
-                "{crate_name}: {lines} production lines over a ceiling of {ceiling}"
-            ));
-        } else if ceiling.saturating_sub(lines) > TOLERANCE {
-            banked.push(format!(
+        match contracts_ceiling_verdict(lines, *ceiling) {
+            CeilingVerdict::Over => over.push(format!(
+                "{crate_name}: {lines} production lines over a ceiling of {ceiling} \
+                 (+{GROWTH_TOLERANCE} working slack -> effective {})",
+                ceiling + GROWTH_TOLERANCE
+            )),
+            CeilingVerdict::Banked => banked.push(format!(
                 "{crate_name}: {lines} production lines against a ceiling of {ceiling} \
                  ({} of slack, window is {TOLERANCE})",
                 ceiling - lines
-            ));
+            )),
+            CeilingVerdict::Within => {}
         }
     }
 
@@ -893,6 +986,51 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
          what it measures is an unclaimed budget for the next unreviewed growth — the specific \
          way `composition-budget.toml`'s share ceiling went inert with 17.4pp of slack (#7151).",
         banked.join("\n")
+    );
+}
+
+/// Regression pin for the 2026-08-07 zero-slack repair (gate audit §3.2):
+/// before it, the growth check was a bare `lines > ceiling` — `TOLERANCE`
+/// was consulted only for the banked-slack direction — so every "set to
+/// current" pin was a hard cap at the observed count, and one line landed on
+/// main in any contracts crate redded every open branch at its next fold
+/// (measured on #7157: four loop_contracts re-captures, roughly one per
+/// fold). This fixture drives the REAL comparison the gate runs at all four
+/// window edges so the asymmetry cannot silently return.
+#[test]
+fn contracts_size_ceiling_window_edges_hold() {
+    const CEILING: usize = 10_000;
+    // Upward jaw: the last line of working slack passes; one more is growth
+    // that demands a reviewed re-pin.
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING + GROWTH_TOLERANCE, CEILING),
+        CeilingVerdict::Within
+    );
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING + GROWTH_TOLERANCE + 1, CEILING),
+        CeilingVerdict::Over
+    );
+    // Downward jaw: the last line of the banked window passes; one more is
+    // slack the ceiling must re-capture.
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING - TOLERANCE, CEILING),
+        CeilingVerdict::Within
+    );
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING - TOLERANCE - 1, CEILING),
+        CeilingVerdict::Banked
+    );
+    // The pin itself sits inside the window (the audit sabotage log's ±1
+    // probes, as arithmetic).
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING, CEILING),
+        CeilingVerdict::Within
+    );
+    // A scan that measured nothing against a real pin reads as banked slack,
+    // never as a silent pass — the suite's fail-closed doctrine.
+    assert_eq!(
+        contracts_ceiling_verdict(0, CEILING),
+        CeilingVerdict::Banked
     );
 }
 

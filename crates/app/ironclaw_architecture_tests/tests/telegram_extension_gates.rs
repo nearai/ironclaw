@@ -358,11 +358,6 @@ fn no_retired_taxonomy_telegram_identifiers() {
         if display.contains("telegram_extension_gates.rs") {
             continue;
         }
-        // `crates/ironclaw_gateway/static` is the v1 monolith's embedded UI,
-        // retained until the monolith retires — not reborn context.
-        if display.contains("ironclaw_gateway/static") {
-            continue;
-        }
         let Ok(contents) = std::fs::read_to_string(&file) else {
             continue;
         };
@@ -392,9 +387,7 @@ fn reborn_context_free_of_v1_pairing_routes() {
     let mut offenders = Vec::new();
     for file in rust_and_frontend_files(&root.join("crates")) {
         let display = file.display().to_string();
-        if display.contains("telegram_extension_gates.rs")
-            || display.contains("ironclaw_gateway/static")
-        {
+        if display.contains("telegram_extension_gates.rs") {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&file) else {
