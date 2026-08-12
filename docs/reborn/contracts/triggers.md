@@ -296,6 +296,14 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   preserves host approval, authentication, authorization, and policy gates.
   The trusted turn origin is the switch; an interactive run must not receive
   this protocol merely because it shares a run profile or process.
+- A graceful scheduled-trigger exit is valid only when its final assistant
+  reply is non-empty and its trimmed final line does not end in `?`. Empty
+  replies and question-ending replies use the existing bounded, tools-capable
+  completion-nudge path. If no further nudge is available, the loop exits with
+  `invalid_model_output` instead of `Completed`. Every rejected assistant reply
+  remains in the transcript and failed-exit evidence. This validation is keyed
+  on `TurnOriginKind::ScheduledTrigger`; interactive question-ending replies
+  retain their conversational completion behavior.
 
 Host-trusted trigger ingress request fields are:
 

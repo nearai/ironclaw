@@ -677,7 +677,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
         // ironclaw_host_runtime.
-        ("ironclaw_host_api", 18_994),
+        // 18_994 -> 19_017 (#7525): add the typed
+        // `UnattendedQuestionEndingResponse` invalid-output reason and its
+        // sanitized user-facing summary. Classification and recovery remain in
+        // ironclaw_agent_loop; this crate owns only shared failure vocabulary.
+        ("ironclaw_host_api", 19_017),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
