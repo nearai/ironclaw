@@ -205,6 +205,11 @@ struct TelegramExtensionEntrypoint {
 
 impl ExtensionEntrypoint for TelegramExtensionEntrypoint {
     fn bind(&self, ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+        // silent-ok: a malformed operator value behaves exactly like an
+        // unset one — the identity stays `None`, the pool refuses every dial
+        // with its explicit not-configured error, and link attempts fail
+        // closed with the same sentence. Nothing downstream ever sees a
+        // garbage id; the config UI still shows the raw value for repair.
         let api_id = ctx
             .config
             .iter()
@@ -214,10 +219,7 @@ impl ExtensionEntrypoint for TelegramExtensionEntrypoint {
         // the link adapter must be able to evict what the tool adapter would
         // otherwise keep serving. Construction is allocation only — the pool
         // connects lazily — so bind stays side-effect-free.
-        let pool = Arc::new(SessionPool::new(
-            Arc::clone(&ctx.linked_sessions),
-            api_id.unwrap_or(0),
-        ));
+        let pool = Arc::new(SessionPool::new(Arc::clone(&ctx.linked_sessions), api_id));
         let identity = match (api_id, self.api_hash.clone()) {
             (Some(api_id), Some(api_hash)) => Some(MtprotoAppIdentity { api_id, api_hash }),
             _ => None,

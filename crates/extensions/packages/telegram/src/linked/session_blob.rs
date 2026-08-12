@@ -49,14 +49,32 @@ const BLOB_SCHEMA_VERSION: u8 = 1;
 /// byte must never reach a log line, an event, or a panic message.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SessionBlobError {
-    #[error("linked-session blob is not valid JSON")]
-    Malformed,
+    /// `reason` is category and position only, never blob content — see
+    /// [`bounded_serde_reason`].
+    #[error("linked-session blob is not valid JSON ({reason})")]
+    Malformed { reason: String },
     #[error("linked-session blob declares schema version {found}, expected {expected}")]
     UnsupportedVersion { found: u8, expected: u8 },
     #[error("linked-session blob carries an authorization key of the wrong length")]
     BadAuthKey,
-    #[error("linked-session blob could not be encoded")]
-    Encode,
+    #[error("linked-session blob could not be encoded ({reason})")]
+    Encode { reason: String },
+}
+
+/// A serde failure reduced to its category and position.
+///
+/// serde_json's own `Display` can echo rejected *content*
+/// (``invalid value: integer `…`, expected …``), and this file's charter is
+/// that no blob byte reaches a log line — so the attribution a corrupt blob
+/// gets is "what kind of failure, where", which is what a repair needs
+/// anyway.
+fn bounded_serde_reason(error: &serde_json::Error) -> String {
+    format!(
+        "{:?} error at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    )
 }
 
 /// The on-disk shape. Field names are short because the blob is written on
@@ -144,7 +162,9 @@ impl PersistedDcOption {
 /// `SessionBytes::new`, which takes ownership and zeroizes on drop — there is
 /// deliberately no borrowed intermediate for a caller to forget about.
 pub(crate) fn encode(session: &PersistedSession) -> Result<Vec<u8>, SessionBlobError> {
-    serde_json::to_vec(session).map_err(|_| SessionBlobError::Encode)
+    serde_json::to_vec(session).map_err(|error| SessionBlobError::Encode {
+        reason: bounded_serde_reason(&error),
+    })
 }
 
 /// Decode a session from custody.
@@ -154,7 +174,9 @@ pub(crate) fn encode(session: &PersistedSession) -> Result<Vec<u8>, SessionBlobE
 /// no way to attribute the failure.
 pub(crate) fn decode(bytes: &[u8]) -> Result<PersistedSession, SessionBlobError> {
     let session: PersistedSession =
-        serde_json::from_slice(bytes).map_err(|_| SessionBlobError::Malformed)?;
+        serde_json::from_slice(bytes).map_err(|error| SessionBlobError::Malformed {
+            reason: bounded_serde_reason(&error),
+        })?;
     if session.v != BLOB_SCHEMA_VERSION {
         return Err(SessionBlobError::UnsupportedVersion {
             found: session.v,
@@ -172,6 +194,26 @@ pub(crate) fn current_schema_version() -> u8 {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn a_malformed_blob_error_carries_category_and_position_only() {
+        // Before the fix the error was a bare `Malformed`, making a corrupt
+        // custody blob unattributable — the exact outcome `decode`'s own doc
+        // says it exists to avoid.
+        let error = decode(b"{\"v\": \"not-a-number\"}").expect_err("must reject");
+        let SessionBlobError::Malformed { reason } = &error else {
+            panic!("expected Malformed, got {error:?}");
+        };
+        assert!(
+            reason.contains("line") && reason.contains("column"),
+            "reason must attribute the failure: {reason}"
+        );
+        // The charter half: the rejected content itself never rides along.
+        assert!(
+            !reason.contains("not-a-number"),
+            "no blob byte may reach the error: {reason}"
+        );
+    }
 
     use grammers_session::types::PeerInfo;
 
@@ -267,7 +309,7 @@ mod tests {
     fn refuses_bytes_that_are_not_a_blob() {
         assert!(matches!(
             decode(b"not json"),
-            Err(SessionBlobError::Malformed)
+            Err(SessionBlobError::Malformed { .. })
         ));
     }
 

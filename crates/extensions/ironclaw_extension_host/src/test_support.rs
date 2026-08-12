@@ -257,9 +257,29 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "Acme link messages"
-inbound = false
-outbound = true
 conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "acme_link_signing_secret"
+signature_header = "X-Acme-Signature"
+signed_payload = [ { body = true } ]
+
+[admin_configuration]
+group_id = "acme.link"
+display_name = "Acme Link channel"
+fields = [ { handle = "acme_link_signing_secret", label = "Signing secret", secret = true } ]
 
 [auth.acme-link]
 method = "device_link"

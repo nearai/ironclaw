@@ -60,7 +60,15 @@ impl From<SessionPoolError> for ToolError {
             // park on the auth gate rather than teaching the model that
             // Telegram rejected its arguments.
             SessionPoolError::Revoked | SessionPoolError::NotLinked => mapping::auth_required(),
-            SessionPoolError::Custody(_) | SessionPoolError::AtCapacity => {
+            // Deployment-shaped, not model- or user-correctable: carry the
+            // honest sentence so the failure is attributable without a vendor
+            // call ever having happened.
+            SessionPoolError::NotConfigured => {
+                mapping::failed_because(StandardMessagingErrorCode::VendorError, error.to_string())
+            }
+            SessionPoolError::Custody(_)
+            | SessionPoolError::AtCapacity
+            | SessionPoolError::Poisoned => {
                 mapping::failed(StandardMessagingErrorCode::VendorError)
             }
         }

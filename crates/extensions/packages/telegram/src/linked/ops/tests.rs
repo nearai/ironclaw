@@ -118,6 +118,22 @@ fn a_revoked_session_parks_on_the_auth_gate() {
     let not_linked = ToolError::from(SessionPoolError::NotLinked);
     assert!(matches!(not_linked, ToolError::AuthRequired { .. }));
     let at_capacity = ToolError::from(SessionPoolError::AtCapacity);
+    let poisoned = ToolError::from(SessionPoolError::Poisoned);
+    let not_configured = ToolError::from(SessionPoolError::NotConfigured);
+    assert!(
+        matches!(&poisoned, ToolError::Failed { .. }),
+        "a poisoned pool is a failure, never an auth prompt: {poisoned:?}"
+    );
+    match &not_configured {
+        ToolError::Failed {
+            model_visible_cause: Some(cause),
+            ..
+        } => assert!(
+            cause.contains("MTProto application identity"),
+            "the not-configured cause must name the missing config: {cause}"
+        ),
+        other => panic!("expected a Failed with a cause, got {other:?}"),
+    }
     assert!(summary(&at_capacity).contains(StandardMessagingErrorCode::VendorError.as_str()));
 }
 

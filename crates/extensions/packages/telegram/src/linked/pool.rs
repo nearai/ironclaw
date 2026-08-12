@@ -79,6 +79,22 @@ pub(crate) enum SessionPoolError {
     /// The pool is full of sessions that are all in active use.
     #[error("the telegram session pool is at capacity")]
     AtCapacity,
+    /// A pool lock was poisoned by a panic on another task. Process-local
+    /// corruption, permanent until restart — deliberately distinct from
+    /// [`SessionPoolError::AtCapacity`], which reads as "retry shortly" and
+    /// would misdiagnose every call on the deployment forever.
+    #[error("a telegram session pool lock is poisoned")]
+    Poisoned,
+    /// The deployment carries no MTProto application identity
+    /// (`telegram_api_id` / `telegram_api_hash`), so no socket may be opened.
+    /// Detected before custody or any dial: connecting with a zero `api_id`
+    /// would burn a datacenter handshake to fail at the vendor with
+    /// `API_ID_INVALID` instead of failing here with the honest reason.
+    #[error(
+        "the deployment has not configured its MTProto application identity \
+         (telegram_api_id / telegram_api_hash)"
+    )]
+    NotConfigured,
 }
 
 /// What a revoke actually managed to do at the vendor.
@@ -147,7 +163,10 @@ impl PooledSession {
 
 struct SessionPoolInner {
     factory: Arc<dyn LinkedSessionPortFactory>,
-    api_id: i32,
+    /// `None` when the deployment declared no MTProto identity; every path
+    /// that would dial fails closed with [`SessionPoolError::NotConfigured`]
+    /// before touching custody or a socket.
+    api_id: Option<i32>,
     entries: Mutex<HashMap<LinkedAccountGrant, Arc<PooledSession>>>,
     /// Per-account generation counters. Keyed on the account **without** the
     /// revision, because a bump has to invalidate every revision's entry.
@@ -177,7 +196,11 @@ pub struct SessionPool {
 
 impl SessionPool {
     /// Build an empty pool. Performs no I/O and spawns nothing.
-    pub fn new(factory: Arc<dyn LinkedSessionPortFactory>, api_id: i32) -> Self {
+    ///
+    /// `api_id: None` builds a pool that refuses every acquire and reports
+    /// every cold logout unverified — the fail-closed shape for a deployment
+    /// without `telegram_api_id` / `telegram_api_hash`.
+    pub fn new(factory: Arc<dyn LinkedSessionPortFactory>, api_id: Option<i32>) -> Self {
         Self {
             inner: Arc::new(SessionPoolInner {
                 factory,
@@ -207,6 +230,10 @@ impl SessionPool {
         &self,
         grant: &LinkedAccountGrant,
     ) -> Result<Arc<PooledSession>, SessionPoolError> {
+        // Before the lookup, not just before the dial: a `None` identity can
+        // never have built a live entry, and failing here keeps the error
+        // ahead of any custody read.
+        let api_id = self.inner.api_id.ok_or(SessionPoolError::NotConfigured)?;
         self.ensure_sweeper();
 
         match self.inner.lookup(grant)? {
@@ -230,7 +257,7 @@ impl SessionPool {
         let fence = self.inner.fence_for(grant.account())?;
         let generation = fence.load(Ordering::Acquire);
         let candidate = Arc::new(PooledSession {
-            connection: MtprotoConnection::open(Arc::clone(&session), self.inner.api_id),
+            connection: MtprotoConnection::open(Arc::clone(&session), api_id),
             session,
             fence,
             generation,
@@ -314,9 +341,7 @@ impl SessionPoolInner {
         std::sync::MutexGuard<'_, HashMap<LinkedAccountGrant, Arc<PooledSession>>>,
         SessionPoolError,
     > {
-        self.entries
-            .lock()
-            .map_err(|_| SessionPoolError::AtCapacity)
+        self.entries.lock().map_err(|_| SessionPoolError::Poisoned)
     }
 
     fn lookup(&self, grant: &LinkedAccountGrant) -> Result<Lookup, SessionPoolError> {
@@ -333,10 +358,7 @@ impl SessionPoolInner {
     }
 
     fn fence_for(&self, account: &LinkedAccountRef) -> Result<Arc<AtomicU64>, SessionPoolError> {
-        let mut fences = self
-            .fences
-            .lock()
-            .map_err(|_| SessionPoolError::AtCapacity)?;
+        let mut fences = self.fences.lock().map_err(|_| SessionPoolError::Poisoned)?;
         Ok(Arc::clone(
             fences
                 .entry(account.clone())
@@ -435,11 +457,17 @@ impl LinkedAccountRevoker {
 
 /// Log out an account that has no live pooled session.
 async fn revoke_cold(inner: &SessionPoolInner, grant: &LinkedAccountGrant) -> RevokeOutcome {
+    // Without an MTProto identity no dial is possible, so the vendor logout
+    // can never be verified. Say so immediately instead of burning a custody
+    // read and a doomed handshake.
+    let Some(api_id) = inner.api_id else {
+        return RevokeOutcome::LogoutUnverified;
+    };
     let port = inner.factory.open(grant);
     let Ok(session) = IronclawSession::hydrate(port).await else {
         return RevokeOutcome::LogoutUnverified;
     };
-    let connection = MtprotoConnection::open(session, inner.api_id);
+    let connection = MtprotoConnection::open(session, api_id);
     if log_out(&connection).await {
         RevokeOutcome::LoggedOut
     } else {
@@ -529,6 +557,63 @@ mod tests {
         assert_eq!(generation, 0);
         fence.fetch_add(1, Ordering::AcqRel);
         assert_ne!(fence.load(Ordering::Acquire), generation);
+    }
+
+    /// A factory that panics if custody is ever consulted — proof a
+    /// fail-closed path never got that far.
+    struct UntouchableFactory;
+
+    impl LinkedSessionPortFactory for UntouchableFactory {
+        fn open(
+            &self,
+            _grant: &LinkedAccountGrant,
+        ) -> std::sync::Arc<dyn ironclaw_extension_contracts::linked_session::LinkedSessionPort>
+        {
+            panic!("custody must not be touched on a fail-closed path");
+        }
+    }
+
+    #[test]
+    fn a_poisoned_pool_lock_reports_poisoned_not_at_capacity() {
+        // Before the fix this surfaced as `AtCapacity` — a "retry shortly"
+        // answer to permanent process-local corruption.
+        let pool = SessionPool::new(Arc::new(UntouchableFactory), Some(1));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = pool.inner.entries.lock().expect("first lock");
+            panic!("poison the entries lock");
+        }));
+        assert!(matches!(
+            pool.inner.lock_entries(),
+            Err(SessionPoolError::Poisoned)
+        ));
+    }
+
+    #[tokio::test]
+    async fn acquire_without_an_app_identity_fails_closed_before_custody() {
+        // Before the fix this dialed Telegram with `api_id = 0` and failed at
+        // the vendor; the panicking factory proves custody is never touched.
+        let pool = SessionPool::new(Arc::new(UntouchableFactory), None);
+        match pool.acquire(&grant("acct-1", 1)).await {
+            Err(SessionPoolError::NotConfigured) => {}
+            Err(other) => panic!("expected NotConfigured, got {other:?}"),
+            Ok(_) => panic!("a deployment without an identity must fail closed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_revoke_without_an_app_identity_reports_logout_unverified() {
+        // The unlink still proceeds locally; what may be *claimed* is capped.
+        let inner = SessionPoolInner {
+            factory: Arc::new(UntouchableFactory),
+            api_id: None,
+            entries: Mutex::new(HashMap::new()),
+            fences: Mutex::new(HashMap::new()),
+            sweeper: Mutex::new(None),
+        };
+        assert_eq!(
+            revoke_cold(&inner, &grant("acct-1", 1)).await,
+            RevokeOutcome::LogoutUnverified
+        );
     }
 
     #[test]

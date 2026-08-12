@@ -70,14 +70,14 @@ pub struct GenericExtensionHostParams {
     pub governor: Arc<dyn ResourceGovernor>,
     pub assembly: ExtensionHostAssemblyConfig,
     pub channel_egress_transport: Option<Arc<dyn crate::egress::ChannelEgressTransport>>,
-    /// Linked-account custody, when the deployment wires it (the
-    /// credential-service-backed store). `None` composes the fail-closed
-    /// store: an extension can hold a handle and is told custody is
-    /// unavailable — the only honest answer where no material store exists.
-    pub linked_sessions: Option<Arc<LinkedSessionStore>>,
-    /// The per-extension linked-account resolver factory, when custody is
-    /// wired. `None` composes resolvers that answer `Unavailable`.
-    pub linked_accounts: Option<Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>>,
+    /// Linked-account custody. A deployment that wires none passes
+    /// [`LinkedSessionStore::unavailable`] — the fail-closed store, chosen at
+    /// the composition boundary rather than defaulted here, so this type
+    /// cannot claim custody is optional when production always supplies it.
+    pub linked_sessions: Arc<LinkedSessionStore>,
+    /// The per-extension linked-account resolver factory; the unwired shape
+    /// is the explicit `UnavailableLinkedAccountResolution`.
+    pub linked_accounts: Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>,
     /// Admin-configuration reads for load-time factory construction. `None`
     /// composes the fail-closed source.
     pub admin_secrets: Option<Arc<crate::ChannelConfigService>>,
@@ -226,14 +226,8 @@ pub async fn build_generic_extension_host(
             reserved_capability_ids: assembly.reserved_capability_ids,
             reserved_ingress_routes: assembly.reserved_ingress_routes,
             hook_deadline: assembly.hook_deadline,
-            // Composition wires the credential-service-backed custody store;
-            // a deployment without one gets the fail-closed store — an
-            // extension can hold a handle and is told custody is unavailable,
-            // which is the only honest answer where no material store exists.
-            linked_sessions: linked_sessions.unwrap_or_else(LinkedSessionStore::unavailable),
-            linked_accounts: linked_accounts.unwrap_or_else(|| {
-                Arc::new(crate::linked_account_resolution::UnavailableLinkedAccountResolution)
-            }),
+            linked_sessions,
+            linked_accounts,
             admin_secrets,
         })
         .await,
@@ -1091,8 +1085,10 @@ input_schema_ref = "schemas/echo.input.json"
                 Duration::from_secs(30),
             ),
             channel_egress_transport: None,
-            linked_sessions: None,
-            linked_accounts: None,
+            linked_sessions: LinkedSessionStore::unavailable(),
+            linked_accounts: Arc::new(
+                crate::linked_account_resolution::UnavailableLinkedAccountResolution,
+            ),
             admin_secrets: None,
         })
         .await;

@@ -137,8 +137,15 @@ pub(crate) async fn build_backend_extension_host(
                 std::time::Duration::from_secs(30),
             ),
             channel_egress_transport: channel_egress_transport.clone(),
-            linked_sessions,
-            linked_accounts,
+            // A deployment without product auth composes no custody; the
+            // fail-closed shapes are chosen here, at the boundary, so the
+            // host's own dependency struct stays honest about what
+            // production always supplies.
+            linked_sessions: linked_sessions
+                .unwrap_or_else(ironclaw_extension_host::LinkedSessionStore::unavailable),
+            linked_accounts: linked_accounts.unwrap_or_else(|| {
+                Arc::new(ironclaw_extension_host::UnavailableLinkedAccountResolution)
+            }),
             admin_secrets: Some(Arc::clone(&admin_configuration_resolver)),
         },
     )

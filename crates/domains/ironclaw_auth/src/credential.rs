@@ -814,12 +814,17 @@ pub trait CredentialAccountService: Send + Sync {
             link_revision: account.link_revision,
         };
         // Load-then-CAS: learn the stored version (an orphan blob from a
-        // crashed link is legal here), then overwrite it. A load failure does
-        // not abort the relink — the conflict path below still learns the
-        // current version.
+        // crashed link is legal here), then overwrite it.
         let expected = match self.load_opaque_material(target.clone()).await {
             Ok(Some(snapshot)) => snapshot.version,
             Ok(None) => LinkedSessionVersion::absent(),
+            // silent-ok: best-effort version probe before the relink write.
+            // A failed load gets the same answer as a missing blob because
+            // the compare-and-swap below is the authority either way: if a
+            // blob exists after all, this `Absent` expectation loses with the
+            // current version and the conflict arm retries against it — so a
+            // transient read error can cost one extra round-trip, never a
+            // clobbered or corrupted custody record.
             Err(_) => LinkedSessionVersion::absent(),
         };
         let material = SessionBytes::new(request.material.expose().to_vec())

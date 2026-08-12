@@ -314,6 +314,18 @@ mod tests {
                     secret: false,
                     provided: false,
                 },
+                ChannelConfigField {
+                    name: "telegram_api_id".to_string(),
+                    label: "MTProto api_id (linked accounts)".to_string(),
+                    secret: false,
+                    provided: false,
+                },
+                ChannelConfigField {
+                    name: "telegram_api_hash".to_string(),
+                    label: "MTProto api_hash (linked accounts)".to_string(),
+                    secret: true,
+                    provided: false,
+                },
             ],
             "the handle becomes `name`, and label/secret/provided cross unchanged"
         );
