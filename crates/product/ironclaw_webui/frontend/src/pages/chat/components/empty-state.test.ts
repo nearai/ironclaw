@@ -72,3 +72,15 @@ test("EmptyState mounts the OOBE suggestion surface so the flag-gated cards rend
     "the suggestion surface must be mounted in the landing view",
   );
 });
+
+test("EmptyState forwards onApproveTask to the suggestion surface so approving a card runs it", () => {
+  // Test through the caller: EmptyState must hand the approve callback down to
+  // the surface (which wires it onto each card), exactly as it forwards the
+  // commands list to ChatInput above.
+  const onApproveTask = () => {};
+  const { tree, components } = renderEmptyState({ onApproveTask });
+
+  const surface = findComponent(tree, components.SuggestedTaskSurface);
+  const props = componentProps(surface, components.SuggestedTaskSurface);
+  assert.equal(props.onApproveTask, onApproveTask);
+});

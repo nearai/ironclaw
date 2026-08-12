@@ -6,6 +6,7 @@ import { SuggestedTaskSurface } from "./suggested-task-surface";
 export function EmptyState({
   onSuggestion,
   onSend,
+  onApproveTask,
   commands = [],
   disabled,
   sendDisabled,
@@ -53,7 +54,7 @@ export function EmptyState({
         </p>
       </div>
 
-      <SuggestedTaskSurface />
+      <SuggestedTaskSurface onApproveTask={onApproveTask} />
 
       <div className="mt-9 w-full max-w-5xl">
         <ChatInput

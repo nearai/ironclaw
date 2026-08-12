@@ -328,6 +328,16 @@ export function Chat({
     [composerSendDisabled, handleSend, setSuggestions]
   );
 
+  // Approving an OOBE suggestion card runs its task as a real foreground turn
+  // through the existing send path; the card's title is shown as the message
+  // display content while its `approvePrompt` drives the agent.
+  const handleApproveTask = React.useCallback(
+    (task) => {
+      void handleSend(task.approvePrompt, { displayContent: task.title });
+    },
+    [handleSend]
+  );
+
   const handleCancelRun = React.useCallback(
     async () => {
       try {
@@ -426,6 +436,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
+            onApproveTask={handleApproveTask}
             commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}

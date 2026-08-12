@@ -38,6 +38,12 @@ export interface SuggestedTask {
   /** One-line proposal/result for the card subtitle. */
   summary: string;
   state: SuggestedTaskState;
+  /**
+   * Instruction submitted through the normal send path when the user approves
+   * the card — this is what actually runs the agent as a foreground turn. The
+   * card's `title` is shown as the message's display content instead.
+   */
+  approvePrompt: string;
   /** Tool name shown in the Connect CTA when `state === "unconnected"`. */
   connectLabel?: string;
 }
