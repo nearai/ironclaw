@@ -38,6 +38,18 @@ rule 1).
     significant-event sink (`events`), and the prompt-write safety engine
     (`PromptWriteSafetyPolicy` + protected-path/decision/event types, `safety`)
     that implements the vocabulary the neutral contract defines.
+- The model-facing memory **guidance** this provider ships
+  (`prompts/memory-guidance.md`, declared as `[memory].guidance_doc`): when a
+  durable fact is worth saving, how to phrase it, what never to save. It is
+  provider-owned because it names this provider's tools and describes this
+  provider's recall behavior; the host appends whatever the bound provider
+  declares and writes none of it. A provider that ships none has nothing
+  appended (mem0 declares none on purpose).
+- The always-on curated prefix of `read_long_term`: this provider serves its
+  standing `MEMORY.md` at the head of its own long-term lane, ahead of the
+  full-text hits and independent of the turn's query (#7185). Budget, line
+  splitting, and the truncation marker are this provider's policy — the host
+  sees ordinary lane snippets and knows no document paths.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Guardrails

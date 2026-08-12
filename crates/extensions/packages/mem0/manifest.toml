@@ -18,6 +18,10 @@ service = "mem0_memory_provider"
 # calls them.
 [memory]
 lifecycle = ["read_long_term", "profile_read"]
+# No `guidance_doc`: mem0's recall is search-first and it serves no standing
+# document, so the native provider's "save it to `memory`, it comes back every
+# turn" guidance would be wrong here. Absent means nothing is appended rather
+# than something inaccurate. mem0 may ship its own search-first guidance later.
 
 # mem0's model tool surface, declared under the reserved stable
 # ironclaw.memory.* namespace so the model's memory tools keep their names
@@ -40,7 +44,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
+description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. Use this to save a durable user preference, fact, decision, or correction so it stays available in future conversations (target \"memory\", append mode). For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"

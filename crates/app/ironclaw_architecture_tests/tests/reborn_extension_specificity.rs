@@ -365,11 +365,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          the leak-scanner carve-out domain (#5965)",
     ),
     (
-        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
-        "github",
-        "credential-prefix redaction (github_pat_)",
-    ),
-    (
         "crates/ironclaw_auth/src/lib.rs",
         "gmail",
         "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",

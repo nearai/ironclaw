@@ -709,7 +709,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // read from this test's failure message. 7_885 -> 7_892 after merging
         // #7076's Basic credential target declaration and validator vocabulary;
         // composition and injection remain in ironclaw_host_runtime.
-        ("ironclaw_extension_contracts", 7_892),
+        // 7_892 -> 7_947 (2026-08-11, #7185 provider-shipped memory guidance):
+        // the optional `[memory].guidance_doc` field on `MemoryDescriptor`, its
+        // doc comment, and two parse tests. Manifest declaration vocabulary
+        // only — the guidance TEXT ships with the memory-native package, the
+        // ref is resolved through that package's public API in
+        // ironclaw_host_runtime, and prompt assembly stays in composition. This
+        // crate gains a field name and no behavior. Count read from this test's
+        // own failure message.
+        ("ironclaw_extension_contracts", 7_947),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -741,12 +749,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 18_974 -> 18_994 (#7076 takeover): the
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
-        // ironclaw_host_runtime.
-        // 18_994 -> 19_017 (#7525): add the typed
+        // ironclaw_host_runtime. 18_994 -> 19_063 (2026-08-11, #7509 plus
+        // #7484's merged host-context contract):
+        // `ModelResultPreview` now redacts credential-keyed values inside
+        // nested and line-numbered JSON before marker masking can destroy the
+        // key/value relationship; `main` adds the bounded context-window
+        // watermark DTO. Count read from this test's own failure message.
+        // 19_063 -> 19_086 (#7525, merged after #7509): add the typed
         // `UnattendedQuestionEndingResponse` invalid-output reason and its
-        // sanitized user-facing summary. Classification and recovery remain in
-        // ironclaw_agent_loop; this crate owns only shared failure vocabulary.
-        ("ironclaw_host_api", 19_017),
+        // sanitized user-facing summary. Classification and recovery remain
+        // in ironclaw_agent_loop; this crate owns only shared failure
+        // vocabulary. Count read from this test's own failure message.
+        ("ironclaw_host_api", 19_086),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -818,7 +832,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the batch-ordering port contract now defaults to ordered entry and
         // documents the explicit opt-in required for concurrent singles.
         // Scheduling and wrapper behavior remain in their owning loop crates.
-        ("ironclaw_loop_contracts", 13_345),
+        // 13_345 -> 13_524 (2026-08-12, #7509 prompt recovery hardening):
+        // production prompt validation checks structural limits and control
+        // characters only; decoded Basic-auth samples remain test-only. Count
+        // read from this test's own failure message after merging #7416.
+        ("ironclaw_loop_contracts", 13_524),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

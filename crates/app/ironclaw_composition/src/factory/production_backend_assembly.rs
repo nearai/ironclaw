@@ -1354,6 +1354,7 @@ pub(super) async fn build_backend_production(
         extension_filesystem: Arc::clone(&stores.filesystem),
         memory_service_resolver: resolved_memory.resolver.clone(),
         memory_lifecycle: resolved_memory.lifecycle.clone(),
+        memory_guidance: resolved_memory.guidance.clone(),
         workspace_mounts: runtime_workspace_mounts,
         standalone_storage_root,
         default_system_prompt_path,

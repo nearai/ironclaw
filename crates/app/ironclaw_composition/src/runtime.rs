@@ -136,7 +136,9 @@ use crate::outbound::{
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
-use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::root::default_system_prompt::{
+    DefaultSystemPromptIdentitySource, SystemPromptProtocols,
+};
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_assistant::{
     OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID, RebornOutboundPreferencesService,
@@ -3660,6 +3662,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         resolved_memory_provider,
         &memory_lifecycle,
     );
+    // The bound provider's own memory guidance for the model, if it ships any
+    // (#7185). The text is the provider's — it names that provider's tools and
+    // describes that provider's recall behavior — resolved generically at
+    // bundle-construction time against the BOUND provider's own asset table
+    // (`memory_provider_factory::resolve_memory_provider`), never by a
+    // host-side match on a specific provider's constants. Two conditions, both
+    // necessary: a provider must actually be resolved (a `Disabled` binding
+    // registers no package, so the model sees no `ironclaw.memory.*` tools and
+    // must not be told they exist), and that provider must declare a
+    // `guidance_doc`. Either missing ⇒ nothing is appended.
+    let memory_guidance = wired_memory_context_service
+        .is_some()
+        .then(|| {
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_guidance.clone())
+                .unwrap_or_default()
+        })
+        .flatten();
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -3813,8 +3833,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     DefaultSystemPromptIdentitySource::try_new(
                         standalone_storage_root,
                         default_system_prompt_path,
-                        resolved_tool_disclosure.is_enabled(),
-                        bool_env_flag("BENCHMARKING_MODE"),
+                        SystemPromptProtocols {
+                            // `is_enabled()` (not `is_bridged()`): #7410 widened
+                            // the disclosure protocol to every enabled mode.
+                            disclosure: resolved_tool_disclosure.is_enabled(),
+                            benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
+                            // Provider-shipped, not host-owned: whatever the
+                            // bound memory extension declares as its guidance,
+                            // or nothing.
+                            memory_guidance,
+                        },
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
                         reason: error.to_string(),
