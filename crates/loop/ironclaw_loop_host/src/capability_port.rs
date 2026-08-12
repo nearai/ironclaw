@@ -1775,6 +1775,10 @@ impl HostRuntimeLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        false
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.validate_visible_request_scope()?;
         let Some((_, snapshot)) = self.current_snapshot()? else {
