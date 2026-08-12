@@ -35,11 +35,10 @@ pub use delivered_gate_routes::{
     NoopDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
-    CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
-    CommunicationDeliveryResolution, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    DeliveryTargetCapabilities, RequestedOutboundContext, RequestedOutboundKind,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
-    SystemEventReasonCode,
+    CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryResolution,
+    CommunicationDeliveryResolutionRequest, CommunicationModality, DeliveryTargetCapabilities,
+    RequestedOutboundContext, RequestedOutboundKind, RunNotificationContext,
+    RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
 };
 pub use delivery_targets::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetChannel,

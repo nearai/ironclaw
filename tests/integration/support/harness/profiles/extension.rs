@@ -811,7 +811,13 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
             tools: Some(Arc::new(AcmeFixtureToolAdapter {
                 fallback_egress: Arc::clone(&self.fallback_egress),
             })),
-            channel: Some(Arc::new(AcmeFixtureChannelAdapter)),
+            channel: {
+                let adapter = Arc::new(AcmeFixtureChannelAdapter);
+                ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
         })
     }
 }
@@ -826,10 +832,11 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
 pub(crate) struct AcmeFixtureChannelAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtureChannelAdapter {
-    fn inbound(
+impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtureChannelAdapter {
+    async fn receive(
         &self,
         request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<
         ironclaw_extension_contracts::channel_adapter::InboundOutcome,
         ironclaw_extension_contracts::channel_adapter::ChannelError,
@@ -879,18 +886,23 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
                     text: field("text")?,
                     trigger: ProductTriggerReason::DirectChat,
                     attachments: Vec::new(),
+                    conversation_context: None,
                     reply_context: Some(b"acme-reply-route".to_vec()),
                 }]))
             }
             _ => Ok(InboundOutcome::Ignore),
         }
     }
+}
 
+/// One vendor mechanism serves both output axes for this fixture, exactly as
+/// it does for a real conversational vendor.
+impl AcmeFixtureChannelAdapter {
     /// Minimal real outbound: one vendor POST per text part. Proves the
     /// generic delivery path (coordinator → adapter → restricted egress)
     /// needs no real product, and gives the conformance suite a deliverable
     /// fixture.
-    async fn deliver(
+    async fn send(
         &self,
         envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
         egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
@@ -952,7 +964,35 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
                 break;
             }
         }
-        Ok(ironclaw_extension_contracts::channel_adapter::DeliveryReport { parts })
+        Ok(ironclaw_extension_contracts::channel_adapter::DeliveryReport::from_parts(parts))
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_extension_contracts::channel_adapter::ChannelReply for AcmeFixtureChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        self.send(envelope, egress).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_extension_contracts::channel_adapter::ChannelDelivery for AcmeFixtureChannelAdapter {
+    async fn deliver(
+        &self,
+        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        self.send(envelope, egress).await
     }
 }
 
@@ -1741,9 +1781,14 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
             tools: None,
-            channel: Some(Arc::new(
-                ironclaw_telegram_extension::TelegramChannelAdapter::default(),
-            )),
+            channel: {
+                let adapter =
+                    Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
+                ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
         })
     }
 }
@@ -1912,18 +1957,32 @@ pub(crate) fn extension_delivery_with_gated_write_tools_profile() -> HarnessResu
 fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }
 }
 
 fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
-        adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         // Explicit model-initiated delivery (`builtin.outbound_deliver`)
         // decodes a Telegram target's conversation through THIS codec
         // (`CoordinatedModelChannelDelivery`'s `CodecChannelTargetResolver`
@@ -1935,6 +1994,8 @@ fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensio
             ironclaw_telegram_extension::TelegramPreferenceTargetCodec,
         )),
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }
 }
 
@@ -1942,42 +2003,38 @@ pub(crate) async fn extension_delivery_tools() -> HarnessResult<HostRuntimeCapab
     extension_delivery_tools_profile()?.build().await
 }
 
-/// Push-service endpoint token the web-push delivery journeys script a
+/// Push-service endpoint token the web-app delivery journeys script a
 /// vendor `410 Gone` for — the "this subscription no longer exists" arm the
 /// adapter must prune on. Mirrored (not imported — a separate test binary)
 /// in `delivery_user_journeys.rs`.
-const WEB_PUSH_GONE_ENDPOINT_TOKEN: &str = "gone-subscription-token";
+const WEB_APP_GONE_ENDPOINT_TOKEN: &str = "gone-subscription-token";
 
 /// [`extension_delivery_with_gated_write_tools_profile`] PLUS the complete
-/// web-push channel: the deployment binding (adapter + codec + catalog
-/// provider) around one late-bound runtime slot, the slot on the composition
-/// input, the package manifest bundled, and the vendor router extended so
-/// push-service POSTs answer `201 Created` (`410 Gone` for the reserved
-/// endpoint token above). Returns the slot so a scenario can reach the
-/// composed subscription store if it needs read-back.
-pub(crate) fn extension_delivery_with_web_push_tools_profile()
--> HarnessResult<(ToolsProfile, ironclaw_web_push::WebPushRuntimeSlot)> {
+/// web-app channel: the deployment binding (adapter + codec + catalog
+/// provider), its generic first-party initializer, the bundled package
+/// manifest, and the vendor router extended so push-service POSTs answer `201
+/// Created` (`410 Gone` for the reserved endpoint token above).
+pub(crate) fn extension_delivery_with_web_app_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_delivery_with_gated_write_tools_profile()?;
-    let slot = ironclaw_web_push::WebPushRuntimeSlot::new();
     let network_egress = Arc::new(
         RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
-            .with_vendor_router(web_push_delivery_vendor_router()),
+            .with_vendor_router(web_app_delivery_vendor_router()),
     );
     profile.options = profile
         .options
-        .with_web_push_channel_extension(slot.clone())
+        .with_web_app_channel_extension()
         .with_recording_network_egress(network_egress);
-    Ok((profile, slot))
+    Ok(profile)
 }
 
 /// The delivery vendor router extended for push services: any POST to an
-/// endpoint on the web-push manifest's declared hosts answers the way a
+/// endpoint on the web-app manifest's declared hosts answers the way a
 /// real push service does — `201 Created` with an empty body (RFC 8030), or
 /// `410 Gone` for the reserved dead-subscription token.
-fn web_push_delivery_vendor_router() -> Arc<VendorResponseRouter> {
+fn web_app_delivery_vendor_router() -> Arc<VendorResponseRouter> {
     Arc::new(move |request: &ironclaw_network::NetworkHttpRequest| {
         if request.url.starts_with("https://fcm.googleapis.com/") {
-            if request.url.contains(WEB_PUSH_GONE_ENDPOINT_TOKEN) {
+            if request.url.contains(WEB_APP_GONE_ENDPOINT_TOKEN) {
                 return Some((410, Vec::new()));
             }
             return Some((201, Vec::new()));

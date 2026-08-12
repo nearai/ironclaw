@@ -10,18 +10,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_host_api::{
     ids::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
-    product_adapter::ProtocolAuthEvidence,
-    product_adapter::identity::{AdapterInstallationId, ProductAdapterId},
-    product_adapter_error::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString},
+    product_adapter_error::{ProductAdapterError, RedactedString},
     turn::{TurnActor, TurnScope},
 };
 
 use crate::inbound::{
-    ChannelInboundClassification, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
+    ChannelInboundClassification, ProductInboundAck, ProductInboundEnvelope, TrustedInboundContext,
 };
 
 /// One verified, normalized channel message admitted through a product surface.
@@ -31,18 +28,14 @@ use crate::inbound::{
 /// the durable inbound envelope and commit path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelInboundSurfaceRequest {
-    pub adapter_id: ProductAdapterId,
-    pub source_channel: ProductSourceChannel,
-    pub installation_id: AdapterInstallationId,
-    pub evidence: ProtocolAuthEvidence,
-    pub received_at: chrono::DateTime<chrono::Utc>,
+    /// One paired trust-and-binding context minted at the host boundary.
+    /// Invalid cross-products cannot be represented here.
+    pub context: TrustedInboundContext,
     pub message: NormalizedInboundMessage,
     pub classification: Option<ChannelInboundClassification>,
-    /// Recent vendor-side conversation history fetched host-side at ingress
-    /// (through the channel's restricted egress) for shared-channel triggers.
-    /// UNTRUSTED third-party text, advisory only: `None` whenever the channel
-    /// has no such capability or the fetch degraded.
-    pub channel_context: Option<String>,
+    /// Caller-requested model hint for session/API transports. `None` for
+    /// channels that don't select a model.
+    pub requested_model: Option<String>,
 }
 
 /// Durable channel admission evidence returned by product workflow.
@@ -79,48 +72,13 @@ impl ChannelInboundSurfaceOutcome {
 /// Typed admission door for extension/channel ingress.
 #[async_trait]
 pub trait ChannelInboundProductSurface: Send + Sync {
+    /// Admit one complete, normalized channel message. Attachment bytes live
+    /// only in `request.message` and are consumed by the product workflow at
+    /// acceptance; they never enter the serialized durable envelope.
     async fn admit_channel_inbound(
         &self,
         request: ChannelInboundSurfaceRequest,
     ) -> ChannelInboundSurfaceOutcome;
-
-    /// Admit one channel message while pinning the exact adapter and
-    /// manifest-restricted egress authority that parsed it, so accepted
-    /// user-message intake can fetch attachment bytes through restricted
-    /// egress after replay dedupe and before-inbound policy. The authority is
-    /// transient host state and never enters the serialized envelope or the
-    /// durable action ledger.
-    ///
-    /// The default admits attachment-free messages through
-    /// [`Self::admit_channel_inbound`] and fails attachment-bearing admission
-    /// closed for surfaces without transfer support.
-    ///
-    /// The failure is **permanent**: a surface that does not implement
-    /// transfer will never implement it for a redelivery of the same message,
-    /// so a retryable outcome would leave the vendor redelivering forever
-    /// while the user receives nothing — not even the message text. This
-    /// matches the equivalent default on the inbound turn service, which is
-    /// the same structural gap one layer down. A missing *deployment* egress
-    /// transport is a different, operator-fixable condition and stays
-    /// retryable at the ingress sink.
-    async fn admit_channel_inbound_with_attachment_transfer(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-        _channel_adapter: Arc<dyn ChannelAdapter>,
-        _channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> ChannelInboundSurfaceOutcome {
-        if request.message.attachments.is_empty() {
-            return self.admit_channel_inbound(request).await;
-        }
-        ChannelInboundSurfaceOutcome::Invalid(ProductAdapterError::SurfaceRejected {
-            kind: ProductSurfaceRejectionKind::InvalidRequest,
-            status_code: 400,
-            retryable: false,
-            reason: RedactedString::new(
-                "channel attachment transfer is not supported by this product surface",
-            ),
-        })
-    }
 }
 
 /// Authenticated product-surface caller stamped by a trusted terminal boundary.

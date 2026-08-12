@@ -786,10 +786,18 @@ mod tests {
 
         let events = source_text("pages/chat/lib/useChatEvents.ts");
         assert!(events.contains("isFinalReply: true"));
+        // The in-flight marker is evidence-driven now: projection text is
+        // final only when the durable projection says so, so the pin asserts
+        // the derivation instead of a hardcoded `false`.
         assert!(
-            events.contains("isFinalReply: false"),
+            events.contains("const finalizedText = item.text.finalized === true;"),
+            "projection-text finality must be driven by the durable finalized bit"
+        );
+        assert!(
+            events.contains("isFinalReply: finalizedText"),
             "live projection text must remain in-flight until final reply/timeline finalizes it"
         );
+        assert!(events.contains("isStreaming: !finalizedText"));
         assert!(events.contains("const textRunId = item.text.run_id || null;"));
     }
 

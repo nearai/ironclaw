@@ -285,6 +285,47 @@ pub async fn channel_conversation_services(
     )
 }
 
+/// Deployment-wide durable idempotency ledger for the authenticated-session
+/// inbound lane (browser + API-key transports riding `submit_turn`). One
+/// store for the whole session surface: fingerprints are already
+/// tenant/actor/conversation-scoped, so a single mount serves every session
+/// caller, exactly like the per-extension channel ledgers serve every vendor
+/// sender. Uses the same mount alias, bounds, and CAS-backed store as the
+/// channel workflow ledgers so the two lanes cannot drift onto different
+/// durability semantics.
+pub fn build_session_inbound_ledger(
+    filesystem: &Arc<dyn RootFilesystem>,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
+    ledger_scope: ResourceScope,
+) -> Result<Arc<dyn IdempotencyLedger>, String> {
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(tenant_id.as_str());
+    let root = VirtualPath::new(format!(
+        "/tenants/{tenant}/shared/session-inbound/product-workflow/idempotency"
+    ))
+    .map_err(|error| format!("invalid session ledger storage root: {error}"))?;
+    let alias = MountAlias::new("/engine/product_surface/idempotency")
+        .map_err(|error| format!("invalid session ledger mount alias: {error}"))?;
+    let view = MountView::new(vec![MountGrant::new(
+        alias,
+        root,
+        MountPermissions::read_write_list_delete(),
+    )])
+    .map_err(|error| format!("invalid session ledger mount view: {error}"))?;
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(filesystem),
+        view,
+    ));
+    let settled_limit = NonZeroUsize::new(CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT)
+        .ok_or_else(|| "settled entry limit must be non-zero".to_string())?;
+    let prune_interval = NonZeroUsize::new(CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL)
+        .ok_or_else(|| "settled prune interval must be non-zero".to_string())?;
+    Ok(Arc::new(
+        RebornFilesystemIdempotencyLedger::new(scoped, ledger_scope)
+            .with_settled_entry_limit(settled_limit)
+            .with_settled_prune_interval(prune_interval),
+    ))
+}
+
 /// The durable per-extension workflow state, private to this module: the
 /// conversations half must not leave it (see the module doc).
 struct ChannelWorkflowState {

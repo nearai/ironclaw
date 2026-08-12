@@ -255,19 +255,6 @@ pub(crate) type ComposedToolPermissionOverrideStore =
 
 pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<CompositeRootFilesystem>;
 
-/// Composed web-push handles the product surface consumes: the subscription
-/// store behind the subscribe/unsubscribe commands and the (non-secret)
-/// VAPID public key browsers use as `applicationServerKey`.
-#[derive(Clone)]
-pub(crate) struct WebPushComposition {
-    pub(crate) subscriptions: Arc<dyn ironclaw_web_push::WebPushSubscriptionStore>,
-    pub(crate) vapid_public_key: String,
-    /// Push-service hosts enrollments may target, read from the web-push
-    /// manifest's `[[channel.egress]]` declarations (the same list the
-    /// channel's restricted egress enforces at send time).
-    pub(crate) allowed_push_hosts: Vec<String>,
-}
-
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     pub(crate) user_sandbox_process_port:
@@ -288,6 +275,11 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
     pub(crate) capability_policy: Arc<BuiltinCapabilityPolicy>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Host-owned per-user delivery registrations (channel contract §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes each channel's non-secret client-bootstrap document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
@@ -398,10 +390,6 @@ pub(crate) struct RebornRuntimeStores {
     /// are consumed by `build_reborn_runtime` when the channel host assembly
     /// starts.
     pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
-    /// The web-push channel's composed handles (subscription store + the
-    /// advertised VAPID public key); `None` when the binary supplied no
-    /// web-push runtime slot.
-    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     /// Manifest-declared deployment channel surfaces, independent of user
     /// installation/activation state.
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,

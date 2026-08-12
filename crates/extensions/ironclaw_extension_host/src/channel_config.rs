@@ -403,7 +403,7 @@ impl ChannelConfigService {
                 descriptor
                     .fields
                     .iter()
-                    .any(|field| field.secret && field.handle == *handle)
+                    .any(|field| field.secret && !field.host_managed && field.handle == *handle)
             }) && let Some(material) = admin
                 .service
                 .secret_material(&admin.scope, &descriptor.group_id, handle)
@@ -713,8 +713,6 @@ service = "acmechat.extension/v1"
 [channel]
 id = "messages"
 display_name = "AcmeChat messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -742,6 +740,58 @@ host = "api.acmechat.example"
 methods = ["post"]
 credential_handle = "acmechat_api_token"
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = false
+"#;
+
+    /// A host-managed deployment secret is declared for egress validation,
+    /// but its bytes are seeded by a first-party initializer rather than the
+    /// operator configuration surface.
+    const HOST_MANAGED_SECRET_FIXTURE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "browser-notifier"
+name = "Browser Notifier"
+version = "0.1.0"
+description = "host-managed secret fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "browser-notifier.extension/v1"
+
+[admin_configuration]
+group_id = "extension.browser-notifier"
+display_name = "Browser notifier deployment configuration"
+fields = [
+  { handle = "browser_signing_key", label = "Signing key", secret = true, required = false, host_managed = true },
+]
+
+[channel]
+id = "notifications"
+display_name = "Browser notifications"
+conversation_model = "isolated"
+
+[channel.reply]
+transport = "stream"
+
+[channel.delivery]
+transport = "push"
+requires_enrollment = true
+
+[channel.ingress]
+method = "post"
+
+[channel.ingress.verification]
+kind = "authenticated_session"
+
+[[channel.egress]]
+scheme = "https"
+host = "push.example"
+methods = ["post"]
+credential_handle = "browser_signing_key"
+injection = { type = "vapid_authorization" }
 
 [channel.presentation]
 supports_markdown = false
@@ -1012,6 +1062,68 @@ fields = [
                 .unwrap();
             assert_eq!(secrecy::ExposeSecret::expose_secret(&value), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn host_managed_secret_resolves_from_scoped_store_not_operator_configuration() {
+        let installation_store =
+            installed_store(HOST_MANAGED_SECRET_FIXTURE_MANIFEST, "browser-notifier").await;
+        let extension_id = ExtensionId::new("browser-notifier").expect("extension id");
+        let manifest = installation_store
+            .get_manifest(&extension_id)
+            .await
+            .expect("manifest read")
+            .expect("manifest installed");
+        let secrets = Arc::new(SecretStore::ephemeral());
+        let scope = test_scope();
+        let handle = SecretHandle::new("browser_signing_key").expect("secret handle");
+        secrets
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("host-seeded-material"),
+                None,
+            )
+            .await
+            .expect("host initializer seeds material");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let admin = Arc::new(
+            AdminConfigurationService::new(
+                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                    filesystem,
+                    |_scope| {
+                        MountView::new(vec![MountGrant::new(
+                            MountAlias::new("/extension-admin-configuration")
+                                .expect("valid mount alias"),
+                            VirtualPath::new("/tenants/test/shared/admin-configuration")
+                                .expect("valid virtual path"),
+                            MountPermissions::read_write_list_delete(),
+                        )])
+                    },
+                ))),
+                Arc::clone(&secrets) as Arc<dyn SecretStorePort>,
+                manifest.resolved().admin_configuration.clone(),
+            )
+            .expect("admin configuration service"),
+        );
+        let service = ChannelConfigService::new(
+            installation_store as Arc<dyn ExtensionInstallationStorePort>,
+            Arc::clone(&secrets) as Arc<dyn SecretStorePort>,
+            scope.clone(),
+            Arc::new(RecordingReactivation::new()),
+        )
+        .with_admin_configuration(admin, scope);
+
+        let material = service
+            .secret_material(&extension_id, &handle)
+            .await
+            .expect("host-managed lookup succeeds")
+            .expect("host-managed material resolves");
+
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&material),
+            "host-seeded-material"
+        );
     }
 
     #[tokio::test]

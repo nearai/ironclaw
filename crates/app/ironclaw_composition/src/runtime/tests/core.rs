@@ -14,6 +14,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::test_support::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_session_channel};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
@@ -140,9 +141,17 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: None,
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }]);
     let input =
         RebornRuntimeInput::from_build_input(build_input).with_identity(RebornRuntimeIdentity {
@@ -213,7 +222,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         Some("A-RUNTIME".to_string()),
     )
     .expect("proven Slack identity");
-    let rollback =
+    let transaction =
         ironclaw_extension_host::channel_identity_binding::bind_channel_identities_for_callback(
             &binding_config,
             "slack",
@@ -223,7 +232,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("bind Slack identity before activation")
         .expect("Slack callback maps to the installed channel extension");
-    drop(rollback);
+    transaction.commit().await;
 
     let dm_targets = &runtime.channel_dm_target_store;
 
@@ -5438,13 +5447,13 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         reply: "webui projection ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input(
             "runtime-webui-owner",
             root.path().join("standalone"),
         )
         .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-tenant".to_string(),
         agent_id: "runtime-webui-agent".to_string(),
@@ -5483,6 +5492,7 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-webui-stream-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("hello webui stream".to_string()),
@@ -6618,10 +6628,10 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
         reply: "webui skill context ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input("runtime-webui-skill-owner", storage_root)
             .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-skill-tenant".to_string(),
         agent_id: "runtime-webui-skill-agent".to_string(),
@@ -6660,6 +6670,7 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
         caller,
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-webui-skill-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("$webui-helper please help".to_string()),
@@ -6968,13 +6979,13 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         reply: "busy-drain ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input(
             "runtime-rejected-busy-owner",
             root.path().join("standalone"),
         )
         .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-rejected-busy-tenant".to_string(),
         agent_id: "runtime-rejected-busy-agent".to_string(),
@@ -7044,6 +7055,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-rejected-busy-b".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message B while thread is busy".to_string()),
@@ -7165,6 +7177,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-rejected-busy-c".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message C after thread is free".to_string()),

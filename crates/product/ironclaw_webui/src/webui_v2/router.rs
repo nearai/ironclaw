@@ -37,9 +37,11 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
     WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
     WEBUI_V2_PATTERN_LIST_PROJECTS, WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS,
-    WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
-    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
+    WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS, WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
+    WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE, WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
     WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP, WEBUI_V2_PATTERN_OPERATOR_LOGS,
     WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
     WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
@@ -48,18 +50,17 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
     WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
     WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN,
-    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-    WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
-    WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
-    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
-    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
-    WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
-    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
-    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK,
-    WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES, WEBUI_V2_PATTERN_TRACE_CREDITS,
-    WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE, WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
-    WEBUI_V2_PATTERN_USER_MODEL_POLICY, WEBUI_V2_PATTERN_WEB_PUSH_STATUS,
-    WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS, WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS_REMOVE,
+    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
+    WEBUI_V2_PATTERN_SET_ACTIVE_LLM, WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+    WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE, WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+    WEBUI_V2_PATTERN_SETTINGS_TOOLS, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
+    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STAT_FS_PATH,
+    WEBUI_V2_PATTERN_STAT_PROJECT_FILE, WEBUI_V2_PATTERN_STREAM_EVENTS,
+    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
+    WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+    WEBUI_V2_PATTERN_USER_MODEL_CATALOG, WEBUI_V2_PATTERN_USER_MODEL_POLICY,
 };
 use crate::webui_v2::handlers;
 use crate::webui_v2::sse_capacity::SseCapacity;
@@ -107,6 +108,7 @@ pub struct WebUiV2State {
     workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
     admin_thread_scrape_enabled: bool,
+    session_channel_extension_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -126,7 +128,20 @@ impl WebUiV2State {
             workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
             admin_thread_scrape_enabled: false,
+            session_channel_extension_id: None,
         }
+    }
+
+    /// The deployment's authenticated-session channel, advertised to the SPA
+    /// on `GET /session` so it can address the generic session-inbound route
+    /// without carrying a channel name of its own.
+    pub fn with_session_channel_extension_id(mut self, extension_id: Option<String>) -> Self {
+        self.session_channel_extension_id = extension_id;
+        self
+    }
+
+    pub fn session_channel_extension_id(&self) -> Option<&str> {
+        self.session_channel_extension_id.as_deref()
     }
 
     /// Deployment gate for the Reborn Projects WebUI surface (the sidebar
@@ -255,10 +270,13 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         )
         .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
         .route(
+            WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
+            post(handlers::session_channel_message),
+        )
+        .route(
             WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
             get(handlers::get_user_model_catalog),
         )
-        .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_LOGS, get(handlers::query_logs))
         .route(
@@ -357,16 +375,16 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             get(handlers::get_notification_channels).post(handlers::set_notification_channels),
         )
         .route(
-            WEBUI_V2_PATTERN_WEB_PUSH_STATUS,
-            get(handlers::web_push_status),
+            WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
+            get(handlers::notification_setup_status),
         )
         .route(
-            WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS,
-            post(handlers::web_push_subscribe),
+            WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE,
+            post(handlers::notification_setup_enable),
         )
         .route(
-            WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS_REMOVE,
-            post(handlers::web_push_unsubscribe),
+            WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
+            post(handlers::notification_setup_disable),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSIONS,

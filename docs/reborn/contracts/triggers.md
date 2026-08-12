@@ -551,7 +551,7 @@ unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
 persists the result without external egress. Trigger execution itself still
 does not choose, parse, or infer a destination. (✎ 2026-08-08: the retired
 in-app "WebApp selection" sentence above describes the pre-#7157 stored-target
-model; under the shipped two-lane model the `web-push` catalog target is a
+model; under the shipped two-lane model the `web-app` catalog target is a
 real external destination — a routine that should notify the browser pins it
 in the prompt's delivery step like any channel target, and the
 notification-channel set fans gate/auth/failure notices to it when selected.)

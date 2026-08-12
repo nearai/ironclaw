@@ -151,6 +151,7 @@ fn validate_delivery_status(
             OutboundDeliveryStatus::Prepared
             | OutboundDeliveryStatus::Sending
             | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::NoTarget
             | OutboundDeliveryStatus::Delivered
             | OutboundDeliveryStatus::Unknown,
             None,
@@ -160,6 +161,7 @@ fn validate_delivery_status(
             OutboundDeliveryStatus::Prepared
             | OutboundDeliveryStatus::Sending
             | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::NoTarget
             | OutboundDeliveryStatus::Delivered
             | OutboundDeliveryStatus::Unknown,
             Some(_),

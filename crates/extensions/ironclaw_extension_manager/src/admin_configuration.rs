@@ -544,6 +544,7 @@ mod tests {
                 secret: true,
                 required: true,
                 description: String::new(),
+                host_managed: false,
             }],
         };
         let uses = vec![

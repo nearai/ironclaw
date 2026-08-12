@@ -53,6 +53,7 @@ async def test_reborn_chat_history_dom_stays_page_bounded_until_user_loads_more(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -150,6 +151,7 @@ async def test_reborn_response_projection_survives_full_history_page(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -278,6 +280,7 @@ async def test_reborn_user_send_survives_full_history_page_without_loading_older
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -339,7 +342,7 @@ async def test_reborn_user_send_survives_full_history_page_without_loading_older
         handle_timeline,
     )
     await page.route(
-        f"**/api/webchat/v2/threads/{FULL_PAGE_SEND_THREAD_ID}/messages",
+        "**/api/webchat/v2/channels/*/messages",
         handle_send,
     )
 
@@ -399,6 +402,7 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

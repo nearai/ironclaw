@@ -92,7 +92,9 @@ pub(crate) fn build_product_surface_with_channel_connection(
     .with_input_enqueue(runtime.webui_input_enqueue())
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service())
-    .with_diagnostic_store(Arc::clone(&runtime.diagnostic_store));
+    .with_diagnostic_store(Arc::clone(&runtime.diagnostic_store))
+    .with_session_inbound_ledger(Arc::clone(&runtime.session_inbound_ledger))
+    .with_session_channel_directory(Arc::clone(&runtime.session_channel_directory));
     if let Some(ironhub_link) = runtime.ironhub_link_service() {
         api = api.with_ironhub_link_service(ironhub_link);
     }
@@ -251,12 +253,12 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
-    if let Some(web_push) = runtime.web_push.as_ref() {
-        api = api.with_web_push_product_service(Arc::new(
-            ironclaw_assistant::RebornWebPushProductService::new(
-                Arc::clone(&web_push.subscriptions),
-                web_push.vapid_public_key.clone(),
-                web_push.allowed_push_hosts.clone(),
+    if let Some(resolver) = runtime.channel_delivery_resolver.clone() {
+        api = api.with_notification_setup_service(Arc::new(
+            ironclaw_assistant::RegistrationChannelNotificationSetupService::new(
+                resolver,
+                Arc::clone(&runtime.delivery_registrations),
+                Arc::clone(&runtime.delivery_client_bootstrap),
             ),
         ));
     }

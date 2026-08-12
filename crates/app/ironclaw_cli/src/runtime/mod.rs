@@ -659,13 +659,10 @@ fn with_binary_host_extension_bindings_from_bundles(
     first_party_bundles: Vec<FirstPartyPackageBundle>,
 ) -> anyhow::Result<RebornHostBindings> {
     crate::first_party::assert_first_party_bundles_present(&first_party_bundles)?;
-    let channel_extensions = native_extensions::bundled_channel_extensions();
-    let mut services_input = services_input
-        .with_channel_extension_bindings(channel_extensions.bindings)
-        .with_web_push_runtime_slot(channel_extensions.web_push_runtime);
-    if let Some(subject) = web_push_vapid_subject_from_env() {
-        services_input = services_input.with_web_push_vapid_subject(subject);
-    }
+    let channel_extensions =
+        native_extensions::bundled_channel_extensions(web_app_vapid_subject_from_env());
+    let services_input =
+        services_input.with_channel_extension_bindings(channel_extensions.bindings);
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_first_party_bundles(first_party_bundles)
@@ -680,7 +677,7 @@ fn with_binary_host_extension_bindings_from_bundles(
 /// back to a stable placeholder). Reads the same env var the serve command
 /// validates for OAuth callbacks; a malformed value degrades to the
 /// placeholder rather than failing boot.
-fn web_push_vapid_subject_from_env() -> Option<String> {
+fn web_app_vapid_subject_from_env() -> Option<String> {
     let raw = std::env::var("IRONCLAW_REBORN_WEBUI_BASE_URL").ok()?; // silent-ok: optional env-derived contact URI, placeholder fallback is safe
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.starts_with("https://") && trimmed.len() > "https://".len() {

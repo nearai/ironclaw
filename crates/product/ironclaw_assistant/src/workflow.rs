@@ -12,9 +12,10 @@ use ironclaw_product_contracts::command::ProductCommandContext;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, ProductTriggerReason};
-use ironclaw_extension_contracts::external::ExternalConversationRef;
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalConversationRef, ProductAttachmentDescriptor, ProductAttachmentKind,
+};
 use ironclaw_host_api::product_adapter::{
     ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
 };
@@ -28,7 +29,7 @@ use ironclaw_host_api::{
 use ironclaw_product_contracts::inbound::{
     ApprovalDecision, ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    TrustedInboundContext, UserMessagePayload,
+    UserMessagePayload,
 };
 use ironclaw_product_contracts::projection::{
     ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
@@ -170,24 +171,7 @@ impl DefaultProductSurface {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, InboundAttachmentAdmission::Inline(Vec::new()))
-            .await
-    }
-
-    async fn submit_inbound_with_channel_attachment_transfer(
-        &self,
-        envelope: ProductInboundEnvelope,
-        channel_adapter: Arc<dyn ChannelAdapter>,
-        channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(
-            envelope,
-            InboundAttachmentAdmission::Channel {
-                adapter: channel_adapter,
-                egress: channel_egress,
-            },
-        )
-        .await
+        self.submit_inbound_inner(envelope, Vec::new()).await
     }
 
     pub async fn read_projection(
@@ -239,56 +223,25 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
         &self,
         request: ChannelInboundSurfaceRequest,
     ) -> ChannelInboundSurfaceOutcome {
-        let envelope = match build_channel_envelope(request) {
-            Ok(envelope) => envelope,
+        let (envelope, attachments) = match build_channel_envelope(request) {
+            Ok(admission) => admission,
             Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
         };
         admission_outcome(
             envelope.clone(),
-            Box::pin(self.submit_inbound(envelope)).await,
-        )
-    }
-
-    async fn admit_channel_inbound_with_attachment_transfer(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-        channel_adapter: Arc<dyn ChannelAdapter>,
-        channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> ChannelInboundSurfaceOutcome {
-        // Preserve the vendor transfer references beside the descriptors the
-        // payload carries; `with_channel_attachment_refs` enforces that they
-        // correspond exactly and stay out of the serialized envelope.
-        let channel_attachment_refs = request.message.attachments.clone();
-        let envelope = match build_channel_envelope(request)
-            .and_then(|envelope| envelope.with_channel_attachment_refs(channel_attachment_refs))
-        {
-            Ok(envelope) => envelope,
-            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
-        };
-        admission_outcome(
-            envelope.clone(),
-            Box::pin(self.submit_inbound_with_channel_attachment_transfer(
-                envelope,
-                channel_adapter,
-                channel_egress,
-            ))
-            .await,
+            Box::pin(self.submit_inbound_inner(envelope, attachments)).await,
         )
     }
 }
 
 /// Build the canonical channel inbound envelope from one verified, normalized
-/// surface request — shared by both admission doors.
+/// surface request — shared by every admission door.
+///
 fn build_channel_envelope(
-    request: ChannelInboundSurfaceRequest,
-) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-    let context = TrustedInboundContext::from_verified_evidence_with_source_channel(
-        request.adapter_id,
-        request.source_channel,
-        request.installation_id,
-        request.received_at,
-        &request.evidence,
-    )?;
+    mut request: ChannelInboundSurfaceRequest,
+) -> Result<(ProductInboundEnvelope, Vec<InboundAttachment>), ProductAdapterError> {
+    let attachments = std::mem::take(&mut request.message.attachments);
+    let context = request.context;
     let payload = match request.classification {
         Some(classification) => ProductInboundPayload::from(classification),
         // A shared-channel run is invoked ONLY by an explicit @mention, which
@@ -303,15 +256,20 @@ fn build_channel_envelope(
         None => ProductInboundPayload::UserMessage(
             UserMessagePayload::new(
                 request.message.text.clone(),
-                request
-                    .message
-                    .attachments
+                attachments
                     .iter()
-                    .map(|attachment| attachment.descriptor.clone())
-                    .collect(),
+                    .map(product_attachment_descriptor)
+                    .collect::<Result<Vec<_>, _>>()?,
                 request.message.trigger,
             )?
-            .with_channel_context(request.channel_context.clone()),
+            .with_requested_model(request.requested_model)
+            .with_channel_context(
+                request
+                    .message
+                    .conversation_context
+                    .as_ref()
+                    .map(|context| context.text.clone()),
+            ),
         ),
     };
     let parsed = ParsedProductInbound::new(
@@ -321,6 +279,37 @@ fn build_channel_envelope(
         payload,
     )?;
     ProductInboundEnvelope::from_trusted_parse(context, parsed)
+        .map(|envelope| (envelope, attachments))
+}
+
+/// Project complete canonical attachment bytes into the byte-free product
+/// envelope. Kind is derived once from MIME; no provider metadata survives.
+fn product_attachment_descriptor(
+    attachment: &InboundAttachment,
+) -> Result<ProductAttachmentDescriptor, ProductAdapterError> {
+    // MIME types are case-insensitive external input on both the channel and
+    // session paths — fold once here so `IMAGE/PNG` classifies as an image,
+    // not a document (the persisted descriptor kind is what the model sees).
+    let kind = match attachment
+        .mime_type
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image" => ProductAttachmentKind::Image,
+        "audio" => ProductAttachmentKind::Audio,
+        "video" => ProductAttachmentKind::Video,
+        _ => ProductAttachmentKind::Document,
+    };
+    ProductAttachmentDescriptor::new(
+        attachment.id.clone(),
+        attachment.mime_type.clone(),
+        attachment.filename.clone(),
+        Some(attachment.bytes.len() as u64),
+        kind,
+    )
 }
 
 fn admission_outcome(
@@ -340,14 +329,6 @@ fn admission_outcome(
     }
 }
 
-enum InboundAttachmentAdmission {
-    Inline(Vec<InboundAttachment>),
-    Channel {
-        adapter: Arc<dyn ChannelAdapter>,
-        egress: Arc<dyn RestrictedEgress>,
-    },
-}
-
 impl DefaultProductSurface {
     /// Shared submit path for both the bytes-free [`Self::submit_inbound`]
     /// door and the inline-attachment [`Self::submit_inbound_with_attachments`] door.
@@ -356,7 +337,7 @@ impl DefaultProductSurface {
     async fn submit_inbound_inner(
         &self,
         envelope: ProductInboundEnvelope,
-        attachment_admission: InboundAttachmentAdmission,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         if matches!(
             envelope.payload(),
@@ -373,13 +354,27 @@ impl DefaultProductSurface {
             });
         }
 
+        // A session envelope admits only user messages. Commands, approval
+        // and auth resolutions from an authenticated session ride their typed
+        // ProductSurface operations; letting them into the channel dispatch
+        // would run webhook-only binding/interaction machinery for a caller
+        // that has no verified-inbound claim.
+        if envelope.session_caller().is_some()
+            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        {
+            return Err(ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new("session inbound admits only user-message payloads"),
+            });
+        }
+
         // Inline attachment bytes are only landed for user-message payloads (see
         // `dispatch_payload`). Fail closed if a caller staged bytes on any other
         // payload kind rather than silently dropping the user's files.
-        if matches!(
-            &attachment_admission,
-            InboundAttachmentAdmission::Inline(attachments) if !attachments.is_empty()
-        ) && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        if !attachments.is_empty()
+            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
         {
             return Err(ProductAdapterError::SurfaceRejected {
                 kind: ProductSurfaceRejectionKind::InvalidRequest,
@@ -441,7 +436,7 @@ impl DefaultProductSurface {
                         auth_interaction_service: &*self.auth_interaction_service,
                         delivered_gate_routes: &*self.delivered_gate_routes,
                     },
-                    attachment_admission,
+                    attachments,
                 )
                 .await;
 
@@ -514,8 +509,7 @@ impl DefaultProductSurface {
         envelope: ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, InboundAttachmentAdmission::Inline(attachments))
-            .await
+        self.submit_inbound_inner(envelope, attachments).await
     }
 }
 
@@ -535,8 +529,14 @@ struct DispatchPorts<'a> {
     delivered_gate_routes: &'a dyn ironclaw_outbound::DeliveredGateRouteStore,
 }
 
-fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
-    ResolveBindingRequest::from_envelope(envelope)
+fn resolve_binding_request(
+    envelope: &ProductInboundEnvelope,
+) -> Result<ResolveBindingRequest, ProductSurfaceFailure> {
+    ResolveBindingRequest::from_envelope(envelope).map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: error.to_string(),
+        }
+    })
 }
 
 async fn resolve_projection_subject(
@@ -582,7 +582,7 @@ async fn lookup_interaction_binding(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ProductBindingResolver,
 ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
-    let request = resolve_binding_request(envelope);
+    let request = resolve_binding_request(envelope)?;
     match binding_service
         .lookup_binding(request.clone())
         .await
@@ -632,7 +632,7 @@ async fn delivered_route_base_binding(
     // the delivered-route fallback depends on this invariant holding. The
     // interaction services remain the resolution authority for the downstream
     // approve/deny operation.
-    let request = match direct_base_binding_request(resolve_binding_request(envelope)) {
+    let request = match resolve_binding_request(envelope).and_then(direct_base_binding_request) {
         Ok(request) => request,
         Err(error) => {
             debug!(
@@ -983,6 +983,7 @@ async fn resolve_via_delivered_approval_route(
                 ack: ProductInboundAck::Accepted {
                     accepted_message_ref,
                     submitted_run_id,
+                    submission: None,
                 },
                 dispatch_kind,
             },
@@ -1091,6 +1092,7 @@ async fn resolve_via_delivered_auth_route(
                 ack: ProductInboundAck::Accepted {
                     accepted_message_ref,
                     submitted_run_id,
+                    submission: None,
                 },
                 dispatch_kind,
             },
@@ -1153,33 +1155,18 @@ async fn dispatch_payload(
     action_id: ProductActionId,
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
-    attachment_admission: InboundAttachmentAdmission,
+    attachments: Vec<InboundAttachment>,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
-            let dispatch = match attachment_admission {
-                InboundAttachmentAdmission::Channel { adapter, egress } => {
-                    ports
-                        .inbound_turn_service
-                        .accept_user_message_with_before_policy_and_channel_transfer(
-                            envelope,
-                            ports.before_inbound_policy,
-                            adapter,
-                            egress,
-                        )
-                        .await?
-                }
-                InboundAttachmentAdmission::Inline(attachments) => {
-                    ports
-                        .inbound_turn_service
-                        .accept_user_message_with_before_policy_and_attachments(
-                            envelope,
-                            ports.before_inbound_policy,
-                            attachments,
-                        )
-                        .await?
-                }
-            };
+            let dispatch = ports
+                .inbound_turn_service
+                .accept_user_message_with_before_policy_and_attachments(
+                    envelope,
+                    ports.before_inbound_policy,
+                    attachments,
+                )
+                .await?;
             match dispatch {
                 InboundUserMessageDispatch::Accepted(outcome) => {
                     let ack = outcome.to_ack();
@@ -1351,6 +1338,7 @@ async fn dispatch_approval_resolution(
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
             submitted_run_id,
+            submission: None,
         },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
@@ -1438,6 +1426,7 @@ async fn dispatch_scoped_approval_resolution(
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
             submitted_run_id,
+            submission: None,
         },
         dispatch_kind: ActionDispatchKind::ScopedApprovalResolution,
     })
@@ -1553,6 +1542,7 @@ async fn dispatch_auth_resolution(
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("auth", envelope)?,
             submitted_run_id,
+            submission: None,
         },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
@@ -1748,7 +1738,7 @@ async fn dispatch_product_command(
         return Ok(command_rejected_ack(&command));
     };
     let binding = binding_service
-        .resolve_binding(resolve_binding_request(envelope))
+        .resolve_binding(resolve_binding_request(envelope)?)
         .await?;
     let is_new_command = matches!(&command, ProductCommand::New);
     let (operation_id, input, command_name) = product_command_operation(command, &binding)?;
@@ -1775,7 +1765,7 @@ async fn dispatch_product_command(
         if output.can_reset {
             binding_service
                 .reset_binding(ResetBindingRequest {
-                    resolve_request: resolve_binding_request(envelope),
+                    resolve_request: resolve_binding_request(envelope)?,
                     expected_thread_id: binding.thread_id,
                 })
                 .await?;
@@ -1998,7 +1988,18 @@ fn terminal_ack_for_error(error: &ProductSurfaceFailure) -> Option<ProductInboun
             retryable: true, ..
         }
         | ProductSurfaceFailure::OutboundTargetNotDirectMessage
-        | ProductSurfaceFailure::DuplicateAction { .. } => None,
+        | ProductSurfaceFailure::DuplicateAction { .. }
+        // Session-arm failures deliberately never settle: the caller can
+        // create the missing thread (OwnedThreadUnavailable), retry against
+        // the original thread (ClientActionReplayMismatch), or retry after
+        // the transient bookkeeping fault (ReplayUnavailable /
+        // SkillActivationFailed) — settling any of them would replay a
+        // rejection for a client action that could now legitimately succeed.
+        | ProductSurfaceFailure::OwnedThreadUnavailable
+        | ProductSurfaceFailure::ClientActionReplayMismatch
+        | ProductSurfaceFailure::ReplayUnavailable { .. }
+        | ProductSurfaceFailure::SkillActivationFailed { .. }
+        | ProductSurfaceFailure::AttachmentLanderUnavailable => None,
     }
 }
 
@@ -2050,8 +2051,7 @@ mod tests {
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
     use ironclaw_product_contracts::inbound::{
         ChannelInboundClassification, InboundCommandPayload, ParsedProductInbound,
-        ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductSourceChannel,
-        TrustedInboundContext,
+        ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
     };
     use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
 
@@ -2111,6 +2111,7 @@ mod tests {
         let accepted = ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid ref"),
             submitted_run_id,
+            submission: None,
         };
         assert_eq!(
             dispatch_kind_from_ack(&accepted, &ProductInboundPayload::NoOp).expect("kind"),
@@ -2123,6 +2124,7 @@ mod tests {
         let deferred = ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:deferred").expect("valid ref"),
             active_run_id,
+            busy: None,
         };
         assert_eq!(
             dispatch_kind_from_ack(&deferred, &ProductInboundPayload::NoOp).expect("kind"),
@@ -2135,6 +2137,7 @@ mod tests {
         let rejected_busy = ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("valid ref"),
             active_run_id: Some(rejected_run_id),
+            busy: None,
         };
         assert_eq!(
             dispatch_kind_from_ack(&rejected_busy, &ProductInboundPayload::NoOp).expect("kind"),
@@ -2156,11 +2159,13 @@ mod tests {
             installation_id.as_str(),
         );
         ChannelInboundSurfaceRequest {
-            adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),
-            source_channel: ProductSourceChannel::new("test_adapter").expect("source channel"),
-            installation_id,
-            evidence,
-            received_at: Utc::now(),
+            context: TrustedInboundContext::from_verified_evidence(
+                ProductAdapterId::new("test_adapter").expect("adapter"),
+                installation_id,
+                Utc::now(),
+                &evidence,
+            )
+            .expect("trusted context"),
             message: NormalizedInboundMessage {
                 actor: ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
                 conversation: ExternalConversationRef::new(None, "conv1", None, None)
@@ -2169,10 +2174,11 @@ mod tests {
                 text: "hey team".to_string(),
                 trigger,
                 attachments: Vec::new(),
+                conversation_context: None,
                 reply_context: None,
             },
             classification,
-            channel_context: None,
+            requested_model: None,
         }
     }
 
@@ -2184,15 +2190,16 @@ mod tests {
     /// (approve/deny, commands) are unaffected.
     #[test]
     fn shared_channel_plain_thread_reply_is_dropped_but_mentions_dms_and_gates_run() {
-        let reply = build_channel_envelope(channel_request(ProductTriggerReason::ReplyToBot, None))
-            .expect("envelope");
+        let (reply, _) =
+            build_channel_envelope(channel_request(ProductTriggerReason::ReplyToBot, None))
+                .expect("envelope");
         assert!(
             matches!(reply.payload(), ProductInboundPayload::NoOp),
             "a non-mention thread reply must be a NoOp (no run), got {:?}",
             reply.payload()
         );
 
-        let mention =
+        let (mention, _) =
             build_channel_envelope(channel_request(ProductTriggerReason::BotMention, None))
                 .expect("envelope");
         assert!(
@@ -2201,8 +2208,9 @@ mod tests {
             mention.payload()
         );
 
-        let dm = build_channel_envelope(channel_request(ProductTriggerReason::DirectChat, None))
-            .expect("envelope");
+        let (dm, _) =
+            build_channel_envelope(channel_request(ProductTriggerReason::DirectChat, None))
+                .expect("envelope");
         assert!(
             matches!(dm.payload(), ProductInboundPayload::UserMessage(_)),
             "a direct message must spawn a run without a mention, got {:?}",
@@ -2212,7 +2220,7 @@ mod tests {
         // A classified reply (here a command; approvals take the same `Some(_)`
         // arm) is preserved — the mention-only drop applies only to unclassified
         // ordinary messages, so approve/deny replies keep resolving gates.
-        let command = build_channel_envelope(channel_request(
+        let (command, _) = build_channel_envelope(channel_request(
             ProductTriggerReason::ReplyToBot,
             Some(ChannelInboundClassification::Command(
                 InboundCommandPayload::new(
@@ -2382,10 +2390,12 @@ mod tests {
         assert!(!should_settle_ack(&ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
             active_run_id: TurnRunId::new(),
+            busy: None,
         }));
         assert!(should_settle_ack(&ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("valid ref"),
             active_run_id: Some(TurnRunId::new()),
+            busy: None,
         }));
     }
 

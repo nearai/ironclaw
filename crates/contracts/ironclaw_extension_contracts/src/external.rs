@@ -117,6 +117,43 @@ impl From<ExternalActorBindingEpoch> for String {
     }
 }
 
+/// Stable vendor-issued actor identifier.
+///
+/// This is the typed form used when a host has proven an actor identity but
+/// does not need the actor kind or presentation metadata carried by a full
+/// [`ExternalActorRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ExternalActorId(String);
+
+impl ExternalActorId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_external_id("external_actor_id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalActorId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for ExternalActorId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// External actor reference. Equality/hash use only stable identity
 /// (`kind`, `id`); `display_name` is presentation metadata.
 #[derive(Debug, Clone, Serialize)]

@@ -50,7 +50,7 @@ impl ProductProjectionReadInput {
             });
         };
         Ok(Self {
-            subject: ProductProjectionSubject::from_inbound_envelope(envelope),
+            subject: ProductProjectionSubject::from_inbound_envelope(envelope)?,
             thread_id_hint: payload.thread_id_hint.clone(),
             after_cursor: payload.after_cursor.clone(),
             limit: payload.limit,
@@ -89,7 +89,7 @@ impl ProductProjectionSubscribeInput {
             });
         };
         Ok(Self {
-            subject: ProductProjectionSubject::from_inbound_envelope(envelope),
+            subject: ProductProjectionSubject::from_inbound_envelope(envelope)?,
             thread_id_hint: payload.thread_id_hint.clone(),
             after_cursor: payload.after_cursor.clone(),
         })
@@ -116,15 +116,20 @@ pub enum ProductProjectionSubject {
 }
 
 impl ProductProjectionSubject {
-    pub fn from_inbound_envelope(envelope: &ProductInboundEnvelope) -> Self {
-        Self::AdapterExternalRefs {
+    /// Build the adapter-refs subject from a webhook-verified envelope.
+    /// Session envelopes carry no verified claim and resolve projections
+    /// through the canonical caller-scoped door instead.
+    pub fn from_inbound_envelope(
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Self, ProductAdapterError> {
+        Ok(Self::AdapterExternalRefs {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_event_id: envelope.external_event_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
-            auth_claim: envelope.auth_claim().clone(),
-        }
+            auth_claim: envelope.require_verified_auth_claim()?.clone(),
+        })
     }
 
     pub fn canonical(actor: TurnActor, scope: TurnScope) -> Self {

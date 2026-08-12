@@ -33,10 +33,18 @@ fields = [
 [channel]
 id = "messages"
 display_name = "Telegram messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 commands = ["model", "status", "new", "stop", "interrupt"]
+
+# For a conversational vendor the two axes happen to share one mechanism — a
+# message in the chat — which is exactly why the reply/delivery distinction
+# stayed invisible until a streaming channel existed. They are still declared
+# separately: `message` here is a coincidence of transport, not one concept.
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.connection]
 provider = "telegram"
@@ -68,6 +76,24 @@ body_limit_bytes = 1048576
 kind = "shared_secret_header"
 secret_handle = "telegram_webhook_secret"
 header = "X-Telegram-Bot-Api-Secret-Token"
+
+# Vendor-side webhook wiring, formerly ChannelAdapter::activate/cleanup. Both
+# method bodies became zero lines: every input was already host-known (the
+# host owns the webhook route, so it owns the URL), and both calls already ran
+# through restricted egress with host-side credential injection. The bot token
+# rides the path placeholder the [[channel.egress]] injection declares; the
+# shared secret rides body_credentials, so neither ever enters adapter scope.
+# `setWebhook` is idempotent — Telegram overwrites the previous registration.
+[channel.ingress.registration]
+method = "post"
+path = "/bot{telegram_bot_token}/setWebhook"
+body = { url = "{telegram_webhook_url}" }
+body_credentials = ["telegram_webhook_secret"]
+
+[channel.ingress.deregistration]
+method = "post"
+path = "/bot{telegram_bot_token}/deleteWebhook"
+body = {}
 
 [[channel.egress]]
 scheme = "https"
@@ -122,4 +148,3 @@ injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 supports_markdown = false
 supports_threads = true
 can_reply_in_threads = false
-max_message_chars = 4096

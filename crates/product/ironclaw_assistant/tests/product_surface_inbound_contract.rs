@@ -79,6 +79,7 @@ fn send_message_maps_body_to_turn_scope_actor_and_content() {
     let ProductInboundCommand::SendMessage {
         scope,
         actor,
+        extension_id: _,
         client_action_id,
         content,
         requested_model,
@@ -101,6 +102,7 @@ fn send_message_maps_body_to_turn_scope_actor_and_content() {
 fn send_message_carries_requested_model_and_drops_default_alias() {
     // A concrete model is carried through as a requested-model hint.
     let request = ProductSubmitTurnRequest {
+        extension_id: None,
         client_action_id: Some("send-model".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hi".to_string()),
@@ -119,6 +121,7 @@ fn send_message_carries_requested_model_and_drops_default_alias() {
     // request falls back to the deployment's active model.
     for alias in ["default", "DEFAULT", "  ", ""] {
         let request = ProductSubmitTurnRequest {
+            extension_id: None,
             client_action_id: Some("send-default".to_string()),
             thread_id: Some("thread-alpha".to_string()),
             content: Some("hi".to_string()),
@@ -352,6 +355,7 @@ fn blank_credential_ref_returns_stable_validation_error() {
 #[test]
 fn command_serializes_with_stable_command_tag() {
     let request = ProductSubmitTurnRequest {
+        extension_id: None,
         client_action_id: Some("send-1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hello".to_string()),
@@ -370,6 +374,7 @@ fn command_serializes_with_stable_command_tag() {
 #[test]
 fn token_fields_reject_control_characters() {
     let request = ProductSubmitTurnRequest {
+        extension_id: None,
         client_action_id: Some("send\n1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hello".to_string()),
@@ -456,6 +461,7 @@ fn b64(bytes: &[u8]) -> String {
 
 fn send_with_attachments(attachments: Vec<ProductInboundAttachment>) -> ProductSubmitTurnRequest {
     ProductSubmitTurnRequest {
+        extension_id: None,
         client_action_id: Some("send-att".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("see attached".to_string()),

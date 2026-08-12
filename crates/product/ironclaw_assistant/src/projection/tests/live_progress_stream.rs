@@ -263,6 +263,7 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
                         id,
                         run_id: observed_run_id,
                         body,
+                        ..
                     } if id == &expected_id && *observed_run_id == Some(run_id) => {
                         Some(body.clone())
                     }
@@ -352,6 +353,7 @@ async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_ru
                         id,
                         run_id: observed_run_id,
                         body,
+                        ..
                     } if *observed_run_id == Some(run_id) => Some((id.clone(), body.clone())),
                     _ => None,
                 })

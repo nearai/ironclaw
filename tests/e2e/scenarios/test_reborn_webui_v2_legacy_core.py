@@ -98,6 +98,7 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "tenant-draft-isolation",
                 "user_id": user_id,
                 "capabilities": {},
