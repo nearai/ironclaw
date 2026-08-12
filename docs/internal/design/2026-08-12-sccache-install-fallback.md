@@ -2,7 +2,7 @@
 
 ## Problem
 
-The shared `setup-sccache-dist` composite action makes every opted-in CI lane depend on downloading an `sccache` release asset. The upstream installer retries transient download failures, but after those retries are exhausted the lane fails before its tests start. This removed PR #7477 from the merge queue twice even though `sccache` is only a compilation-cache optimization.
+The shared `setup-sccache-dist` composite action makes every opted-in CI lane depend on downloading an `sccache` release asset. The upstream installer retries transient download failures, but after those retries are exhausted the lane fails before its tests start. This failed two independent runs for PR #7477 and ultimately removed it from the merge queue even though `sccache` is only a compilation-cache optimization.
 
 ## Design
 
