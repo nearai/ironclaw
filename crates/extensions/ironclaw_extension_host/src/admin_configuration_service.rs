@@ -40,6 +40,7 @@ pub struct AdminConfigurationSubmittedValue {
 pub struct AdminConfigurationFieldState {
     pub handle: SecretHandle,
     pub label: String,
+    pub description: String,
     pub secret: bool,
     pub required: bool,
     pub provided: bool,
@@ -562,6 +563,7 @@ fn render_group(
             AdminConfigurationFieldState {
                 handle: field.handle.clone(),
                 label: field.label.clone(),
+                description: field.description.clone(),
                 secret: field.secret,
                 required: field.required,
                 provided,
