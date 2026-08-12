@@ -26,8 +26,15 @@
 
 set -uo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "${REPO_ROOT}"
+# Deliberately no `-e`: the gate-running section must keep going after a
+# failing gate (one round-trip, full report). The setup below therefore
+# checks its own plumbing explicitly — a setup failure must never let the
+# script report OK over work it didn't do.
+REPO_ROOT="$(git rev-parse --show-toplevel)" || {
+    echo "preflight-gates: not inside a git repository" >&2
+    exit 2
+}
+cd "${REPO_ROOT}" || exit 2
 
 failures=()
 
@@ -64,14 +71,24 @@ fi
 # --- Layer 3: module-charter tests for crates the diff touches -------------
 # Charter maps live inside their crates, so only changed crates pay the
 # compile. Diff base mirrors the pre-push hook's default (origin/main).
+# Discovery fails CLOSED: when the base is missing or the diff plumbing
+# errors, the fallback widens to all five charters — a broken setup may cost
+# compile time, never a silent skip.
+all_charter_crates="crates/product/ironclaw_webui crates/product/ironclaw_assistant \
+         crates/domains/ironclaw_llm crates/domains/ironclaw_auth \
+         crates/lanes/ironclaw_mcp"
 base_ref="${IRONCLAW_PREFLIGHT_BASE:-origin/main}"
 if git rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null; then
-    changed="$(git diff --name-only "$(git merge-base HEAD "${base_ref}")"...HEAD)"
+    if merge_base="$(git merge-base HEAD "${base_ref}")" \
+        && changed="$(git diff --name-only "${merge_base}...HEAD")"; then
+        :
+    else
+        echo "==> charter tests: cannot diff against ${base_ref}; running all five"
+        changed="${all_charter_crates}"
+    fi
 else
     echo "==> charter tests: base ${base_ref} not found; running all five"
-    changed="crates/product/ironclaw_webui crates/product/ironclaw_assistant \
-             crates/domains/ironclaw_llm crates/domains/ironclaw_auth \
-             crates/lanes/ironclaw_mcp"
+    changed="${all_charter_crates}"
 fi
 
 charter() {

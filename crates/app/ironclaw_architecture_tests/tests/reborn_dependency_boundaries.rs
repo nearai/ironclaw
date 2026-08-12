@@ -621,20 +621,46 @@ fn reborn_crate_dependency_boundaries_hold() {
 /// Measured through [`production_rust_files`], the suite's single definition of
 /// a production source file, so the numbers agree with every sibling gate
 /// rather than with a private walk.
+/// The banked-slack window below each ceiling: a crate sitting more than
+/// this far under its ceiling forces a re-capture (anti-inertness).
+const TOLERANCE: usize = 400;
+
+/// Working slack ABOVE each pinned count, so routine drift — a fold from
+/// main, a few lines of wiring — passes while real growth still forces a
+/// reviewed re-pin. Before 2026-08-07 this direction had NO tolerance
+/// (the check was a bare `lines > ceiling`), which combined with
+/// "set to current" pins to red every open branch on any main-side
+/// contracts-crate growth (see the module doc and the gate audit).
+const GROWTH_TOLERANCE: usize = 150;
+
+/// One crate's measured production line count judged against its pinned
+/// ceiling. The pass window is `[ceiling - TOLERANCE, ceiling +
+/// GROWTH_TOLERANCE]`; both jaws are enforced by the size-ceiling gate and
+/// the arithmetic is pinned by `contracts_size_ceiling_window_edges_hold`.
+#[derive(Debug, PartialEq, Eq)]
+enum CeilingVerdict {
+    /// Inside the window — the routine-drift case the working slack exists
+    /// for.
+    Within,
+    /// Growth past the working slack: a reviewed re-pin is required.
+    Over,
+    /// More than one banked-slack window under the ceiling: re-capture in
+    /// the PR that shrank the crate (anti-inertness).
+    Banked,
+}
+
+fn contracts_ceiling_verdict(lines: usize, ceiling: usize) -> CeilingVerdict {
+    if lines > ceiling + GROWTH_TOLERANCE {
+        CeilingVerdict::Over
+    } else if ceiling.saturating_sub(lines) > TOLERANCE {
+        CeilingVerdict::Banked
+    } else {
+        CeilingVerdict::Within
+    }
+}
+
 #[test]
 fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
-    /// The banked-slack window below each ceiling: a crate sitting more than
-    /// this far under its ceiling forces a re-capture (anti-inertness).
-    const TOLERANCE: usize = 400;
-
-    /// Working slack ABOVE each pinned count, so routine drift — a fold from
-    /// main, a few lines of wiring — passes while real growth still forces a
-    /// reviewed re-pin. Before 2026-08-07 this direction had NO tolerance
-    /// (the check was a bare `lines > ceiling`), which combined with
-    /// "set to current" pins to red every open branch on any main-side
-    /// contracts-crate growth (see the module doc and the gate audit).
-    const GROWTH_TOLERANCE: usize = 150;
-
     /// `(crate, production line ceiling)` — captured 2026-08-05 by running this
     /// test with every ceiling at `0` and reading the counts out of its own
     /// failure message. Never counted by eye.
@@ -856,18 +882,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
             })
             .sum();
 
-        if lines > *ceiling + GROWTH_TOLERANCE {
-            over.push(format!(
+        match contracts_ceiling_verdict(lines, *ceiling) {
+            CeilingVerdict::Over => over.push(format!(
                 "{crate_name}: {lines} production lines over a ceiling of {ceiling} \
                  (+{GROWTH_TOLERANCE} working slack -> effective {})",
                 ceiling + GROWTH_TOLERANCE
-            ));
-        } else if ceiling.saturating_sub(lines) > TOLERANCE {
-            banked.push(format!(
+            )),
+            CeilingVerdict::Banked => banked.push(format!(
                 "{crate_name}: {lines} production lines against a ceiling of {ceiling} \
                  ({} of slack, window is {TOLERANCE})",
                 ceiling - lines
-            ));
+            )),
+            CeilingVerdict::Within => {}
         }
     }
 
@@ -888,6 +914,51 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
          what it measures is an unclaimed budget for the next unreviewed growth — the specific \
          way `composition-budget.toml`'s share ceiling went inert with 17.4pp of slack (#7151).",
         banked.join("\n")
+    );
+}
+
+/// Regression pin for the 2026-08-07 zero-slack repair (gate audit §3.2):
+/// before it, the growth check was a bare `lines > ceiling` — `TOLERANCE`
+/// was consulted only for the banked-slack direction — so every "set to
+/// current" pin was a hard cap at the observed count, and one line landed on
+/// main in any contracts crate redded every open branch at its next fold
+/// (measured on #7157: four loop_contracts re-captures, roughly one per
+/// fold). This fixture drives the REAL comparison the gate runs at all four
+/// window edges so the asymmetry cannot silently return.
+#[test]
+fn contracts_size_ceiling_window_edges_hold() {
+    const CEILING: usize = 10_000;
+    // Upward jaw: the last line of working slack passes; one more is growth
+    // that demands a reviewed re-pin.
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING + GROWTH_TOLERANCE, CEILING),
+        CeilingVerdict::Within
+    );
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING + GROWTH_TOLERANCE + 1, CEILING),
+        CeilingVerdict::Over
+    );
+    // Downward jaw: the last line of the banked window passes; one more is
+    // slack the ceiling must re-capture.
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING - TOLERANCE, CEILING),
+        CeilingVerdict::Within
+    );
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING - TOLERANCE - 1, CEILING),
+        CeilingVerdict::Banked
+    );
+    // The pin itself sits inside the window (the audit sabotage log's ±1
+    // probes, as arithmetic).
+    assert_eq!(
+        contracts_ceiling_verdict(CEILING, CEILING),
+        CeilingVerdict::Within
+    );
+    // A scan that measured nothing against a real pin reads as banked slack,
+    // never as a silent pass — the suite's fail-closed doctrine.
+    assert_eq!(
+        contracts_ceiling_verdict(0, CEILING),
+        CeilingVerdict::Banked
     );
 }
 
