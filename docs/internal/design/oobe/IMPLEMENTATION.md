@@ -41,8 +41,9 @@ The earlier prototype was rolled back for showing mock cards to all users. v1 mu
 
 ## 3. PR slices (vertical, each independently mergeable behind the flag)
 
-1. **Flag + empty surface + `SuggestedTaskCard`** — the component (all states) rendered from a static in-memory list *only* under the flag; flag off in prod. No backend. (Frontend-only; tests for each card state.)
-2. **Approve → foreground turn + live status** — wire Approve to `sendMessage`; derive status from `useChatEvents(runId)`; render running → completed/error. (Change 2 + 6.)
+1. ✅ **Flag + surface + `SuggestedTaskCard`** *(landed)* — component (all states) from a static list under the off-by-default flag; per-state tests.
+2. ✅ **Approve → foreground turn** *(landed)* — Approve submits the task's `approvePrompt` through the existing `chat.tsx` `handleSend` (display content = card title), running a real foreground turn; the thread streams the activity by reuse; the card flips to `running` optimistically. (Change 2.)
+2b. **Persistent drawer + live card status** — keep the surface across the landing→thread transition (a composer-docked drawer) and mirror the run's status on the card via `useChatEvents` (running → completed on `final_reply`, error on `failed`). *Split out of the original slice 2 because it needs the surface to live in the thread view, not just the landing.* (Change 6.)
 3. **Connect CTA** — unconnected card → existing extension `setup`/OAuth; on success → suggested. (Change 5.)
 4. **"+ Automation"** — completed card → scheduling prompt via `sendMessage` → agent `trigger_create`; deep-link to `pages/automations/`. (Change 4.)
 5. **Single-active + error polish** — disable other cards while one runs; `failed`-frame error/incomplete state; resolve the queue-vs-block UX (mockup blocks). (Change 3 + 6.)
