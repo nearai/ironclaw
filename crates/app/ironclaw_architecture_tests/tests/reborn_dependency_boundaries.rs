@@ -742,7 +742,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // truncation-watermark DTO carried across the existing context and
         // prompt contracts. Window selection and task-pinning behavior remain
         // in ironclaw_threads and ironclaw_loop_host.
-        ("ironclaw_loop_contracts", 13_326),
+        // 13_326 -> 13_337 (2026-08-12, #7416 fail-closed batch ordering):
+        // the batch-ordering port contract now defaults to ordered entry and
+        // documents the explicit opt-in required for concurrent singles.
+        // Scheduling and wrapper behavior remain in their owning loop crates.
+        ("ironclaw_loop_contracts", 13_337),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
