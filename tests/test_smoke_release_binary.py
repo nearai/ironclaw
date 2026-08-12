@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -132,6 +133,19 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         self.assertTrue(
             all("DATABASE_URL" not in environment for environment in environments)
         )
+
+    def test_isolated_environment_preserves_windows_account_for_key_acl(self) -> None:
+        root = Path(self.temp_dir.name) / "windows-smoke"
+        root.mkdir()
+        with mock.patch.dict(
+            os.environ,
+            {"USERNAME": "runneradmin", "USERDOMAIN": "RUNNER"},
+            clear=False,
+        ):
+            environment = SMOKE._isolated_environment(root)
+
+        self.assertEqual(environment["USERNAME"], "runneradmin")
+        self.assertEqual(environment["USERDOMAIN"], "RUNNER")
 
     def test_nonzero_shipping_command_fails(self) -> None:
         self.runner.responses[("extension", "search", "--json")] = completed(

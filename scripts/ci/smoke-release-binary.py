@@ -32,6 +32,8 @@ _PASSTHROUGH_ENV = (
     "TMP",
     "TEMP",
     "LANG",
+    "USERNAME",
+    "USERDOMAIN",
 )
 
 
