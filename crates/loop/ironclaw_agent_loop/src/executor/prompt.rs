@@ -89,6 +89,7 @@ pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
     inline_messages: Vec<LoopInlineMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
+    recent_window_truncation: Option<ironclaw_loop_contracts::LoopContextWindowTruncation>,
     rendered_reply_admission_control: bool,
     rendered_repeated_call_warning: bool,
 }
@@ -103,6 +104,7 @@ impl BuiltPromptBundle {
         let bundle =
             build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view).await?;
         refresh_compaction_prompt_from_index(state, &bundle.compaction_message_index);
+        observe_recent_window_truncation(state, bundle.recent_window_truncation.as_ref());
         Ok(bundle)
     }
 
@@ -111,6 +113,7 @@ impl BuiltPromptBundle {
         state: &mut LoopExecutionState,
     ) -> Vec<LoopModelMessage> {
         refresh_compaction_prompt_from_index(state, &self.compaction_message_index);
+        observe_recent_window_truncation(state, self.recent_window_truncation.as_ref());
         self.messages
     }
 
@@ -465,6 +468,11 @@ impl<'a> PromptCompactionStep<'a> {
             .force_compact_initiator
             .take()
             .unwrap_or(CompactionInitiator::Auto);
+        let mode = if initiator == CompactionInitiator::WindowEviction {
+            LoopCompactionMode::WindowEviction
+        } else {
+            LoopCompactionMode::Fresh
+        };
         CheckpointStage
             .emit_progress(
                 self.ctx,
@@ -484,7 +492,7 @@ impl<'a> PromptCompactionStep<'a> {
             last_compacted_through_seq: state.compaction_state.last_compacted_through_seq,
             drop_through_seq,
             preserve_tail_tokens,
-            mode: LoopCompactionMode::Fresh,
+            mode,
             deadline_ms,
         };
         let compaction_result = await_compaction_with_cancellation(
@@ -542,6 +550,14 @@ impl<'a> PromptCompactionStep<'a> {
         };
 
         state.compaction_state.last_compacted_through_seq = Some(drop_through_seq);
+        if state
+            .compaction_state
+            .window_eviction
+            .as_ref()
+            .is_some_and(|watermark| watermark.omitted_through_sequence <= drop_through_seq)
+        {
+            state.compaction_state.window_eviction = None;
+        }
         state.compaction_state.last_deferred = None;
         state.compaction_state.force_compact_on_next_iteration = false;
         state
@@ -745,6 +761,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
         messages: prompt_bundle.messages,
         inline_messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
+        recent_window_truncation: prompt_bundle.recent_window_truncation,
         rendered_reply_admission_control,
         rendered_repeated_call_warning,
     })
@@ -822,6 +839,7 @@ fn refresh_compaction_prompt_from_index(
             kind: match entry.kind {
                 LoopContextCompactionKind::User => IndexedMessageKind::User,
                 LoopContextCompactionKind::Assistant => IndexedMessageKind::Assistant,
+                LoopContextCompactionKind::ToolResult => IndexedMessageKind::ToolResult,
                 LoopContextCompactionKind::System => IndexedMessageKind::System,
                 LoopContextCompactionKind::Summary => IndexedMessageKind::Summary,
                 LoopContextCompactionKind::Other => IndexedMessageKind::Other,
@@ -830,6 +848,36 @@ fn refresh_compaction_prompt_from_index(
         })
         .collect();
     state.compaction_prompt = CompactionPromptSnapshot::from_message_index(message_index);
+}
+
+fn observe_recent_window_truncation(
+    state: &mut LoopExecutionState,
+    truncation: Option<&ironclaw_loop_contracts::LoopContextWindowTruncation>,
+) {
+    let Some(truncation) = truncation else {
+        return;
+    };
+    if !matches!(
+        truncation.omitted_through_kind,
+        LoopContextCompactionKind::User | LoopContextCompactionKind::ToolResult
+    ) || Some(truncation.omitted_through_sequence)
+        <= state.compaction_state.last_compacted_through_seq
+    {
+        return;
+    }
+    state.compaction_state.window_eviction = Some(truncation.clone());
+    let prompt_fingerprint = state.compaction_prompt.fingerprint();
+    if state
+        .compaction_state
+        .last_deferred
+        .is_some_and(|deferred| deferred.prompt_fingerprint == prompt_fingerprint)
+    {
+        return;
+    }
+    if !state.compaction_state.force_compact_on_next_iteration {
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_state.force_compact_initiator = Some(CompactionInitiator::WindowEviction);
+    }
 }
 
 fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {

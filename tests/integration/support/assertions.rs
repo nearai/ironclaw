@@ -1738,6 +1738,22 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the compactor persisted at least `minimum` durable summaries.
+    pub async fn assert_summary_artifact_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let count = self
+            .thread_harness
+            .summary_artifacts(self.binding.thread_id.clone())
+            .await?
+            .len();
+        if count >= minimum {
+            return Ok(());
+        }
+        Err(format!("expected at least {minimum} durable summary artifact(s), saw {count}").into())
+    }
+
     /// Assert no durable compaction summary contains forbidden content. The
     /// diagnostic deliberately omits `needle` and summary bodies.
     pub async fn assert_summary_artifacts_lack(&self, needle: &str) -> HarnessResult<()> {
