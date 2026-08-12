@@ -27,6 +27,7 @@ def completed(
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        self.workspace_roots_were_directories: list[bool] = []
         self.responses = {
             ("--version",): completed("ironclaw 1.0.0\n"),
             ("--help",): completed("Commands: serve run extension profile\n"),
@@ -73,6 +74,10 @@ class FakeRunner:
         self, _binary: Path, args: tuple[str, ...], environment: dict[str, str]
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append((args, environment))
+        workspace_root = environment.get("IRONCLAW_REBORN_WORKSPACE_ROOT")
+        self.workspace_roots_were_directories.append(
+            workspace_root is not None and Path(workspace_root).is_dir()
+        )
         if args == ("extension", "search", "--json"):
             database = (
                 Path(environment["IRONCLAW_REBORN_HOME"])
@@ -115,6 +120,15 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         self.assertTrue(
             all("IRONCLAW_REBORN_HOME" in environment for environment in environments)
         )
+        workspace_roots = {
+            environment.get("IRONCLAW_REBORN_WORKSPACE_ROOT")
+            for environment in environments
+        }
+        self.assertEqual(len(workspace_roots), 1)
+        workspace_root = workspace_roots.pop()
+        self.assertIsNotNone(workspace_root)
+        self.assertTrue(all(self.runner.workspace_roots_were_directories))
+        self.assertNotEqual(Path(workspace_root), ROOT)
         self.assertTrue(
             all("DATABASE_URL" not in environment for environment in environments)
         )

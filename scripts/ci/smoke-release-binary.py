@@ -160,6 +160,7 @@ def _isolated_environment(root: Path) -> dict[str, str]:
             "HOME": str(home),
             "USERPROFILE": str(home),
             "IRONCLAW_REBORN_HOME": str(reborn_home),
+            "IRONCLAW_REBORN_WORKSPACE_ROOT": str(workspace),
             "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
             "TZ": "UTC",
             "LANG": environment.get("LANG", "C.UTF-8"),
