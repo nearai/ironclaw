@@ -7,7 +7,7 @@
 //! 2. The Reborn context stays free of the v1 pairing surface: no
 //!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend —
 //!    Telegram pairing is the WebGeneratedCode flow under
-//!    `/api/webchat/v2/channels/telegram/pairing`.
+//!    the generic `/api/webchat/v2/extensions/{extension_id}/pairing/{action}`.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -408,8 +408,8 @@ fn reborn_context_free_of_v1_pairing_routes() {
     }
     assert!(
         offenders.is_empty(),
-        "v1 pairing route literals found in the reborn context (telegram pairing is \
-         /api/webchat/v2/channels/telegram/pairing):\n{}",
+        "v1 pairing route literals found in the reborn context (pairing is generic: \
+         /api/webchat/v2/extensions/{{extension_id}}/pairing/{{action}}):\n{}",
         offenders.join("\n")
     );
 }

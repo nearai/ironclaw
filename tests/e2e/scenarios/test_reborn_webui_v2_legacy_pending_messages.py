@@ -116,6 +116,7 @@ async def _open_mocked_pending_page(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -156,7 +157,7 @@ async def _open_mocked_pending_page(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     await page.goto(
         f"{reborn_v2_server}/chat/{initial_thread_id}?token={REBORN_V2_AUTH_TOKEN}"

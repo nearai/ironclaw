@@ -92,11 +92,11 @@ pub struct CommunicationDeliveryResolutionRequest {
     intent: CommunicationDeliveryIntent,
 }
 
-pub enum CommunicationDeliveryKind {
+pub enum OutboundPushKind {
     FinalReply,
-    ProgressUpdate,
+    Progress,
     DeliveryStatus,
-    ApprovalPrompt,
+    GateRequired,
     AuthPrompt,
     ModelDelivery,
 }
@@ -120,6 +120,12 @@ pub enum RequestedOutboundKind {
 Requested outbound is explicit command intent. Run notification is lifecycle
 policy for final replies, progress updates, approval prompts, auth prompts, and
 delivery-status notices.
+
+`OutboundPushKind` is the one canonical delivery-kind enum from resolution
+through persisted attempts. The former resolution-only mirror was removed;
+private serde aliases still accept its retired `progress_update` and
+`approval_prompt` spellings while writers retain the established persisted
+`progress` and `gate_required` values.
 
 `RequestedOutboundContext.requested_target` is a typed reply-target binding candidate,
 not a raw channel, adapter string, product-specific conversation id, or
@@ -145,7 +151,7 @@ pub enum RunNotificationEventKind {
     RunBlocked,
     DeliveryStatus,
     /// An explicit model-initiated delivery (`builtin.outbound_deliver`).
-    /// Carries its own `CommunicationDeliveryKind::ModelDelivery` so attempts
+    /// Carries its own `OutboundPushKind::ModelDelivery` so attempts
     /// stay distinguishable in the durable audit trail and per-run accounting.
     ModelDelivery,
 }
@@ -220,7 +226,7 @@ The record is keyed by scope (`DeliveryDefaultScope`, effectively
   background/routine run with no live source route. Empty means "no external
   notification route" — the run's reply still lands in its own thread, and
   there is no dedicated in-app pseudo-target to configure instead. (✎
-  2026-08-08: the `web-push` catalog target — browser push to the user's
+  2026-08-08: the `web-app` catalog target — browser push to the user's
   enrolled devices — is a real, provider-backed external target selectable in
   this set like any channel target; it did not reintroduce the retired
   in-app pseudo-target.)

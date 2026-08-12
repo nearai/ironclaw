@@ -55,6 +55,15 @@ impl ProductCommandContext {
                 false,
             ));
         };
+        // Channel commands are a webhook-ingress concern; a session envelope
+        // carries no verified claim and must not reach command dispatch.
+        let Some(auth_claim) = envelope.auth_claim().cloned() else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
         Ok(Self {
             action_id,
             fingerprint,
@@ -63,7 +72,7 @@ impl ProductCommandContext {
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
-            auth_claim: envelope.auth_claim().clone(),
+            auth_claim,
             trigger: command.trigger,
             received_at: envelope.received_at(),
         })

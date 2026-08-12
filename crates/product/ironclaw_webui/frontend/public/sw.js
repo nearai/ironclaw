@@ -1,6 +1,6 @@
 // IronClaw service worker: Web Push display + notification deep links.
 //
-// The push payload contract is `ironclaw_web_push::WebPushNotificationPayload`
+// The push payload contract is `ironclaw_web_app::WebAppNotificationPayload`
 // — `{ title, body, url, tag? }` — encrypted per RFC 8291; the browser hands
 // this worker the decrypted JSON. Deliberately NO fetch handler and NO
 // caching: the app is served fresh by the gateway, and a stale-asset cache

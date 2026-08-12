@@ -4,25 +4,28 @@
 
 - Read `README.md` for orientation (surfaces, vendor, runtime, tests); this
   map plus `Cargo.toml` and source files carry the working rules.
-- This directory is the whole Slack **package**: the adapter crate, its
+- This directory is the whole Slack **package**: the channel-capability crate, its
   `manifest.toml`, `prompts/`, and the WASM user-token tools (`wasm/` +
   `wasm-src/`) live together, per the family's self-containment rule.
 - Read `src/lib.rs` first, then:
-  - `channel.rs` — the `SlackChannelAdapter` (`ChannelAdapter`) implementation.
+  - `channel.rs` — the `SlackChannelAdapter` implementations of
+    `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`.
   - `payload.rs` — Slack Events API payload parsing/DTO handling.
   - `mrkdwn.rs` — Slack outbound mrkdwn rendering and message chunking.
   - `delivery.rs`, `attachment_transfer.rs`, `preference_targets.rs` — delivery DTOs, attachment transfer, reply-target codec.
   - Re-derive this list with `ls crates/extensions/packages/slack/src/`.
-- Read the contract before changing adapter behavior:
-  - `crates/contracts/ironclaw_extension_contracts/` — `ChannelAdapter` and the
+- Read the contract before changing channel behavior:
+  - `crates/contracts/ironclaw_extension_contracts/` — `ChannelIngress`,
+    `ChannelReply`, `ChannelDelivery`, and the
     surface vocabulary (a channel package depends on contracts-tier crates
     only; never on `ironclaw_assistant`, the registry, or the extension host).
 
 ## What This Crate Owns
 
-- The Slack `ChannelAdapter` implementation for Reborn (issue #3857). The
-  contract is `ironclaw_extension_contracts::ChannelAdapter` — there is
-  no `ProductAdapter` trait in this codebase.
+- Slack's three channel capability implementations for Reborn (issue #3857).
+  `receive` completes payload-derived attachments and shared-conversation
+  context through restricted egress before returning; the output methods
+  render/send only. There is no `ProductAdapter` trait in this codebase.
 - Slack Events API payload parsing and outbound `chat.postMessage` rendering.
 - Adapter-specific mapping between Slack shapes and the shared channel DTOs.
 
@@ -41,5 +44,5 @@
 ## Agent Notes
 
 - Keep Slack-specific parsing/rendering here; move reusable DTO concerns upstream.
-- Preserve adapter outputs as untrusted parsed DTOs until host/workflow stamps trusted context.
+- Preserve package outputs as untrusted complete DTOs until host/workflow validates and stamps trusted context.
 - Approval/auth conversational handling is deferred to the owning Reborn service seam (#3094).

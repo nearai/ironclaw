@@ -76,6 +76,9 @@ const SELF_FILE: &str = "reborn_extension_contract_location_scan.rs";
 const FROZEN_CONTRACT_NAMES: &[&str] = &[
     // Adapter/port traits.
     "ChannelConnectionScopeSource",
+    "ChannelDelivery",
+    "ChannelIngress",
+    "ChannelReply",
     "Extension",
     "MemoryLifecycleHook",
     "PreferenceTargetCodec",
@@ -434,10 +437,12 @@ fn collision_exemptions_name_live_owner_types_and_do_not_widen_the_import_path_h
         import_path_governed.contains("ToolAdapter"),
         "the import-path half must still govern the tool tier's trait"
     );
-    assert!(
-        import_path_governed.contains("ChannelAdapter"),
-        "the import-path half must still govern the channel tier's trait"
-    );
+    for name in ["ChannelIngress", "ChannelReply", "ChannelDelivery"] {
+        assert!(
+            import_path_governed.contains(name),
+            "the import-path half must still govern the channel tier's `{name}` trait"
+        );
+    }
 }
 
 #[test]

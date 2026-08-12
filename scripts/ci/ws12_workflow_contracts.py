@@ -953,6 +953,10 @@ def validate_postgres_scripted_parity(text: str) -> list[str]:
 PRODUCTION_LINT_STEP = "Check production-target lints"
 WINDOWS_CLIPPY_JOB = "clippy-windows"
 WEBUI_INSTALL_STEP = "Install WebUI frontend dependencies"
+SCCACHE_SETUP_ACTION = ".github/actions/setup-sccache-dist/action.yml"
+SCCACHE_INSTALL_STEP = "Install sccache"
+SCCACHE_CONFIGURE_STEP = "Configure OVH sccache"
+SCCACHE_FALLBACK_STEP = "Fall back to local compilation"
 
 # One `- name:` step heading. The scan is bounded to its own step because the
 # neighbouring `Check all-target lints` legitimately passes `--tests
@@ -1008,6 +1012,55 @@ def step_body(text: str, step_name: str) -> str | None:
         following = STEP_HEADING.search(text, heading.end())
         return text[heading.end() : following.start() if following else len(text)]
     return None
+
+
+def validate_sccache_setup_action(text: str) -> list[str]:
+    """Keep an optional compiler-cache download from gating CI correctness."""
+    errors: list[str] = []
+
+    install = step_body(text, SCCACHE_INSTALL_STEP)
+    if install is None:
+        return [
+            f"{SCCACHE_SETUP_ACTION}: could not find the {SCCACHE_INSTALL_STEP!r} step"
+        ]
+    if "id: install_sccache" not in install:
+        errors.append(
+            f"{SCCACHE_SETUP_ACTION}: {SCCACHE_INSTALL_STEP!r} must expose "
+            "`id: install_sccache` so later steps can route on its outcome"
+        )
+    if "continue-on-error: true" not in install:
+        errors.append(
+            f"{SCCACHE_SETUP_ACTION}: {SCCACHE_INSTALL_STEP!r} must set "
+            "`continue-on-error: true` because cache installation is optional"
+        )
+
+    configure = step_body(text, SCCACHE_CONFIGURE_STEP)
+    if configure is None:
+        errors.append(
+            f"{SCCACHE_SETUP_ACTION}: could not find the {SCCACHE_CONFIGURE_STEP!r} step"
+        )
+    elif "steps.install_sccache.outcome == 'success'" not in configure:
+        errors.append(
+            f"{SCCACHE_SETUP_ACTION}: {SCCACHE_CONFIGURE_STEP!r} must require a "
+            "successful installation before configuring or enabling `RUSTC_WRAPPER`"
+        )
+
+    fallback = step_body(text, SCCACHE_FALLBACK_STEP)
+    if fallback is None:
+        errors.append(
+            f"{SCCACHE_SETUP_ACTION}: could not find the {SCCACHE_FALLBACK_STEP!r} step"
+        )
+    elif (
+        "steps.install_sccache.outcome == 'failure'" not in fallback
+        or "::warning" not in fallback
+        or "local compilation" not in fallback
+    ):
+        errors.append(
+            f"{SCCACHE_SETUP_ACTION}: {SCCACHE_FALLBACK_STEP!r} must warn that a "
+            "failed installation is falling back to local compilation"
+        )
+
+    return errors
 
 
 def job_body(text: str, job_name: str) -> str | None:
@@ -1704,6 +1757,12 @@ def validate_workflow_texts(
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))
+    try:
+        sccache_action = (root / SCCACHE_SETUP_ACTION).read_text(encoding="utf-8")
+    except OSError as error:
+        errors.append(f"{SCCACHE_SETUP_ACTION}: could not read action: {error}")
+    else:
+        errors.extend(validate_sccache_setup_action(sccache_action))
     return errors
 
 

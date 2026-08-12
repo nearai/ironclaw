@@ -145,20 +145,6 @@ where
             .await
             .map_err(ProductSurfaceError::from)
     }
-
-    pub(super) async fn resolve_user_model(
-        &self,
-        caller: ProductSurfaceCaller,
-        requested_model: Option<String>,
-    ) -> Result<Option<String>, ProductSurfaceError> {
-        let Some(service) = self.llm_config.as_ref() else {
-            return Ok(requested_model);
-        };
-        service
-            .resolve_user_model(caller, requested_model)
-            .await
-            .map_err(ProductSurfaceError::from)
-    }
 }
 
 fn llm_config_input_error(field: &'static str) -> ProductSurfaceError {

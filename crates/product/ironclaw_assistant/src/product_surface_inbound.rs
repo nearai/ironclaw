@@ -150,6 +150,11 @@ pub enum ProductInboundCommand {
         /// Normalized caller-requested model hint (`"default"`/empty already
         /// dropped to `None`). Set on the submitted turn's `requested_model`.
         requested_model: Option<String>,
+        /// The session channel extension named by the generic session-inbound
+        /// route. `None` for transports submitting under the legacy session
+        /// surface identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extension_id: Option<String>,
     },
     CancelRun {
         request: CancelRunRequest,
@@ -215,6 +220,14 @@ impl IntoProductInboundCommand for ProductSubmitTurnRequest {
             TextMode::MessageContent,
         )?;
 
+        let extension_id = self
+            .extension_id
+            .map(|value| {
+                validate_text_value("extension_id", &value, 256, TextMode::Token)?;
+                Ok::<_, ProductSurfaceError>(value)
+            })
+            .transpose()?;
+
         Ok(ProductInboundCommand::SendMessage {
             scope: caller.turn_scope(thread_id),
             actor: caller.actor(),
@@ -224,6 +237,7 @@ impl IntoProductInboundCommand for ProductSubmitTurnRequest {
                 .model
                 .as_deref()
                 .and_then(ironclaw_common::model_selection::requested_model_hint),
+            extension_id,
         })
     }
 }

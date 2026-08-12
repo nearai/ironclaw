@@ -312,9 +312,13 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "Acme messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.ingress]
 route_suffix = "events"           # served at /webhooks/extensions/acme-messenger/events
@@ -345,7 +349,6 @@ credential_handle = "acme_bot_token"
 [channel.presentation]
 supports_markdown = true
 supports_threads = false
-max_message_chars = 4000
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 

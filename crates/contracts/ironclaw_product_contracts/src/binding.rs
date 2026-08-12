@@ -106,16 +106,21 @@ pub enum ProductConversationBindingCreationPolicy {
 }
 
 impl ResolveBindingRequest {
-    pub fn from_envelope(envelope: &ProductInboundEnvelope) -> Self {
-        Self {
+    /// Build the binding request for a webhook-verified envelope. Session
+    /// envelopes bind through their owned thread and never reach the external
+    /// binding resolver, so a missing claim fails closed here.
+    pub fn from_envelope(
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Self, ironclaw_host_api::product_adapter_error::ProductAdapterError> {
+        Ok(Self {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
             external_event_id: envelope.external_event_id().clone(),
             route_kind: route_kind_for_inbound_payload(envelope.payload()),
-            auth_claim: envelope.auth_claim().clone(),
-        }
+            auth_claim: envelope.require_verified_auth_claim()?.clone(),
+        })
     }
 }
 

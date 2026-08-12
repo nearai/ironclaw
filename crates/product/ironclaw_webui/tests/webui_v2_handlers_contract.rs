@@ -2274,7 +2274,7 @@ async fn delete_thread_path_dispatches_through_service() {
 }
 
 #[tokio::test]
-async fn send_message_path_overrides_body_thread_id() {
+async fn session_channel_message_path_overrides_body_extension_id() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2283,10 +2283,10 @@ async fn send_message_path_overrides_body_thread_id() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-from-path/messages")
+                .uri("/api/webchat/v2/channels/ext-from-path/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"client_action_id":"act-1","thread_id":"thread-from-body","content":"hi"}"#,
+                    r#"{"client_action_id":"act-1","extension_id":"ext-from-body","thread_id":"thread-1","content":"hi"}"#,
                 ))
                 .expect("request"),
         )
@@ -2297,9 +2297,14 @@ async fn send_message_path_overrides_body_thread_id() {
     let calls = services.submit_turn_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].thread_id.as_deref(),
-        Some("thread-from-path"),
+        calls[0].extension_id.as_deref(),
+        Some("ext-from-path"),
         "path segment must win over body field"
+    );
+    assert_eq!(
+        calls[0].thread_id.as_deref(),
+        Some("thread-1"),
+        "the caller-owned thread travels in the body"
     );
 }
 
@@ -2311,7 +2316,7 @@ async fn send_message_path_overrides_body_thread_id() {
 // Fresh-path variant: run metadata is Some — wire must include active_run_id, status,
 // event_cursor fields so the client can poll the blocking run.
 #[tokio::test]
-async fn send_message_rejected_busy_wire_shape() {
+async fn session_channel_message_rejected_busy_wire_shape() {
     let services = Arc::new(StubServices::default());
     services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
         thread_id: ThreadId::new("thread-alpha").expect("thread id"),
@@ -2327,9 +2332,11 @@ async fn send_message_rejected_busy_wire_shape() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"content":"hello"}"#))
+                .body(Body::from(
+                    r#"{"thread_id":"thread-alpha","content":"hello"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -2400,7 +2407,7 @@ async fn set_auto_activate_learned_invokes_capability_with_enabled_flag() {
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
 // event_cursor so the client receives no fabricated run reference it cannot query.
 #[tokio::test]
-async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
+async fn session_channel_message_rejected_busy_replay_wire_shape_omits_run_fields() {
     let services = Arc::new(StubServices::default());
     services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
         thread_id: ThreadId::new("thread-alpha").expect("thread id"),
@@ -2416,9 +2423,11 @@ async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"content":"hello"}"#))
+                .body(Body::from(
+                    r#"{"thread_id":"thread-alpha","content":"hello"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -7302,6 +7311,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                     id: "message-1".to_string(),
                     run_id: None,
                     body: "projection body".to_string(),
+                    finalized: false,
                 }],
             )
             .expect("projection state"),

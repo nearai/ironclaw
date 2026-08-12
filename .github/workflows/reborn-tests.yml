@@ -210,6 +210,15 @@ jobs:
       OPENAI_API_KEY: ""
       RUSTC_BOOTSTRAP: "1"
       RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
+      # The deep composed-runtime futures (turn -> capability -> skills script
+      # mount, and the channel admission chain) overflow the 2 MiB default
+      # test-thread stack on this lane's Linux codegen — first observed as a
+      # SIGABRT in composition-core's
+      # `the_model_runs_a_skills_script_from_the_workdir_the_body_advertises`.
+      # 8 MiB matches the integration-lane headroom below; the deepest
+      # subtrees stay Box::pin'd at their seams — this is headroom, not a
+      # substitute.
+      RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}

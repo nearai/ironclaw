@@ -536,6 +536,7 @@ mod tests {
                 label: "API token".to_string(),
                 secret: true,
                 required: true,
+                host_managed: false,
             }],
         };
         let uses = vec![

@@ -49,6 +49,11 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     /// fail-closed custody (a deployment without product auth).
     pub(crate) linked_sessions: Option<Arc<ironclaw_extension_host::LinkedSessionStore>>,
     pub(crate) linked_accounts: Option<Arc<dyn ironclaw_extension_host::LinkedAccountResolution>>,
+    /// Host-owned per-user delivery registrations, handed to the coordinator
+    /// so a channel with zero of them resolves to "no target" before any
+    /// adapter call (design §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
 }
 
 pub(crate) struct BackendExtensionHostAssembly {
@@ -72,6 +77,7 @@ pub(crate) async fn build_backend_extension_host(
         channel_bindings,
         installation_store,
         admin_configuration_resolver,
+        delivery_registrations,
         resource_governor,
         reserved_capability_ids,
         host_runtime_http_egress,
@@ -120,7 +126,7 @@ pub(crate) async fn build_backend_extension_host(
             native_factories,
             channel_adapters: channel_bindings
                 .iter()
-                .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
+                .map(|binding| (binding.extension_id.clone(), binding.surfaces.clone()))
                 .collect(),
             installation_store: Arc::clone(&installation_store),
             boot_installations,
@@ -173,6 +179,7 @@ pub(crate) async fn build_backend_extension_host(
                 Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
                     Arc::clone(&ingress.reply_context),
                 )),
+                Arc::clone(&delivery_registrations),
                 ironclaw_assistant::DeliveryRetryPolicy::default(),
             ));
             (Some(coordinator), Some(resolver))

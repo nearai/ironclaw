@@ -5,9 +5,45 @@
 
 use serde_json::json;
 
+use ironclaw_host_api::turn::TurnRunId;
+use ironclaw_product_contracts::outbound::{ProductProjectionItem, ProductProjectionState};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
 };
+
+#[test]
+fn projection_text_distinguishes_live_from_finalized_transcript_rows() {
+    let run_id = TurnRunId::new();
+    let decoded: ProductProjectionState = serde_json::from_value(json!({
+        "thread_id": "thread-1",
+        "items": [{"text": {"id": "live-1", "run_id": run_id, "body": "partial"}}]
+    }))
+    .expect("legacy live text remains readable");
+    assert!(matches!(
+        decoded.items.as_slice(),
+        [ProductProjectionItem::Text {
+            finalized: false,
+            ..
+        }]
+    ));
+
+    let finalized = ProductProjectionState::new(
+        "thread-1",
+        vec![ProductProjectionItem::Text {
+            id: "message-1".to_string(),
+            run_id: Some(run_id),
+            body: "final".to_string(),
+            finalized: true,
+        }],
+    )
+    .expect("finalized text state");
+    let value = serde_json::to_value(&finalized).expect("serialize finalized text");
+    assert_eq!(value["items"][0]["text"]["finalized"], true);
+    assert_eq!(
+        serde_json::from_value::<ProductProjectionState>(value).expect("round trip finalized text"),
+        finalized
+    );
+}
 
 #[test]
 fn product_stream_continuation_is_process_local_not_wire_state() {

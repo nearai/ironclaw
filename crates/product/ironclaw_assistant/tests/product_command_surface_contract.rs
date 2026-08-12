@@ -612,7 +612,10 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     let expected_installation_id = envelope.installation_id().clone();
     let expected_actor = envelope.external_actor_ref().clone();
     let expected_conversation = envelope.external_conversation_ref().clone();
-    let expected_auth_claim = envelope.auth_claim().clone();
+    let expected_auth_claim = envelope
+        .require_verified_auth_claim()
+        .expect("verified envelope")
+        .clone();
     let expected_received_at = envelope.received_at();
 
     let ack = workflow.submit_inbound(envelope).await.expect("accept");

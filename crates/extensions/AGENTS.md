@@ -53,7 +53,7 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 
 | Concern | Home |
 |---|---|
-| Surface/adapter *vocabulary*: `ChannelAdapter`, `ToolAdapter`, `CapabilitySurfaceKind`, the exported conformance suite | `crates/contracts/ironclaw_extension_contracts` — outside this family, so every layer shares one vocabulary |
+| Surface/adapter *vocabulary*: `ChannelIngress`, `ChannelReply`, `ChannelDelivery`, `ToolAdapter`, `CapabilitySurfaceKind`, the exported conformance suite | `crates/contracts/ironclaw_extension_contracts` — outside this family, so every layer shares one vocabulary |
 | Manifest schema + durable installation/membership/credential-binding/definition records | `ironclaw_extension_registry` |
 | Generic hosting: lifecycle authority, loaders, activation, the vendor-blind ingress verifier, egress, hosted-MCP registration | `ironclaw_extension_host` |
 | Product face: catalog UX, lifecycle commands/capabilities, credential views, the extension hub | `ironclaw_extension_manager` |
@@ -67,8 +67,9 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 | [`ironclaw_extension_host`](./ironclaw_extension_host) | The generic host: lifecycle writer + active snapshot, loaders (native/WASM/MCP), activation/removal transactions, the manifest-recipe ingress verifier, egress transports, channel identity/pairing/config service cores, hosted-MCP registration pipeline | you change how *any* extension is installed, verified, bound, activated, or delivered — never for one vendor |
 | [`ironclaw_extension_manager`](./ironclaw_extension_manager) | The product face: lifecycle commands/capabilities, the lifecycle product service, admin/operator capability handlers, credential views, the extension hub | you change what a user or operator sees or does to manage extensions |
 | [`ironclaw_extension_support`](./ironclaw_extension_support) | Shared support for the bundled packages: the `PACKAGES` inventory and the native tool *executors* (gsuite, web-access, coding, skills) — not itself a package | you add native, non-WASM tool logic for a data-only package |
-| [`packages/slack`](./packages/slack) (`ironclaw_slack_extension`) | Protocol-only Slack `ChannelAdapter`: payload parsing, mrkdwn rendering, delivery | Slack-shaped bytes only |
-| [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Protocol-only Telegram `ChannelAdapter`: Bot API normalization + rendering | Telegram-shaped bytes only |
+| [`packages/slack`](./packages/slack) (`ironclaw_slack_extension`) | Protocol-only Slack channel capabilities: complete webhook ingress, message replies, and target-resolved delivery | Slack-shaped bytes only |
+| [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Protocol-only Telegram channel capabilities: complete webhook ingress, message replies, and target-resolved delivery | Telegram-shaped bytes only |
+| [`packages/web-app`](./packages/web-app) (`ironclaw_web_app_extension`) | Delivery-only browser-push translator; authenticated-session ingress and stream replies are host-owned | Web Push-shaped bytes only |
 | [`packages/memory-native`](./packages/memory-native) (`ironclaw_memory_native`) | The default `[memory]` provider: filesystem-backed `MemoryService` implementation | the bundled memory backend's behavior |
 | [`packages/mem0`](./packages/mem0) (`ironclaw_memory_mem0`) | The alternative `[memory]` provider over an external mem0 REST service | the mem0 mapping or its hardened transport |
 
@@ -118,9 +119,9 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `memory-native/` | `ironclaw.memory` | 5 memory tools + `[memory]` provider | — | first_party | crate `ironclaw_memory_native` |
 | `nearai-mcp/` | `nearai` | `[mcp]` hosted server + 1 pinned tool | `nearai` (api_key) | mcp | data-only |
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
-| `slack/` | `slack` | 8 tools + channel | `slack` | wasm (tools) + first-party adapter | crate `ironclaw_slack_extension` + `wasm/` |
-| `telegram/` | `telegram` | channel only (no tools, no auth recipe — deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
-| `web-push/` | `web-push` | channel only (outbound-only browser push; no ingress, no pairing — VAPID key material auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_push_extension` |
+| `slack/` | `slack` | 8 tools + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`) | `slack` | wasm (tools) + first-party channel capabilities | crate `ironclaw_slack_extension` + `wasm/` |
+| `telegram/` | `telegram` | channel only (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`; no tools/auth recipe, deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
+| `web-app/` | `web-app` | channel only (host-owned `authenticated_session` ingress + host-owned stream reply + push `[channel.delivery]`; package binds delivery only, VAPID auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_app_extension` |
 | `web-access/` | `web-access` | 2 tools | — | first_party | data-only (executor: `extension_support::web_access`) |
 
 Data-only packages ship through the `PACKAGES` inventory in

@@ -17,8 +17,7 @@ use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    CommunicationPreferenceKey, DeliveryDefaultScope, OutboundDeliveryTargetScope, OutboundError,
-    OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
+    OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
     TriggeredFireFailureDeliveryRequest, TriggeredRunDelivery, TriggeredRunDeliveryOutcomeKind,
@@ -37,8 +36,8 @@ use super::prompts;
 use super::{
     BlockedActionableMarker, DeliveredChannelMessage, RunDeliveryError, RunDeliveryServices,
     RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
-    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    triggered_run_delivery_settings, wait_for_actionable_state,
+    gate_routes::record_gate_route_if_needed, triggered_run_delivery_settings,
+    wait_for_actionable_state,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
@@ -891,92 +890,25 @@ async fn resolve_notification_targets(
     creator_user_id: &UserId,
     notification_ref: &str,
 ) -> Result<ResolvedNotificationTargets, OutboundError> {
-    let key = CommunicationPreferenceKey {
-        scope: DeliveryDefaultScope::personal(tenant_id.clone(), creator_user_id.clone()),
-    };
-    let owner_scope = OutboundDeliveryTargetScope::new(tenant_id.clone(), creator_user_id.clone());
-    let resolution =
-        match crate::notification_channel_resolution::resolve_effective_notification_channels_arc(
-            &services.communication_preferences,
-            &services.delivery_targets,
-            &owner_scope,
-            key,
-            crate::notification_channel_resolution::LookupErrorPolicy::SkipEntry,
-        )
-        .await
-        {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                // silent-ok: a preference/legacy-slot read failure means we cannot
-                // know the notification channels; the run itself is untouched and
-                // the web app surface still shows the hold.
-                tracing::warn!(
-                    target: TRACE_TARGET,
-                    notification_ref,
-                    %error,
-                    "background run notification: notification-channel read failed"
-                );
-                return Err(error);
-            }
-        };
-    for (target_id, error) in &resolution.skipped {
-        // silent-ok: one unreachable catalog entry must not suppress the
-        // notification on every other channel.
-        tracing::debug!(
-            target: TRACE_TARGET,
-            notification_ref,
-            target_id = %target_id,
-            %error,
-            "background run notification: notification channel lookup failed; skipped"
-        );
-    }
-
-    let mut targets = Vec::with_capacity(resolution.channels.len());
-    for channel in resolution.channels {
-        let entry = match channel {
-            crate::notification_channel_resolution::EffectiveNotificationChannel::Resolved(
-                entry,
-            ) => entry,
-            crate::notification_channel_resolution::EffectiveNotificationChannel::Missing {
-                target_id,
-            } => {
-                tracing::debug!(
-                    target: TRACE_TARGET,
-                    notification_ref,
-                    target_id = %target_id,
-                    "background run notification: notification channel is no longer available to its owner; skipped"
-                );
-                continue;
-            }
-            // The WebUI read surface represents this as an Unavailable row;
-            // the notifier has nothing to deliver through it — skip.
-            crate::notification_channel_resolution::EffectiveNotificationChannel::LegacyUnresolvable {
-                reply_ref: _,
-            } => {
-                tracing::debug!(
-                    target: TRACE_TARGET,
-                    notification_ref,
-                    "background run notification: legacy notification slot no longer resolves; skipped"
-                );
-                continue;
-            }
-        };
-        let reply_target_binding_ref = entry.destination;
-        let direct_message = target_codecs.iter().any(|codec| {
-            codec
-                .conversation_for_target(&reply_target_binding_ref)
-                .is_some()
-                && codec.is_personal_direct_message(&reply_target_binding_ref)
-        });
-        targets.push(NotificationTarget {
-            target: reply_target_binding_ref,
-            extension_id: entry.summary.channel.as_str().to_string(),
-            direct_message,
-        });
-    }
+    let resolved = super::notifications::resolve_user_notification_targets(
+        services,
+        target_codecs,
+        tenant_id,
+        creator_user_id,
+        notification_ref,
+    )
+    .await?;
     Ok(ResolvedNotificationTargets {
-        targets,
-        lookup_failed: !resolution.skipped.is_empty(),
+        targets: resolved
+            .targets
+            .into_iter()
+            .map(|target| NotificationTarget {
+                target: target.target,
+                extension_id: target.extension_id,
+                direct_message: target.direct_message,
+            })
+            .collect(),
+        lookup_failed: resolved.lookup_failed,
     })
 }
 
@@ -1349,62 +1281,43 @@ async fn deliver_notification_to_target(
     notification: &TriggeredNotification,
     target: &NotificationTarget,
 ) -> Result<Vec<DeliveredChannelMessage>, TriggeredNotificationFailure> {
-    let projection_access_policy = AllowNoProjectionAccess;
-    let outbound_policy = OutboundPolicyService::new(
-        services.outbound_store.as_ref(),
-        &projection_access_policy,
-        context.authority,
-    );
-    let projection_id = prompts::run_notification_projection_id(
-        context.run_id,
-        notification.event_kind,
-        notification.notice_discriminator.as_deref(),
-    );
-    let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
-        TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
-    })?;
-    let delivery = PrepareCommunicationDeliveryRequest {
-        resolution_request: CommunicationDeliveryResolutionRequest {
-            scope: context.scope.clone(),
-            actor: context.actor.clone(),
-            modality: CommunicationModality::Text,
-            intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
-                event_kind: notification.event_kind,
-                origin: RunNotificationOrigin::RunScopedTarget {
-                    target: target.target.clone(),
-                },
-            }),
-        },
-        turn_run_id: Some(context.run_id),
-        projection_ref,
-        attempted_at: Utc::now(),
+    // One caller of the generic §7a facade among any number: the routine
+    // driver decides WHEN and WHAT; the facade + adapter own HOW.
+    let facade_context = super::notifications::ChannelNotificationContext {
+        scope: context.scope,
+        thread_scope: context.thread_scope,
+        actor: context.actor,
+        run_id: context.run_id,
+        reply_target_authority: context.authority,
+        target_resolver: context.target_resolver,
     };
-
-    let outcome = services
-        .coordinator
-        .deliver(
-            &outbound_policy,
-            context.target_resolver,
-            services.project_filesystem.as_ref(),
-            CoordinatedDeliveryRequest {
-                intent: notification.intent,
-                delivery,
-                parts: vec![OutboundPart::Text(notification.text.clone())],
-                attachments: Vec::new(),
-                thread_anchor: None,
-                require_direct_message_target: notification.require_direct_message_target,
-                extension_id: &target.extension_id,
-                thread_scope: context.thread_scope,
-            },
-        )
-        .await
-        .map_err(classify_delivery_error)?;
-    match outcome {
-        CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
-            TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
-        ),
-        outcome => Ok(delivered_messages_from_outcome(&outcome)),
-    }
+    let facade_notification = super::notifications::ChannelNotification {
+        event_kind: notification.event_kind,
+        intent: notification.intent,
+        text: notification.text.clone(),
+        require_direct_message_target: notification.require_direct_message_target,
+        notice_discriminator: notification.notice_discriminator.clone(),
+    };
+    let facade_target = super::notifications::NotificationChannelTarget {
+        target: target.target.clone(),
+        extension_id: target.extension_id.clone(),
+        direct_message: target.direct_message,
+    };
+    super::notifications::notify(
+        services,
+        &facade_context,
+        &facade_notification,
+        &facade_target,
+    )
+    .await
+    .map_err(|failure| match failure {
+        super::notifications::NotificationDeliveryFailure::Denied => {
+            TriggeredNotificationFailure::Denied
+        }
+        super::notifications::NotificationDeliveryFailure::Other(reason) => {
+            TriggeredNotificationFailure::Other(reason)
+        }
+    })
 }
 
 /// Retract prompts that must not outlive the run (OAuth links), each through

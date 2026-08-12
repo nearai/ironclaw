@@ -342,6 +342,7 @@ pub struct LifecycleExtensionSummary {
     pub channel_directions: Option<LifecycleChannelDirections>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_connection: Option<ChannelConnectionRequirement>,
+    /// How the model should format output for this channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_presentation: Option<ChannelPresentation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

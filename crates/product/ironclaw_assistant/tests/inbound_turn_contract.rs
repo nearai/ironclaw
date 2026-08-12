@@ -2300,3 +2300,606 @@ async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
         "nothing may be enqueued for a terminal run"
     );
 }
+
+// ─── Session (owned-thread) lane ────────────────────────────────────────────
+//
+// The unified inbound core's second arm: an authenticated-session caller
+// binding through its own thread. These pin the behaviors the dedicated
+// browser path guaranteed before it was re-plumbed onto this core:
+// caller-owns-thread (404-shaped failure, no submission), no implicit thread
+// creation, client-action replay (including the legacy persisted binding-id
+// scheme), cross-thread reuse rejection, and the session submit shape
+// (webui-prefixed refs, raw client action id as the idempotency key, WebUi
+// product context).
+
+mod session_lane {
+    use super::*;
+    use ironclaw_assistant::{
+        SessionSkillActivationClearer, SessionSkillActivationPorts, SessionSkillActivationRecorder,
+    };
+    use ironclaw_product_contracts::inbound::ProductInboundBindingDirective;
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
+    use ironclaw_threads::{AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn session_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("user-a").expect("user"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            None,
+        )
+    }
+
+    fn session_thread_scope(caller: &ProductSurfaceCaller) -> ThreadScope {
+        ThreadScope {
+            tenant_id: caller.tenant_id.clone(),
+            agent_id: caller.agent_id.clone().expect("agent"),
+            project_id: caller.project_id.clone(),
+            owner_user_id: Some(caller.user_id.clone()),
+            mission_id: None,
+        }
+    }
+
+    fn session_envelope(
+        caller: &ProductSurfaceCaller,
+        thread_id: &ThreadId,
+        client_action_id: &str,
+        text: &str,
+    ) -> ProductInboundEnvelope {
+        let context = TrustedInboundContext::from_session_caller(
+            ProductAdapterId::new("webui").expect("adapter"),
+            ironclaw_product_contracts::inbound::ProductSourceChannel::new("webui")
+                .expect("source"),
+            AdapterInstallationId::new(caller.tenant_id.as_str()).expect("installation"),
+            Utc::now(),
+            caller.clone(),
+            thread_id.clone(),
+        );
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new(client_action_id).expect("event"),
+            ExternalActorRef::new(
+                "session_user",
+                caller.user_id.as_str(),
+                Option::<String>::None,
+            )
+            .expect("actor"),
+            ExternalConversationRef::new(None, thread_id.as_str(), None, None)
+                .expect("conversation"),
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)
+                    .expect("payload"),
+            ),
+        )
+        .expect("parsed");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    async fn create_owned_thread(
+        thread_service: &InMemorySessionThreadService,
+        caller: &ProductSurfaceCaller,
+        thread_id: &ThreadId,
+    ) {
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: session_thread_scope(caller),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: caller.user_id.as_str().to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("create owned thread");
+    }
+
+    fn session_service(
+        thread_service: &InMemorySessionThreadService,
+        coordinator: CapturingTurnCoordinator,
+    ) -> DefaultInboundTurnService<
+        FakeConversationBindingService,
+        InMemorySessionThreadService,
+        CapturingTurnCoordinator,
+    > {
+        DefaultInboundTurnService::new(
+            FakeConversationBindingService::new(),
+            thread_service.clone(),
+            coordinator,
+            Arc::new(RejectingInputEnqueue),
+        )
+    }
+
+    #[test]
+    fn session_envelope_carries_owned_thread_directive() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-1").expect("thread");
+        let envelope = session_envelope(&caller, &thread_id, "action-1", "hello");
+        assert!(matches!(
+            envelope.binding_directive(),
+            ProductInboundBindingDirective::OwnedThread { thread_id: bound } if bound == &thread_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_user_message_submits_owned_thread_turn_with_session_shape() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-1").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &caller, &thread_id).await;
+        let coordinator = CapturingTurnCoordinator::default();
+        let service = session_service(&thread_service, coordinator.clone());
+
+        let envelope = session_envelope(&caller, &thread_id, "action-1", "hello session");
+        let outcome = service
+            .accept_user_message(&envelope)
+            .await
+            .expect("submit");
+
+        let InboundTurnOutcome::Submitted {
+            binding,
+            submission,
+            ..
+        } = &outcome
+        else {
+            panic!("expected Submitted, got {outcome:?}");
+        };
+        assert_eq!(binding.thread_id, thread_id);
+        assert_eq!(binding.actor_user_id, caller.user_id);
+        assert!(
+            submission.is_some(),
+            "fresh session submit must carry coordinator metadata"
+        );
+
+        let request = coordinator
+            .last_submit
+            .lock()
+            .expect("capturing coordinator lock poisoned")
+            .clone()
+            .expect("one submitted request");
+        assert_eq!(request.scope.thread_id, thread_id);
+        assert_eq!(
+            request.scope.explicit_owner_user_id(),
+            Some(&caller.user_id),
+            "the session scope is owned by the caller"
+        );
+        assert_eq!(request.actor.user_id, caller.user_id);
+        assert_eq!(
+            request.idempotency_key.as_str(),
+            "action-1",
+            "session submissions keep the raw client action id as the idempotency key"
+        );
+        assert!(
+            request.source_binding_ref.as_str().starts_with("webui-src"),
+            "session source ref keeps the webui prefix, got {}",
+            request.source_binding_ref.as_str()
+        );
+        assert!(
+            request
+                .reply_target_binding_ref
+                .as_str()
+                .starts_with("webui-reply"),
+            "session reply ref keeps the webui prefix, got {}",
+            request.reply_target_binding_ref.as_str()
+        );
+        let product_context = request.product_context.expect("product context");
+        assert_eq!(
+            product_context.origin,
+            TurnOriginKind::WebUi,
+            "session turns keep the WebUi product origin"
+        );
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: session_thread_scope(&caller),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("history");
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    }
+
+    #[tokio::test]
+    async fn session_missing_thread_rejects_without_submission_or_thread_creation() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-missing").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        let coordinator = CapturingTurnCoordinator::default();
+        let service = session_service(&thread_service, coordinator.clone());
+
+        let envelope = session_envelope(&caller, &thread_id, "action-1", "hello");
+        let error = service
+            .accept_user_message(&envelope)
+            .await
+            .expect_err("missing thread must fail");
+        assert!(
+            matches!(error, ProductSurfaceFailure::OwnedThreadUnavailable),
+            "expected OwnedThreadUnavailable, got {error:?}"
+        );
+        assert!(
+            coordinator
+                .last_submit
+                .lock()
+                .expect("capturing coordinator lock poisoned")
+                .is_none(),
+            "no turn may be submitted for a missing thread"
+        );
+        // The probe must not have created the thread as a side effect.
+        assert!(
+            thread_service
+                .list_thread_history(ThreadHistoryRequest {
+                    scope: session_thread_scope(&caller),
+                    thread_id: thread_id.clone(),
+                })
+                .await
+                .is_err(),
+            "send-message must never create a thread implicitly"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_foreign_thread_rejects_indistinguishably_from_missing() {
+        let caller = session_caller();
+        let other = ProductSurfaceCaller::new(
+            caller.tenant_id.clone(),
+            UserId::new("user-b").expect("user"),
+            caller.agent_id.clone(),
+            None,
+        );
+        let thread_id = ThreadId::new("thread-of-b").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &other, &thread_id).await;
+        let coordinator = CapturingTurnCoordinator::default();
+        let service = session_service(&thread_service, coordinator.clone());
+
+        let envelope = session_envelope(&caller, &thread_id, "action-1", "hello");
+        let error = service
+            .accept_user_message(&envelope)
+            .await
+            .expect_err("foreign thread must fail");
+        assert!(
+            matches!(error, ProductSurfaceFailure::OwnedThreadUnavailable),
+            "foreign thread must be indistinguishable from missing, got {error:?}"
+        );
+        assert!(
+            coordinator
+                .last_submit
+                .lock()
+                .expect("capturing coordinator lock poisoned")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_replay_returns_already_submitted_without_resubmission() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-1").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &caller, &thread_id).await;
+        let coordinator = CountingCoordinator::default();
+        let service = DefaultInboundTurnService::new(
+            FakeConversationBindingService::new(),
+            thread_service.clone(),
+            coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
+        );
+
+        let envelope = session_envelope(&caller, &thread_id, "action-1", "hello");
+        let first = service.accept_user_message(&envelope).await.expect("first");
+        let InboundTurnOutcome::Submitted {
+            submitted_run_id: first_run,
+            submission: Some(_),
+            ..
+        } = first
+        else {
+            panic!("expected fresh Submitted, got {first:?}");
+        };
+
+        let second = service
+            .accept_user_message(&envelope)
+            .await
+            .expect("replay");
+        let InboundTurnOutcome::Submitted {
+            submitted_run_id: replay_run,
+            submission,
+            ..
+        } = second
+        else {
+            panic!("expected replayed Submitted, got {second:?}");
+        };
+        assert_eq!(first_run, replay_run, "replay reports the original run");
+        assert!(
+            submission.is_none(),
+            "a replay must not fabricate fresh submit metadata"
+        );
+        assert_eq!(
+            coordinator.submissions.load(Ordering::SeqCst),
+            1,
+            "the coordinator must see exactly one submission"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_replay_finds_messages_accepted_under_the_legacy_binding_scheme() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-1").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &caller, &thread_id).await;
+
+        // Seed a message the way a pre-migration build persisted it: the
+        // thread-scoped legacy binding-id scheme, already submitted.
+        let legacy_binding_id = format!(
+            "surface:5:webui;tenant:{}:{};agent:{}:{};thread:{}:{};actor:{}:{};",
+            caller.tenant_id.as_str().len(),
+            caller.tenant_id.as_str(),
+            caller.agent_id.as_ref().expect("agent").as_str().len(),
+            caller.agent_id.as_ref().expect("agent").as_str(),
+            thread_id.as_str().len(),
+            thread_id.as_str(),
+            caller.user_id.as_str().len(),
+            caller.user_id.as_str(),
+        );
+        let accepted = thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: session_thread_scope(&caller),
+                thread_id: thread_id.clone(),
+                actor_id: caller.user_id.as_str().to_string(),
+                source_binding_id: Some(legacy_binding_id.clone()),
+                reply_target_binding_id: Some(legacy_binding_id),
+                external_event_id: Some("action-legacy".to_string()),
+                content: MessageContent::text("hello legacy".to_string()),
+            })
+            .await
+            .expect("seed legacy message");
+        let legacy_run_id = TurnRunId::new();
+        thread_service
+            .mark_message_submitted(
+                &session_thread_scope(&caller),
+                &thread_id,
+                accepted.message_id,
+                TurnId::new().to_string(),
+                legacy_run_id.to_string(),
+            )
+            .await
+            .expect("mark legacy submitted");
+
+        let coordinator = CountingCoordinator::default();
+        let service = DefaultInboundTurnService::new(
+            FakeConversationBindingService::new(),
+            thread_service.clone(),
+            coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
+        );
+        let envelope = session_envelope(&caller, &thread_id, "action-legacy", "hello legacy");
+        let outcome = service
+            .accept_user_message(&envelope)
+            .await
+            .expect("legacy replay");
+        let InboundTurnOutcome::Submitted {
+            submitted_run_id,
+            submission,
+            ..
+        } = outcome
+        else {
+            panic!("expected replayed Submitted, got {outcome:?}");
+        };
+        assert_eq!(submitted_run_id, legacy_run_id);
+        assert!(submission.is_none());
+        assert_eq!(
+            coordinator.submissions.load(Ordering::SeqCst),
+            0,
+            "a legacy-scheme replay must not double-accept or resubmit"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_cross_thread_client_action_reuse_is_rejected() {
+        let caller = session_caller();
+        let thread_a = ThreadId::new("thread-a").expect("thread");
+        let thread_b = ThreadId::new("thread-b").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &caller, &thread_a).await;
+        create_owned_thread(&thread_service, &caller, &thread_b).await;
+        let coordinator = CountingCoordinator::default();
+        let service = DefaultInboundTurnService::new(
+            FakeConversationBindingService::new(),
+            thread_service.clone(),
+            coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
+        );
+
+        let first = session_envelope(&caller, &thread_a, "action-1", "hello");
+        service.accept_user_message(&first).await.expect("first");
+
+        let cross = session_envelope(&caller, &thread_b, "action-1", "hello again");
+        let error = service
+            .accept_user_message(&cross)
+            .await
+            .expect_err("cross-thread reuse must fail");
+        assert!(
+            matches!(error, ProductSurfaceFailure::ClientActionReplayMismatch),
+            "expected ClientActionReplayMismatch, got {error:?}"
+        );
+        assert_eq!(
+            coordinator.submissions.load(Ordering::SeqCst),
+            1,
+            "the reused action id must not submit a second turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_busy_thread_reports_snapshot_and_replays_without_run_metadata() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-1").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &caller, &thread_id).await;
+        let store = Arc::new(in_memory_agent_turn_runtime());
+        let coordinator = DefaultTurnCoordinator::new(store);
+        let service = DefaultInboundTurnService::new(
+            FakeConversationBindingService::new(),
+            thread_service.clone(),
+            coordinator,
+            Arc::new(RejectingInputEnqueue),
+        );
+
+        let first = session_envelope(&caller, &thread_id, "action-1", "start work");
+        service.accept_user_message(&first).await.expect("first");
+
+        let second = session_envelope(&caller, &thread_id, "action-2", "busy now");
+        let busy_outcome = service
+            .accept_user_message(&second)
+            .await
+            .expect("busy outcome");
+        let InboundTurnOutcome::RejectedBusy {
+            active_run_id,
+            busy,
+            ..
+        } = &busy_outcome
+        else {
+            panic!("expected RejectedBusy, got {busy_outcome:?}");
+        };
+        assert!(active_run_id.is_some(), "fresh busy names the blocking run");
+        assert!(
+            busy.is_some(),
+            "fresh busy carries the blocking run snapshot"
+        );
+
+        // A transport retry of the SAME busy action replays the stored busy
+        // outcome without run metadata — the blocking run may be long gone.
+        let replay_outcome = service
+            .accept_user_message(&second)
+            .await
+            .expect("busy replay");
+        let InboundTurnOutcome::RejectedBusy {
+            active_run_id,
+            busy,
+            ..
+        } = &replay_outcome
+        else {
+            panic!("expected replayed RejectedBusy, got {replay_outcome:?}");
+        };
+        assert!(
+            active_run_id.is_none(),
+            "a replayed session busy carries no run id"
+        );
+        assert!(
+            busy.is_none(),
+            "a replayed session busy carries no snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skill_activation_records_before_submit_and_clears_on_busy() {
+        let caller = session_caller();
+        let thread_id = ThreadId::new("thread-1").expect("thread");
+        let thread_service = InMemorySessionThreadService::default();
+        create_owned_thread(&thread_service, &caller, &thread_id).await;
+        let store = Arc::new(in_memory_agent_turn_runtime());
+        let coordinator = DefaultTurnCoordinator::new(store);
+        let recorded = Arc::new(AtomicUsize::new(0));
+        let cleared = Arc::new(AtomicUsize::new(0));
+        let recorded_in = recorded.clone();
+        let cleared_in = cleared.clone();
+        let recorder: Arc<SessionSkillActivationRecorder> = Arc::new(
+            move |_scope: &TurnScope, _message_ref: &AcceptedMessageRef, _text: &str| {
+                recorded_in.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let clearer: Arc<SessionSkillActivationClearer> = Arc::new(
+            move |_scope: &TurnScope, _message_ref: &AcceptedMessageRef| {
+                cleared_in.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let ports = SessionSkillActivationPorts { recorder, clearer };
+        let service = DefaultInboundTurnService::new(
+            FakeConversationBindingService::new(),
+            thread_service.clone(),
+            coordinator,
+            Arc::new(RejectingInputEnqueue),
+        )
+        .with_session_skill_activation(ports);
+
+        let first = session_envelope(&caller, &thread_id, "action-1", "start work");
+        service.accept_user_message(&first).await.expect("first");
+        assert_eq!(recorded.load(Ordering::SeqCst), 1);
+        assert_eq!(cleared.load(Ordering::SeqCst), 0);
+
+        let second = session_envelope(&caller, &thread_id, "action-2", "busy now");
+        let outcome = service.accept_user_message(&second).await.expect("busy");
+        assert!(matches!(outcome, InboundTurnOutcome::RejectedBusy { .. }));
+        assert_eq!(
+            recorded.load(Ordering::SeqCst),
+            2,
+            "activation is recorded before the busy decision"
+        );
+        assert_eq!(
+            cleared.load(Ordering::SeqCst),
+            1,
+            "a busy submission clears its activation"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingCoordinator {
+        submissions: Arc<AtomicUsize>,
+        fixed_run: Arc<Mutex<Option<TurnRunId>>>,
+    }
+
+    #[async_trait]
+    impl TurnCoordinator for CountingCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
+        async fn submit_turn(
+            &self,
+            request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            let run_id = *self
+                .fixed_run
+                .lock()
+                .expect("counting coordinator lock poisoned")
+                .get_or_insert_with(TurnRunId::new);
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id: TurnId::new(),
+                run_id,
+                status: TurnStatus::Queued,
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                event_cursor: EventCursor::default(),
+                accepted_message_ref: request.accepted_message_ref.clone(),
+                reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            panic!("resume_turn is not used by session lane tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by session lane tests")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            panic!("cancel_run is not used by session lane tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::ScopeNotFound)
+        }
+    }
+}

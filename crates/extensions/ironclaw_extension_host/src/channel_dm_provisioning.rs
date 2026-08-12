@@ -4,23 +4,25 @@
 //! the caller's personal direct conversation is opened through the
 //! extension's own channel adapter and persisted in the generic DM-target
 //! store, so the outbound-target surface can offer "DM me" without any
-//! vendor code in the host. The adapter interprets the direct-conversation
-//! target query grammar `im:{external_actor_id}` (the same `list_targets`
-//! convention the retired lane used); adapters without target listing
-//! simply provision nothing.
+//! vendor code in the host. The adapter receives a typed, proven external
+//! actor id and may return that actor's direct conversation; adapters without
+//! direct-target provisioning simply provision nothing.
 //!
-//! Provisioning is fire-and-forget and never fails the callback that already
-//! bound the identity. OAuth continuation can publish activation just after
-//! the bind, so an inactive snapshot waits on the generic host's publication
-//! signal and retries against each new generation for a bounded interval.
+//! Provisioning is awaited after OAuth completion and never changes the
+//! already-committed callback result. OAuth continuation can publish
+//! activation just after the bind, so an inactive snapshot waits on the
+//! generic host's publication signal and retries against each new generation
+//! for a bounded interval.
 
 use std::{sync::Arc, time::Duration};
 
 use ironclaw_host_api::ids::UserId;
 
-use ironclaw_extension_contracts::channel_adapter::TargetQuery;
 use ironclaw_extension_contracts::channel_identity::{
     ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
+};
+use ironclaw_extension_contracts::{
+    channel_adapter::DirectTargetProvisionRequest, external::ExternalActorId,
 };
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
@@ -32,19 +34,14 @@ const ACTIVATION_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(10);
 enum DmTargetProvisioningError {
     #[error("channel extension is not active in the snapshot")]
     ExtensionInactive,
-    #[error("channel target discovery failed: {0}")]
-    TargetDiscovery(String),
+    #[error("channel direct-target provisioning failed: {0}")]
+    DirectTargetProvisioning(String),
     #[error("channel DM-target persistence failed: {0}")]
     Persistence(String),
     #[error("timed out waiting for channel extension activation")]
     ActivationTimeout,
     #[error("channel extension activation publisher stopped")]
     ActivationPublisherStopped,
-}
-
-/// The direct-conversation target query grammar adapters interpret.
-fn direct_conversation_query(external_actor_id: &str) -> String {
-    format!("im:{external_actor_id}")
 }
 
 /// Builds one generic post-bind provisioner per discovered channel
@@ -92,39 +89,33 @@ struct ChannelDmTargetPostBind {
     snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
+#[async_trait::async_trait]
 impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
-    fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str) {
-        let extension_id = self.extension_id.clone();
-        let delivery = Arc::clone(&self.delivery);
-        let store = Arc::clone(&self.store);
-        let snapshot_updates = self.snapshot_updates.clone();
-        let external_actor_id = external_actor_id.to_string();
-        tokio::spawn(async move {
-            match provision_dm_target_after_bind(
-                &extension_id,
-                &delivery,
-                &store,
-                &user_id,
-                &external_actor_id,
-                snapshot_updates,
-            )
-            .await
-            {
-                Ok(true) => tracing::debug!(
-                    extension_id,
-                    "channel DM target provisioned after identity bind"
-                ),
-                Ok(false) => tracing::debug!(
-                    extension_id,
-                    "channel DM target not provisioned (adapter offers no direct target)"
-                ),
-                Err(reason) => tracing::warn!(
-                    extension_id,
-                    %reason,
-                    "channel DM-target provisioning failed after identity bind"
-                ),
-            }
-        });
+    async fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str) {
+        match provision_dm_target_after_bind(
+            &self.extension_id,
+            &self.delivery,
+            &self.store,
+            &user_id,
+            external_actor_id,
+            self.snapshot_updates.clone(),
+        )
+        .await
+        {
+            Ok(true) => tracing::debug!(
+                extension_id = self.extension_id,
+                "channel DM target provisioned after identity bind"
+            ),
+            Ok(false) => tracing::debug!(
+                extension_id = self.extension_id,
+                "channel DM target not provisioned (adapter offers no direct target)"
+            ),
+            Err(reason) => tracing::warn!(
+                extension_id = self.extension_id,
+                %reason,
+                "channel DM-target provisioning failed after identity bind"
+            ),
+        }
     }
 }
 
@@ -155,8 +146,8 @@ async fn provision_dm_target_after_bind(
 
 /// The provisioning body (separable for tests): resolve the active channel
 /// delivery, ask the adapter for the caller's direct conversation, persist
-/// the generic record. `Ok(false)` when the adapter does not support target
-/// listing or returns no candidate.
+/// the generic record. `Ok(false)` when the adapter does not support direct
+/// target provisioning or returns no conversation.
 async fn provision_dm_target(
     extension_id: &str,
     delivery: &Arc<dyn ChannelDeliveryResolver>,
@@ -167,30 +158,32 @@ async fn provision_dm_target(
     let Some(channel) = delivery.resolve_channel_delivery(extension_id) else {
         return Err(DmTargetProvisioningError::ExtensionInactive);
     };
-    let candidates = match channel
-        .adapter
-        .list_targets(
-            TargetQuery {
-                extension_id: channel.extension_id.as_str().to_string(),
-                installation_id: channel.installation_id.as_str().to_string(),
-                query: Some(direct_conversation_query(external_actor_id)),
-                limit: 1,
-            },
+    // Direct-target provisioning is a delivery-half capability. A channel with no
+    // delivery half cannot provision a DM target, which is the same "nothing
+    // to do here" answer its `Unsupported` arm gives below — not an error.
+    let Some(delivery_half) = channel.delivery.as_ref() else {
+        return Ok(false);
+    };
+    let actor_id = ExternalActorId::new(external_actor_id)
+        .map_err(|error| DmTargetProvisioningError::DirectTargetProvisioning(error.to_string()))?;
+    let conversation = match delivery_half
+        .provision_direct_target(
+            DirectTargetProvisionRequest { actor_id },
             channel.egress.as_ref(),
         )
         .await
     {
-        Ok(candidates) => candidates,
+        Ok(conversation) => conversation,
         Err(ironclaw_extension_contracts::channel_adapter::ChannelError::Unsupported) => {
             return Ok(false);
         }
         Err(error) => {
-            return Err(DmTargetProvisioningError::TargetDiscovery(
+            return Err(DmTargetProvisioningError::DirectTargetProvisioning(
                 error.to_string(),
             ));
         }
     };
-    let Some(candidate) = candidates.first() else {
+    let Some(conversation) = conversation else {
         return Ok(false);
     };
     store
@@ -198,10 +191,7 @@ async fn provision_dm_target(
             extension_id,
             user_id,
             external_actor_id.to_string(),
-            dm_target_payload(
-                candidate.conversation.space_id(),
-                candidate.conversation.conversation_id(),
-            ),
+            dm_target_payload(conversation.space_id(), conversation.conversation_id()),
         )
         .await
         .map_err(|error| DmTargetProvisioningError::Persistence(error.to_string()))?;
@@ -216,12 +206,13 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
     use ironclaw_extension_contracts::channel_adapter::{
-        ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, TargetCandidate,
-        VerifiedInbound,
+        ChannelDelivery, DirectTargetProvisionRequest,
     };
-    use ironclaw_extension_contracts::external::ExternalConversationRef;
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelError, DeliveryReport, OutboundEnvelope,
+    };
+    use ironclaw_extension_contracts::external::{ExternalActorId, ExternalConversationRef};
     use ironclaw_extension_contracts::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
@@ -245,47 +236,37 @@ mod tests {
         }
     }
 
-    /// Adapter fake: records the target query and serves one DM candidate
+    /// Adapter fake: records the typed actor and serves one direct conversation
     /// (or `Unsupported`).
     struct RecordingAdapter {
-        queries: Mutex<Vec<Option<String>>>,
-        candidate: Option<TargetCandidate>,
+        actors: Mutex<Vec<ExternalActorId>>,
+        conversation: Option<ExternalConversationRef>,
         unsupported: bool,
     }
 
     impl RecordingAdapter {
         fn with_candidate(space_id: Option<&str>, conversation_id: &str) -> Self {
             Self {
-                queries: Mutex::new(Vec::new()),
-                candidate: Some(TargetCandidate {
-                    conversation: ExternalConversationRef::new(
-                        space_id,
-                        conversation_id,
-                        None,
-                        None,
-                    )
-                    .expect("conversation ref"),
-                    display_name: "Direct message".to_string(),
-                }),
+                actors: Mutex::new(Vec::new()),
+                conversation: Some(
+                    ExternalConversationRef::new(space_id, conversation_id, None, None)
+                        .expect("conversation ref"),
+                ),
                 unsupported: false,
             }
         }
 
         fn unsupported() -> Self {
             Self {
-                queries: Mutex::new(Vec::new()),
-                candidate: None,
+                actors: Mutex::new(Vec::new()),
+                conversation: None,
                 unsupported: true,
             }
         }
     }
 
     #[async_trait]
-    impl ChannelAdapter for RecordingAdapter {
-        fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-            unreachable!("DM provisioning tests never parse inbound requests")
-        }
-
+    impl ChannelDelivery for RecordingAdapter {
         async fn deliver(
             &self,
             _envelope: OutboundEnvelope,
@@ -294,19 +275,19 @@ mod tests {
             unreachable!("DM provisioning tests never deliver")
         }
 
-        async fn list_targets(
+        async fn provision_direct_target(
             &self,
-            query: TargetQuery,
+            request: DirectTargetProvisionRequest,
             _egress: &dyn RestrictedEgress,
-        ) -> Result<Vec<TargetCandidate>, ChannelError> {
-            self.queries
+        ) -> Result<Option<ExternalConversationRef>, ChannelError> {
+            self.actors
                 .lock()
-                .expect("queries lock")
-                .push(query.query.clone());
+                .expect("actors lock")
+                .push(request.actor_id);
             if self.unsupported {
                 return Err(ChannelError::Unsupported);
             }
-            Ok(self.candidate.clone().into_iter().collect())
+            Ok(self.conversation.clone())
         }
     }
 
@@ -323,8 +304,14 @@ mod tests {
                 extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
                 installation_id: AdapterInstallationId::new("vendorx-install-1")
                     .expect("valid installation id"),
-                adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+                reply: None,
+                delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
                 egress: Arc::new(NoopEgress),
+                reply_transport: Some(
+                    ironclaw_extension_contracts::channel::ReplyTransport::Message,
+                ),
+                requires_enrollment: false,
+                declared_egress_hosts: Vec::new(),
             })
         }
     }
@@ -332,6 +319,24 @@ mod tests {
     struct EventuallyActiveDeliveryResolver {
         active: Arc<AtomicBool>,
         adapter: Arc<RecordingAdapter>,
+    }
+
+    struct MissingDeliveryHalfResolver;
+
+    impl ChannelDeliveryResolver for MissingDeliveryHalfResolver {
+        fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+            Some(ResolvedChannelDelivery {
+                extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+                installation_id: AdapterInstallationId::new("vendorx-install-1")
+                    .expect("valid installation id"),
+                reply: None,
+                delivery: None,
+                egress: Arc::new(NoopEgress),
+                reply_transport: None,
+                requires_enrollment: false,
+                declared_egress_hosts: Vec::new(),
+            })
+        }
     }
 
     impl ChannelDeliveryResolver for EventuallyActiveDeliveryResolver {
@@ -343,8 +348,14 @@ mod tests {
                 extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
                 installation_id: AdapterInstallationId::new("vendorx-install-1")
                     .expect("valid installation id"),
-                adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+                reply: None,
+                delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
                 egress: Arc::new(NoopEgress),
+                reply_transport: Some(
+                    ironclaw_extension_contracts::channel::ReplyTransport::Message,
+                ),
+                requires_enrollment: false,
+                declared_egress_hosts: Vec::new(),
             })
         }
     }
@@ -371,9 +382,15 @@ mod tests {
             .expect("provisioning succeeds");
         assert!(provisioned);
         assert_eq!(
-            adapter.queries.lock().expect("queries lock").clone(),
-            vec![Some("im:U777".to_string())],
-            "the adapter receives the direct-conversation target query"
+            adapter
+                .actors
+                .lock()
+                .expect("actors lock")
+                .iter()
+                .map(ExternalActorId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["U777"],
+            "the adapter receives the typed external actor id"
         );
         let record = store
             .load("vendorx", &user)
@@ -408,6 +425,19 @@ mod tests {
         let provisioned = provision_dm_target("vendorx", &delivery, &store, &user, "U777")
             .await
             .expect("unsupported listing is not an error");
+        assert!(!provisioned);
+        assert!(store.load("vendorx", &user).await.expect("load").is_none());
+    }
+
+    #[tokio::test]
+    async fn channels_without_a_delivery_half_provision_nothing() {
+        let delivery: Arc<dyn ChannelDeliveryResolver> = Arc::new(MissingDeliveryHalfResolver);
+        let store = store();
+        let user = UserId::new("user-alice").expect("user");
+
+        let provisioned = provision_dm_target("vendorx", &delivery, &store, &user, "U777")
+            .await
+            .expect("a missing delivery half is not an error");
         assert!(!provisioned);
         assert!(store.load("vendorx", &user).await.expect("load").is_none());
     }
