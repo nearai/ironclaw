@@ -105,6 +105,7 @@ fn channel_only_bindings(channel: Arc<FakeChannelAdapter>) -> ExtensionBindings 
             .with_ingress(channel.clone())
             .with_reply(channel.clone())
             .with_delivery(channel),
+        device_link: None,
     }
 }
 
@@ -126,6 +127,11 @@ async fn harness_with_egress(
         reserved_capability_ids: Default::default(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     Harness {
         host: ExtensionHost::new(deps).await,

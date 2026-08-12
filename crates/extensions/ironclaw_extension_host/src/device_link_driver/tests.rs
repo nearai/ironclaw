@@ -13,7 +13,6 @@ use std::sync::atomic::AtomicUsize;
 use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountService, InMemoryAuthProductServices,
 };
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::device_link::{
     DeviceLinkDisplayKind, DeviceLinkPayload, MAX_DEVICE_LINK_IDENTIFIER_BYTES,
 };
@@ -113,7 +112,7 @@ async fn harness_with(
     let bindings = ExtensionBindings {
         tools: declares_device_link
             .then(|| Arc::new(crate::test_support::FakeToolAdapter) as Arc<dyn ToolAdapter>),
-        channel: Some(Arc::new(FakeChannelAdapter::default()) as Arc<dyn ChannelAdapter>),
+        channel: FakeChannelAdapter::all_halves(),
         device_link: declares_device_link
             .then(|| Arc::clone(&adapter) as Arc<dyn DeviceLinkAdapter>),
     };

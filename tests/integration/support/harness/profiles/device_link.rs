@@ -606,9 +606,14 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramLinkedFixtureEntry
         self.tools.attach_resolver(Arc::clone(&ctx.linked_accounts));
         Ok(ironclaw_extension_host::ExtensionBindings {
             tools: Some(Arc::clone(&self.tools) as Arc<dyn ToolAdapter>),
-            channel: Some(Arc::new(
-                ironclaw_telegram_extension::TelegramChannelAdapter::default(),
-            )),
+            channel: {
+                let adapter =
+                    Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
+                ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
             device_link: Some(Arc::clone(&self.device_link) as Arc<dyn DeviceLinkAdapter>),
         })
     }
