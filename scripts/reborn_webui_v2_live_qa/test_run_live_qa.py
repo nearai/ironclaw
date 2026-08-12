@@ -9654,6 +9654,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     {
                         "model_call_count": 1,
                         "tool_call_count": 0,
+                        "tool_call_batch_count": 0,
+                        "multi_tool_call_batch_count": 0,
+                        "tool_calls_in_multi_batches": 0,
+                        "max_tool_call_batch_width": 0,
+                        "tool_call_batch_width_counts": {},
                         "input_tokens": 10,
                         "output_tokens": 2,
                         "cache_read_tokens": 4,
@@ -9715,6 +9720,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             {
                 "model_call_count": 2,
                 "tool_call_count": 2,
+                "tool_call_batch_count": 1,
+                "multi_tool_call_batch_count": 1,
+                "tool_calls_in_multi_batches": 2,
+                "max_tool_call_batch_width": 2,
+                "tool_call_batch_width_counts": {"2": 1},
                 "input_tokens": 180,
                 "output_tokens": 35,
                 "cache_read_tokens": 70,
@@ -9751,6 +9761,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(metrics["model_call_count"], 1)
         self.assertEqual(metrics["tool_call_count"], 0)
+        self.assertEqual(metrics["tool_call_batch_count"], 0)
+        self.assertEqual(metrics["multi_tool_call_batch_count"], 0)
+        self.assertEqual(metrics["tool_calls_in_multi_batches"], 0)
+        self.assertEqual(metrics["max_tool_call_batch_width"], 0)
+        self.assertEqual(metrics["tool_call_batch_width_counts"], {})
         self.assertEqual(metrics["input_tokens"], 12)
         self.assertEqual(metrics["output_tokens"], 3)
         self.assertIsNone(metrics["cache_read_tokens"])
@@ -9821,6 +9836,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             {
                 "model_call_count": None,
                 "tool_call_count": None,
+                "tool_call_batch_count": None,
+                "multi_tool_call_batch_count": None,
+                "tool_calls_in_multi_batches": None,
+                "max_tool_call_batch_width": None,
+                "tool_call_batch_width_counts": None,
                 "input_tokens": None,
                 "output_tokens": None,
                 "cache_read_tokens": None,
