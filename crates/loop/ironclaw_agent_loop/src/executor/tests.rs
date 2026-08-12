@@ -15,15 +15,15 @@ use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
     CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
-    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
-    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind, LoopExit,
-    LoopFailureKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-    LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
-    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
-    LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-    ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
-    ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
-    resolution,
+    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionMode,
+    LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
+    LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef,
+    LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+    LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation, ObservationTrust,
+    ParentLoopOutput, PromptMode, ProviderToolCallReplay, ToolObservationDetail,
+    ToolObservationStatus, VisibleCapabilityRequest, resolution,
 };
 
 use crate::state::{
@@ -597,6 +597,134 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
             _
         ] if reason_kind.as_str() == "redacted"
     ));
+}
+
+#[tokio::test]
+async fn prompt_stage_compacts_eviction_through_latest_safe_tool_result_once() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![
+                compaction_metadata(4, LoopContextCompactionKind::Assistant, 10),
+                compaction_metadata(9, LoopContextCompactionKind::ToolResult, 10),
+            ],
+            vec![compaction_metadata(
+                4,
+                LoopContextCompactionKind::Assistant,
+                10,
+            )],
+        ])
+        .with_recent_window_truncation(LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        })
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-window-eviction").unwrap(),
+            compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state: LoopExecutionState::initial_for_run(host.run_context()),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_)
+        | PromptStep::SkipModel(_) => panic!("expected prepared prompt"),
+    };
+    let requests = host.compaction_requests();
+    assert_eq!(requests.len(), 1, "the watermark must trigger exactly once");
+    assert_eq!(requests[0].drop_through_seq, 9);
+    assert_eq!(requests[0].mode, LoopCompactionMode::WindowEviction);
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(9)
+    );
+    let initiator = host
+        .progress_events()
+        .into_iter()
+        .find_map(|event| match event {
+            LoopProgressEvent::CompactionStarted { initiator, .. } => Some(initiator),
+            _ => None,
+        });
+    assert_eq!(
+        initiator,
+        Some(ironclaw_loop_contracts::CompactionInitiator::WindowEviction)
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_does_not_retry_deferred_eviction_watermark_on_unchanged_prompt() {
+    let index = vec![compaction_metadata(
+        4,
+        LoopContextCompactionKind::Assistant,
+        10,
+    )];
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![index.clone(), index])
+        .with_recent_window_truncation(LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        })
+        .with_compaction_outcome(Ok(LoopCompactionOutcome::Deferred {
+            safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
+                .unwrap(),
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    let first = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state: LoopExecutionState::initial_for_run(host.run_context()),
+            },
+        )
+        .await
+        .expect("first prompt stage");
+    let first_state = match first {
+        PromptStep::Prepared(output) => output.state,
+        _ => panic!("expected prepared prompt"),
+    };
+    let second = PromptStage
+        .process(ctx, PromptInput { state: first_state })
+        .await
+        .expect("second prompt stage");
+    let second_state = match second {
+        PromptStep::Prepared(output) => output.state,
+        _ => panic!("expected prepared prompt"),
+    };
+
+    assert_eq!(host.compaction_requests().len(), 1);
+    assert!(
+        !second_state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(second_state.compaction_state.force_compact_initiator, None);
 }
 
 #[tokio::test]

@@ -678,7 +678,7 @@ impl ironclaw_loop_contracts::LoopContextPort for MockHost {
             identity_messages: Vec::new(),
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
-            recent_window_truncation: None,
+            recent_window_truncation: self.compaction.recent_window_truncation(),
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         })
@@ -707,7 +707,7 @@ impl ironclaw_loop_contracts::LoopPromptPort for MockHost {
             }],
             surface_version: self.prompt_surface_version.clone(),
             compaction_message_index: self.compaction.next_prompt_index(),
-            recent_window_truncation: None,
+            recent_window_truncation: self.compaction.recent_window_truncation(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

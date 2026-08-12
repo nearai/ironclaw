@@ -298,6 +298,69 @@ async fn thread_context_port_pins_the_run_accepted_task_ahead_of_the_recent_tail
 }
 
 #[tokio::test]
+async fn task_pin_evicts_complete_tool_exchange_at_a_compactable_boundary() {
+    let mut fixture = ThreadFixture::new_with_user_content("original task").await;
+    fixture.pin_initial_message_to_run();
+    fixture
+        .thread_service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            content: MessageContent::text("assistant tool call"),
+        })
+        .await
+        .unwrap();
+    fixture
+        .thread_service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            result_ref: "result:pin-boundary".to_string(),
+            safe_summary: ToolResultSafeSummary::new("tool output").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    fixture
+        .accept_user_message("event-4", "recent message")
+        .await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 3,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .messages
+            .iter()
+            .filter_map(|message| message.compaction.as_ref().map(|entry| entry.sequence))
+            .collect::<Vec<_>>(),
+        vec![1, 4]
+    );
+    assert_eq!(
+        bundle.recent_window_truncation,
+        Some(ironclaw_loop_contracts::LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        })
+    );
+}
+
+#[tokio::test]
 async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallback() {
     let fixture = ThreadFixture::new_with_user_content("old short").await;
     fixture
