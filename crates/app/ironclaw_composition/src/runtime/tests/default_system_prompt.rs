@@ -91,6 +91,20 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
         }),
         "bridged disclosure should inject a visibility-conditional discovery protocol"
     );
+    // The standalone runtime binds the native memory provider, so the model's
+    // surface carries `ironclaw.memory.*`. Pinned at the caller because the
+    // gate is composed here (`memory_protocol_active` in `runtime.rs`) from
+    // whether a provider actually resolved — the unit tests below only prove
+    // the flag is honored once someone sets it, not that it tracks the real
+    // binding. A protocol naming concrete tools must not outlive those tools.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("Persistent Memory")
+                && message.content.contains("ironclaw.memory.write")
+        }),
+        "a runtime with a bound memory provider should inject the persistent-memory protocol"
+    );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::User && message.content == "ping"

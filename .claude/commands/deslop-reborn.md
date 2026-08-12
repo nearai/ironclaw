@@ -1,7 +1,7 @@
 ---
 description: One iteration of the IronClaw Reborn de-slop loop — take ONE Reborn crate, fan out parallel review sub-agents (thermo-nuclear quality, paranoid architect, interface/contract/invariants, test-coverage/wiring), synthesize, apply fixes/refactors/missing tests, open a PR. Stop.
 disable-model-invocation: true
-allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo build:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(rg:*), Bash(ls:*), Bash(wc:*), Bash(scripts/check-boundaries.sh:*), Bash(scripts/reborn-e2e-rust.sh:*), Read, Grep, Glob, Edit, Write, Agent
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo build:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(rg:*), Bash(ls:*), Bash(wc:*), Bash(scripts/reborn-e2e-rust.sh:*), Read, Grep, Glob, Edit, Write, Agent
 argument-hint: "[crate name, e.g. ironclaw_turns]"
 ---
 

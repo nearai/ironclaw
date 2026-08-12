@@ -514,12 +514,7 @@ fn omits_delivery_guidance_block_when_tools_not_visible() {
 }
 
 #[test]
-fn connected_channel_name_tripping_model_safe_policy_degrades_to_placeholder() {
-    // A legitimate label can contain a word the model-safe-text policy rejects
-    // (e.g. "authorization"). It must degrade to a placeholder rather than
-    // surviving into the slice and later failing prompt-bundle construction.
-    // (Moved from the retired delivery-target label test — `model_safe_label`
-    // is exercised here via the connected-channel name instead.)
+fn connected_channel_name_with_security_vocabulary_remains_usable() {
     let ctx = LoopRuntimeContext {
         loop_started_at_utc: stamp(),
         communication: Some(CommunicationRuntimeContext {
@@ -538,17 +533,43 @@ fn connected_channel_name_tripping_model_safe_policy_degrades_to_placeholder() {
     };
     let text = ctx.render_model_content();
     assert!(
-        !text.contains("authorization"),
-        "denylisted label word must not survive into the slice: {text}"
+        text.contains("Connected channels: authorization (authenticated, active)."),
+        "ordinary security vocabulary must survive in the slice: {text}"
     );
-    assert!(
-        text.contains("Connected channels: a connected channel (authenticated, active)."),
-        "label degrades to placeholder: {text}"
-    );
-    // The rendered slice must itself pass the model-safe-text policy.
     assert!(
         crate::prompt_text::validate_model_safe_text(text.clone(), "test").is_ok(),
-        "degraded slice must be model-safe: {text}"
+        "rendered slice must remain model-safe: {text}"
+    );
+}
+
+#[test]
+fn connected_channel_name_with_credential_value_reaches_final_redaction_boundary() {
+    let ctx = LoopRuntimeContext {
+        loop_started_at_utc: stamp(),
+        communication: Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                name: "Authorization: Bearer ghp_secretvalue123".to_string(),
+                authenticated: true,
+                active: true,
+                presentation: None,
+            }]),
+            notification_channels: NotificationChannelsState::Unknown,
+            pending_extension_auth: PendingExtensionAuthState::Unknown,
+            delivery_tools_visible: false,
+        }),
+        product_context: None,
+        user_profile: None,
+    };
+    let text = ctx.render_model_content();
+    assert!(
+        text.contains("ghp_secretvalue123"),
+        "the contract preserves source data until the provider-bound redaction pass: {text}"
+    );
+    assert!(
+        text.contains(
+            "Connected channels: Authorization: Bearer ghp_secretvalue123 (authenticated, active)."
+        ),
+        "credential content must not remove the connected channel: {text}"
     );
 }
 

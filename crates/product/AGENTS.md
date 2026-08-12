@@ -83,9 +83,9 @@ an at-most-once reservation it does not own (`ironclaw_outbound`).
   `cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries reborn_crate_dependency_boundaries_hold`
   and `--test reborn_same_layer_edge_inventory`
 - **Gate-pinned guidance.** Two crate files are contracts, not prose:
-  `ironclaw_webui/CONTRACT.md` (route table + 19-owner `handlers.rs` charter
-  map; `cargo test -p ironclaw_webui --test handlers_module_charter`) and
-  `ironclaw_assistant/AGENTS.md` (19-sub-owner `reborn_services` charter map;
+  `ironclaw_webui/CONTRACT.md` (route table + `handlers.rs` charter map;
+  `cargo test -p ironclaw_webui --test handlers_module_charter`) and
+  `ironclaw_assistant/AGENTS.md` (`reborn_services` charter map;
   `cargo test -p ironclaw_assistant --test reborn_services_module_charter`).
   Edit them only with the owning suite green; do not reflow or renumber.
 

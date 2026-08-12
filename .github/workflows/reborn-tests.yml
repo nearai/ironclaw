@@ -1026,6 +1026,15 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      # This job runs `reborn_qa_recorded_behavior`, whose own module docs
+      # require this value: its replay tests build a full Reborn runtime and
+      # drive whole turns, and the combined debug async frames sit within a few
+      # percent of whatever stack they are given. Measured on this suite: it
+      # overflows below 2 MiB and clears at 2 MiB, i.e. the libtest default is
+      # the boundary itself, so any layout shift decides it. The root-tests and
+      # group-suite jobs already set this for the same pathology; this job was
+      # the one that ran the documented binary without it.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

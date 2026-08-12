@@ -55,6 +55,8 @@ dumping ground.
 - Inbound routing metadata that affects turn submission is accepted atomically
   with the idempotency record and replayed unchanged; it is never rendered as
   transcript content.
+- Raw attachment references remain durable, while extracted document text and
+  audio transcripts are secret-redacted when projected into model context.
 - Context-window limits count the effective model-visible transcript, not
   hidden durable rows. Truncated windows report the exact last omitted
   sequence and kind so loop policy can react without guessing.

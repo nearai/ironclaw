@@ -142,9 +142,8 @@ workspace gate (`cargo fmt`, workspace clippy, `cargo test`) is the root
 `AGENTS.md`'s; test tiers and the regression rules are
 `.claude/rules/testing.md`.
 
-> **Do not reach for `scripts/check-boundaries.sh`.** Measured 2026-08-05: it
-> fails on a clean tree (its check 5 grep false-positives on live test files)
-> and checks 1/2/3/6 target the deleted v1 `src/` tree, passing vacuously.
+> The legacy `check-boundaries.sh` script is deleted (measured 2026-08-05: it
+> failed on a clean tree and its v1-targeted checks passed vacuously).
 > Boundary enforcement for `crates/` is the architecture suite above.
 
 ## Cross-family change routes
