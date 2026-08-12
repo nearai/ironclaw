@@ -596,17 +596,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_planned_driver_uses_individual_parallel_capability_calls() {
+    async fn default_planned_driver_has_stable_family_identity() {
         let registry = build_loop_family_registry_with_overrides(None, None).expect("registry");
         let family = registry
             .get(&LoopFamilyId::DEFAULT)
             .expect("default family");
-        // Pin the family's replay identity to the bounded-parallel
-        // composition: the override must recompose the family (digest differs
-        // from the host-batch default) and must do so deterministically (the
-        // same digest on rebuild). If the override were silently ignored and
-        // execution stayed sequential, this assertion fails outright — the
-        // family would carry the static DEFAULT_FAMILY_DIGEST.
+        // With no overrides, the registry must retain the static default
+        // family identity and reproduce it deterministically on rebuild.
         assert_eq!(
             family.version().digest,
             DEFAULT_FAMILY_DIGEST,

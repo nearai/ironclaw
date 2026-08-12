@@ -699,6 +699,10 @@ mod tests {
 
     #[async_trait]
     impl LoopCapabilityPort for AlwaysCompletedPort {
+        fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+            false
+        }
+
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
@@ -769,7 +773,7 @@ mod tests {
             tenant(),
         );
 
-        assert!(wrapped.requires_ordered_batch_invocation(&[]));
+        assert!(!wrapped.requires_ordered_batch_invocation(&[invocation("cap.x")]));
     }
 
     #[async_trait]
