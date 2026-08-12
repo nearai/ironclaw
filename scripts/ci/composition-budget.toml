@@ -66,8 +66,8 @@ tolerance_bp = 30
 # Informational — the observed share when this file was last updated. Lets a
 # reviewer see the baseline and lets the gate emit a down-ratchet nudge. Not
 # consulted for the pass/fail decision.
-observed_bp = 576
-observed_date = "2026-08-07"
+observed_bp = 572
+observed_date = "2026-08-08"
 
 # --- Absolute mass (production LOC) ---------------------------------------
 # The BINDING mass bound. Same numerator as the share metric — production `.rs`
@@ -153,6 +153,12 @@ observed_date = "2026-08-07"
 # with `bash scripts/ci/check-composition-budget.sh`.
 # Union re-measured 40432 -> 40747 on 2026-08-07 after merging #7157's delivery
 # refactor with #7214's sandbox profile and binding assembly.
+# Union re-measured on the #7373 merge (2026-08-08): the gate-audit branch had
+# independently re-equalized 40423 -> 40524 for the same drift class before
+# #7157's chain (40692 -> 40432 -> 40747) landed; both chains fold into the
+# merged-tree measure below (40804 on the #7373 merge), set to current, not padded. The recurrence class
+# itself is repaired in this PR: the contracts size gate now carries upward
+# working slack, and this file's loc_tolerance keeps doing that job here.
 # History: 40747 -> 40811 (#7157 acting-user scope helper), then two features
 # merged on top on 2026-08-08/09, each service-graph assembly only:
 #  - web-push channel assembly (`assemble_web_push`: subscription-store
@@ -167,7 +173,27 @@ observed_date = "2026-08-07"
 # implement-issue-6896-fix: #7131's run-failure settlement observer adds its
 # production wiring and inline regression coverage to the current main tree.
 # Measured with --print; set to current rather than hidden in tolerance.
-loc_ceiling = 41582
+# Re-seeded 41582 -> 41810 on 2026-08-11 for #7471's merged tree. The dedicated
+# process-journal PostgreSQL pool adds service-graph assembly needed to keep
+# lease heartbeats independent of data-plane saturation; concurrent mainline
+# composition growth consumed the prior tolerance before this branch merged.
+# Measured by the Fast deterministic checks gate on the GitHub merge commit and
+# recorded explicitly rather than weakening or bypassing the absolute bound.
+# Union re-measured 41810 -> 41820 on 2026-08-12 (#7373 refresh merge of
+# main): the audit branch's chain (40804 @ 2026-08-08) and main's chain
+# (41810 @ #7471) fold; measured on the merged tree with this gate's
+# --print. Set to current, not padded — re-equalized per this file's own
+# re-capture instruction so the designed 150-line working window is fully
+# live again (main's pin had drifted to 140 lines of effective headroom).
+#
+# Re-ratcheted DOWN 41810 -> 41527 on 2026-08-12 by #7365 (memory recall): the
+# memory-save guidance and its content pins moved out of composition into the
+# memory-native package that owns them, and `runtime/tests/default_system_prompt.rs`
+# was split out of the production file — the carve-out Phase 0 this file blesses.
+# The gate's NUDGE fired at 283 LOC of slack; this locks the improvement in rather
+# than banking it as headroom. Measured on the merged tree with
+# `bash scripts/ci/check-composition-budget.sh`.
+loc_ceiling = 41533
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -178,8 +204,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41582
-loc_observed_date = "2026-08-10"
+loc_observed = 41533
+loc_observed_date = "2026-08-12"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
@@ -208,6 +234,14 @@ loc_observed_date = "2026-08-10"
 # baseline without lowering the mass ratchet; future work must shrink again.
 # 2026-08-05 (program closure): nudge taken, 1122 -> 814 — locked at today's
 # observed count; the WS0 record (827) stays within the effective ceiling (829).
+# 2026-08-07 (gate audit): re-equalized 814 -> 819 — five governed sites of
+# merged main-side drift through the 15-site tolerance window since 08-05,
+# leaving 10 sites of live headroom. Measured with the gate's --print; set to
+# current, not padded; the WS0 record (827) stays within the effective
+# ceiling (834).
+# 2026-08-08 (#7373 merge): union re-measured 819 -> 826 — the folded #7157
+# delivery lane and siblings carry 7 more governed sites. Set to current; the
+# WS0 record (827) stays within the effective ceiling (841).
 # 2026-08-10 PR #7474 (#7247 truthful connection context): 814 -> 816 for the
 # two injected context-provider ports (`ExtensionCredentialSetupService` +
 # channel-connection facade) wired into the communication-context assembly —
@@ -215,6 +249,12 @@ loc_observed_date = "2026-08-10"
 # only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
 # two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
 # count exactly, no slack.
-arc_dyn_ceiling = 816
+# 2026-08-12 (#7373 refresh merge): union re-measured — the merged tree
+# reports 831 governed sites, exactly the effective ceiling above, i.e. the
+# gate was live at ZERO headroom (the recurrence class §3.2 of the gate
+# audit names). Re-equalized 816 -> 831 per this file's re-capture
+# instruction, restoring the designed 15-site window. The WS0 record (827)
+# stays within the effective ceiling (846).
+arc_dyn_ceiling = 831
 arc_dyn_tolerance = 15
 arc_dyn_observed = 831

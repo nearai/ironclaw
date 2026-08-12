@@ -632,7 +632,7 @@ pub(super) fn clear_matching_pending_auth_resume(
     if state
         .pending_auth_resume
         .as_ref()
-        .is_some_and(|resume| resume.capability_id == call.capability_id)
+        .is_some_and(|resume| resume.activity_id == call.activity_id)
     {
         state.pending_auth_resume = None;
     }
@@ -645,7 +645,7 @@ pub(super) fn clear_matching_pending_external_tool_resume(
     if state
         .pending_external_tool_resume
         .as_ref()
-        .is_some_and(|resume| resume.capability_id == call.capability_id)
+        .is_some_and(|resume| resume.activity_id == call.activity_id)
     {
         state.pending_external_tool_resume = None;
     }

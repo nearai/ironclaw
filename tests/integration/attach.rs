@@ -22,6 +22,7 @@ mod support;
 
 use axum::http::StatusCode;
 use ironclaw_assistant::RebornServices;
+use ironclaw_threads::{LoadContextWindowRequest, SessionThreadService};
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -132,6 +133,8 @@ async fn submit_with_image_attachment_fails_fast_without_a_lander() {
 #[tokio::test]
 async fn doc_attachment_reaches_the_model_with_extracted_text() {
     const MARKER: &str = "ZAFFRE-DOCUMENT-MARKER-771";
+    const SECRET: &str = "attachment canary,with;delimiters-7509";
+    const BENIGN: &str = "secretary: Treasury contact";
     let group = RebornIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
@@ -148,7 +151,7 @@ async fn doc_attachment_reaches_the_model_with_extracted_text() {
             vec![(
                 "note.txt",
                 "text/plain",
-                format!("Reminder: the launch codeword is {MARKER}.").into_bytes(),
+                format!("Reminder: {MARKER}. password: \"{SECRET}\"; {BENIGN}.").into_bytes(),
             )],
         )
         .await
@@ -158,6 +161,18 @@ async fn doc_attachment_reaches_the_model_with_extracted_text() {
         .assert_model_request_contains(MARKER)
         .await
         .expect("extracted document text reached the model");
+    harness
+        .assert_model_request_contains(BENIGN)
+        .await
+        .expect("benign attachment context reached the model");
+    harness
+        .assert_model_request_contains("[REDACTED_SECRET]")
+        .await
+        .expect("attachment credential was replaced before provider dispatch");
+    assert!(
+        harness.assert_model_request_contains(SECRET).await.is_err(),
+        "attachment credential must not reach the provider request"
+    );
     // Serialized capture escapes `"` to `\"`; the needle must match the
     // escaped form.
     harness
@@ -174,6 +189,50 @@ async fn doc_attachment_reaches_the_model_with_extracted_text() {
     {
         panic!("negative guard failed: model request must not contain an unwritten marker");
     }
+
+    let projected = harness
+        .thread_harness
+        .service
+        .load_context_window(LoadContextWindowRequest {
+            scope: harness.thread_harness.scope.clone(),
+            thread_id: harness.binding.thread_id.clone(),
+            max_messages: 100,
+        })
+        .await
+        .expect("model-visible context projection loads");
+    assert_model_projection_redacted(&projected.messages, SECRET, MARKER, BENIGN);
+
+    let reopened = harness
+        .thread_harness
+        .reopened()
+        .expect("thread service reopens over persisted storage");
+    let refreshed = reopened
+        .service
+        .load_context_window(LoadContextWindowRequest {
+            scope: reopened.scope.clone(),
+            thread_id: harness.binding.thread_id.clone(),
+            max_messages: 100,
+        })
+        .await
+        .expect("model-visible context projection reloads after refresh");
+    assert_model_projection_redacted(&refreshed.messages, SECRET, MARKER, BENIGN);
+}
+
+fn assert_model_projection_redacted(
+    messages: &[ironclaw_threads::ContextMessage],
+    secret: &str,
+    marker: &str,
+    benign: &str,
+) {
+    let projected = messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!projected.contains(secret));
+    assert!(projected.contains("[REDACTED_SECRET]"));
+    assert!(projected.contains(marker));
+    assert!(projected.contains(benign));
 }
 
 /// W4-ATTACH-VARIANTS: two attachments landed in one turn both reach the

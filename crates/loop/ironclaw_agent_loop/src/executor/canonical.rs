@@ -11,7 +11,7 @@ use super::{
     DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
     ModelStep, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext,
     StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, latency,
+    UserFacingInputDrainMode, latency, scheduled_trigger_run,
 };
 
 impl DefaultExecutorPipeline {
@@ -305,6 +305,8 @@ impl DefaultExecutorPipeline {
                                 stop_state.completion_nudges_used += 1;
                                 stop_state.completion_nudge_pending = true;
                                 stop_state.last_reply_trailed_off = false;
+                                stop_state.last_reply_empty = false;
+                                stop_state.last_reply_ended_with_question = false;
                                 debug!(
                                     iteration = stop_state.iteration,
                                     ?kind,
@@ -530,7 +532,10 @@ fn completion_nudge_should_fire(
     }
     match kind {
         StopKind::NoProgressDetected => false,
-        StopKind::GracefulStop => state.last_reply_trailed_off,
+        StopKind::GracefulStop => {
+            state.last_reply_trailed_off
+                || (scheduled_trigger_run(host) && state.last_reply_ended_with_question)
+        }
         StopKind::Aborted(_) => false,
     }
 }

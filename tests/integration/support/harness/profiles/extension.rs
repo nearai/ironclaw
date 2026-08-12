@@ -284,9 +284,10 @@ pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRunt
     extension_visibility_probe_tools_profile()?.build().await
 }
 
-/// Catalog wording from the Attio incident. Registry-installed descriptions
-/// may retain this authentication vocabulary; local packages may not.
-pub(crate) const PROMPT_DENIAL_DESCRIPTION: &str =
+/// Authentication vocabulary from the Attio incident. It is ordinary prompt
+/// data regardless of package provenance; actual credential values are
+/// handled by the provider-bound redaction pass.
+pub(crate) const AUTH_VOCABULARY_DESCRIPTION: &str =
     "Authenticated with a workspace API key presented as a Bearer header";
 
 const VERIFIED_PROMPT_DESCRIPTION_MANIFEST: &str = r#"

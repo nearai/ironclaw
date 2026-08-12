@@ -17,7 +17,7 @@ mod reborn_support;
 mod support;
 
 use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::harness::profiles::extension::PROMPT_DENIAL_DESCRIPTION;
+use reborn_support::harness::profiles::extension::AUTH_VOCABULARY_DESCRIPTION;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
@@ -67,12 +67,12 @@ async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
         .expect("run recovered after the rejected call");
 }
 
-/// Regression for the Attio incident: the post-signature `RegistryInstalled`
-/// source makes catalog descriptions trusted prompt text, while a local
-/// package's unsafe description degrades only that prompt entry instead of
-/// denying the turn.
+/// Regression for the Attio incident: ordinary authentication vocabulary in
+/// both registry-installed and local package descriptions remains usable
+/// prompt text. Actual credential values are handled later by the
+/// source-independent provider-bound redaction pass.
 #[tokio::test]
-async fn prompt_description_trust_is_enforced_at_the_real_turn_seam() {
+async fn prompt_description_auth_vocabulary_survives_at_the_real_turn_seam() {
     let group = RebornIntegrationGroup::extension_prompt_description_trust_probe()
         .await
         .expect("prompt-description trust probe group builds");
@@ -92,11 +92,14 @@ async fn prompt_description_trust_is_enforced_at_the_real_turn_seam() {
         .await
         .expect("turn completes through persisted reply");
     harness
-        .assert_model_tool_description_contains("verifiedprompt__invoke", PROMPT_DENIAL_DESCRIPTION)
+        .assert_model_tool_description_contains(
+            "verifiedprompt__invoke",
+            AUTH_VOCABULARY_DESCRIPTION,
+        )
         .await
         .expect("verified catalog description reaches the model intact, including Bearer");
     harness
-        .assert_system_prompt_contains(PROMPT_DENIAL_DESCRIPTION)
+        .assert_system_prompt_contains(AUTH_VOCABULARY_DESCRIPTION)
         .await
         .expect("verified catalog description survives instruction-bundle validation");
     harness
@@ -108,7 +111,11 @@ async fn prompt_description_trust_is_enforced_at_the_real_turn_seam() {
         .await
         .expect("safe local sibling remains in the validated prompt surface");
     harness
-        .assert_system_prompt_excludes("localprompt.unsafe")
+        .assert_model_tool_description_contains("localprompt__unsafe", AUTH_VOCABULARY_DESCRIPTION)
         .await
-        .expect("only the unsafe untrusted prompt entry is omitted");
+        .expect("ordinary auth vocabulary in a local description reaches the model intact");
+    harness
+        .assert_system_prompt_contains("localprompt.unsafe")
+        .await
+        .expect("the local prompt entry is preserved instead of being denied as a false positive");
 }

@@ -607,8 +607,11 @@ Important invariants:
 - `submit_turn` creates queued work, but no model/tool side effect runs before
   the process claim succeeds.
 - Heartbeats require the matching runner id and lease token.
-- Expired running leases move to terminal `Failed` (sanitized
-  `lease_expired`); expired cancel-requested leases move to `Cancelled`.
+- An expired running lease whose latest checkpoint replays no side effect
+  (`BeforeModel`, `BeforeBlock`) is requeued for resume, after a full lease TTL
+  of grace so a still-live worker cannot be duplicated; every other expired
+  running lease moves to terminal `Failed` (sanitized `lease_expired`).
+  Expired cancel-requested leases move to `Cancelled`.
   Never automatic retry of side-effecting work. (`TurnStatus::RecoveryRequired`
   survives only as a legacy variant.)
 - `LoopExit` is a driver claim, not trusted durable state.
@@ -656,14 +659,22 @@ recovery over pretending the run was safely cancelled.
 ```text
 runner crashes or stops heartbeating
   -> reconciler sees expired Running/CancelRequested lease
-  -> Running          => terminal Failed (sanitized "lease_expired")
+  -> Running, checkpoint replays no side effect, expired > one lease TTL
+                      => Queued (resumed from the checkpoint), bounded budget
+  -> Running, otherwise
+                      => terminal Failed (sanitized "lease_expired")
   -> CancelRequested  => terminal Cancelled
   -> the terminal transition releases the active-thread lock
 ```
 
 Reborn does not automatically retry uncertain side-effecting work after a lost
-lease — expiry is terminal, and the user resubmits explicitly. `RecoveryRequired`
-is legacy-only and is not the Reborn lease-expiry path.
+lease. What makes work certain is its latest checkpoint kind: a run parked
+before a model call or a gate has committed nothing externally, so it is
+requeued once the lease has been expired for a full lease TTL — long enough that
+a worker still running would have renewed it. Anything else, including a
+checkpoint whose kind is unknown, stays terminal and the user resubmits
+explicitly. `RecoveryRequired` is legacy-only and is not the Reborn
+lease-expiry path.
 
 ### Invalid Loop Exit
 

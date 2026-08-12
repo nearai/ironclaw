@@ -283,6 +283,9 @@ impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
             Self::EmptyAssistantResponse => {
                 "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
             }
+            Self::UnattendedQuestionEndingResponse => {
+                "The scheduled run failed because the model ended by asking for input when no user was present. Make the automation prompt self-contained or choose a different model."
+            }
             Self::TextualToolCallSyntax => {
                 "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model."
             }
@@ -371,6 +374,17 @@ mod tests {
                 Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse),
             ),
             "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+        );
+    }
+
+    #[test]
+    fn unattended_question_detail_has_scheduled_run_guidance() {
+        assert_eq!(
+            reborn_failure_summary_for_category_and_detail(
+                Some("invalid_model_output"),
+                Some(ModelInvalidOutputDetailReason::UnattendedQuestionEndingResponse),
+            ),
+            "The scheduled run failed because the model ended by asking for input when no user was present. Make the automation prompt self-contained or choose a different model."
         );
     }
 
