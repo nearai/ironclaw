@@ -124,6 +124,19 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub last_reply_trailed_off: bool,
 
+    /// Whether the most recent admitted assistant reply was empty after
+    /// trimming. Kept separately from `last_reply_trailed_off` so unattended
+    /// runs can fail empty output after their bounded nudge budget without
+    /// changing the existing trailing-colon terminal behavior.
+    #[serde(default)]
+    pub last_reply_empty: bool,
+
+    /// Whether the most recent admitted assistant reply's trimmed final line
+    /// ended in a question mark. Scheduled runs cannot obtain an answer from a
+    /// user, so this drives their origin-scoped completion recovery only.
+    #[serde(default)]
+    pub last_reply_ended_with_question: bool,
+
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
@@ -341,6 +354,8 @@ impl LoopExecutionState {
             pending_model_retry_directive: None,
             terminal_warning_state: TerminalWarningState::default(),
             last_reply_trailed_off: false,
+            last_reply_empty: false,
+            last_reply_ended_with_question: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),

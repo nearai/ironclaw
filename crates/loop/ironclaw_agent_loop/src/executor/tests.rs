@@ -2838,6 +2838,142 @@ async fn completion_nudge_skips_confirmation_with_quoted_literal_ending_in_colon
     assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
 }
 
+#[tokio::test]
+async fn scheduled_question_gets_bounded_nudge_then_completes_with_answer() {
+    let host = MockHost::new(vec![
+        reply_response_with_text("Which repository should I inspect?"),
+        reply_response_with_text("Inspected nearai/ironclaw. No blocking failures found."),
+    ])
+    .with_driver_nudges_enabled()
+    .with_scheduled_trigger_origin();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.prompt_requests().len(), 2);
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 1);
+    assert!(
+        host.prompt_requests()[1]
+            .inline_messages
+            .iter()
+            .any(|message| message.safe_body.as_str().contains("Finish the task now"))
+    );
+}
+
+#[tokio::test]
+async fn scheduled_question_after_nudge_budget_fails_and_retains_replies() {
+    let questions = [
+        "Which repository should I inspect?",
+        "Should I inspect the main branch?",
+        "Would you like me to continue?",
+    ];
+    let host = MockHost::new(vec![
+        reply_response_with_text(questions[0]),
+        reply_response_with_text(questions[1]),
+        reply_response_with_text(questions[2]),
+    ])
+    .with_driver_nudges_enabled()
+    .with_scheduled_trigger_origin();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let LoopExit::Failed(failed) = exit else {
+        panic!("expected invalid scheduled output to fail, got {exit:?}");
+    };
+    assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 2);
+    let finalized = host.finalized_assistant_messages();
+    for question in questions {
+        assert!(finalized.iter().any(|message| message == question));
+    }
+    assert!(
+        !failed.explanation_message_refs.is_empty(),
+        "the failed exit must retain assistant transcript evidence"
+    );
+}
+
+#[tokio::test]
+async fn scheduled_empty_reply_fails_through_canonical_executor() {
+    let host =
+        MockHost::new(vec![reply_response_with_text("   \n")]).with_scheduled_trigger_origin();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let LoopExit::Failed(failed) = exit else {
+        panic!("expected empty scheduled output to fail, got {exit:?}");
+    };
+    assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
+    let summary = failed
+        .safe_summary
+        .expect("empty scheduled output must carry typed failure detail");
+    assert_eq!(summary.category(), "invalid_model_output");
+    assert_eq!(
+        summary.detail(),
+        Some("model returned an empty assistant response")
+    );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["   \n".to_string()]
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
+#[tokio::test]
+async fn interactive_question_remains_a_normal_completion() {
+    let host = MockHost::new(vec![reply_response_with_text(
+        "Which repository should I inspect?",
+    )])
+    .with_driver_nudges_enabled();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
+#[tokio::test]
+async fn scheduled_answer_with_internal_question_completes_without_nudge() {
+    let answer = "Did the deployment pass? Yes. All required checks passed.";
+    let host = MockHost::new(vec![reply_response_with_text(answer)])
+        .with_driver_nudges_enabled()
+        .with_scheduled_trigger_origin();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec![answer.to_string()]
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
 #[test]
 fn trailing_off_detection_keeps_bare_unfinished_colon_but_accepts_markdown_quote() {
     assert!(super::reply_trailed_off("Let me write the file:"));
