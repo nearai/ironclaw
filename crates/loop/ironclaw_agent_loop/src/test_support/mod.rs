@@ -839,6 +839,10 @@ impl ironclaw_loop_contracts::LoopModelPort for MockAgentLoopDriverHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockAgentLoopDriverHost {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        false
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
