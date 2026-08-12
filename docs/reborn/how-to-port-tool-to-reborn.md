@@ -1,10 +1,23 @@
 # How to port a v1 tool to Reborn
 
+> **Superseded (2026-08-07).** The current manifest authoring format is
+> `reborn.extension_manifest.v3` (`[[tools]]`, `[auth.<vendor>]`, `[mcp]`,
+> `origin_gate_matrix`) — see `docs/extensions/building-a-tool.md` and
+> `docs/reborn/extension-runtime/overview.md` §3. The manifest examples below
+> show historical v2-era shapes (some, like top-level `[[capabilities]]` and
+> `script` manifest authoring, were retired before or during the v3 cutover —
+> the `RuntimeKind::Script` symbol itself survives as the process-sandbox
+> lane's runtime kind) and
+> must not be used as an authoring reference. The *decision tree* below keeps
+> its v1 classification questions, but its `RuntimeKind::*` target column is
+> historical: v3 authoring accepts only `[runtime] kind = "wasm" |
+> "first_party"`, hosted MCP servers use a top-level `[mcp]` section instead
+> of a runtime kind, and process/CLI work goes through the sandbox lane
+> (`system.process_sandbox.run`) rather than a script runtime.
+
 This guide helps maintainers decide how an IronClaw v1 tool should move onto the Reborn capability path.
 
-The important distinction is that v1 used one `Tool` abstraction plus sidecar `*.capabilities.json` files for several different things. Reborn should keep those categories separate and describe them through Extension Manifest v2.
-
-> Status note: this guide targets the manifest-v2 direction from issue #3537. If the target branch has not completed the v2 hard cutover yet, use the shapes here as the porting target, not as proof that every parser/runtime field is already implemented.
+The important distinction is that v1 used one `Tool` abstraction plus sidecar `*.capabilities.json` files for several different things. Reborn keeps those categories separate and describes them through the extension manifest.
 
 ## Quick decision tree
 

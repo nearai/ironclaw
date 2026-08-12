@@ -707,7 +707,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         storage.secret_master_key_env.as_deref(),
         Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
     );
-    assert_eq!(storage.pool_max_size, Some(2));
+    assert_eq!(storage.pool_max_size, Some(8));
 
     let policy = parsed
         .policy
@@ -1335,6 +1335,14 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         stdout.contains("hosted-single-tenant-volume"),
         "stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed-railway"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -1361,7 +1369,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 6);
+    assert_eq!(profiles.len(), 8);
     assert!(
         profiles
             .iter()
@@ -1384,6 +1392,12 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
             .any(|profile| profile["name"] == "hosted-single-tenant-volume"
                 && profile["default"] == false)
     );
+    assert!(profiles.iter().any(|profile| profile["name"]
+        == "hosted-single-tenant-volume-sandboxed"
+        && profile["default"] == false));
+    assert!(profiles.iter().any(|profile| profile["name"]
+        == "hosted-single-tenant-volume-sandboxed-railway"
+        && profile["default"] == false));
     assert!(
         profiles
             .iter()
@@ -1576,6 +1590,29 @@ fn skills_list_rejects_unsupported_profiles() {
         assert!(
             stderr.contains(&format!("profile={profile}")),
             "stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn skills_list_accepts_sandbox_profiles() {
+    for profile in [
+        "hosted-single-tenant-volume-sandboxed",
+        "hosted-single-tenant-volume-sandboxed-railway",
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = reborn_command()
+            .arg("skills")
+            .arg("list")
+            .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+            .env("IRONCLAW_REBORN_PROFILE", profile)
+            .output()
+            .expect("ironclaw-reborn skills list should run");
+
+        assert!(
+            output.status.success(),
+            "skills list should accept profile={profile}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
@@ -6965,6 +7002,37 @@ heartbeat_interval_secs = 0
     assert!(
         stderr.contains("heartbeat_interval_secs") && stderr.contains("greater than 0"),
         "stderr should explain heartbeat interval rejection; got: {stderr}"
+    );
+}
+
+#[test]
+fn run_rejects_runner_heartbeat_interval_past_the_lease_ttl_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[runner]
+heartbeat_interval_secs = 60
+"#,
+    )
+    .expect("write config");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "-m", "ping"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    assert!(
+        !output.status.success(),
+        "a heartbeat interval past the lease TTL bound must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("heartbeat_interval_secs") && stderr.contains("must not exceed"),
+        "stderr should explain the lease-TTL bound rejection; got: {stderr}"
     );
 }
 

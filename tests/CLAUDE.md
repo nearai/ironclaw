@@ -34,7 +34,7 @@ The counts in each section header are checked-in facts, not estimates. Update th
 | Tier | Location | What is real | What is faked | Cost |
 |---|---|---|---|---|
 | **Group scenarios** (§3) | `tests/integration/group_*/scenario_*.rs` | whole Reborn turn, shared runtime + shared stores across several threads | the model, at the vendor-SDK seam | fast, offline, no setup |
-| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread | the model | fast, offline |
+| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread; one dedicated sandbox test also uses a real local Docker worker | the model | usually fast/offline; sandbox worker test runs in its Docker CI lane |
 | **Binary / parity / QA-trace** (§5) | `tests/*.rs` | composed runtime or shipping binary; recorded real-LLM traces | model responses replayed from committed traces | medium |
 | **Python E2E** (§6) | `tests/e2e/scenarios/test_*.py` | current Reborn scenarios use real `ironclaw serve`, HTTP, and Playwright; retained legacy-fixture scenarios are pending migration | LLM (mock or recorded), external SaaS (Emulate/fakes) | slow |
 
@@ -50,11 +50,11 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Auth / credentials / OAuth | 3 | 7 | ✓ | ✓ (heaviest) |
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 2 | 3 | ✓ | ✓ |
-| Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
-| Memory & workspace | 5 | 2 | — | ✓ |
+| Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
+| Memory & workspace | 6 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
-| Tools & tool dispatch | — | 10 | ✓ | ✓ |
+| Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
 | Durability & restart | 4 | 5 | ✓ | ✓ |
@@ -62,13 +62,15 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **54** flat integration bins (48 in
+Totals: **53** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**868** test functions).
+**102** Python scenario files (**869** test functions) registered in the active
+Reborn coverage map below. Section 6 separately inventories retained and legacy
+Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (51)
+## 3. Group scenarios — `tests/integration/group_*/` (53)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -116,7 +118,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (5)
+### 3.4 Memory — `group_memory/` (7)
 
 | The user can… | Evidence |
 |---|---|
@@ -125,12 +127,14 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
+| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
+| Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
 | The user can… | Evidence |
 |---|---|
-| Share one deployment with someone else and each keep their own threads | `scenario_two_actors_own_threads.rs` |
+| Mention the bot in a shared channel and have the run act as the pinger — a second, distinct actor's run acts as itself, never the first binder (owner == actor) — while a Direct-route probe of the shared conversation is refused. Ephemeral-per-ping thread minting is pinned at the conversations tier and the channel e2e. | `scenario_shared_route_refuses_direct_reclassification.rs` |
 | Not read another user's memories (and still read their own) | `scenario_memory_isolation_across_actors.rs` |
 | Not have another user's "always allow" apply to them | `scenario_auto_approve_isolation_across_actors.rs` |
 | Not see another user's run/turn state | `scenario_turn_state_isolation_across_actors.rs` |
@@ -142,7 +146,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 |---|---|
 | List, install, and remove a skill, with each step visible from a different conversation | `scenario_install_list_remove.rs` |
 
-### 3.7 Triggers & automations — `group_triggers/` (10)
+### 3.7 Triggers & automations — `group_triggers/` (11)
 
 | The user can… | Evidence |
 |---|---|
@@ -152,13 +156,13 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a scheduled run chain through *two* approval prompts and still be recognised as a scheduled run | `scenario_triggered_chained_gate.rs` |
 | See "waiting on you" on an automation whose run is parked, and see it clear when the run ends | `scenario_triggered_gate_hold_visible.rs` |
 | Trust that a scheduled run can't create/remove/pause its own automations | `scenario_trigger_self_create_denied.rs` |
-| Create an automation from Slack/Telegram and have the result routed back to that conversation | `scenario_external_source_trigger_captures_delivery.rs` |
-| Not create an automation pointed at a delivery target this deployment can't reach | `scenario_delivery_target_fail_closed.rs` |
+| Have a scheduled run that repeatedly asks the absent user a question fail truthfully after two bounded nudges while retaining every rejected reply | `scenario_scheduled_final_output.rs` |
+| Create an automation whose create input carries no delivery-routing field at all | `scenario_trigger_create_has_no_delivery_target_field.rs` |
 | See and rename their automations in the WebUI, backed by the real trigger store | `scenario_webui_automations_list.rs`, `scenario_webui_automations_rename.rs` |
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (54)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -169,7 +173,8 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
-| The exact prompt + tool surface sent to the model is snapshot-pinned per iteration | `golden_payload.rs` |
+| A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
+| A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
@@ -179,15 +184,20 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Behavior | Evidence |
 |---|---|
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
-| Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths, and invalid JSON produces model-visible correction guidance | `tool_call.rs` |
+| Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
+| A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
-| Bridged tool disclosure mode reaches production's decorator wiring | `tool_disclosure.rs` |
+| Ordinary authentication vocabulary in verified and locally imported tool descriptions survives prompt construction without denying the turn | `extension_visibility.rs::prompt_description_auth_vocabulary_survives_at_the_real_turn_seam` |
+| With a large tool catalog, progressive-disclosure modes and the `namespaces` production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools; a complete search signature invokes directly, while incomplete or explicitly inspected results fall back through `tool_describe` | `tool_disclosure.rs` |
+| Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
+| Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
+| A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
 | Creating a project through chat persists it | `project_create.rs` |
@@ -211,6 +221,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
+| A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user` (step 8 + anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | The model sees channel setup guidance but not UI-only chrome | `channel_connection_projection.rs` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |
@@ -234,11 +245,25 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Scheduled-origin runs carry their origin into persisted state | `triggered_submit.rs` |
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
+| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-push` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_push_enrollment_and_notification_channel_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-The 54th registered bin, `delivery_user_journeys.rs`, is a retired Cargo target
-with no scenario behavior. Current delivery evidence is listed under Extensions
-& channels and the group trigger scenarios; the retired target is not coverage.
+One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
+channel-delivery journeys (two-lane model):
+
+| A user can… | Scenario |
+|---|---|
+| Ask in WebUI to be pinged on Slack and get a bot delivery with provider evidence | `webui_send_me_on_slack_delivers_via_bot_with_evidence` |
+| Ask from Slack for a Telegram delivery; ack lands in Slack, payload in Telegram | `slack_origin_delivers_to_telegram_and_acks_in_slack` |
+| Never have the model deliver into the run's own conversation (lane 1 is automatic) | `deliver_to_origin_conversation_is_denied_and_model_replies` |
+| See per-call honest results when one of several deliveries fails | `partial_failure_reports_per_call_honestly` |
+| Get a refusal (no tool calls) for an undeliverable destination | `undeliverable_destination_is_refused_without_tool_calls` |
+| Have a routine fire deliver via the tool with no stored target anywhere | `routine_fire_delivers_via_tool_without_stored_target` |
+| Have a conditional fire that calls no delivery tool produce zero outbound attempts | `conditional_fire_with_no_delivery_call_produces_zero_attempts` |
+| Get blocked-fire notices fanned out to every notification channel, first approve wins | `blocked_fire_fans_out_and_first_approve_wins` |
+| Keep a blocked fire app-only when the notification-channel set is empty | `empty_notification_set_keeps_blocked_fire_in_app_only` |
+| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_push_notice_to_enrolled_browser` |
+| Have a dead browser subscription (push service answers `410 Gone`) pruned after one notice attempt | `gone_push_subscription_is_pruned_after_notice_attempt` |
 
 ---
 
@@ -252,7 +277,9 @@ with no scenario behavior. Current delivery evidence is listed under Extensions
 | a question in a Slack DM / a keyword-prefixed message, and gets a Slack reply | `reborn_qa_channel_delivery.rs` (2) |
 | "use this Google Drive doc as your knowledge base" | `reborn_qa_doc_grounding.rs` (2) |
 | "does api.github.com return 200 / summarize this release page" | `reborn_qa_web_fetch.rs` (3) |
-| any of the above, replayed from committed real-LLM traces | `reborn_qa_recorded_behavior.rs` (25) |
+| any of the above, replayed from committed real-LLM traces | `reborn_qa_recorded_behavior.rs` (29) |
+| "send me XYZ every morning" from the web app and gets a routine whose fires stay in the run thread (no delivery step — the source-surface default, live-recorded) | `reborn_qa_recorded_behavior.rs::contract_routine_bare_send_me_from_web_app_pins_no_delivery_step` (+ replay) |
+| "send me XYZ to Slack and Telegram" and gets a routine whose prompt pins one delivery step per channel (live-recorded) | `reborn_qa_recorded_behavior.rs::contract_routine_multi_channel_delivery_pins_both_targets_in_prompt` (+ replay) |
 | a broad smoke set of whole turns on a full runtime | `reborn_qa_smoke_scenarios_e2e.rs` (10) |
 
 **Binary-level behavior**
@@ -290,7 +317,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 868 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,141 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -316,6 +343,8 @@ entries.
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
+| Opt into the inspector for the browser session, toggle it from the header icon, preserve its selected tab while closing, resizing, reloading, and reconnecting after visibility changes, explicitly disable it, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
+| Inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for completed runs, including continued diagnostic observation while the panel is closed | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
 | Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
 
@@ -323,6 +352,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Run built-in tools, parallel calls, and multi-step chains and see the result | `test_reborn_webui_v2_legacy_tool_execution.py` (9), `test_v2_engine_tool_lifecycle.py` (6), `test_tool_execution.py` |
+| Inspect safely bounded arguments and a visibly truncated 50 KiB output for a completed tool call | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_tool_turn_records_result_and_final_reply` |
 | Recover when a tool fails, a tool call is truncated, or the model loops | `test_reborn_webui_v2_legacy_tool_execution.py`, `test_agent_loop_recovery.py` (4), `test_v2_engine_error_handling.py` |
 | See the approval card with payload details, approve/deny, and see it disable while resolving | `test_reborn_webui_v2_legacy_approval.py` (8) |
 | Not send messages while a gate is pending — but keep using other threads | `test_reborn_webui_v2_legacy_approval.py::test_reborn_legacy_pending_approval_does_not_block_other_thread` |
@@ -387,6 +417,7 @@ entries.
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
+| Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |
 | Use plan mode (`/plan`, checklist, approve, status) | `test_plan_mode.py` (5) |
 | As an admin: create users, hand out one-time tokens, page the user list, set roles, suspend/activate, manage write-only secrets, delete users | `test_admin_api.py` (18) |
 | Bootstrap as the single-tenant owner with stable identity | `test_ownership_model.py` (8), `test_multi_tenant_greeting.py` |
@@ -409,7 +440,7 @@ entries.
 | Kill the process (`kill -9`) and still find their history | `test_reborn_blackbox_smoke.py` (5) |
 | Restart gracefully and keep thread history and "always approve" | `test_reborn_blackbox_smoke.py`, `test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_always_approve_survives_reborn_restart` |
 | Not be XSS'd by assistant or user content | `test_reborn_webui_v2_legacy_rendering.py` (3), `test_csp.py` (4) |
-| Upload attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (7) |
+| Upload and reselect attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (8) |
 | Have the model retried on HTTP errors and broken SSE streams, and cancel a slow inference | `test_reborn_webui_v2_streaming_run_control_api.py` |
 
 ### 6.10 Provider contracts & fixtures (Emulate-backed)
@@ -452,7 +483,7 @@ verify it.
 | **Sub-agents** have no group scenario | `reborn_subagent_spawn_e2e.rs` + `subagent_await_edge.rs` only. |
 | **Python E2E skip/xfail debt** | Tracked separately in `tests/e2e/E2E_DEBT.md` (ClawHub skills, legacy Gmail/MCP OAuth prerequisites, Telegram OAuth placeholders, portfolio widget, v2 auth/OAuth xfails). Do not silently un-xfail. |
 | **Live-model tool-misuse patterns** are documented but not gated | `tests/e2e/LIVE_TOOL_FAILURES.md` — the assistant claiming a write it never made, etc. No test fails on these today. |
-| **Observability** has no scenario coverage | Only `log` and `noop` backends ship (root `CLAUDE.md` → Current Limitations). |
+| **Observability** has no scenario coverage | `crates/substrates/ironclaw_observability` is latency-trace macros over `tracing` only — there is no exporter backend to exercise. |
 
 ---
 

@@ -234,6 +234,10 @@ impl HookedLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HookedLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        true
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.inner.tool_definitions()
     }
@@ -757,6 +761,18 @@ mod tests {
     }
 
     struct DenyingHook;
+
+    #[test]
+    fn hooked_port_requires_ordered_batch_entry() {
+        let wrapped = HookedLoopCapabilityPort::new(
+            Arc::new(AlwaysCompletedPort::new()),
+            Arc::new(HookDispatcher::new(HookRegistry::new())),
+            tenant(),
+        );
+
+        assert!(wrapped.requires_ordered_batch_invocation());
+    }
+
     #[async_trait]
     impl RestrictedBeforeCapabilityHook for DenyingHook {
         async fn evaluate(

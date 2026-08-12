@@ -24,8 +24,9 @@ Working rules for the host-port adapter crate. Orientation lives in
   instruction/context builders (safe summaries and refs; full prompt
   materialization is owned by the prompt port contract).
 - `capability_port.rs`, `capability_surface_filter.rs`, and
-  `capability_allow_set.rs` capability-surface adapters and profile-scoped
-  narrowing.
+  `capability_surface_policy.rs` capability-surface adapters, filtering, and
+  profile-to-policy resolution. The neutral policy vocabulary belongs to
+  `ironclaw_host_api`.
 - `input_queue.rs` / `input_port.rs` steering and followup queues;
   `cancellation_port.rs` cancellation observation.
 - `model_gateway.rs` / `model_routes.rs` / `thread_resolving_model_gateway.rs`
@@ -52,16 +53,17 @@ Working rules for the host-port adapter crate. Orientation lives in
   — so this module may reach only `host_api`, `loop_contracts`, `filesystem`,
   `skills`, `turns`, and this crate, even though `loop_host` itself may reach
   far more.
-- `system_prompt_assets.rs` + `prompts/{default_system,tool_disclosure_protocol,self_knowledge,benchmarking_mode}.md`
+- `system_prompt_assets.rs` + `prompts/{default_system,tool_disclosure_protocol,self_knowledge,benchmarking_mode,scheduled_trigger_mode}.md`
   — the system-prompt *content*: `DEFAULT_SYSTEM_PROMPT` (seed text written
-  once into the user-editable `SYSTEM.md`) and the three protocols appended in
+  once into the user-editable `SYSTEM.md`) and the four protocols appended in
   memory at resolve time (`SELF_KNOWLEDGE_PROTOCOL_PROMPT` unconditional,
   `TOOL_DISCLOSURE_PROTOCOL_PROMPT` bridged mode only,
-  `BENCHMARKING_MODE_PROTOCOL_PROMPT`). The text lives in `prompts/*.md`,
-  never inline in Rust. Evicted from the composition root, which owns assembly
-  and the boot-time seeding of the on-disk `SYSTEM.md` (`std::fs` on a real
-  host path — this crate performs no such I/O), never the text (PROPOSAL
-  §6.10.1).
+  `BENCHMARKING_MODE_PROTOCOL_PROMPT` process-wide benchmarking only, and
+  `SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT` trusted scheduled-trigger origin
+  only). The text lives in `prompts/*.md`, never inline in Rust. Evicted from
+  the composition root, which owns assembly and the boot-time seeding of the
+  on-disk `SYSTEM.md` (`std::fs` on a real host path — this crate performs no
+  such I/O), never the text (PROPOSAL §6.10.1).
 
 ## Do Not Move In Here
 
@@ -88,9 +90,10 @@ Working rules for the host-port adapter crate. Orientation lives in
 - Add one file per host adapter or context source.
 - Add decorators (e.g. profile filters) as named types with a single policy
   responsibility.
-- Put capability-surface filtering policy in `capability_surface_filter.rs`;
-  put profile-to-allow-set construction and validation in
-  `capability_allow_set.rs`.
+- Put capability-surface filtering behavior in
+  `capability_surface_filter.rs`; put profile-to-policy resolution in
+  `capability_surface_policy.rs`. Neutral policy vocabulary belongs to
+  `ironclaw_host_api`.
 - Add traits here only for host-owned inputs to existing loop ports.
 - Do not fold unrelated ports into `lib.rs`.
 

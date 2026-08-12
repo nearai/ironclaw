@@ -15,7 +15,7 @@
 //! port that drives the input hook lives in `ironclaw_loop_host` and speaks
 //! its own [`ironclaw_loop_host::CapabilityTrajectoryObserver`]; rather than
 //! re-export that substrate trait (which would commit this service to a
-//! loop-host contract — see `CLAUDE.md`: "expose service-shaped handles only;
+//! loop-host contract — see `CONTRACT.md`: "expose service-shaped handles only;
 //! keep lower substrate handles private"), we define our own trait and adapt it
 //! to the substrate one in [`as_capability_observer`]. Loop-support contract
 //! changes therefore stay internal to the adapter instead of breaking the

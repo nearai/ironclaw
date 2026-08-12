@@ -513,6 +513,19 @@ async fn standalone_trace_commons_profile_set_requires_approval_gate() {
 async fn native_memory_manifest_authorize_decision(
     capability_id: &str,
 ) -> ironclaw_host_api::decision::Decision {
+    // `EmptyApprovalSettingsProvider` reports global auto-approve OFF, i.e. the
+    // user who deliberately asked to be prompted.
+    native_memory_manifest_authorize_decision_with_settings(
+        capability_id,
+        Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
+    )
+    .await
+}
+
+async fn native_memory_manifest_authorize_decision_with_settings(
+    capability_id: &str,
+    settings: Arc<dyn ironclaw_approvals::ApprovalSettingsProvider>,
+) -> ironclaw_host_api::decision::Decision {
     let package =
         ironclaw_host_runtime::native_memory_first_party_package().expect("native memory package");
     // The registry's descriptor projection is the production path from
@@ -558,11 +571,7 @@ async fn native_memory_manifest_authorize_decision(
         provenance: TrustProvenance::AdminConfig,
         evaluated_at: chrono::Utc::now(),
     };
-    let authorizer = capability_authorizer(
-        None,
-        policy,
-        Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
-    );
+    let authorizer = capability_authorizer(None, policy, settings);
     authorizer
         .authorize_dispatch_with_trust(
             &context,
@@ -571,6 +580,85 @@ async fn native_memory_manifest_authorize_decision(
             &trust_decision,
         )
         .await
+}
+
+/// Approval settings as a never-configured user actually has them: global
+/// auto-approve defaults ON ([`ironclaw_approvals::AUTO_APPROVE_DEFAULT_ENABLED`]),
+/// no per-tool overrides, no stored always-allow policies.
+struct DefaultApprovalSettingsProvider;
+
+#[async_trait::async_trait]
+impl ironclaw_approvals::ApprovalSettingsProvider for DefaultApprovalSettingsProvider {
+    async fn tool_override(
+        &self,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _capability_id: &CapabilityId,
+    ) -> Option<ironclaw_approvals::ToolPermissionOverride> {
+        None
+    }
+
+    async fn global_auto_approve(
+        &self,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+    ) -> bool {
+        ironclaw_approvals::AUTO_APPROVE_DEFAULT_ENABLED
+    }
+
+    async fn tool_always_allow(
+        &self,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _capability_id: &CapabilityId,
+        _grantee: &Principal,
+    ) -> bool {
+        false
+    }
+}
+
+/// #7185: saving a durable user fact must not stop the turn on an approval
+/// prompt for a user who never touched the approval settings. On that default
+/// path `ironclaw.memory.write` is auto-approved, so the model can record a
+/// stated preference in the same turn the user states it.
+///
+/// `ironclaw.memory.write` is deliberately NOT on the approval-gate exemption
+/// list (unlike `ironclaw.memory.profile_set`): it is an arbitrary-path write
+/// whose target is model-chosen, so a user who turned auto-approve OFF still
+/// gets asked — see the companion test below. The gate seam is per-capability
+/// (`ProfileApprovalGatePolicy` sees the descriptor, never the invocation
+/// input), so "ungated for curated targets only" is not expressible there.
+#[tokio::test]
+async fn standalone_memory_write_is_auto_approved_under_default_settings() {
+    let decision = native_memory_manifest_authorize_decision_with_settings(
+        ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID,
+        Arc::new(DefaultApprovalSettingsProvider),
+    )
+    .await;
+    assert!(
+        matches!(
+            decision,
+            ironclaw_host_api::decision::Decision::Allow { .. }
+        ),
+        "saving a durable memory must not prompt a never-configured user; got {decision:?}"
+    );
+}
+
+/// The other half of the contract: turning global auto-approve OFF is an
+/// explicit request to be asked, and memory writes must honor it. Anything
+/// that made memory writes unconditionally ungated would silently override
+/// that choice.
+#[tokio::test]
+async fn standalone_memory_write_still_gates_when_auto_approve_is_off() {
+    let decision = native_memory_manifest_authorize_decision(
+        ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID,
+    )
+    .await;
+    assert!(
+        matches!(
+            decision,
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
+        ),
+        "memory write is an arbitrary-path write and must still gate when the user \
+         turned auto-approve off; got {decision:?}"
+    );
 }
 
 /// Surface-visibility regression test: `ironclaw.memory.profile_set` (the

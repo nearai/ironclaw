@@ -44,7 +44,7 @@ ones deterministically match a request.
 - No reaching upward (kernel/loop/product/app) — enforced by the layer matrix
   (`reborn_workspace_crates_declare_layers_and_follow_layer_matrix`).
 - Prompt templates live in `prompts/*.md`, loaded via `include_str!` — never
-  inline Rust string constants (root `CLAUDE.md` code-style rule; the
+  inline Rust string constants (root `AGENTS.md` code-style rule; the
   cross-crate include scan `reborn_cross_crate_include_scan.rs` polices
   reach-ins).
 

@@ -27,7 +27,7 @@ alone constructs authenticated-caller evidence.
   the fixed middleware order: ws-origin → body limit → bearer/session/OIDC
   auth → rate limit → handler.
 - `webui_v2_router(state)` / `webui_v2_routes()` — the route builder and the
-  frozen descriptor table (93 routes, contract-locked; re-derive:
+  frozen descriptor table (97 routes, contract-locked; re-derive:
   `rg -c 'pub const WEBUI_V2_ROUTE_' src/webui_v2/descriptors.rs`).
 - Handlers dispatch to `ironclaw_product_contracts::surface::ProductSurface`
   and render redacted responses through `WebUiV2HttpError`.
@@ -64,9 +64,9 @@ alone constructs authenticated-caller evidence.
   `webui_v2_routes()` entry (`tests/webui_v2_descriptors_contract.rs`).
 - **The product residue is pinned** at 100 symbols, exact-match/shrink-only:
   `reborn_transport_product_boundary.rs` (`WEBUI_PRODUCT_SYMBOL_BASELINE`).
-- **`CLAUDE.md` here is the module spec and is gate-pinned** — the 19-owner
+- **`CONTRACT.md` here is the module spec and is gate-pinned** — the 19-owner
   `handlers.rs` charter map is enforced by
-  `tests/handlers_module_charter.rs`; the root `CLAUDE.md` Module Specs table
+  `tests/handlers_module_charter.rs`; the root `AGENTS.md` Module Specs table
   names it. Do not reflow or renumber; edit only with
   `cargo test -p ironclaw_webui` green.
 - **Only this crate binds a listener** in the product family
@@ -76,6 +76,27 @@ alone constructs authenticated-caller evidence.
 - One cargo feature only: `test-support` (compiles `EmailUserDirectory` for
   standalone deployments and tests); the OpenAI-compat mounts and extension
   administration surface are unconditional.
+
+### Web Debug Inspector
+
+Operators can append `?debug=true` to a chat URL to enable the inspector for
+the current browser tab; `?debug=false` disables it. The opt-in survives route
+changes and reloads in that tab.
+It shows the bounded host-resolved prompt, an ordered activity timeline with
+session-local turn navigation, aggregate model/tool statistics, and verbose
+tool details fetched on demand. The panel is a desktop sidebar, a tablet
+overlay, and hidden on mobile. Its header icon toggles presentation without
+stopping diagnostic observation; panel visibility and the selected tab persist
+only for the current browser session.
+
+The four inspector routes live below
+`/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}`. They
+require both operator caller authority and the operator configuration
+capability. Reads are tenant/user/thread/run scoped, SSE updates are resumable,
+and normal chat events never carry prompt bodies, tool arguments, or tool
+results. See
+[`docs/reborn/contracts/web-debug-inspector.md`](../../../docs/reborn/contracts/web-debug-inspector.md)
+for the bounds, security contract, and failure behavior.
 
 ## Tests
 
@@ -91,6 +112,6 @@ corepack/pnpm; `frontend/README.md` covers the JS/TS toolchain.
 ## See also
 
 Module spec (route table, streaming model, SSE caps, OAuth login security
-contract, charter map): `CLAUDE.md` — the spec is the tiebreaker · working
+contract, charter map): `CONTRACT.md` — the spec is the tiebreaker · working
 rules: `AGENTS.md` · family rules: `crates/product/AGENTS.md` · design record:
 `docs/reborn/target-architecture/families/product.md` (§6.9.4).

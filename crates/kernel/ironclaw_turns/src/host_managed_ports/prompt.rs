@@ -8,8 +8,8 @@ use ironclaw_loop_contracts::LoopRuntimeContext;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
     LoopContextPort, LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority,
-    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
-    VisibleCapabilitySurface,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    LoopRunContext, PromptMode, SkillName, VisibleCapabilitySurface,
 };
 use ironclaw_loop_contracts::{
     InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
@@ -340,6 +340,7 @@ where
         } else {
             context.compaction_message_index.clone()
         };
+        let recent_window_truncation = context.recent_window_truncation.clone();
         trace_prompt_latency_ok(
             "compaction_index",
             &self.context,
@@ -386,12 +387,33 @@ where
             messages: instruction_bundle.messages,
             surface_version: request.surface_version.clone(),
             compaction_message_index,
+            recent_window_truncation,
             instruction_fingerprint: Some(instruction_bundle.fingerprint),
             identity_message_count,
             instruction_snippet_count,
         };
         let started_at = ironclaw_observability::live_latency_started_at();
-        self.prompt_authority.issue_bundle(&self.context, &bundle)?;
+        self.prompt_authority
+            .issue_bundle_with_diagnostic_metadata(
+                &self.context,
+                &bundle,
+                Some(LoopPromptDiagnosticMetadata {
+                    identity_message_count,
+                    instruction_snippet_count,
+                    active_skills: instruction_bundle
+                        .skill_context
+                        .iter()
+                        .map(|skill| {
+                            SkillName::new(skill.source_name.clone()).map_err(|_| {
+                                AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::Invalid,
+                                    "prompt bundle contains an invalid skill name",
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                }),
+            )?;
         trace_prompt_latency_ok(
             "issue_bundle",
             &self.context,
@@ -441,8 +463,8 @@ mod tests {
     use ironclaw_loop_contracts::{
         EphemeralInstructionMaterializationStore, InMemoryLoopHostMilestoneSink, LoopContextBundle,
         LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopRuntimeContext,
-        ResolvedRunProfile,
+        LoopContextWindowTruncation, LoopInlineMessage, LoopInlineMessageBody,
+        LoopInlineMessageRole, LoopRuntimeContext, ResolvedRunProfile,
     };
 
     struct PanicContextPort;
@@ -556,6 +578,7 @@ mod tests {
     struct StubContextPort {
         identity_messages: Vec<LoopContextMessage>,
         messages: Vec<LoopContextMessage>,
+        recent_window_truncation: Option<LoopContextWindowTruncation>,
     }
 
     impl StubContextPort {
@@ -566,7 +589,16 @@ mod tests {
             Self {
                 identity_messages,
                 messages,
+                recent_window_truncation: None,
             }
+        }
+
+        fn with_recent_window_truncation(
+            mut self,
+            recent_window_truncation: LoopContextWindowTruncation,
+        ) -> Self {
+            self.recent_window_truncation = Some(recent_window_truncation);
+            self
         }
     }
 
@@ -580,6 +612,7 @@ mod tests {
                 identity_messages: self.identity_messages.clone(),
                 messages: self.messages.clone(),
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: self.recent_window_truncation.clone(),
                 instruction_snippets: vec![],
                 memory_snippets: vec![],
             })
@@ -726,6 +759,38 @@ mod tests {
             .expect("bundle should preserve compaction metadata");
 
         assert_eq!(bundle.compaction_message_index, vec![compaction]);
+    }
+
+    #[tokio::test]
+    async fn host_managed_prompt_port_preserves_recent_window_truncation() {
+        let context = test_context();
+        let truncation = LoopContextWindowTruncation {
+            omitted_through_sequence: 17,
+            omitted_through_kind: LoopContextCompactionKind::Other,
+        };
+        let port = HostManagedLoopPromptPort::new(
+            context,
+            Arc::new(
+                StubContextPort::new(vec![], vec![])
+                    .with_recent_window_truncation(truncation.clone()),
+            ),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                capability_view: None,
+                inline_messages: vec![],
+            })
+            .await
+            .expect("bundle should preserve the recent truncation watermark");
+
+        assert_eq!(bundle.recent_window_truncation, Some(truncation));
     }
 
     #[tokio::test]

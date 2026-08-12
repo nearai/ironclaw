@@ -18,10 +18,11 @@ use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
-use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::result_meta::{FailureKind, MODEL_DIAGNOSTIC_MAX_BYTES};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -50,22 +51,22 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, ToolCallHttpEgress,
+    TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
@@ -327,7 +328,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         HTTP_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID,
     ] {
         assert_eq!(
             loop_run(gated),
@@ -441,20 +442,58 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
 #[tokio::test]
 async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     let package =
-        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
     assert!(
         package
             .capabilities
             .iter()
             .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
     );
+    let shell = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("user-sandbox shell descriptor");
+    assert!(shell.description.contains("read-only system filesystem"));
+    assert!(shell.description.contains("/workspace/.venv"));
+    assert!(shell.description.contains("/workspace/.venv/bin/python"));
+    for effect in [
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+    ] {
+        assert!(!shell.effects.contains(&effect));
+    }
+    let manifest_shell = package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("user-sandbox shell manifest");
+    assert_eq!(manifest_shell.description, shell.description);
+    for effect in [
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+    ] {
+        assert!(!manifest_shell.effects.contains(&effect));
+    }
 
     let handlers = builtin_first_party_handlers_for_process_backend(
         Arc::new(InMemoryTriggerRepository::default()),
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
     )
     .unwrap();
     assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+
+    let host_package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::LocalHost).unwrap();
+    let host_shell = host_package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("local-host shell descriptor");
+    assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -742,6 +781,78 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     );
 }
 
+/// Regression guard for issue #7246: the agent fabricated automation status
+/// ("your BTC digest is running and sending to Telegram") while the Automations
+/// page showed none. `builtin.trigger_list` IS the model's read path for that
+/// state, so its model-visible description must (a) bridge the user vocabulary
+/// ("automation", "routine") to the trigger capability id and (b) carry the
+/// grounding rule: call it before asserting routine/automation existence or
+/// status, never answer from memory. Driven through the production
+/// `visible_capabilities` surface assembly, not the constant.
+#[tokio::test]
+async fn builtin_trigger_list_surface_grounds_automation_status_claims() {
+    let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let trigger_list = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == TRIGGER_LIST_CAPABILITY_ID)
+        .expect("trigger_list must appear in surface");
+
+    let description = &trigger_list.descriptor.description;
+    // Vocabulary bridge: users ask about "automations" (the Automations page)
+    // and "routines"; the capability id says "trigger". Without all three in
+    // the description the model does not map status questions to this tool.
+    assert!(
+        description.contains("routine"),
+        "trigger_list description must use the routine vocabulary: {description}"
+    );
+    assert!(
+        description.contains("automation"),
+        "trigger_list description must use the automation vocabulary: {description}"
+    );
+    // Grounding rule tied to the specific fabrication (issue #7246), mirroring
+    // the outbound targets-list pattern: state the positive check-before-assert
+    // rule, not generic caution.
+    assert!(
+        description.contains("Call this before"),
+        "trigger_list description must instruct calling it before status claims: {description}"
+    );
+    assert!(
+        description.contains("never report routine or automation status from"),
+        "trigger_list description must forbid answering status from memory: {description}"
+    );
+    // Empty-state grounding: no rows means no automations exist — say so.
+    assert!(
+        description.contains("empty"),
+        "trigger_list description must ground the empty result as 'no routines': {description}"
+    );
+
+    // The same grounding must survive into the model-visible input schema root
+    // description (the trigger_create schema already carries steering there).
+    let schema = &trigger_list.descriptor.parameters_schema;
+    let schema_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_list schema must describe the listing as authoritative state");
+    assert!(
+        schema_description.contains("authoritative"),
+        "trigger_list schema description must declare the response authoritative: {schema_description}"
+    );
+    assert!(
+        schema_description.contains("routine") && schema_description.contains("automation"),
+        "trigger_list schema description must bridge routine/automation vocabulary: {schema_description}"
+    );
+}
+
 #[tokio::test]
 async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
     let runtime = runtime_with_policy(network_denied_policy());
@@ -884,104 +995,14 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
     assert_eq!(listed["triggers"][0]["state"], json!("scheduled"));
 }
 
-/// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
-/// shape-validated, host-validated through the create hook, persisted on the
-/// record, and echoed in the model-facing output — so one automation's
-/// routing no longer depends on the mutable user-global preference.
+/// Retired stored routing: a routine delivers externally only by calling
+/// `builtin.outbound_deliver` from its own prompt, so the create surface no
+/// longer accepts a delivery route. A call that still passes one is refused as
+/// invalid input through the real runtime dispatch path — never accepted and
+/// silently ignored, which would leave the caller believing a route was sealed
+/// — and nothing persists.
 #[tokio::test]
-async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_validates() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
-        "slack:personal-dm:T123:user-a",
-    ));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    let output = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
-            "delivery_target_id": "slack:personal-dm:T123:user-a"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        output["trigger"]["delivery_target_id"],
-        json!("slack:personal-dm:T123:user-a")
-    );
-    assert_eq!(
-        hook.validated(),
-        vec!["slack:personal-dm:T123:user-a".to_string()],
-        "the host validation hook must see the model-supplied target"
-    );
-
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0]
-            .delivery_target
-            .as_ref()
-            .map(|target| target.as_str()),
-        Some("slack:personal-dm:T123:user-a")
-    );
-}
-
-/// When the model omits `delivery_target_id`, the host hook still receives the
-/// trusted loop run id and may seal a source-derived target into the record.
-/// This is the authority path used for an automation created from an external
-/// conversation; prompt text never supplies the target.
-#[tokio::test]
-async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_context() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let inherited = "external:source-conversation";
-    let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
-    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-    let run_id = ironclaw_host_api::ids::RunId::new();
-    context.run_id = Some(run_id);
-
-    let output = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Source-routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(output["trigger"]["delivery_target_id"], json!(inherited));
-    assert_eq!(hook.seen_run_ids(), vec![Some(run_id)]);
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        records[0]
-            .delivery_target
-            .as_ref()
-            .map(|target| target.as_str()),
-        Some(inherited)
-    );
-}
-
-/// Fail closed: without host wiring that can resolve outbound delivery
-/// targets (the default no-op hook), a supplied `delivery_target_id` must be
-/// rejected as invalid input instead of being persisted unvalidated.
-#[tokio::test]
-async fn builtin_trigger_create_rejects_delivery_target_without_host_validation() {
+async fn builtin_trigger_create_rejects_the_retired_delivery_target_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -994,41 +1015,6 @@ async fn builtin_trigger_create_rejects_delivery_target_without_host_validation(
             "prompt": "Summarize yesterday",
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "delivery_target_id": "slack:personal-dm:T123:user-a"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::InputEncode);
-    assert!(
-        repository
-            .list_triggers(context.resource_scope.tenant_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-/// A target the host rejects (unknown id, foreign owner, disconnected
-/// product) is invalid input and nothing persists.
-#[tokio::test]
-async fn builtin_trigger_create_rejects_delivery_target_the_host_rejects() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
-        "slack:personal-dm:T123:user-a",
-    ));
-    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook);
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    let error = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Routed summary",
-            "prompt": "Summarize yesterday",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
-            "delivery_target_id": "slack:shared-channel:T123:C_SOMEONE_ELSES"
         }),
         context.clone(),
     )
@@ -2156,15 +2142,19 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
         .unwrap();
     }
 
-    let empty = invoke_with_context(
+    // #7474 review: `limit: 0` used to succeed with an empty list while 101
+    // routines exist — exactly the false-absence result the trigger_list
+    // description forbids the model to fabricate. It is now rejected as
+    // invalid input (schema declares `minimum: 1`), so an empty `triggers`
+    // array is always proof of absence.
+    invoke_with_context(
         &runtime,
         TRIGGER_LIST_CAPABILITY_ID,
         json!({ "limit": 0 }),
         context.clone(),
     )
     .await
-    .unwrap();
-    assert_eq!(empty["triggers"], json!([]));
+    .expect_err("a zero limit must be rejected, not answered with an empty list");
 
     let listed = invoke_with_context(
         &runtime,
@@ -3715,14 +3705,14 @@ async fn builtin_shell_path_bearing_failure_reason_rides_the_diagnostic_detail()
 }
 
 #[tokio::test]
-async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
+async fn builtin_shell_uses_configured_user_sandbox_process_port() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
-    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let sandbox_process = Arc::new(UserSandboxProcessPort::new(sandbox_transport.clone()));
     let runtime = runtime_with_local_and_sandbox_process_ports(
         Arc::clone(&local_process),
         Arc::clone(&sandbox_process),
-        tenant_sandbox_process_policy(),
+        user_sandbox_process_policy(),
     );
 
     let output = invoke_with_context(
@@ -3741,14 +3731,14 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
-async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+async fn builtin_shell_user_sandbox_process_uses_callers_scope_for_two_user_isolation() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
-    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let sandbox_process = Arc::new(UserSandboxProcessPort::new(sandbox_transport.clone()));
     let runtime = runtime_with_local_and_sandbox_process_ports(
         Arc::clone(&local_process),
         Arc::clone(&sandbox_process),
-        tenant_sandbox_process_policy(),
+        user_sandbox_process_policy(),
     );
     let user_a = UserId::new("user-a").unwrap();
     let user_b = UserId::new("user-b").unwrap();
@@ -3800,10 +3790,10 @@ async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, FailureKind::FilesystemDenied);
+    assert_eq!(error, FailureKind::UnsupportedRunner);
     assert!(
         process_port.requests.lock().unwrap().is_empty(),
-        "hosted shell must fail at invocation-service resolution before the handler can run"
+        "hosted shell must fail at user-sandbox process resolution before the handler can run"
     );
 }
 
@@ -4430,6 +4420,285 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.save_body_to, None);
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_surfaces_http_error_status_as_failed_outcome() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        br#"{"message":"authentication required"}"#.to_vec(),
+    ));
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "method": "post",
+            "url": "https://api.example.test/private",
+            "body": "paid"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 403")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["body_text"],
+        json!(r#"{"message":"authentication required"}"#)
+    );
+    assert!(response["auth_hint"].as_str().is_some_and(|hint| {
+        hint.contains("authentication/authorization") && hint.contains("extension")
+    }));
+    assert_eq!(egress.requests().len(), 1);
+    // The failure carries usage like the sibling dispatch paths: egress bytes
+    // from the request body flow into the governor even for failed calls.
+    // (wall_clock_ms is pinned at the classify_status unit seam instead of
+    // here because integration-tier wall-clock is timing-dependent; the
+    // governor records the full failed-call usage, wall_clock_ms included.)
+    let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
+    let usage = governor.usage_for(&tenant_account);
+    assert_eq!(
+        usage.network_egress_bytes, 4,
+        "failed calls must still account egress bytes"
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_keeps_redirect_responses_model_visible() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(302, Vec::new())
+            .with_headers(vec![("location".to_string(), "/next".to_string())]),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/redirect"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .expect("redirect responses must remain inspectable results");
+
+    assert_eq!(output["status"], json!(302));
+    assert_eq!(output["headers"][0]["name"], json!("location"));
+    assert_eq!(output["headers"][0]["value"], json!("/next"));
+}
+
+#[tokio::test]
+async fn builtin_http_surfaces_server_error_status_as_failed_outcome() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        500,
+        br#"{"error":"internal"}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/boom"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 500")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(500));
+    assert_eq!(response["body_text"], json!(r#"{"error":"internal"}"#));
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_http_save_surfaces_http_error_status_as_failed_outcome() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(403, br#"{"message":"denied"}"#.to_vec())
+            .with_saved_body("/workspace/denied.json", 20),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/private",
+            "save_to": "/workspace/denied.json"
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("HTTP request returned status 403")
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("HTTP diagnostic must be JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["saved_body"],
+        json!({"path": "/workspace/denied.json", "bytes_written": 20})
+    );
+    assert!(
+        response.get("body_text").is_none(),
+        "save-mode diagnostics carry saved_body metadata, not the inline body"
+    );
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].save_body_to.is_some(),
+        "save-mode error path must still use strict host egress with a save target"
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_classifies_status_range_boundaries() {
+    for status in [400u16, 599] {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+            status,
+            Vec::new(),
+        ));
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+        let failure = invoke_failure_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/edge"}),
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+        )
+        .await;
+        assert_eq!(
+            failure.kind,
+            FailureKind::OperationFailed,
+            "status {status} must classify as a failure"
+        );
+    }
+    for status in [100u16, 304, 600] {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+            status,
+            Vec::new(),
+        ));
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+        let output = invoke_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/edge"}),
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("status {status} must stay an inspectable result, got {error:?}")
+        });
+        assert_eq!(output["status"], json!(status));
+    }
+}
+
+#[tokio::test]
+async fn builtin_http_error_diagnostic_respects_model_diagnostic_budget() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        vec![b'a'; 16 * 1024],
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/private"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    assert!(
+        text.len() <= MODEL_DIAGNOSTIC_MAX_BYTES,
+        "diagnostic must fit the model-visible budget, got {} bytes",
+        text.len()
+    );
+    let response: Value =
+        serde_json::from_str(&text).expect("trimmed diagnostic must stay valid JSON");
+    assert_eq!(
+        response["status"],
+        json!(403),
+        "status must survive the budget trim"
+    );
+    assert_eq!(response["truncation"]["body"], json!(true));
+    assert!(
+        response["body_text"].as_str().is_some(),
+        "trimmed error body must remain visible in the diagnostic"
+    );
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_http_error_diagnostic_preserves_egress_truncation_flag() {
+    // The egress returns a partial body when it hits the caller's
+    // response_body_limit; the failure diagnostic must keep reporting that
+    // truncation instead of presenting the partial body as complete.
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        403,
+        b"partial body that exceeds the one-byte cap".to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/private",
+            "response_body_limit": 1
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail else {
+        panic!("HTTP error response must remain available as diagnostic context");
+    };
+    let response: Value = serde_json::from_str(&text).expect("diagnostic must stay valid JSON");
+    assert_eq!(response["status"], json!(403));
+    assert_eq!(
+        response["body_truncated"],
+        json!(true),
+        "egress truncation at the caller cap must stay visible"
+    );
+    assert_eq!(response["truncation"]["body"], json!(true));
 }
 
 #[tokio::test]
@@ -5372,13 +5641,14 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     );
 }
 
+/// An agent must not be able to forge install provenance: `source`/`source_url` are set by the
+/// URL-fetch path, so accepting them inline would let an agent label its own output as fetched.
+///
+/// A `content` + `files` case was removed from here deliberately, not by accident -- rejecting it
+/// was the bug this PR fixes.
 #[tokio::test]
-async fn builtin_skill_install_rejects_hidden_url_install_fields() {
+async fn builtin_skill_install_rejects_forged_provenance_fields() {
     let cases = [
-        json!({
-            "content": "---\nname: hidden-files\n---\nPrompt.\n",
-            "files": [{"path": "references/injected.md", "bytes_base64": "IyBJbmplY3RlZAo="}]
-        }),
         json!({
             "content": "---\nname: hidden-source\n---\nPrompt.\n",
             "source": "installed_url"
@@ -5410,6 +5680,176 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
         assert_eq!(error, FailureKind::InputEncode);
         assert!(temp.path().read_dir().unwrap().next().is_none());
     }
+}
+
+// The direct-install input contract, asserted at the capability boundary rather than against
+// whichever helper currently normalizes the input -- the normalizer has already moved crates once,
+// and these were written to pass on both sides of that move. The dividing line is provenance, not
+// shape: `files` is caller content, `source`/`source_url` are not.
+
+/// A direct install may carry the rest of the bundle, not just prose.
+///
+/// Refused before nearai/ironclaw#6745, and it failed the ENTIRE install rather than dropping the
+/// file: on the 31-task SkillsBench subset (nearai/benchmarks#287) 18 correctly-shaped entries
+/// across 9 calls were all refused. A skill that cannot carry a script is a prose description.
+#[tokio::test]
+async fn builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: egfr-calc\ndescription: CKD-EPI eGFR\n---\nRun scripts/egfr.py.\n",
+            "files": [
+                { "path": "scripts/egfr.py", "text": "print('eGFR')\n" },
+                { "path": "references/units.md", "text": "mg/dL -> mmol/L: x 0.0555\n" }
+            ]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("egfr-calc"));
+    // `source` stays `user`: authoring a bundle locally is not a URL install, and the
+    // normalizer must not infer provenance from the presence of `files`.
+    assert_eq!(installed["source"], json!("user"));
+    assert_eq!(installed["files_installed"], json!(2));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("egfr-calc/scripts/egfr.py")).unwrap(),
+        "print('eGFR')\n",
+        "the script the agent authored must be on disk verbatim, or the skill it belongs to \
+         cannot run it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("egfr-calc/references/units.md")).unwrap(),
+        "mg/dL -> mmol/L: x 0.0555\n"
+    );
+
+    let listed = invoke_with_context(
+        &runtime,
+        SKILL_LIST_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_mounts([SKILL_LIST_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["count"], json!(1));
+    assert_eq!(listed["skills"][0]["name"], json!("egfr-calc"));
+    assert_eq!(listed["skills"][0]["source"], json!("user"));
+}
+
+/// `bytes_base64` is the shape the URL-fetch path constructs, so the direct arm must accept it too;
+/// both arms converge on one install request.
+#[tokio::test]
+async fn builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: binary-helper\ndescription: has a binary asset\n---\nPrompt.\n",
+            "files": [{ "path": "assets/blob.bin", "bytes_base64": "aGVsbG8=" }]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["files_installed"], json!(1));
+    assert_eq!(
+        std::fs::read(temp.path().join("binary-helper/assets/blob.bin")).unwrap(),
+        b"hello"
+    );
+}
+
+/// Carrying `files` does not buy the right to forge provenance. Sends both, and the install must be
+/// refused whole rather than accepted with the provenance ignored.
+#[tokio::test]
+async fn builtin_skill_install_rejects_a_bundle_that_also_forges_provenance() {
+    let cases = [
+        json!({
+            "content": "---\nname: forged-with-files\n---\nPrompt.\n",
+            "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+            "source": "installed_url"
+        }),
+        json!({
+            "content": "---\nname: forged-url-with-files\n---\nPrompt.\n",
+            "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+            "source_url": "https://api.example.test/skills/forged/SKILL.md"
+        }),
+    ];
+
+    for input in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let runtime = runtime_with_filesystem(filesystem);
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_CAPABILITY_ID,
+            input,
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, FailureKind::InputEncode);
+        assert!(
+            temp.path().read_dir().unwrap().next().is_none(),
+            "a refused install must leave the skill root untouched"
+        );
+    }
+}
+
+/// A bundle-relative path may not climb out of its own skill directory. Accepting caller `files`
+/// means each path is caller-controlled, so this is what makes that safe.
+#[tokio::test]
+async fn builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "content": "---\nname: escaper\ndescription: tries to climb out\n---\nPrompt.\n",
+            "files": [{ "path": "../../escaped.py", "text": "print('escaped')\n" }]
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, FailureKind::InputEncode);
+    assert!(
+        !temp.path().join("escaped.py").exists(),
+        "a traversing bundle path must not write outside the skill directory"
+    );
 }
 
 // URL-install coverage stays in this integration file because these cases assert
@@ -7124,22 +7564,26 @@ async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_service
 }
 
 #[tokio::test]
-async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
+async fn builtin_read_file_uses_scoped_mounts_for_hosted_tenant_workspace() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    tokio::fs::write(temp.path().join("README.md"), "hosted scoped read\n")
+        .await
+        .unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
         execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, FailureKind::FilesystemDenied);
+    assert_eq!(output["content"], json!("     1│ hosted scoped read"));
+    assert_eq!(output["path"], json!("/workspace/README.md"));
+    assert_eq!(output["total_lines"], json!(1));
 }
 
 #[tokio::test]
@@ -8932,86 +9376,6 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
     }
 }
 
-/// Test hook standing in for host composition's outbound-target resolution:
-/// accepts exactly one target id, records every validation request.
-struct DeliveryTargetValidatingTriggerCreateHook {
-    accepted: String,
-    validated: std::sync::Mutex<Vec<String>>,
-}
-
-struct SourceResolvingTriggerCreateHook {
-    target: String,
-    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::ids::RunId>>>,
-}
-
-impl SourceResolvingTriggerCreateHook {
-    fn new(target: &str) -> Self {
-        Self {
-            target: target.to_string(),
-            seen_run_ids: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::ids::RunId>> {
-        self.seen_run_ids.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
-    async fn resolve_implicit_delivery_target(
-        &self,
-        _scope: &ironclaw_host_api::resource::ResourceScope,
-        run_id: Option<ironclaw_host_api::ids::RunId>,
-    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
-        self.seen_run_ids.lock().unwrap().push(run_id);
-        Ok(Some(
-            ironclaw_triggers::TriggerDeliveryTargetId::new(self.target.clone())
-                .expect("fixture target id"),
-        ))
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
-impl DeliveryTargetValidatingTriggerCreateHook {
-    fn accepting(target: &str) -> Self {
-        Self {
-            accepted: target.to_string(),
-            validated: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn validated(&self) -> Vec<String> {
-        self.validated.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
-    async fn validate_delivery_target(
-        &self,
-        _scope: &ironclaw_host_api::resource::ResourceScope,
-        target: &ironclaw_triggers::TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        self.validated.lock().unwrap().push(target.to_string());
-        if target.as_str() == self.accepted {
-            Ok(())
-        } else {
-            Err(TriggerError::InvalidRecord {
-                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-                reason: "delivery target is not available to this caller".to_string(),
-            })
-        }
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 #[cfg(feature = "test-support")]
 struct FixedTriggerClock(DateTime<Utc>);
@@ -9631,7 +9995,7 @@ where
 
 fn runtime_with_local_and_sandbox_process_ports<L>(
     local_process: Arc<L>,
-    sandbox_process: Arc<TenantSandboxProcessPort>,
+    sandbox_process: Arc<UserSandboxProcessPort>,
     policy: EffectiveRuntimePolicy,
 ) -> impl HostRuntime
 where
@@ -9649,7 +10013,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_process_port(local_process)
-    .with_tenant_sandbox_process_port(sandbox_process)
+    .with_user_sandbox_process_port(sandbox_process)
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
@@ -9687,9 +10051,9 @@ fn local_host_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
+fn user_sandbox_process_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         ..local_host_policy()
     }
 }
@@ -9700,7 +10064,7 @@ fn hosted_dev_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
@@ -9841,7 +10205,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        OUTBOUND_DELIVER_CAPABILITY_ID,
         ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,

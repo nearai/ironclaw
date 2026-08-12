@@ -537,6 +537,280 @@ async fn filesystem_conversation_services_reopen_snapshot_without_pairing_epochs
     assert_eq!(resolution.binding_epoch, None);
 }
 
+/// A binding persisted BEFORE the run-acts-as-invoker work — keyed by the
+/// conversation alone (the SAME key shape this model uses) and stamped with a
+/// legacy owner such as the deployment operator — still deserializes and
+/// routes after reopen. Under ephemeral-per-ping the legacy owner is fully
+/// vestigial: each channel ping resolves onto its OWN fresh pinger-owned
+/// thread (the retained record's owner never surfaces), and a `Direct` request
+/// for the same conversation is still refused as a route-kind mismatch.
+/// (Replaces the retired "resume the one operator-owned shared thread and join
+/// later participants onto it" model.)
+#[tokio::test]
+async fn legacy_operator_owned_shared_binding_still_routes_but_pings_get_pinger_threads() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    for (external, canonical) in [
+        ("telegram-user-legacy-shared", "alice"),
+        ("telegram-user-legacy-bob", "bob"),
+    ] {
+        services
+            .pair_external_actor(
+                tenant_id("tenant-a"),
+                telegram(),
+                default_installation(),
+                external_actor(external),
+                user_id(canonical),
+            )
+            .await
+            .expect("pair actor");
+    }
+    let mut shared_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-shared"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-seed",
+    );
+    shared_request.route_kind = ConversationRouteKind::Shared;
+    let seeded = services
+        .resolve_or_create_binding(shared_request)
+        .await
+        .expect("seed a shared binding to rewrite into the legacy shape");
+    let legacy_thread_id = seeded.turn_scope.thread_id.clone();
+    drop(services);
+
+    // Rewrite the persisted record into the pre-upgrade shape: owned by the
+    // configured subject of the era (the deployment operator). The KEY is
+    // already the legacy shape — shared bindings are conversation-keyed.
+    let state_path = VirtualPath::new("/tenants/tenant-a/users/alice/conversations/state.json")
+        .expect("state path");
+    let mut versioned = backend
+        .get(&state_path)
+        .await
+        .expect("read state")
+        .expect("stored state");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&versioned.entry.body).expect("state json");
+    let bindings = state["bindings"].as_array_mut().expect("bindings array");
+    assert_eq!(bindings.len(), 1, "exactly the seeded shared binding");
+    let entry = bindings[0].as_array_mut().expect("binding entry pair");
+    assert!(
+        entry[0].get("shared_actor_user_id").is_none(),
+        "shared binding keys are conversation-scoped — byte-compatible with \
+         pre-upgrade rows"
+    );
+    entry[1]
+        .as_object_mut()
+        .expect("binding record object")
+        .insert(
+            "owner_user_id".to_string(),
+            serde_json::Value::String("operator".to_string()),
+        );
+    versioned.entry.body = serde_json::to_vec(&state).expect("legacy state json");
+    backend
+        .put(
+            &state_path,
+            versioned.entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .expect("write legacy snapshot");
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("legacy snapshots remain readable");
+
+    // Post-reopen, the original participant's next ping resolves onto its OWN
+    // fresh ephemeral thread (routed via the retained legacy binding); the
+    // legacy operator owner is vestigial and never surfaces.
+    let mut alice_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-shared"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-post-upgrade",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let alice_resolved = reopened
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("post-upgrade shared resolve routes via the legacy binding");
+    assert_ne!(
+        alice_resolved.turn_scope.thread_id, legacy_thread_id,
+        "each ping gets its own ephemeral thread, not the legacy record's thread"
+    );
+    assert_eq!(
+        alice_resolved.actor.user_id.as_str(),
+        "alice",
+        "the run acts as the invoking participant"
+    );
+    assert_eq!(
+        alice_resolved
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("alice"),
+        "the ephemeral ping thread is owned by the pinger — the legacy \
+         operator owner is vestigial and never surfaces"
+    );
+
+    // A different paired participant's ping gets THEIR own ephemeral thread —
+    // no join onto a shared one.
+    let mut bob_request = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-bob"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-bob",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+    let bob_resolved = reopened
+        .resolve_or_create_binding(bob_request)
+        .await
+        .expect("bob's channel ping routes via the legacy binding");
+    assert_ne!(
+        bob_resolved.turn_scope.thread_id, alice_resolved.turn_scope.thread_id,
+        "each pinger gets their own ephemeral thread, never a shared one"
+    );
+    assert_eq!(bob_resolved.actor.user_id.as_str(), "bob");
+
+    // A `Direct` request for the same conversation identity is a route-kind
+    // mismatch and is refused — no adapter re-classification can turn the
+    // shared thread into somebody's DM.
+    let direct_probe = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-legacy-shared"),
+        external_conversation("chat-legacy-shared"),
+        "event-legacy-shared-direct-probe",
+    );
+    let refused = reopened
+        .resolve_or_create_binding(direct_probe)
+        .await
+        .expect_err("a Direct request must not reach the shared row");
+    assert!(
+        matches!(refused, InboundTurnError::BindingRequired { .. }),
+        "route-kind mismatch fails closed as BindingRequired, got {refused:?}"
+    );
+}
+
+/// Ephemeral per-ping (channel routes): each shared inbound EVENT resolves
+/// onto its own fresh thread owned by the pinger (owner == actor). A
+/// REDELIVERY of the same `external_event_id` — even across a restart —
+/// replays that same thread (event-idempotent, no orphan threads), so the
+/// per-event thread mapping must persist. Distinct events, even from the same
+/// actor in the same channel, get distinct threads; a shared channel is NOT
+/// one shared thread. (Replaces the retired "one canonical shared thread
+/// joined by every participant" model.)
+#[tokio::test]
+async fn shared_channel_pings_get_ephemeral_pinger_owned_threads_idempotent_per_event() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    for (external, canonical) in [
+        ("telegram-user-alice", "alice"),
+        ("telegram-user-bob", "bob"),
+    ] {
+        services
+            .pair_external_actor(
+                tenant_id("tenant-a"),
+                telegram(),
+                default_installation(),
+                external_actor(external),
+                user_id(canonical),
+            )
+            .await
+            .expect("pair actor");
+    }
+    // Alice's first ping (event A1): a fresh thread owned by alice.
+    let mut a1 = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-alice"),
+        external_conversation("group-chat-1"),
+        "event-a1",
+    );
+    a1.route_kind = ConversationRouteKind::Shared;
+    let alice_ping_1 = services
+        .resolve_or_create_binding(a1)
+        .await
+        .expect("alice's first channel ping");
+    assert_eq!(alice_ping_1.actor.user_id.as_str(), "alice");
+    assert_eq!(
+        alice_ping_1
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("alice"),
+        "an ephemeral ping thread is owned by the pinger (owner == actor)"
+    );
+
+    // Alice's second ping (distinct event A2): a DIFFERENT thread.
+    let mut a2 = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-alice"),
+        external_conversation("group-chat-1"),
+        "event-a2",
+    );
+    a2.route_kind = ConversationRouteKind::Shared;
+    let alice_ping_2 = services
+        .resolve_or_create_binding(a2)
+        .await
+        .expect("alice's second channel ping");
+    assert_ne!(
+        alice_ping_2.turn_scope.thread_id, alice_ping_1.turn_scope.thread_id,
+        "distinct pings get distinct ephemeral threads — no reused canonical thread"
+    );
+    drop(services);
+
+    // Redelivery of event A1 AFTER a restart replays the SAME thread.
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("reopen");
+    let mut a1_redeliver = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-alice"),
+        external_conversation("group-chat-1"),
+        "event-a1",
+    );
+    a1_redeliver.route_kind = ConversationRouteKind::Shared;
+    let alice_replay = reopened
+        .resolve_or_create_binding(a1_redeliver)
+        .await
+        .expect("redelivery of event A1 after reopen");
+    assert_eq!(
+        alice_replay.turn_scope.thread_id, alice_ping_1.turn_scope.thread_id,
+        "a redelivered event replays its own thread across a restart — event-idempotent, no orphans"
+    );
+
+    // Bob's ping (event B1): bob's OWN thread, owned by bob, never shared.
+    let mut b1 = resolve_request(
+        tenant_id("tenant-a"),
+        external_actor("telegram-user-bob"),
+        external_conversation("group-chat-1"),
+        "event-b1",
+    );
+    b1.route_kind = ConversationRouteKind::Shared;
+    let bob_ping = reopened
+        .resolve_or_create_binding(b1)
+        .await
+        .expect("bob's channel ping");
+    assert_ne!(
+        bob_ping.turn_scope.thread_id, alice_ping_1.turn_scope.thread_id,
+        "a shared channel is not one shared thread — each pinger gets their own"
+    );
+    assert_eq!(bob_ping.actor.user_id.as_str(), "bob");
+    assert_eq!(
+        bob_ping
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("bob"),
+        "each ping thread is owned by its pinger"
+    );
+}
+
 /// Regression for the `ScopedFilesystem` migration: two
 /// [`RebornFilesystemConversationServices`] instances share one
 /// underlying [`RootFilesystem`] but each is constructed with a

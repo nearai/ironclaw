@@ -281,8 +281,8 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// the same seam a production LLM-provider-backed gateway uses to turn a raw
 /// tool-call response into a `CapabilityCallCandidate`
 /// (`LoopCapabilityPort::register_provider_tool_call`), so registering
-/// through it here exercises the *real* `PerSurfaceCapabilityDenyDecorator` /
-/// `CapabilitySurfaceDenyFilter` composition chain, not a stand-in.
+/// through it here exercises the *real* `CapabilitySurfacePolicyFilter` /
+/// `ToolDisclosureCapabilityDecorator` composition chain, not a stand-in.
 ///
 /// Generalized from a single `trigger_create`-only attempt (PR #5515 review:
 /// "production mutator deny set only has create covered end-to-end — the
@@ -296,7 +296,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// while only `trigger_create` stayed covered by a full-path (real host
 /// composition) test.
 ///
-/// `CapabilitySurfaceDenyFilter::register_provider_tool_call` resolves each
+/// `CapabilitySurfacePolicyFilter::register_provider_tool_call` resolves each
 /// provider tool call to a capability id via its OWN
 /// `provider_tool_call_capability_ids` override (delegating to `inner` so
 /// deferred/disclosed tools still resolve — see #5149's progressive tool
@@ -602,6 +602,7 @@ async fn build_runtime_with_slack_delivery(
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
+        outbound_target_provider: None,
     }]);
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -718,16 +719,17 @@ async fn configure_delivery_targets(runtime: &RebornRuntime) {
         .expect("local runtime exposes outbound preferences")
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant_id, user_id.clone()),
-            final_reply_target: Some(slack_reply_target(SLACK_DEFAULT_DM, Some(SLACK_USER))),
-            progress_target: None,
-            approval_prompt_target: None,
-            auth_prompt_target: None,
+            legacy_notification_target: None,
             default_modality: None,
+            notification_targets: vec![
+                ironclaw_outbound::OutboundDeliveryTargetId::new(QA_9B_TARGET_ID)
+                    .expect("valid notification channel id"),
+            ],
             updated_at: Utc::now(),
             updated_by: user_id,
         })
         .await
-        .expect("seed the creator's default Slack DM");
+        .expect("seed the creator's Slack DM notification channel");
 }
 
 fn register_delivery_targets(runtime: &RebornRuntime) {
@@ -810,10 +812,13 @@ async fn seed_due_delivery_trigger(
     trigger_id
 }
 
-async fn wait_for_delivered_run(
+/// Wait for the background-run notifier to record its outcome for the
+/// trigger's most recent run, asserting the outcome kind.
+async fn wait_for_recorded_outcome(
     repository: &Arc<dyn TriggerRepository>,
     delivery_store: &Arc<dyn TriggeredRunDeliveryStore>,
     trigger_id: TriggerId,
+    expected: TriggeredRunDeliveryOutcomeKind,
 ) -> TurnRunId {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -832,9 +837,8 @@ async fn wait_for_delivered_run(
                 .expect("read triggered delivery outcome")
         {
             assert_eq!(
-                record.outcome,
-                TriggeredRunDeliveryOutcomeKind::Delivered,
-                "triggered run must reach the provider successfully"
+                record.outcome, expected,
+                "unexpected background-run notification outcome"
             );
             return run_id;
         }
@@ -1143,18 +1147,161 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     );
 }
 
-/// QA-9B + QA-9D whole-path regression:
+/// Journey 10 — a routine written before the stored-target removal must not
+/// silently stop delivering.
+///
+/// A pre-removal record carries `delivery_target`, and the fire path now
+/// ignores it entirely (see the QA-9B/QA-9D regression below): left alone, the
+/// user's routine would run forever and deliver nothing. Composition's boot
+/// migration is what closes that gap — it rewrites the stored route into the
+/// routine's own prompt, the only place the fire can still act on it, and
+/// clears the field.
+///
+/// Driven through the real boot path (`build_reborn_runtime`, the same
+/// function `ironclaw serve` calls) over a durable store, then booted a second
+/// time to prove the pass is idempotent — a migration that re-appended its
+/// step on every restart would grow the prompt without bound.
+///
+/// The stored id does NOT resolve to a display name in this fixture: the
+/// static outbound target provider is registered on the runtime *after* boot
+/// (`configure_delivery_targets`) and is not re-registered on the later boots,
+/// so the migration sees an empty provider set — a fixture property, not a
+/// production ordering claim (boot activation is synchronous and awaited).
+/// That makes this the regression for the ambiguity rule: a registry
+/// `Ok(None)` cannot distinguish "retired" from "activation failed",
+/// "reconfiguring", or "not yet provisioned", and clearing is irreversible
+/// while keeping the id costs nothing — so the step is written anyway,
+/// carrying the id. An earlier draft treated non-resolution as "destination is
+/// gone" and wiped the route; this test failed on exactly that.
+#[tokio::test]
+async fn stored_delivery_target_trigger_is_migrated_to_prompt() {
+    const LEGACY_PROMPT: &str = "stored-target-era digest prompt";
+    let root = tempfile::tempdir().expect("tempdir");
+    let model_gateway = Arc::new(DeliveryJourneyGateway::default());
+    let slack_provider = Arc::new(FakeSlackProvider::default());
+    let runtime = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+    configure_and_activate_slack_for_delivery(&runtime).await;
+    configure_delivery_targets(&runtime).await;
+    pair_trigger_creator(&runtime).await;
+
+    // Seed a routine exactly as a pre-removal host wrote it. Scheduled far in
+    // the future so the poller never claims it — this test is about the boot
+    // migration, not the fire.
+    let tenant_id = TenantId::new(TENANT).expect("valid tenant id");
+    let trigger_id = TriggerId::new();
+    let fire_at = Utc::now() + chrono::Duration::days(3650);
+    runtime
+        .trigger_repository()
+        .upsert_trigger(TriggerRecord {
+            trigger_id,
+            tenant_id: tenant_id.clone(),
+            creator_user_id: UserId::new(USER).expect("valid user id"),
+            agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
+            project_id: None,
+            name: "stored-target-era routine".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
+            prompt: LEGACY_PROMPT.to_string(),
+            delivery_target: Some(
+                TriggerDeliveryTargetId::new(QA_9B_TARGET_ID).expect("valid delivery target"),
+            ),
+            state: TriggerState::Scheduled,
+            next_run_at: fire_at,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed a stored-target-era routine");
+    runtime.shutdown().await.expect("first runtime shutdown");
+
+    // Boot 2: the migration runs during composition, before the poller starts.
+    let restarted = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+    let migrated = restarted
+        .trigger_repository()
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("read the migrated routine")
+        .expect("the routine survives the restart");
+    assert!(
+        migrated.delivery_target.is_none(),
+        "the boot migration must clear the retired stored route: {:?}",
+        migrated.delivery_target
+    );
+    assert!(
+        migrated.prompt.starts_with(LEGACY_PROMPT),
+        "the migration must append to the routine's task, never replace it: {:?}",
+        migrated.prompt
+    );
+    assert!(
+        migrated
+            .prompt
+            .contains("using builtin__outbound_deliver (target id: "),
+        "the stored route must become an explicit delivery step the fire can perform: {:?}",
+        migrated.prompt
+    );
+    assert!(
+        migrated.prompt.contains(QA_9B_TARGET_ID),
+        "the migrated step must name the exact target the routine was routed to: {:?}",
+        migrated.prompt
+    );
+    restarted
+        .shutdown()
+        .await
+        .expect("restarted runtime shutdown");
+
+    // Boot 3: idempotent — nothing left to migrate, nothing appended again.
+    let third = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+    let after_second_boot = third
+        .trigger_repository()
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("read the routine after a second boot")
+        .expect("the routine survives the second restart");
+    assert_eq!(
+        after_second_boot.prompt, migrated.prompt,
+        "a second boot must not append the delivery step again"
+    );
+    assert!(
+        after_second_boot.delivery_target.is_none(),
+        "a migrated routine must stay migrated"
+    );
+    third.shutdown().await.expect("third runtime shutdown");
+}
+
+/// QA-9B + QA-9D whole-path regression, retargeted to the explicit-delivery
+/// model (spec §8): a scheduled fire's RESULT is never pushed to a channel.
 ///
 /// due trigger -> trusted ingress -> real Reborn run -> persisted final reply
-/// -> generic triggered-delivery hook -> real Slack adapter -> host-mediated
-/// credential injection -> fake Slack HTTP boundary.
+/// in the fire's own run thread -> background-run notifier -> **nothing on any
+/// channel**.
 ///
-/// The two arms prove that the creator's default DM is used when the trigger
-/// has no target and that an explicit per-trigger target overrides that
-/// default. Re-polling and rebuilding the runtime over the same durable store
-/// must not repeat either provider mutation.
+/// The two arms are the two ways the retired routing used to pick a
+/// destination: QA-9B had none (it inherited the creator's default), QA-9D
+/// carried an explicit stored `delivery_target`. Neither delivers now — the
+/// fire path ignores the stored target entirely, and a completed run has
+/// nothing to notify about. Restart over the same durable store must not
+/// resurrect either.
 #[tokio::test]
-async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart() {
+async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart() {
     let root = tempfile::tempdir().expect("tempdir");
     let model_gateway = Arc::new(DeliveryJourneyGateway::default());
     let slack_provider = Arc::new(FakeSlackProvider::default());
@@ -1177,32 +1324,30 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
     let explicit_target_trigger =
         seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
 
-    wait_for_delivered_run(&repository, &delivery_store, default_target_trigger).await;
-    wait_for_delivered_run(&repository, &delivery_store, explicit_target_trigger).await;
+    wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        default_target_trigger,
+        TriggeredRunDeliveryOutcomeKind::Skipped,
+    )
+    .await;
+    wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        explicit_target_trigger,
+        TriggeredRunDeliveryOutcomeKind::Skipped,
+    )
+    .await;
 
-    let provider_messages = slack_provider.provider_messages();
-    assert_eq!(
-        provider_messages.len(),
-        2,
-        "one provider-side message per scheduled trigger: {provider_messages:?}"
-    );
-    assert_slack_dm_delivery_evidence(&provider_messages);
-    assert_slack_channel_delivery_evidence(&provider_messages);
-
-    let wire_messages = slack_provider.wire_messages();
-    assert_eq!(
-        wire_messages.len(),
-        2,
-        "exactly two Slack wire mutations: {wire_messages:?}"
+    assert!(
+        slack_provider.provider_messages().is_empty(),
+        "a completed scheduled fire must not push its result to any channel: {:?}",
+        slack_provider.provider_messages()
     );
     assert!(
-        wire_messages.iter().all(|message| {
-            message.url == "https://slack.com/api/chat.postMessage"
-                && message.authorization.as_deref() == Some("Bearer xoxb-trigger-e2e")
-                && provider_messages.contains(&message.body)
-        }),
-        "each provider mutation must cross the real Slack adapter and host credential boundary: \
-         {wire_messages:?}"
+        slack_provider.wire_messages().is_empty(),
+        "no Slack wire mutation may originate from a completed scheduled fire: {:?}",
+        slack_provider.wire_messages()
     );
     assert_eq!(
         model_gateway.request_count_containing(QA_9B_PROMPT).await,
@@ -1216,10 +1361,9 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
     );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
-    assert_eq!(
-        slack_provider.provider_messages().len(),
-        2,
-        "re-polling completed one-shot triggers must not duplicate delivery"
+    assert!(
+        slack_provider.provider_messages().is_empty(),
+        "re-polling completed one-shot triggers must not start delivering"
     );
     runtime.shutdown().await.expect("first runtime shutdown");
 
@@ -1236,10 +1380,9 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         .await
         .expect("restarted runtime shutdown");
 
-    assert_eq!(
-        slack_provider.provider_messages().len(),
-        2,
-        "restart over the same durable trigger state must not duplicate provider effects"
+    assert!(
+        slack_provider.provider_messages().is_empty(),
+        "restart over the same durable trigger state must not produce provider effects"
     );
     assert_eq!(
         model_gateway.request_count_containing(QA_9B_PROMPT).await,
@@ -1250,42 +1393,6 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "restart must not rerun QA-9D"
-    );
-}
-
-fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
-    let expected_conversation_id = "D-TRIGGER-DEFAULT";
-    let expected_thread_anchor: Option<&Value> = None;
-    let expected_count = 1;
-    let matching = messages.iter().filter(|message| {
-        message["channel"] == expected_conversation_id
-            && message.get("thread_ts") == expected_thread_anchor
-            && message["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(QA_9B_RESULT))
-    });
-    assert_eq!(
-        matching.count(),
-        expected_count,
-        "QA-9B must create exactly one unthreaded message in D-TRIGGER-DEFAULT: {messages:?}"
-    );
-}
-
-fn assert_slack_channel_delivery_evidence(messages: &[Value]) {
-    let expected_conversation_id = "C-TRIGGER-OVERRIDE";
-    let expected_thread_anchor: Option<&Value> = None;
-    let expected_count = 1;
-    let matching = messages.iter().filter(|message| {
-        message["channel"] == expected_conversation_id
-            && message.get("thread_ts") == expected_thread_anchor
-            && message["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(QA_9D_RESULT))
-    });
-    assert_eq!(
-        matching.count(),
-        expected_count,
-        "QA-9D must create exactly one unthreaded message in C-TRIGGER-OVERRIDE: {messages:?}"
     );
 }
 
@@ -1927,8 +2034,8 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other three
 /// targeting the already-created legitimate trigger. See
 /// `TriggerMutatorAttemptGateway`'s doc comment for why this exercises the real
-/// `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter` chain
-/// instead of a stand-in, and for why all four mutators — not just
+/// `CapabilitySurfacePolicyFilter` and disclosure chain instead of a stand-in,
+/// and for why all four mutators — not just
 /// `trigger_create` — are covered here (PR #5515 review comment: a
 /// full-path test that only exercised `trigger_create` would not catch the
 /// production deny constant accidentally dropping one of the other three).
@@ -1941,12 +2048,10 @@ async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
 /// but with the runtime built under `ToolDisclosureMode::Bridged` instead of
 /// the default `Off`.
 ///
-/// This is not a redundant copy of the `Off` variant above. PR #5515
-/// self-review: the deny decorator (`PerSurfaceCapabilityDenyDecorator` /
-/// `CapabilitySurfaceDenyFilter`) is deliberately wired in `runtime.rs`
-/// *after* the conditional `ToolDisclosureCapabilityDecorator` so the
-/// mutator denial stays outermost — and therefore still wins — even when
-/// bridged tool disclosure is enabled. Before this test, `Bridged` had
+/// This is not a redundant copy of the `Off` variant above. The one resolved
+/// capability-surface policy is shared by the gate and the conditional
+/// `ToolDisclosureCapabilityDecorator`, so denied mutators stay absent even
+/// when bridged tool disclosure is enabled. Before this test, `Bridged` had
 /// exactly one usage anywhere in the repo (an unrelated system-prompt test),
 /// so nothing exercised that decorator-ordering composition end-to-end; a
 /// decorator-order or bridged-disclosure regression could have re-exposed
@@ -2047,11 +2152,10 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator
     // registration, not just `trigger_create`. Each of these ids is on the
-    // scheduled_trigger deny set (the fix's `PerSurfaceCapabilityDenyDecorator`
-    // / `CapabilitySurfaceDenyFilter`), so `register_provider_tool_call`'s own
-    // scope check on the resolved capability id fails closed before a
-    // candidate is ever built — see `TriggerMutatorAttemptGateway`'s doc comment
-    // for the exact call chain.
+    // scheduled_trigger deny set folded into the run's one
+    // `CapabilitySurfacePolicy`, so `register_provider_tool_call`'s scope check
+    // fails closed before a candidate is ever built — see
+    // `TriggerMutatorAttemptGateway`'s doc comment for the exact call chain.
     //
     // GUARD AGAINST FALSE-PASS: pre-fix (or if the production deny constant
     // ever drops one of these ids), the scheduled_trigger capability surface
@@ -2064,10 +2168,10 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // dispatch that mutator against the staged input, and either the marker
     // trigger asserted absent below WOULD exist, or the original trigger's
     // state WOULD have changed. Reverting any one entry of the
-    // scheduled_trigger deny map turns that entry's assertion here into a
+    // scheduled_trigger policy turns that entry's assertion here into a
     // `Some(Ok(()))` and one of the repository-state assertions below into a
     // failure — both catch the regression independently, per mutator.
-    const DENIED_SUMMARY: &str = "provider tool call targets a disabled capability";
+    const DENIED_SUMMARY: &str = "provider tool call is outside the visible capability surface";
     assert_eq!(
         registration_outcomes.get(TRIGGER_CREATE_CAPABILITY_ID),
         Some(&Err(DENIED_SUMMARY.to_string())),

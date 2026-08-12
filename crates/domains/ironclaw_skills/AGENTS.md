@@ -8,7 +8,6 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these sources of truth before changing behavior:
 - `.claude/rules/skills.md`
-- the repo-root `CLAUDE.md` ("Skills System" section)
 - `docs/reborn/contracts/extensions.md`
 
 ## What This Crate Owns

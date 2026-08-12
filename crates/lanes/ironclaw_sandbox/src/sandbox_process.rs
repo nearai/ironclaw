@@ -1,9 +1,8 @@
-//! Reborn-native tenant sandbox command transport.
+//! Reborn-native user sandbox command transport.
 //!
-//! The transport derives host workspace and container identity from the full
-//! [`ResourceScope`]. It deliberately avoids the legacy project-only sandbox
-//! lifecycle so hosted tenants with matching user/project strings cannot share
-//! command state.
+//! The transport derives host workspace identity from tenant plus user. It
+//! deliberately avoids project-, thread-, and invocation-scoped storage so one
+//! user's workspace persists across turns while different users remain isolated.
 
 use std::{
     collections::HashMap,
@@ -18,7 +17,7 @@ use bollard::{
         Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
         StartContainerOptions, WaitContainerOptions,
     },
-    models::HostConfig,
+    models::{HostConfig, HostConfigLogConfig},
 };
 use futures_util::StreamExt;
 use ironclaw_host_api::resource::ResourceScope;
@@ -35,17 +34,14 @@ mod credential_firewall;
 mod key_codec;
 mod mounts;
 mod network_allowlist;
+mod railway;
 mod scope_key;
 pub(crate) mod shell_limits;
+mod worker_spec;
 
-// `attribution`, `registry`, and `user_key` are the persistent per-user
-// sandbox container model's identity/registry primitives: container naming,
-// label-based identity, and Docker-network connection attribution. Their
-// consumers are the exec-based transport's per-user container reuse and the
-// egress proxy's credential-injection path. `user_key` is `pub`/re-exported
-// for cross-crate composition wiring to construct directly; `registry` and
-// `attribution` stay crate-private, with per-item `#[allow(dead_code)]`
-// comments naming the future consumer where one isn't wired yet.
+// `user_key` is the production per-user workspace identity shared by local
+// Docker and Railway. `registry` and `attribution` remain future egress/lifecycle
+// primitives and stay crate-private.
 mod attribution;
 mod registry;
 mod user_key;
@@ -60,6 +56,7 @@ pub use network_allowlist::{
     SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,
     sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
 };
+pub use railway::{RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport};
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use user_key::RebornSandboxUserKey;
@@ -125,7 +122,7 @@ impl RebornSandboxConfig {
             disable_network: true,
             network_broker: None,
             secret_broker: None,
-            container_identity: RebornSandboxContainerIdentity::image_default(),
+            container_identity: RebornSandboxContainerIdentity::workspace_owner(),
         }
     }
 
@@ -227,6 +224,7 @@ impl RebornSandboxConfig {
         broker::push_broker_env(
             self.network_broker.as_ref(),
             self.secret_broker.as_ref(),
+            !self.disable_network,
             &mut env,
         )?;
         Ok(env)
@@ -272,16 +270,16 @@ impl RebornScopedSandboxCommandTransport {
     }
 
     // `into_process_port` was deleted with the lane merge: it returned
-    // `ironclaw_host_runtime::TenantSandboxProcessPort`, a kernel type this
+    // `ironclaw_host_runtime::UserSandboxProcessPort`, a kernel type this
     // runtimes-layer crate may not name. It had zero callers workspace-wide;
-    // the kernel wraps the transport (`TenantSandboxProcessPort::new`), which
+    // the kernel wraps the transport (`UserSandboxProcessPort::new`), which
     // is the direction the port inversion requires.
 
     async fn prepare_workspace(
         &self,
         scope: &ResourceScope,
     ) -> Result<PathBuf, RuntimeProcessError> {
-        let key = RebornSandboxScopeKey::from_scope(scope);
+        let key = RebornSandboxUserKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
         tokio::fs::create_dir_all(&workspace)
             .await
@@ -345,12 +343,8 @@ impl RebornScopedSandboxCommandTransport {
         workdir: ContainerWorkdir,
         timeout: Duration,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let scope_key = RebornSandboxScopeKey::from_scope(&request.scope);
-        let container_name = format!(
-            "{}-{}",
-            scope_key.container_name_prefix(),
-            uuid::Uuid::new_v4()
-        );
+        let user_key = RebornSandboxUserKey::from_scope(&request.scope);
+        let container_name = format!("{}-{}", user_key.container_name(), uuid::Uuid::new_v4());
         let launch = self
             .container_launch_config(request, workspace, workdir)
             .await?;
@@ -423,7 +417,13 @@ impl RebornScopedSandboxCommandTransport {
         workdir: ContainerWorkdir,
     ) -> Result<Config<String>, RuntimeProcessError> {
         let env = self.config.command_env(request.extra_env)?;
-        let container_user = self.config.container_identity.container_user()?;
+        let container_user = self
+            .config
+            .container_identity
+            .container_user(workspace)
+            .await?;
+        let security =
+            worker_spec::DockerWorkerSecuritySpec::new(self.config.container_network_mode());
         let mut binds = self
             .config
             .mount_sources
@@ -438,12 +438,18 @@ impl RebornScopedSandboxCommandTransport {
             memory: Some(self.config.memory_bytes as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
             auto_remove: Some(false),
-            network_mode: self.config.container_network_mode(),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            readonly_rootfs: Some(true),
+            network_mode: security.network_mode(),
+            cap_drop: Some(security.cap_drop()),
+            security_opt: Some(security.security_options()),
+            readonly_rootfs: Some(security.readonly_rootfs()),
+            pids_limit: Some(security.pids_limit()),
+            nano_cpus: Some(security.nano_cpus()),
+            log_config: Some(HostConfigLogConfig {
+                typ: Some(security.log_driver()),
+                config: Some(security.log_options().into_iter().collect()),
+            }),
             tmpfs: Some(
-                [("/tmp".to_string(), "size=512M".to_string())]
+                [("/tmp".to_string(), security.tmpfs_options())]
                     .into_iter()
                     .collect(),
             ),
@@ -455,7 +461,7 @@ impl RebornScopedSandboxCommandTransport {
             working_dir: Some(workdir.into_string()),
             env: Some(env),
             host_config: Some(host_config),
-            user: container_user,
+            user: Some(container_user),
             attach_stdout: Some(false),
             attach_stderr: Some(false),
             ..Default::default()
@@ -482,43 +488,11 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
     }
 }
 
+// Kept as the crate-local seam used by Docker-backed tests. Connection policy
+// lives exclusively in the `connect` module; do not add discovery or timeout
+// behavior here.
 async fn connect_docker() -> Result<Docker, RuntimeProcessError> {
-    if let Ok(docker) = Docker::connect_with_local_defaults()
-        && docker.ping().await.is_ok()
-    {
-        return Ok(docker);
-    }
-    #[cfg(unix)]
-    {
-        for socket in unix_socket_candidates() {
-            if socket.exists() {
-                let socket = socket.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&socket, 120, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
-                {
-                    return Ok(docker);
-                }
-            }
-        }
-    }
-    Err(RuntimeProcessError::ExecutionFailed(
-        "could not connect to Docker daemon for Reborn sandbox".to_string(),
-    ))
-}
-
-#[cfg(unix)]
-fn unix_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.push(home.join(".docker/run/docker.sock"));
-        candidates.push(home.join(".colima/default/docker.sock"));
-        candidates.push(home.join(".rd/docker.sock"));
-    }
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        candidates.push(runtime_dir.join("docker.sock"));
-    }
-    candidates
+    connect_docker_with_retry().await
 }
 
 async fn wait_for_container(
@@ -533,6 +507,11 @@ async fn wait_for_container(
     );
     match stream.next().await {
         Some(Ok(result)) => Ok(result.status_code),
+        // Bollard 0.18 represents every positive container exit status as a
+        // `DockerContainerWaitError`. That is command evidence, not a Docker
+        // transport failure; preserve the status so callers can inspect the
+        // command's bounded stdout/stderr like any other sandbox result.
+        Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => Ok(code),
         Some(Err(error)) => Err(RuntimeProcessError::ExecutionFailed(format!(
             "sandbox container wait failed: {error}"
         ))),
@@ -618,6 +597,11 @@ fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
 }
 
 fn validate_env(env: HashMap<String, String>) -> Result<Vec<String>, RuntimeProcessError> {
+    if !env.is_empty() {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "user sandbox commands do not accept caller-provided environment variables".to_string(),
+        ));
+    }
     env.into_iter()
         .map(|(key, value)| {
             reject_nul("environment variable name", &key)?;
@@ -650,10 +634,36 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
+
+    #[test]
+    fn transport_constructor_uses_canonical_bounded_docker_connector() {
+        let _guard = lock_env();
+        set_runtime_env(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            "/nonexistent/ironclaw-constructor-docker.sock",
+        );
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(RebornScopedSandboxCommandTransport::connect(
+                RebornSandboxConfig::new("/tmp/reborn-sandbox-constructor-test"),
+            ));
+
+        remove_runtime_env("IRONCLAW_REBORN_DOCKER_HOST");
+
+        let error = result.expect_err("nonexistent Docker override must fail closed");
+        assert!(
+            error.to_string().contains("IRONCLAW_REBORN_DOCKER_HOST"),
+            "constructor must use the canonical connector, including its bounded retry and override handling: {error}"
+        );
+    }
 
     #[test]
     fn relative_workdir_rejects_escape() {
@@ -704,17 +714,33 @@ mod tests {
     }
 
     #[test]
-    fn validate_env_rejects_empty_equals_and_nul_values() {
-        for (key, value) in [
-            ("", "value"),
-            ("BAD=KEY", "value"),
-            ("BAD\0KEY", "value"),
-            ("GOOD_KEY", "bad\0value"),
-        ] {
-            let error = validate_env(HashMap::from([(key.to_string(), value.to_string())]))
-                .expect_err("invalid env should be rejected");
-            assert!(matches!(error, RuntimeProcessError::ExecutionFailed(_)));
-        }
+    fn explicit_direct_network_uses_docker_networking_and_reports_its_posture() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_enabled();
+        let env = config.command_env(HashMap::new()).unwrap();
+
+        assert_eq!(config.container_network_mode(), None);
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=direct".to_string()));
+        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+        assert!(
+            env.iter().all(|entry| {
+                !entry.starts_with("http_proxy=")
+                    && !entry.starts_with("https_proxy=")
+                    && !entry.starts_with("HTTP_PROXY=")
+                    && !entry.starts_with("HTTPS_PROXY=")
+            }),
+            "direct mode must not pretend that traffic is proxy-mediated"
+        );
+    }
+
+    #[test]
+    fn validate_env_rejects_all_caller_environment_injection() {
+        let error = validate_env(HashMap::from([(
+            "PLACEHOLDER".to_string(),
+            "value".to_string(),
+        )]))
+        .expect_err("user sandbox caller env should be rejected");
+        assert!(error.to_string().contains("caller-provided environment"));
+        assert_eq!(validate_env(HashMap::new()).unwrap(), Vec::<String>::new());
     }
 
     #[test]
@@ -809,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn broker_env_rejects_all_reserved_user_overrides() {
+    fn broker_env_rejects_all_caller_overrides_before_reserved_env_is_built() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap()
@@ -823,7 +849,10 @@ mod tests {
                 )]))
                 .unwrap_err();
 
-            assert!(format!("{error}").contains("reserved"), "{key}");
+            assert!(
+                format!("{error}").contains("caller-provided environment"),
+                "{key}"
+            );
         }
     }
 
@@ -878,6 +907,37 @@ mod tests {
         let env = launch.env.unwrap();
 
         assert_eq!(host_config.network_mode, Some("none".to_string()));
+        assert_eq!(
+            host_config.nano_cpus,
+            Some(worker_spec::DOCKER_WORKER_NANO_CPUS)
+        );
+        assert_eq!(
+            host_config
+                .tmpfs
+                .as_ref()
+                .and_then(|tmpfs| tmpfs.get("/tmp"))
+                .map(String::as_str),
+            Some(worker_spec::DOCKER_WORKER_TMPFS)
+        );
+        let log_config = host_config
+            .log_config
+            .as_ref()
+            .expect("bounded Docker logs");
+        assert_eq!(log_config.typ.as_deref(), Some("json-file"));
+        assert_eq!(
+            log_config
+                .config
+                .as_ref()
+                .and_then(|options| options.get("max-size"))
+                .map(String::as_str),
+            Some("1m")
+        );
+        assert!(
+            launch
+                .user
+                .as_deref()
+                .is_some_and(|user| !user.starts_with("0:"))
+        );
         assert!(env.contains(
             &"IRONCLAW_REBORN_HTTP_BROKER_SOCKET=/tmp/ironclaw-http-broker.sock".to_string()
         ));

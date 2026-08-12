@@ -318,9 +318,13 @@ impl RootFilesystem for InMemoryBackend {
                 operation: FilesystemOperation::Query,
             });
         }
+        // Tokenize every `Filter::Fts` query once, before the record scan, so
+        // the per-record matcher never re-runs the same split/stop-word pass
+        // for each candidate row.
+        let fts = PrecomputedFts::from_filter(filter);
         let mut matched: Vec<(&VirtualPath, &StoredEntry)> = candidates
             .into_iter()
-            .filter(|(_, stored)| filter_matches(filter, &stored.entry.indexed))
+            .filter(|(_, stored)| filter_matches(filter, &stored.entry.indexed, &fts))
             .collect();
         matched.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         let start = page.offset as usize;
@@ -782,6 +786,7 @@ fn push_ordered_result(
 fn filter_matches(
     filter: &Filter,
     indexed: &std::collections::BTreeMap<IndexKey, IndexValue>,
+    fts: &PrecomputedFts,
 ) -> bool {
     match filter {
         Filter::All => true,
@@ -809,7 +814,10 @@ fn filter_matches(
             None => false,
         },
         Filter::Fts { key, query } => match indexed.get(key) {
-            Some(IndexValue::Text(stored)) => fts_naive_matches(stored, query),
+            Some(IndexValue::Text(stored)) => fts
+                .terms_by_query
+                .get(query.as_str())
+                .is_some_and(|terms| fts_naive_matches(stored, terms)),
             _ => false,
         },
         // Audit finding F5: `Filter::VectorNearest` is a ranking operation
@@ -822,20 +830,63 @@ fn filter_matches(
         // we don't fall through to "match any row with a bytes value at
         // key" the way prior versions did.
         Filter::VectorNearest { .. } => false,
-        Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed)),
-        Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed)),
+        Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed, fts)),
+        Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed, fts)),
     }
 }
 
-/// Coarse FTS approximation: tokenize the query on whitespace and require
-/// every token to appear (case-insensitively) in the stored text. This
-/// matches FTS5's default `AND`-of-terms behavior closely enough for the
-/// in-memory reference; the SQL backends use the real engines.
-fn fts_naive_matches(stored: &str, query: &str) -> bool {
+/// FTS queries tokenized once per `query` call. Terms are keyed by the query
+/// string (not the indexed key), so a compound filter that carries two
+/// different `Filter::Fts` queries for the same key keeps each arm's own
+/// required terms, exactly as if each arm had parsed its query lazily.
+struct PrecomputedFts<'a> {
+    terms_by_query: std::collections::HashMap<&'a str, Vec<String>>,
+}
+
+impl<'a> PrecomputedFts<'a> {
+    fn from_filter(filter: &'a Filter) -> Self {
+        let mut terms_by_query = std::collections::HashMap::new();
+        collect_fts_terms(filter, &mut terms_by_query);
+        Self { terms_by_query }
+    }
+}
+
+fn collect_fts_terms<'a>(
+    filter: &'a Filter,
+    out: &mut std::collections::HashMap<&'a str, Vec<String>>,
+) {
+    match filter {
+        Filter::Fts { query, .. } => {
+            out.entry(query.as_str())
+                .or_insert_with(|| crate::index::plain_fts_terms(query));
+        }
+        Filter::And(children) | Filter::Or(children) => {
+            for child in children {
+                collect_fts_terms(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Coarse FTS approximation: normalize the query through the shared
+/// `plain_fts_terms` parser (non-alphanumeric split, English stop words
+/// dropped) and require every remaining term to appear as a whole token in
+/// the stored text. Token matching (not substring containment) mirrors FTS5's
+/// unicode61 tokenizer, so punctuation and contractions split identically on
+/// the reference and shipping backends. Empty term sets match nothing.
+fn fts_naive_matches(stored: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
     let stored_lower = stored.to_lowercase();
-    query
-        .split_whitespace()
-        .all(|token| stored_lower.contains(&token.to_lowercase()))
+    let tokens: std::collections::HashSet<&str> = stored_lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    terms
+        .iter()
+        .all(|term| tokens.contains(term.to_lowercase().as_str()))
 }
 
 /// If `filter` is a top-level `VectorNearest` (the only shape the SQL
@@ -1513,7 +1564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fts_filter_matches_naive_substring_tokens() {
+    async fn fts_filter_matches_plain_text_terms() {
         let fs = InMemoryBackend::new();
         let kind = RecordKind::new("chunk").unwrap();
         for (path, text) in [
@@ -1540,6 +1591,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+
+        let natural_language = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "What is the quick-brown fox?".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(natural_language.len(), 1);
+
+        let punctuation_only = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "?!()".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(punctuation_only.is_empty());
     }
 
     #[tokio::test]

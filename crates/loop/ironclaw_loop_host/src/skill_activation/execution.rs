@@ -309,9 +309,14 @@ mod tests {
                 extra_files: vec![("references/style.md", "docs style")],
             },
         ]));
+        // This test's SUBJECT is asset grants; it uses criteria selection only as the
+        // mechanism that activates a bundle. The library default is now `ExplicitOnly`
+        // (model-decides), so it opts in explicitly rather than relying on the old default.
         let selector = Arc::new(SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig::default(),
+            SkillActivationSelectorConfig::default().set_selection_mode(
+                crate::skill_activation::activation::SkillActivationSelectionMode::ExplicitAndCriteria,
+            ),
         ));
         let adapter = SkillExecutionAdapter::new(selector);
         let context = run_context().await;

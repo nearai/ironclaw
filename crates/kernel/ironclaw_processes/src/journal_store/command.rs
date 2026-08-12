@@ -32,7 +32,13 @@ pub(super) enum StoredProcessCommand {
         now: ironclaw_host_api::Timestamp,
         lease_duration_millis: u64,
     },
-    RecoverExpired(RecoverExpiredProcessLeasesRequest),
+    RecoverExpired {
+        request: RecoverExpiredProcessLeasesRequest,
+        /// Lease TTL in force at sweep time. Recovery uses it as the grace
+        /// window a checkpointed process must sit past expiry before being
+        /// requeued.
+        lease_duration_millis: u64,
+    },
     LeasedTransition {
         request: ProcessLeaseRequest,
         mutation: ProcessTransitionMutation,
@@ -105,7 +111,7 @@ impl StoredProcessCommand {
                 references.process_ids.extend(request.process_id_filter);
                 references.claims.push((request.clone(), limits.clone()));
             }
-            Self::RecoverExpired(request) => {
+            Self::RecoverExpired { request, .. } => {
                 references.recover_expired.push(request.clone());
             }
             Self::Heartbeat { request, .. } | Self::LeasedTransition { request, .. } => {

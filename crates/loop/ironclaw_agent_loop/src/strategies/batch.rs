@@ -13,13 +13,18 @@ use ironclaw_loop_contracts::ConcurrencyHint;
 
 use crate::state::LoopExecutionState;
 
-/// Decides whether a capability batch executes sequentially or in parallel.
+/// Decides whether a capability batch is eligible for parallel execution and
+/// which execution path handles eligible batches.
 ///
 /// `&self` only — the strategy is value-immutable. The host's per-capability
 /// concurrency hints (from descriptors) override this batch-level default
 /// for any individual call that declares itself [`ConcurrencyHint::Exclusive`].
 pub(crate) trait BatchPolicyStrategy: Send + Sync {
     fn policy(&self, state: &LoopExecutionState, calls: &[CapabilityCallSummary]) -> BatchPolicy;
+
+    fn execution_mode(&self) -> CapabilityBatchExecutionMode {
+        CapabilityBatchExecutionMode::HostBatch
+    }
 }
 
 /// Compile-time object-safety check. `BatchPolicyStrategy` is pure-sync
@@ -48,6 +53,31 @@ impl BatchPolicyStrategy for DefaultBatchPolicyStrategy {
             BatchPolicy::Parallel
         }
     }
+}
+
+/// Opt-in batch strategy that executes eligible calls through the loop's
+/// bounded fan-out path instead of the host's legacy batch method.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct BoundedParallelBatchPolicyStrategy;
+
+impl BatchPolicyStrategy for BoundedParallelBatchPolicyStrategy {
+    fn policy(&self, state: &LoopExecutionState, calls: &[CapabilityCallSummary]) -> BatchPolicy {
+        DefaultBatchPolicyStrategy.policy(state, calls)
+    }
+
+    fn execution_mode(&self) -> CapabilityBatchExecutionMode {
+        CapabilityBatchExecutionMode::BoundedParallel
+    }
+}
+
+/// Selects how a batch already judged safe for parallel execution is invoked.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityBatchExecutionMode {
+    /// Preserve the production default through the host's batch method.
+    #[default]
+    HostBatch,
+    /// Invoke individual capability calls concurrently with a fixed bound.
+    BoundedParallel,
 }
 
 /// Batch-level execution mode. Wire-stable: serialized into checkpoints and

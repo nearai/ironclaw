@@ -116,7 +116,18 @@ fn resolve_listed_path(root: &Path, logical: &str) -> String {
 /// Excluding these two restores exactly the pre-move term set: before WS2 the
 /// inventory was the twelve extension packages plus the fixtures, and it still
 /// is.
-const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0"];
+///
+/// `web-push` joined 2026-08-08 with the browser-notification channel: the id
+/// is the IETF protocol name (RFC 8030/8291/8292), not a vendor, and the
+/// package is first-party deployment infrastructure for the product's own web
+/// surface. Its protocol mechanics live in the `ironclaw_web_push` domain
+/// crate the same way the provider-neutral memory contract lives in
+/// `ironclaw_memory`, so composition wiring, the product wire DTOs, and the
+/// domain crate legitimately name it. Its manifest's egress hosts (the push
+/// services browsers mint endpoints on) are likewise protocol infrastructure,
+/// not vendor vocabulary — and generic code does not hardcode them anyway:
+/// the enrollment allowlist is read from the resolved manifest at composition.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-push"];
 
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
@@ -354,11 +365,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          the leak-scanner carve-out domain (#5965)",
     ),
     (
-        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
-        "github",
-        "credential-prefix redaction (github_pat_)",
-    ),
-    (
         "crates/ironclaw_auth/src/lib.rs",
         "gmail",
         "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
@@ -576,7 +582,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     //    registration-sourced list is unpopulated exactly when it matters.
     //
     // Pinned by `inline_secret_guard_is_a_safety_denylist_not_package_inventory`
-    // in `crates/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
+    // in `crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
     (
         "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
         "github",
@@ -685,10 +691,13 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 /// structural reason, mirroring `reborn_retired_taxonomy.rs`: the one-time
 /// forward data migrations name what they fold forward.
 const SANCTIONED_PATHS: &[&str] = &[
-    "extension_host/extension_installation_store.rs",
     // One-release legacy webhook-path aliases (MIG-5): the compatibility
     // table names the concrete legacy paths it forwards; each entry carries
     // its own removal note.
+    // (A second fragment, `extension_host/extension_installation_store.rs`,
+    // sat here after #6430 deleted that file — matching nothing. Unlike the
+    // taxonomy twin, this list has no staleness check, so keep it pruned by
+    // hand when the named files go away.)
     "product_auth/durable/",
 ];
 
@@ -1205,9 +1214,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_assistant/Cargo.toml", "telegram"),
     // `conversation_binding.rs` was carved for a vendor example in
     // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
-    // `ironclaw_product_contracts::subject_route`, where a vendor name is
-    // forbidden outright, so the example was rewritten generically rather than
-    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
+    // `ironclaw_product_contracts::subject_route` (today's
+    // `shared_admission`, after the subject retirement), where a vendor name
+    // is forbidden outright, so the example was rewritten generically rather
+    // than re-carved. The entry is deleted, not repointed — the allowlist
+    // shrinks.
     ("crates/ironclaw_assistant/src/lib.rs", "telegram"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
@@ -1257,10 +1268,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_turn_runner/src/loop_driver_host.rs",
         "slack",
     ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
@@ -1405,10 +1412,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // repoint: the count is unchanged and this stays a `lane-4: doc-str` row
     // awaiting the owner's reword-or-leave call, not a new debt.
     ("crates/domains/ironclaw_identity/src/projects.rs", "github"),
-    (
-        "crates/ironclaw_composition/src/automation/trigger_poller.rs",
-        "slack",
-    ),
     (
         "crates/ironclaw_assistant/src/blocked_auth_resume.rs",
         "google",
@@ -1675,7 +1678,17 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// list is where the trace-redaction classifier already records the identical
 /// disposition. Net vendor-name surface is unchanged: three rows moved list,
 /// zero terms appeared or vanished.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 119;
+///
+/// **119 → 118, 2026-08-06 (channel-generic trigger settlement delivery).**
+/// The trigger-poller bridge now describes its owner as the channel delivery
+/// hook instead of naming one concrete extension. The stale `slack` exception
+/// was removed after the specificity scan proved the production file no
+/// longer contains that vendor term.
+// 118 -> 117 (2026-08-09, ephemeral-per-ping remodel): the
+// `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
+// forwarding it described was reworked, so its now-stale allowlist entry was
+// deleted — the ratchet only ever shrinks.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 117;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

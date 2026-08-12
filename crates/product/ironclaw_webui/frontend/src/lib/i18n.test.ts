@@ -71,24 +71,53 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", "zh-CN"];
 
-function loadLocalePack(locale) {
-  let registeredId = null;
-  let registeredPack = null;
-  let source = readFileSync(new URL(`../i18n/${locale}.ts`, import.meta.url), "utf8");
-  source = source
+// English copy that a lazily loaded route registers instead of `src/i18n/en.ts`.
+//
+// `en.ts` is bundled eagerly as the fallback pack, so every key in it is paid
+// for on /chat. The inspector's ~110 operator-only strings measurably exceed
+// that budget from en.ts (217.4 KB vs the 217.0 KB gzip ceiling), so their
+// English copy ships inside the lazy inspector chunk. Listing the sidecar here
+// keeps those keys inside the all-locale parity gate below: the English key set
+// is the union of en.ts and these files, and every non-English locale must
+// still carry the whole union in its own `src/i18n/<locale>.ts`.
+//
+// A new sidecar must be added here, or its keys silently fall back to English
+// in all ten other locales.
+const ENGLISH_SIDECAR_PACKS = ["../pages/chat/inspector/inspector-translations.ts"];
+
+function runPackSource(specifier, onRegister) {
+  const source = readFileSync(new URL(specifier, import.meta.url), "utf8")
     .split("\n")
     .filter((line) => !line.startsWith("import "))
     .join("\n");
+  vm.runInNewContext(source, { registerPack: onRegister });
+}
 
-  vm.runInNewContext(source, {
-    registerPack: (id, pack) => {
-      registeredId = id;
-      registeredPack = { ...(registeredPack || {}), ...pack };
-    },
-  });
+function loadLocalePack(locale) {
+  let registeredId = null;
+  let registeredPack = null;
+  const collect = (id, pack) => {
+    registeredId = id;
+    registeredPack = { ...(registeredPack || {}), ...pack };
+  };
+
+  runPackSource(`../i18n/${locale}.ts`, collect);
 
   assert.equal(registeredId, locale);
   assert.ok(registeredPack, `${locale} pack should register`);
+
+  if (locale === "en") {
+    for (const specifier of ENGLISH_SIDECAR_PACKS) {
+      let sidecarKeys = 0;
+      runPackSource(specifier, (id, pack) => {
+        assert.equal(id, "en", `${specifier} should register English copy`);
+        sidecarKeys = Object.keys(pack).length;
+        collect(id, pack);
+      });
+      assert.ok(sidecarKeys > 0, `${specifier} should register at least one key`);
+    }
+  }
+
   return registeredPack;
 }
 
@@ -296,12 +325,54 @@ test("locale packs include automation action failure copy", () => {
   }
 });
 
+test("locale packs localize every builtin outbound-delivery tool description", () => {
+  // `builtin.notification_channels_set` is a registered operator tool
+  // (`notification_channels_set_operator_tool_info`) and renders in the
+  // settings Tools tab beside its two siblings. Without a pack entry it is
+  // the one row falling back to the raw model-oriented backend description
+  // in every locale, so the three keys are pinned together.
+  const requiredKeys = [
+    "tools.description.builtin.outbound_delivery_targets_list",
+    "tools.description.builtin.outbound_deliver",
+    "tools.description.builtin.notification_channels_set",
+  ];
+  const english = loadLocalePack("en");
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+      if (locale === "en") continue;
+      assert.notEqual(
+        pack[key],
+        english[key],
+        `${locale} must localize ${key}, not echo the English string`,
+      );
+    }
+  }
+});
+
+test("locale packs explain why the notification-channels panel locks after a failed read", () => {
+  // The panel disables editing when the channels read fails (a stale,
+  // all-unchecked form would turn one toggle into a destructive full
+  // replace). The disabled state is only honest if every locale can say so.
+  const key = "automations.notificationChannels.loadFailedEditingDisabled";
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+    assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+  }
+});
+
 test("locale packs include client-generated chat failure copy", () => {
   const requiredKeys = [
     "chat.failure.connectionLost",
     "chat.failure.request",
     "chat.failure.requestDetail",
     "chat.failure.runCategory",
+    "chat.failure.noProgress",
     "chat.failure.recoveryRequired",
     "chat.failure.run",
     "chat.failure.streamRetryable",

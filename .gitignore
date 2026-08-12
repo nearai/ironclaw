@@ -66,6 +66,14 @@ trace_*.json
 # root they land in ./attachments/. These are user uploads, never source.
 /attachments/
 
+# The per-caller agent workspace. Local-dev sets `workspace_root` to the server's
+# cwd, so `serve` from the repo root gives every caller
+# ./tenants/<tenant>/users/<user>/, and anything the agent writes there -- a script
+# it authored, a file it was asked to produce -- lands in the repo. Runtime output,
+# never source: without this, a `git add -A` after a demo session commits an
+# agent-written script into the tree (caught in review on #7171).
+/tenants/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -116,3 +124,6 @@ mutants.out.old/
 # silently exclude nested `app/` directories (e.g. crates/*/frontend/src/app/).
 # Prefer .git/info/exclude for personal working directories.
 /app/
+
+# Skill bundles staged into a workspace at activation. Build output, never source.
+.skills/

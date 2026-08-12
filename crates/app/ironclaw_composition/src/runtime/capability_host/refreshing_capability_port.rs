@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, UserId},
     mount::MountView,
     resolution::{Resolution, ResolutionBatch},
@@ -44,6 +45,7 @@ use super::{
 pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
     pub(super) run_context: LoopRunContext,
+    pub(super) surface_policy: Arc<CapabilitySurfacePolicy>,
     pub(super) fallback_user_id: UserId,
     pub(super) policy: Arc<BuiltinCapabilityPolicy>,
     pub(super) workspace_mounts: MountView,
@@ -59,7 +61,7 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    pub(super) outbound_delivery_target_set_requires_approval: bool,
+    pub(super) outbound_preference_write_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     pub(super) capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -101,6 +103,7 @@ pub(crate) async fn create_refreshing_capability_port(
     let port = Arc::new(RefreshingCapabilityPort {
         runtime: config.runtime,
         run_context: config.run_context,
+        surface_policy: config.surface_policy,
         fallback_user_id: config.fallback_user_id,
         policy: config.policy,
         workspace_mounts: config.workspace_mounts,
@@ -116,8 +119,8 @@ pub(crate) async fn create_refreshing_capability_port(
         thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
         outbound_preferences_service: config.outbound_preferences_service,
-        outbound_delivery_target_set_requires_approval: config
-            .outbound_delivery_target_set_requires_approval,
+        outbound_preference_write_requires_approval: config
+            .outbound_preference_write_requires_approval,
         approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
@@ -141,6 +144,7 @@ pub(crate) async fn create_refreshing_capability_port(
 struct RefreshingCapabilityPort {
     runtime: Arc<dyn HostRuntime>,
     run_context: LoopRunContext,
+    surface_policy: Arc<CapabilitySurfacePolicy>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
     workspace_mounts: MountView,
@@ -156,7 +160,7 @@ struct RefreshingCapabilityPort {
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    outbound_delivery_target_set_requires_approval: bool,
+    outbound_preference_write_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -187,6 +191,7 @@ impl RefreshingCapabilityPort {
                 memory_mounts: &self.memory_mounts,
                 system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
                 policy: &self.policy,
+                surface_policy: &self.surface_policy,
                 extension_surface: &extension_surface,
             },
         )?;
@@ -323,7 +328,7 @@ impl RefreshingCapabilityPort {
                 self.fallback_user_id.clone(),
                 Arc::clone(&self.approval_requests),
                 Arc::clone(&self.capability_leases),
-                self.outbound_delivery_target_set_requires_approval,
+                self.outbound_preference_write_requires_approval,
                 Arc::clone(&self.approval_settings),
                 Arc::clone(&self.replay_payload_store),
                 Arc::clone(&self.gate_record_store),
@@ -406,6 +411,11 @@ impl RefreshingCapabilityPort {
 
 #[async_trait::async_trait]
 impl LoopCapabilityPort for RefreshingCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.current_port()
+            .map_or(true, |port| port.requires_ordered_batch_invocation())
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.current_port()?.tool_definitions()
     }
@@ -479,6 +489,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     let crate::test_support::RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
+        surface_policy,
         fallback_user_id,
         workspace_mounts,
         skill_mounts,
@@ -492,7 +503,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         thread_service,
         trajectory_observer,
         outbound_preferences_service,
-        outbound_delivery_target_set_requires_approval,
+        outbound_preference_write_requires_approval,
         tool_permission_overrides,
         auto_approve_settings,
         persistent_approval_policies,
@@ -526,6 +537,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     create_refreshing_capability_port(RefreshingCapabilityPortConfig {
         runtime,
         run_context,
+        surface_policy: Arc::new(surface_policy),
         fallback_user_id,
         policy,
         workspace_mounts,
@@ -549,7 +561,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         thread_service,
         trajectory_observer,
         outbound_preferences_service,
-        outbound_delivery_target_set_requires_approval,
+        outbound_preference_write_requires_approval,
         approval_settings,
         approval_requests,
         capability_leases,

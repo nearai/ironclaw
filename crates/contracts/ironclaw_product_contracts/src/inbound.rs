@@ -19,6 +19,9 @@ use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::product_adapter_error::RedactedString;
 
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
+/// Matches `ironclaw_extension_contracts::channel_adapter::MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES`
+/// (the adapter-side bound the ingress host enforces at fetch time).
+const CHANNEL_CONTEXT_MAX_BYTES: usize = 32 * 1024;
 const REQUESTED_MODEL_MAX_BYTES: usize = 256;
 const COMMAND_MAX_BYTES: usize = 256;
 const COMMAND_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
@@ -131,6 +134,11 @@ pub struct UserMessagePayload {
     /// model (chat UI, channels).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    /// Recent vendor-side conversation history fetched host-side at channel
+    /// ingress for shared-channel triggers. UNTRUSTED third-party text quoted
+    /// for context; advisory only and absent everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_context: Option<String>,
 }
 
 impl UserMessagePayload {
@@ -144,6 +152,7 @@ impl UserMessagePayload {
             attachments,
             trigger,
             requested_model: None,
+            channel_context: None,
         };
         payload.validate()?;
         Ok(payload)
@@ -156,10 +165,20 @@ impl UserMessagePayload {
         self
     }
 
+    /// Attach host-fetched channel conversation context to this payload. See
+    /// [`UserMessagePayload::channel_context`].
+    pub fn with_channel_context(mut self, channel_context: Option<String>) -> Self {
+        self.channel_context = channel_context.filter(|context| !context.is_empty());
+        self
+    }
+
     pub fn validate(&self) -> Result<(), ProductAdapterError> {
         validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)?;
         if let Some(model) = &self.requested_model {
             validate_payload_string("requested model", model, REQUESTED_MODEL_MAX_BYTES)?;
+        }
+        if let Some(context) = &self.channel_context {
+            validate_payload_string("channel context", context, CHANNEL_CONTEXT_MAX_BYTES)?;
         }
         Ok(())
     }
@@ -172,6 +191,8 @@ struct UserMessagePayloadWire {
     trigger: ProductTriggerReason,
     #[serde(default)]
     requested_model: Option<String>,
+    #[serde(default)]
+    channel_context: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for UserMessagePayload {
@@ -181,11 +202,16 @@ impl<'de> Deserialize<'de> for UserMessagePayload {
     {
         let wire = UserMessagePayloadWire::deserialize(deserializer)?;
         let payload = Self::new(wire.text, wire.attachments, wire.trigger)
-            .map(|payload| payload.with_requested_model(wire.requested_model))
+            .map(|payload| {
+                payload
+                    .with_requested_model(wire.requested_model)
+                    .with_channel_context(wire.channel_context)
+            })
             .map_err(serde::de::Error::custom)?;
-        // `new` validated the payload while `requested_model` was still `None`;
-        // re-validate the assembled value so the wire-supplied model hint is
-        // bounded like every other ingress field (bypass flagged in PR review).
+        // `new` validated the payload while `requested_model` and
+        // `channel_context` were still `None`; re-validate the assembled value
+        // so the wire-supplied fields are bounded like every other ingress
+        // field (bypass flagged in PR review).
         payload.validate().map_err(serde::de::Error::custom)?;
         Ok(payload)
     }

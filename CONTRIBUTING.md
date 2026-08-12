@@ -54,7 +54,7 @@ test location.
 
 ```bash
 cargo fmt                                                    # format
-cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
+cargo clippy --all --benches --tests --examples --all-features  # lint (warnings surface here; the pre-PR block below denies them)
 cargo test                                                   # unit + integration suites (Postgres legs self-provision testcontainers; skipped when Docker is unavailable)
 ```
 
@@ -133,7 +133,7 @@ Select the appropriate track in the PR template based on what your changes touch
 
 ## Database Changes
 
-IronClaw uses dual-backend persistence (PostgreSQL + libSQL) behind the `RootFilesystem` mount catalog. All new persistence features must support both backends. See `crates/substrates/ironclaw_filesystem/CLAUDE.md` and `.claude/rules/database.md`.
+IronClaw uses dual-backend persistence (PostgreSQL + libSQL) behind the `RootFilesystem` mount catalog. All new persistence features must support both backends. See `crates/substrates/ironclaw_filesystem/CONTRACT.md` and `.claude/rules/database.md`.
 
 ## Adding Dependencies
 
@@ -149,7 +149,7 @@ Run `cargo deny check` before adding new dependencies to verify license compatib
 
 In case you want to document the library itself (i.e. reference documentation) for other core contributors, use the `docs/internal/` folder
 
-If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/plans` folder.
+If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/internal/plans` folder.
 
 ### Skills
 Read the `.claude/skills/mintlify-docs` for guidelines on how to generate documentation with mintlify.

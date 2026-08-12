@@ -19,7 +19,7 @@ adding a browser test, use the `reborn_v2_*` fixtures — see
 
 > **Tier B note:** the v1 legacy `ironclaw` gateway binary
 > (`ironclaw-legacy`, formerly built by the `ironclaw_binary` fixture) was
-> **deleted** under Tier B (`docs/plans/2026-07-02-reborn-internal-module-refactor.md`
+> **deleted** under Tier B (`docs/internal/plans/2026-07-02-reborn-internal-module-refactor.md`
 > §8). The eight browser scenarios that drove only the legacy gateway
 > (`test_connection`, `test_chat`, `test_html_injection`, `test_skills`,
 > `test_sse_reconnect`, `test_tool_approval`, `test_dom_resource_limits`,
@@ -122,9 +122,9 @@ from `tests/e2e/` for the full, current set.
 
 | File | What it tests |
 |------|--------------|
-| `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_webui_v2_smoke.py` | Canonical WebUI smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, debug inspector session activation/header toggle/prompt/activity/statistics/background observation/multi-turn navigation/visibility reconnect, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
 | `test_reborn_webui_v2_sso.py` | Google-shaped SSO login through a local mock OIDC provider, one-time ticket exchange, two-user thread/timeline isolation, and logout revocation against the standalone `ironclaw serve` binary |
-| `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
+| `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, inspector detail with a visible 50 KiB output bound, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
 | `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |

@@ -1,16 +1,23 @@
-//! Zero-legacy gate for the NEA-25 unified extension model.
+//! Zero-legacy gate for retired Reborn vocabulary.
 //!
-//! The unified model retired an entire vocabulary: the connectable-channels
-//! rail, the one-variant lifecycle surface kind, the conflated extension
-//! `kind` wire string, the split `slack_bot` package identity, the
-//! `slack_personal` provider id, and the contract-free manifest parse paths.
-//! This test pins all of it at **zero occurrences** across Reborn code
-//! (`crates/`, the WebUI frontend sources, and `tests/integration/`) so none
-//! of it can be reintroduced silently.
+//! The NEA-25 unified extension model retired an entire vocabulary: the
+//! connectable-channels rail, the one-variant lifecycle surface kind, the
+//! conflated extension `kind` wire string, the split `slack_bot` package
+//! identity, the `slack_personal` provider id, and the contract-free manifest
+//! parse paths. The channel-delivery-tool stack then retired stored delivery
+//! *routing*: the per-run route-current seal, the target-setting capability,
+//! the per-trigger `delivery_target_id` field, and the triggered-delivery
+//! intent. This test pins all of it at **zero occurrences** across Reborn code
+//! and model-visible guidance (`crates/` including the WebUI frontend sources
+//! and packaged extension manifests/schemas, `tests/integration/`, and the
+//! embedded `skills/` bundles) so none of it can be reintroduced silently.
 //!
-//! Sanctioned exceptions are path-scoped, not term-scoped:
+//! Sanctioned exceptions are path-scoped, and each path names the exact terms
+//! it may use:
 //! - the one-time forward data migration under `product_auth/durable/`
 //!   legitimately names the retired identities it folds forward;
+//! - the retirement's own regression tests must spell the retired input they
+//!   prove is rejected or absent;
 //! - this test names every term on purpose.
 //!
 //! The list is shrink-only and pinned to reality — see `SANCTIONED_PATHS`.
@@ -22,8 +29,9 @@ use std::path::Path;
 
 use ratchet_support::workspace_root;
 
-/// Retired vocabulary. Every term here was deleted by the NEA-25 stack; a hit
-/// outside the sanctioned paths is a regression, not a style issue.
+/// Retired vocabulary. Every term here was deleted by the NEA-25 stack or the
+/// channel-delivery-tool stack; a hit outside the sanctioned paths is a
+/// regression, not a style issue.
 const RETIRED_TERMS: &[&str] = &[
     // The connectable-channels rail (replaced by extension-surface discovery).
     "ConnectableChannelsProductService",
@@ -67,6 +75,19 @@ const RETIRED_TERMS: &[&str] = &[
     "parse_with_optional_host_api_contracts",
     "from_toml_with_contracts",
     "LegacyTopLevelCapabilitiesForInstalledSource",
+    // Stored delivery routing (replaced by the model-called
+    // `builtin.outbound_deliver` tool plus the caller's notification-channel
+    // set). `delivery_target_id` was the trigger-create input and the wire
+    // name of the retired routing field; bare `delivery_target` is
+    // deliberately NOT pinned, because `TriggerRecord.delivery_target`
+    // survives as a read-tolerated column that the boot migration folds
+    // forward into the routine's own prompt.
+    "outbound_delivery_target_route_current",
+    "outbound_delivery_target_set",
+    "delivery_target_id",
+    "TriggeredDelivery",
+    "resolve_per_trigger_target",
+    "stored_preference_target",
 ];
 
 /// Retired identities that survive only as *substrings* of sanctioned names:
@@ -92,7 +113,10 @@ const RETIRED_IDENTITY_FORMS: &[&str] = &[
     "'mcp_server'",
 ];
 
-/// Path fragments allowed to reference retired vocabulary.
+/// Path fragments allowed to reference retired vocabulary, each with the exact
+/// terms it may name. An empty term list means "every retired term" and is
+/// reserved for this gate itself; every other entry is narrowed, so a file
+/// sanctioned for one retirement cannot silently reintroduce a different one.
 ///
 /// Shrink-only, and pinned to reality: `sanctioned_paths_all_match_real_files`
 /// fails when a fragment matches no scanned file, so an exemption cannot outlive
@@ -101,11 +125,38 @@ const RETIRED_IDENTITY_FORMS: &[&str] = &[
 /// `extension_host/extension_installation_store.rs` (deleted by #6430) — and
 /// neither was visible, because a fragment that matches nothing simply never
 /// sanctions anything.
-const SANCTIONED_PATHS: &[&str] = &[
+const SANCTIONED_PATHS: &[(&str, &[&str])] = &[
     // One-time forward data migrations name what they fold forward.
-    "product_auth/durable/",
+    (
+        "product_auth/durable/",
+        &["\"slack_personal\"", "'slack_personal'"],
+    ),
+    // The retirement's own regression tests: each proves `delivery_target_id`
+    // is rejected as an input, absent from a tool schema/description, or
+    // absent from embedded skill guidance, which cannot be asserted without
+    // spelling it.
+    (
+        "host_runtime/src/first_party_tools/trigger_management/tests.rs",
+        &["delivery_target_id"],
+    ),
+    (
+        "host_runtime/tests/first_party_builtin_tools.rs",
+        &["delivery_target_id"],
+    ),
+    (
+        "host_runtime/tests/tool_surface_contract.rs",
+        &["delivery_target_id"],
+    ),
+    (
+        "extension_host/src/bundled_skills.rs",
+        &["delivery_target_id"],
+    ),
+    (
+        "group_triggers/scenario_trigger_create_has_no_delivery_target_field.rs",
+        &["delivery_target_id"],
+    ),
     // This gate names every term on purpose.
-    "reborn_retired_taxonomy.rs",
+    ("reborn_retired_taxonomy.rs", &[]),
 ];
 
 /// Sanity floor for the scan. Far below the real count (~1500) and never
@@ -116,10 +167,20 @@ const SANCTIONED_PATHS: &[&str] = &[
 /// was looked at" (CHECKLIST WS0, #6963).
 const MIN_SCANNED_FILES: usize = 500;
 
-fn is_sanctioned(path: &str) -> bool {
+/// Terms this path may name, or `None` when the path is not sanctioned at all.
+fn sanctioned_terms(path: &str) -> Option<&'static [&'static str]> {
     SANCTIONED_PATHS
         .iter()
-        .any(|fragment| path.contains(fragment))
+        .find(|(fragment, _)| path.contains(fragment))
+        .map(|(_, terms)| *terms)
+}
+
+fn is_sanctioned(sanctioned: Option<&'static [&'static str]>, term: &str) -> bool {
+    match sanctioned {
+        None => false,
+        Some([]) => true,
+        Some(terms) => terms.contains(&term),
+    }
 }
 
 /// A scan error is a gate failure, not a skip: an unreadable directory or file
@@ -152,7 +213,11 @@ fn scan_dir(
             || name.ends_with(".mjs")
             || name.ends_with(".js");
         let is_manifest = name.ends_with(".toml");
-        if !(is_rust || is_frontend || is_manifest) {
+        // Manifests, tool input schemas and skill/prompt markdown are
+        // model-visible guidance: retired vocabulary reaching the model is the
+        // same regression as retired vocabulary in code.
+        let is_guidance = name.ends_with(".json") || name.ends_with(".md");
+        if !(is_rust || is_frontend || is_manifest || is_guidance) {
             continue;
         }
         let relative = path
@@ -161,19 +226,12 @@ fn scan_dir(
             .to_string_lossy()
             .replace('\\', "/");
         scanned.push(relative.clone());
-        if is_sanctioned(&relative) {
-            continue;
-        }
+        let sanctioned = sanctioned_terms(&relative);
         let contents = std::fs::read_to_string(&path)
             .map_err(|error| std::io::Error::new(error.kind(), format!("{relative}: {error}")))?;
-        for term in RETIRED_TERMS {
-            if contents.contains(term) {
+        for term in RETIRED_TERMS.iter().chain(RETIRED_IDENTITY_FORMS) {
+            if contents.contains(term) && !is_sanctioned(sanctioned, term) {
                 hits.push(format!("{relative}: `{term}`"));
-            }
-        }
-        for form in RETIRED_IDENTITY_FORMS {
-            if contents.contains(form) {
-                hits.push(format!("{relative}: `{form}`"));
             }
         }
     }
@@ -193,6 +251,10 @@ fn scan_workspace(root: &Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
         &mut hits,
         &mut scanned,
     )?;
+    // The Reborn binary embeds the repo `skills/` directory verbatim
+    // (`ironclaw_extension_host::bundled_skills`), so a skill naming retired
+    // vocabulary misdirects every conversation its keywords match.
+    scan_dir(root, &root.join("skills"), &mut hits, &mut scanned)?;
     hits.sort();
     hits.dedup();
     Ok((hits, scanned))
@@ -221,6 +283,7 @@ fn a_wrong_root_is_refused_and_a_partial_tree_hits_the_floor() {
     let family = root.join("crates/substrates/ironclaw_extension_registry/src");
     std::fs::create_dir_all(&family).expect("family tree");
     std::fs::create_dir_all(root.join("tests/integration")).expect("integration tree");
+    std::fs::create_dir_all(root.join("skills")).expect("skills tree");
     for index in 0..10 {
         std::fs::write(family.join(format!("m{index}.rs")), "pub fn f() {}\n").expect("source");
     }
@@ -249,7 +312,7 @@ fn sanctioned_paths_all_match_real_files() {
         scan_workspace(&workspace_root()).expect("the workspace scan must not hit an I/O error");
     let stale: Vec<&str> = SANCTIONED_PATHS
         .iter()
-        .copied()
+        .map(|(fragment, _)| *fragment)
         .filter(|fragment| !scanned.iter().any(|path| path.contains(fragment)))
         .collect();
 
@@ -277,8 +340,9 @@ fn reborn_code_never_references_retired_taxonomy() {
     );
     assert!(
         hits.is_empty(),
-        "retired NEA-25 taxonomy reintroduced (extension = the product object; \
-         channel = a capability surface; runtime is implementation only):\n{}",
+        "retired Reborn taxonomy reintroduced (extension = the product object; \
+         channel = a capability surface; runtime is implementation only; \
+         delivery is a model-called tool, never a stored route):\n{}",
         hits.join("\n")
     );
 }

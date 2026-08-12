@@ -71,13 +71,14 @@ pub use host::{
     LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
     LoopCheckpointStateRef, LoopContextBundle, LoopContextCompactionKind,
     LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind, LoopGateKind,
-    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopInput, LoopInputAck,
-    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-    LoopInterruptKind, LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-    LoopModelResponse, LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef, LoopProgressEvent,
-    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRecoveryClass,
+    LoopContextSnippet, LoopContextSnippetMetadata, LoopContextWindowTruncation,
+    LoopDriverNoteKind, LoopGateKind, LoopInlineMessage, LoopInlineMessageBody,
+    LoopInlineMessageRole, LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopInterruptKind,
+    LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+    LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
+    LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef,
+    LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort, LoopRecoveryClass,
     LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch, LoopRunContext,
     LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
     PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
@@ -134,9 +135,10 @@ pub use resolver::{
 };
 pub use runtime_context::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-    Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
+    ConnectedChannelSummary, ConnectedChannelsState, Locale, LocaleError, LoopRuntimeContext,
+    NotificationChannelsState, PendingExtensionAuthState, UserProfileContext,
 };
+pub use skill_context::SkillName;
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
     SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,

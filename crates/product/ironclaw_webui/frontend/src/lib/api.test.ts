@@ -1,6 +1,6 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { afterEach, test } from "vitest";
 
 import {
   attachmentUrl,
@@ -17,9 +17,20 @@ import {
   queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
+  getWebPushStatus,
+  setNotificationChannels,
   setupExtension,
-  setOutboundPreferences,
+  subscribeWebPush,
+  unsubscribeWebPush,
 } from "./api";
+
+const originalFetch = globalThis.fetch;
+const originalSessionStorage = globalThis.sessionStorage;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  globalThis.sessionStorage = originalSessionStorage;
+});
 
 function withCryptoGlobal(replacement, run) {
   const prior = Object.getOwnPropertyDescriptor(globalThis, "crypto");
@@ -322,7 +333,7 @@ test("setupExtension serializes a generated client action id", async () => {
   });
 });
 
-test("setOutboundPreferences includes a client action id", async () => {
+test("setNotificationChannels posts the full-replace target_ids body with no other wire fields", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -331,26 +342,54 @@ test("setOutboundPreferences includes a client action id", async () => {
   };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ final_reply_target: null }), {
+    return new Response(JSON.stringify({ channels: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
 
-  await setOutboundPreferences({
-    finalReplyTargetId: "slack-dm-alpha",
-    clientActionId: "outbound-save-1",
-  });
+  await setNotificationChannels({ targetIds: ["slack-dm-alpha", "slack-dm-beta"] });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/outbound/preferences");
+  assert.equal(calls[0].path, "/api/webchat/v2/outbound/notification-channels");
+  assert.equal(calls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    client_action_id: "outbound-save-1",
-    final_reply_target_id: "slack-dm-alpha",
+    target_ids: ["slack-dm-alpha", "slack-dm-beta"],
   });
 });
 
-test("setOutboundPreferences serializes a generated client action id", async () => {
+test("setNotificationChannels rejects an omitted targetIds instead of posting a destructive clear-all", async () => {
+  let fetchCalled = false;
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called");
+  };
+
+  // `RebornSetNotificationChannelsRequest` deliberately omits
+  // `#[serde(default)]` on `target_ids` so an omitted field is a 400, never
+  // an implicit clear-all. A client-side `targetIds ?? []` default defeats
+  // that server-side guard entirely: the backend accepts `[]` as a valid,
+  // *intentional* full replace, so a caller that simply forgot the argument
+  // would silently wipe every stored notification channel.
+  await assert.rejects(setNotificationChannels(), /targetIds must be an array/);
+  await assert.rejects(setNotificationChannels({}), /targetIds must be an array/);
+  await assert.rejects(
+    setNotificationChannels({ targetIds: null }),
+    /targetIds must be an array/,
+  );
+  await assert.rejects(
+    setNotificationChannels({ targetIds: "slack-dm-alpha" }),
+    /targetIds must be an array/,
+  );
+  assert.equal(fetchCalled, false, "a malformed targetIds must never reach the wire");
+});
+
+test("setNotificationChannels sends an explicit empty array as the intentional clear-all", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -359,21 +398,19 @@ test("setOutboundPreferences serializes a generated client action id", async () 
   };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ final_reply_target: null }), {
+    return new Response(JSON.stringify({ channels: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
 
-  await withCryptoGlobal({ randomUUID: () => "generated-outbound-action" }, async () => {
-    await setOutboundPreferences();
-  });
+  // An explicit `[]` stays the one supported way to clear the set (spec §7:
+  // an empty list clears every notification channel) — the guard above
+  // rejects only the *absent* argument.
+  await setNotificationChannels({ targetIds: [] });
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
-    client_action_id: "generated-outbound-action",
-    final_reply_target_id: null,
-  });
+  assert.deepEqual(JSON.parse(calls[0].options.body), { target_ids: [] });
 });
 
 test("automation state mutations reject before fetch when automation id is missing", async () => {
@@ -567,4 +604,89 @@ test("clientActionId falls back when global crypto is null", () => {
     assert.match(id, /^[0-9a-f]{32}$/);
     assert.notEqual(id, "0".repeat(32));
   });
+});
+
+test("getWebPushStatus reads the web-push status route", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(
+      JSON.stringify({ vapid_public_key: "k", subscription_count: 0, subscriptions: [] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const status = await getWebPushStatus();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/web-push/status");
+  assert.equal(status.vapid_public_key, "k");
+});
+
+test("subscribeWebPush posts the subscription wire body and validates required keys", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ outcome: "enrolled" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await subscribeWebPush({
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    keys: { p256dh: "pk", auth: "as" },
+    userAgent: "TestBrowser/1.0",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/web-push/subscriptions");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    keys: { p256dh: "pk", auth: "as" },
+    user_agent: "TestBrowser/1.0",
+  });
+
+  await assert.rejects(subscribeWebPush(), /endpoint is required/);
+  await assert.rejects(
+    subscribeWebPush({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" }),
+    /keys\.p256dh and keys\.auth are required/,
+  );
+  assert.equal(calls.length, 1, "invalid input must never reach fetch");
+});
+
+test("unsubscribeWebPush posts the endpoint removal body", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ removed: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await unsubscribeWebPush({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/web-push/subscriptions/remove");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+  });
+  await assert.rejects(unsubscribeWebPush({}), /endpoint is required/);
 });

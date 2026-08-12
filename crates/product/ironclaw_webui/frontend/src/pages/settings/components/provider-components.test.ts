@@ -361,6 +361,65 @@ function firstButtonProps(rendered) {
   return componentProps(findComponentNodes(rendered, "Button")[0], "Button");
 }
 
+test("ProviderDialog enables search on the fetched model selector", () => {
+  const SelectMenu = "SelectMenu";
+  const context = {
+    Button: "Button",
+    Input: "Input",
+    Modal: "Modal",
+    ModalBody: "ModalBody",
+    ModalFooter: "ModalFooter",
+    React: { useMemo: (factory) => factory() },
+    SelectMenu,
+    ADAPTER_OPTIONS: [],
+    adapterLabel: (adapter) => adapter,
+    html,
+    useProviderDialogForm: () => ({
+      form: {
+        adapter: "nearai",
+        baseUrl: "",
+        id: "nearai",
+        model: "model-a",
+        name: "NEAR AI",
+      },
+      apiKey: "",
+      models: ["model-a", "model-b"],
+      message: null,
+      busy: "",
+      isBuiltin: true,
+      isEditing: true,
+      update: () => {},
+      setApiKey: () => {},
+      fetchModels: () => {},
+      runTest: () => {},
+      submit: () => {},
+    }),
+    useT: () => (key) => key,
+  };
+  const exports = runVmModuleForTest(
+    "./provider-dialog.tsx",
+    ["ProviderDialog"],
+    context,
+    import.meta.url
+  );
+  const rendered = exports.ProviderDialog({
+    provider: builtinProvider("nearai", { name: "NEAR AI" }),
+    allProviderIds: ["nearai"],
+    builtinOverrides: {},
+    open: true,
+    onClose: () => {},
+    onSave: () => {},
+    onTest: () => {},
+    onListModels: () => {},
+  });
+  const modelSelectProps = findComponentNodes(rendered, SelectMenu)
+    .map((node) => componentProps(node, SelectMenu))
+    .find((props) => props.searchable);
+
+  assert.equal(modelSelectProps.searchAriaLabel, "llm.searchModels");
+  assert.equal(modelSelectProps.searchPlaceholder, "llm.searchModels");
+});
+
 test("ProviderManagement groups filtered providers through the render caller", () => {
   const { rendered, cardProps } = renderProviderManagement({
     providers: [

@@ -27,13 +27,13 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ironclaw_extension_contracts::channel_adapter::OutboundPart;
+use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ReactionAction, RunReaction};
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
-    OutboundStateStorePort,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
+    OutboundError, OutboundStateStorePort,
 };
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
@@ -87,6 +87,12 @@ pub struct RunDeliverySettings {
     /// are recorded as `Skipped` rather than spawning an unbounded waiting
     /// task.
     pub max_pending_deliveries: NonZeroUsize,
+    /// How long a run may run before the working indicator is refreshed to a
+    /// "still working" nudge, so the user knows it hasn't stalled.
+    pub first_nudge_after: Duration,
+    /// Gap before the SECOND nudge; each subsequent gap doubles (e.g. 30s, then
+    /// +1m, +2m, +4m …) so a very long run backs off instead of spamming.
+    pub renudge_interval: Duration,
 }
 
 impl Default for RunDeliverySettings {
@@ -96,6 +102,8 @@ impl Default for RunDeliverySettings {
             max_wait: DEFAULT_RUN_DELIVERY_MAX_WAIT,
             max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
+            first_nudge_after: Duration::from_secs(30),
+            renudge_interval: Duration::from_secs(60),
         }
     }
 }
@@ -121,6 +129,10 @@ pub struct RunDeliveryServices {
     /// `/workspace/...` references only after outbound policy approves the
     /// delivery.
     pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
+    /// The owner-scoped outbound target catalog. The background-run notifier
+    /// resolves the creator's stored notification-channel ids through it at
+    /// fire time; a target that vanished since it was chosen simply drops out.
+    pub delivery_targets: Arc<dyn OutboundDeliveryTargetProvider>,
     /// The coordinator every send goes through (OUT-1: none bypasses).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the
@@ -151,7 +163,19 @@ pub(crate) fn delivered_messages_from_outcome(
     outcome: &CoordinatedDeliveryOutcome,
 ) -> Vec<DeliveredChannelMessage> {
     match outcome {
+        // `DeliveredUnconfirmed` is the ONE non-`Delivered` outcome that
+        // actually sent something: the provider accepted the message and
+        // returned real refs, only the durable terminal write failed. The
+        // messages exist in the channel, so everything keyed off them — gate
+        // reply routes, and retraction of a live auth prompt — must still be
+        // bookkept, or a delivered OAuth link can never be retracted and a
+        // threaded `approve` can never route.
         CoordinatedDeliveryOutcome::Delivered {
+            conversation,
+            vendor_message_refs,
+            ..
+        }
+        | CoordinatedDeliveryOutcome::DeliveredUnconfirmed {
             conversation,
             vendor_message_refs,
             ..
@@ -278,16 +302,12 @@ pub(crate) async fn cancel_auth_blocked_run(
     gate_ref: Option<&str>,
 ) -> Result<(), RunDeliveryError> {
     // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`.
-    // Owner resolution: an explicit turn owner (shared/team subject) wins,
-    // else the acting user. Without a gate ref there is no flow to resolve.
+    // The flow was created under the run's user, so cancel must target the same
+    // user — matching the auth-flow create/resolve sides. Owner == actor since
+    // the ephemeral-per-ping remodel. Without a gate ref there is no flow to
+    // resolve.
     let flow_cancel_target = match (auth_flow_cancel, gate_ref) {
-        (Some(canceller), Some(gate_ref)) => {
-            let owner_user_id = scope
-                .explicit_owner_user_id()
-                .unwrap_or(&actor.user_id)
-                .clone();
-            Some((canceller, owner_user_id, gate_ref))
-        }
+        (Some(canceller), Some(gate_ref)) => Some((canceller, actor.user_id.clone(), gate_ref)),
         _ => None,
     };
 
@@ -339,7 +359,10 @@ pub(crate) fn thread_scope_from_binding(
         tenant_id: binding.tenant_id.clone(),
         agent_id,
         project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
+        // The thread belongs to the user who invoked it (the pinger). A channel
+        // ping resolves onto its own ephemeral pinger-owned thread and a DM is
+        // the user's own thread, so there is one identity per run: the actor.
+        owner_user_id: Some(binding.actor_user_id.clone()),
         mission_id: None,
     })
 }
@@ -353,6 +376,8 @@ pub(crate) fn turn_scope_from_thread_scope(
             reason: "resolved binding missing agent_id required for turn scope".to_string(),
         });
     };
+    // The run's turn scope shares the thread scope's single user (the pinger):
+    // there is no separate thread owner to diverge from the actor.
     Ok(TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         Some(agent_id),
@@ -402,9 +427,24 @@ impl RunDeliveryServices {
     }
 
     /// Best-effort cleanup of an earlier delivery (`Cleanup` intent with a
-    /// `Retract` part).
+    /// `Retract` part) on this component's own channel extension.
     pub(crate) async fn retract_message(
         &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        message: DeliveredChannelMessage,
+    ) {
+        self.retract_message_on_extension(&self.extension_id, scope, run_id, message)
+            .await;
+    }
+
+    /// [`Self::retract_message`] for a message delivered through a DIFFERENT
+    /// extension than this component's configured one. The background-run
+    /// notifier fans out across every notification channel, so the extension
+    /// that carried a prompt is per-message, not per-component.
+    pub(crate) async fn retract_message_on_extension(
+        &self,
+        extension_id: &str,
         scope: TurnScope,
         run_id: Option<TurnRunId>,
         message: DeliveredChannelMessage,
@@ -428,7 +468,7 @@ impl RunDeliveryServices {
                 parts: vec![OutboundPart::Retract {
                     vendor_message_ref: message.vendor_message_ref,
                 }],
-                extension_id: &self.extension_id,
+                extension_id,
                 notice_ref,
             })
             .await
@@ -437,6 +477,61 @@ impl RunDeliveryServices {
                 target: "ironclaw::reborn::run_delivery",
                 %error,
                 "failed to retract channel prompt/status message"
+            );
+        }
+    }
+
+    /// Best-effort run-lifecycle reaction on the message that triggered the
+    /// run (its `reply_target_message_id`) — 👀 while working, ⚠️ when it needs
+    /// the user, ✅ done, ❌ failed. A conversation with no reply target (nothing
+    /// to react to) is a no-op, and any delivery failure is swallowed: a
+    /// reaction must never fail the run. `seq` is a per-run monotonic id so each
+    /// transition is a distinct, idempotent delivery — a retried loop replays the
+    /// same seq and dedupes, while a genuine re-transition gets a fresh one.
+    pub(crate) async fn react_to_source(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+        conversation: &ExternalConversationRef,
+        reaction: RunReaction,
+        action: ReactionAction,
+        seq: u64,
+    ) {
+        let Some(source_ref) = conversation.reply_target_message_id() else {
+            return;
+        };
+        let action_key = match action {
+            ReactionAction::Add => "add",
+            ReactionAction::Remove => "remove",
+        };
+        let reaction_key = match reaction {
+            RunReaction::Working => "working",
+            RunReaction::Done => "done",
+            RunReaction::NeedsInput => "needs-input",
+            RunReaction::Failed => "failed",
+        };
+        if let Err(error) = self
+            .coordinator
+            .deliver_notice(NoticeDeliveryRequest {
+                intent: DeliveryIntent::Reaction,
+                scope,
+                turn_run_id: Some(run_id),
+                conversation: conversation.clone(),
+                thread_anchor: None,
+                parts: vec![OutboundPart::React {
+                    vendor_message_ref: source_ref.to_string(),
+                    reaction,
+                    action,
+                }],
+                extension_id: &self.extension_id,
+                notice_ref: format!("{run_id}:{seq}:{action_key}-{reaction_key}"),
+            })
+            .await
+        {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_delivery",
+                %error,
+                "channel reaction delivery failed (best-effort)"
             );
         }
     }

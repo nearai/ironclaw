@@ -1,8 +1,8 @@
 # `crates/domains/` — one crate per business-record grammar, no authority decisions
 
-**Layer(s):** `substrates` (all 12 manifests declare it; checked by
+**Layer(s):** `substrates` (all 13 manifests declare it; checked by
 `reborn_workspace_crates_declare_layers_and_follow_layer_matrix`) ·
-**Crates:** 12 · **May depend on:** `contracts/`, `substrates/`, `events/`,
+**Crates:** 13 · **May depend on:** `contracts/`, `substrates/`, `events/`,
 plus five inventoried in-family edges (below) · **Depended on by:** `kernel/`,
 `loop/`, `extensions/`, `product/`, `app/` — every tier above wires against
 these contracts.
@@ -36,6 +36,7 @@ no other crate in the family may acquire either property.
 | [`ironclaw_threads`](./ironclaw_threads) | The canonical transcript service: `SessionThreadService` (filesystem + in-memory), message ordering/status/redaction, tool-result records, display projections | Reading or writing thread/message history or transcript-derived views |
 | [`ironclaw_trace_commons`](./ironclaw_trace_commons) | The Trace Commons client: envelope schema, deterministic redaction, submission queue/credits, device-key onboarding, and the autonomous capture pipeline | Contributing traces to the external Trace Commons service |
 | [`ironclaw_triggers`](./ironclaw_triggers) | Scheduled-trigger records, cron/timezone validation, deterministic fire identity, the poller tick, and sealed trusted-submission minting (prompt-scanned at the mint); SQL backends held under ADR 0003 | Trigger records/schedules, or anything on the host-trusted fire path |
+| [`ironclaw_web_push`](./ironclaw_web_push) | Web Push (RFC 8030/8291/8292) subscription records + CAS store, `aes128gcm` payload encryption, VAPID key-material generation, transport-free push request planning, and the browser channel's identity grammar | Browser push enrollment records or push protocol mechanics (delivery runs through the web-push channel package; the VAPID header is computed at the host egress boundary) |
 
 Two boundary facts that have been gotten wrong before, stated precisely:
 
@@ -58,7 +59,7 @@ Two boundary facts that have been gotten wrong before, stated precisely:
   or local-disk — composition chooses backends and mounts
   (`.claude/rules/database.md`; `ScopedFilesystem` is the floor). A
   hand-written SQL backend requires its own ADR; `ironclaw_triggers` under
-  [ADR 0003](../../docs/adr/0003-triggers-keeps-hand-written-sql.md) is the
+  [ADR 0003](../../docs/internal/adr/0003-triggers-keeps-hand-written-sql.md) is the
   family's only such exception, and it still takes admission from
   `ironclaw_libsql_runtime` rather than owning connections.
 - **Authority decisions.** Authorization, approvals, trust ceilings, resource
@@ -132,9 +133,9 @@ crate path is given.
   ADR-held exception.
 - **Module charters are contracts, not comments:** `cargo test -p
   ironclaw_auth --test module_charter` and `cargo test -p ironclaw_llm --test
-  module_charter` each enforce their crate's `CLAUDE.md` sub-owner map
-  (every `src/**/*.rs` file has exactly one owner; auth's two engines must not
-  name each other).
+  module_charter` enforce the sub-owner maps in auth's `AGENTS.md` and llm's
+  `CONTRACT.md` respectively (every `src/**/*.rs` file has exactly one owner;
+  auth's two engines must not name each other).
 
 **Gate for adding a crate here:** it must own a genuinely distinct record
 grammar with independent consumers — otherwise it is a module inside an

@@ -7,7 +7,9 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     approval::{canonical_json_v1, sha256_digest_token},
     capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, EffectKind},
+    capability_surface::CapabilityIdScope,
     decision::Decision,
+    ids::CapabilityId,
     messaging::{STANDARD_SCHEMA_REF_PREFIX, resolve_standard_schema_ref},
     resource::ResourceEstimate,
     runtime::RuntimeKind,
@@ -26,82 +28,7 @@ use crate::{
 };
 use ironclaw_runtime_policy::plan_capability;
 
-const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
-    RuntimeKind::Wasm,
-    RuntimeKind::Mcp,
-    RuntimeKind::Script,
-    RuntimeKind::Sandbox,
-    RuntimeKind::FirstParty,
-    RuntimeKind::System,
-];
-
-const ALL_EFFECT_KINDS: &[EffectKind] = &[
-    EffectKind::ReadFilesystem,
-    EffectKind::WriteFilesystem,
-    EffectKind::DeleteFilesystem,
-    EffectKind::Network,
-    EffectKind::UseSecret,
-    EffectKind::ExecuteCode,
-    EffectKind::SpawnProcess,
-    EffectKind::DispatchCapability,
-    EffectKind::ModifyExtension,
-    EffectKind::ModifyApproval,
-    EffectKind::ModifyBudget,
-    EffectKind::ExternalWrite,
-    EffectKind::Financial,
-];
 const VISIBLE_CAPABILITY_AUTHORIZATION_CONCURRENCY: usize = 16;
-
-/// Visibility-only policy applied before authorization estimates are rendered.
-///
-/// This is a narrowing surface policy, not an authority source. A runtime/effect
-/// listed here can still be omitted by missing grants, missing provider trust,
-/// denied trust ceilings, or an authorizer denial. A runtime/effect absent here
-/// is omitted before the authorizer is consulted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CapabilitySurfacePolicy {
-    /// Runtime kinds that may appear on this projection.
-    ///
-    /// Empty means allow none. Order and duplicates do not affect filtering or
-    /// surface-version fingerprinting.
-    pub allowed_runtimes: Vec<RuntimeKind>,
-    /// Effect ceiling for visible descriptors.
-    ///
-    /// This is strict subset semantics: every effect declared by a capability
-    /// must appear in this list or the capability is omitted. Empty means allow
-    /// none. Order and duplicates do not affect filtering or surface-version
-    /// fingerprinting.
-    pub allowed_effects: Vec<EffectKind>,
-    /// Whether capabilities that require approval may be rendered as askable.
-    ///
-    /// This is informational only. It does not issue approval leases or widen
-    /// direct invocation authority.
-    pub include_requires_approval: bool,
-    /// Maximum visible capabilities returned after filtering, in registry
-    /// order. `Some(0)` returns an empty surface without authorizer calls.
-    pub max_capabilities: Option<usize>,
-}
-
-impl CapabilitySurfacePolicy {
-    pub fn allow_all() -> Self {
-        Self {
-            allowed_runtimes: ALL_RUNTIME_KINDS.to_vec(),
-            allowed_effects: ALL_EFFECT_KINDS.to_vec(),
-            include_requires_approval: true,
-            max_capabilities: None,
-        }
-    }
-
-    fn allows_runtime(&self, runtime: RuntimeKind) -> bool {
-        self.allowed_runtimes.contains(&runtime)
-    }
-
-    fn allows_effects(&self, effects: &[EffectKind]) -> bool {
-        effects
-            .iter()
-            .all(|effect| self.allowed_effects.contains(effect))
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VisibleCapabilityAccess {
@@ -123,8 +50,9 @@ pub struct VisibleCapability {
     /// Redacted declarative capability descriptor from the extension registry.
     pub descriptor: CapabilityDescriptor,
     /// Provenance-backed trust for the model-visible description. Unknown
-    /// sources remain untrusted; only registry-installed packages cross the
-    /// signature/digest-verifying catalog boundary.
+    /// sources remain untrusted; registry-installed packages cross the
+    /// signature/digest-verifying catalog boundary, and host-bundled
+    /// packages are compiled or shipped with the binary itself.
     pub description_trust: CapabilityDescriptionTrust,
     /// Current visibility status for this context and policy.
     pub access: VisibleCapabilityAccess,
@@ -178,6 +106,7 @@ impl<'a> CapabilityCatalog<'a> {
                 break;
             }
             if !self.is_model_visible(descriptor)
+                || !request.policy.permits_capability_id(&descriptor.id)
                 || !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
@@ -218,6 +147,7 @@ impl<'a> CapabilityCatalog<'a> {
             .capabilities()
             .filter(|descriptor| {
                 self.is_model_visible(descriptor)
+                    && request.policy.permits_capability_id(&descriptor.id)
                     && request.policy.allows_runtime(descriptor.runtime)
                     && request.policy.allows_effects(&descriptor.effects)
                     && plan_capability(descriptor, self.runtime_policy).is_ok()
@@ -319,13 +249,21 @@ impl<'a> CapabilityCatalog<'a> {
             .get_extension(&descriptor.provider)
             .map(|package| package.manifest.source)
         {
-            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
-            Some(
-                ManifestSource::HostBundled
-                | ManifestSource::InstalledLocal
-                | ManifestSource::UserRegistered,
-            )
-            | None => CapabilityDescriptionTrust::Untrusted,
+            // Host-bundled manifests are compiled or shipped with the binary —
+            // the only source eligible for effective FirstParty/System trust
+            // (`ManifestSource` docs) — so their repo-authored descriptions
+            // cross the verified boundary exactly like signature/digest-
+            // verified catalog installs. Leaving them untrusted routes
+            // compiled-in text through the strict prompt-text denylist, which
+            // silently omitted `builtin.extension_register_hosted_mcp` from
+            // every model prompt ("browser authorization-code flow" matched
+            // the "authorization" credential pattern).
+            Some(ManifestSource::HostBundled | ManifestSource::RegistryInstalled) => {
+                CapabilityDescriptionTrust::VerifiedCatalog
+            }
+            Some(ManifestSource::InstalledLocal | ManifestSource::UserRegistered) | None => {
+                CapabilityDescriptionTrust::Untrusted
+            }
         }
     }
 
@@ -511,6 +449,7 @@ fn surface_version(
         "surface_kind": request.surface_kind.as_str(),
         "context": context_payload,
         "policy": {
+            "capability_ids": canonical_capability_id_scope(&request.policy.capability_ids),
             "allowed_runtimes": canonical_runtime_kinds(&request.policy.allowed_runtimes),
             "allowed_effects": canonical_effect_kinds(&request.policy.allowed_effects),
             "include_requires_approval": request.policy.include_requires_approval,
@@ -523,6 +462,19 @@ fn surface_version(
     let bytes = serde_json::to_vec(&canonical)
         .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))?;
     CapabilitySurfaceVersion::new(sha256_digest_token(&bytes))
+}
+
+fn canonical_capability_id_scope(scope: &CapabilityIdScope) -> Value {
+    match scope {
+        CapabilityIdScope::Only(ids) => json!({
+            "kind": "only",
+            "ids": ids.iter().map(CapabilityId::as_str).collect::<Vec<_>>(),
+        }),
+        CapabilityIdScope::AllExcept(ids) => json!({
+            "kind": "all_except",
+            "ids": ids.iter().map(CapabilityId::as_str).collect::<Vec<_>>(),
+        }),
+    }
 }
 
 fn context_version_payload(request: &VisibleCapabilityRequest) -> Result<Value, HostRuntimeError> {
@@ -663,6 +615,7 @@ mod tests {
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_host_api::{
         capability::PermissionMode,
+        capability_surface::CapabilitySurfacePolicy,
         ids::{CapabilityId, ExtensionId},
         runtime::TrustClass,
         runtime_policy::{

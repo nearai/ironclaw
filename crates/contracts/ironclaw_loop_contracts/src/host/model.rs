@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::instruction_bundle::InstructionBundleFingerprint;
 use crate::refs::ModelProfileId;
+use crate::skill_context::SkillName;
 use ironclaw_host_api::turn::{CapabilityActivityId, LoopMessageRef, TurnRunId};
 
 use super::capability::ProviderToolCallReplay;
@@ -40,6 +41,9 @@ pub struct LoopModelRequest {
     /// Zero-based index into the host-resolved ordered fallback chain.
     #[serde(default)]
     pub fallback_index: u32,
+    /// Zero-based agent-loop iteration that issued this provider call.
+    #[serde(default)]
+    pub iteration: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<LoopModelCapabilityView>,
 }
@@ -119,6 +123,8 @@ pub struct LoopPromptBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_window_truncation: Option<crate::host::context::LoopContextWindowTruncation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
     pub identity_message_count: u32,
@@ -132,6 +138,14 @@ pub struct LoopPromptBundleGrant {
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+    pub diagnostic_metadata: LoopPromptDiagnosticMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoopPromptDiagnosticMetadata {
+    pub identity_message_count: u32,
+    pub instruction_snippet_count: u32,
+    pub active_skills: Vec<SkillName>,
 }
 
 #[derive(Clone, Default)]
@@ -155,6 +169,15 @@ impl LoopPromptBundleAuthority {
         context: &LoopRunContext,
         bundle: &LoopPromptBundle,
     ) -> Result<(), AgentLoopHostError> {
+        self.issue_bundle_with_diagnostic_metadata(context, bundle, None)
+    }
+
+    pub fn issue_bundle_with_diagnostic_metadata(
+        &self,
+        context: &LoopRunContext,
+        bundle: &LoopPromptBundle,
+        diagnostic_metadata: Option<LoopPromptDiagnosticMetadata>,
+    ) -> Result<(), AgentLoopHostError> {
         if !bundle.bundle_ref.is_for_run(context) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::ScopeMismatch,
@@ -162,13 +185,24 @@ impl LoopPromptBundleAuthority {
             ));
         }
 
-        self.lock_state()?.latest_by_run.insert(
+        let mut state = self.lock_state()?;
+        let diagnostic_metadata = diagnostic_metadata
+            .or_else(|| {
+                state
+                    .latest_by_run
+                    .get(&context.run_id)
+                    .filter(|grant| grant.bundle_ref == bundle.bundle_ref)
+                    .map(|grant| grant.diagnostic_metadata.clone())
+            })
+            .unwrap_or_default();
+        state.latest_by_run.insert(
             context.run_id,
             LoopPromptBundleGrant {
                 bundle_ref: bundle.bundle_ref.clone(),
                 messages: bundle.messages.clone(),
                 surface_version: bundle.surface_version.clone(),
                 instruction_fingerprint: bundle.instruction_fingerprint.clone(),
+                diagnostic_metadata,
             },
         );
         Ok(())
@@ -378,6 +412,7 @@ mod tests {
             messages: Vec::new(),
             surface_version: None,
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

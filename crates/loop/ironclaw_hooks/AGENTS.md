@@ -215,7 +215,7 @@ isolation.
 Cross-run isolation is pinned by
 **`poisoned_hook_slot_does_not_leak_into_the_next_run`** in
 `tests/integration/hooks.rs` ([#6945](https://github.com/nearai/ironclaw/issues/6945),
-landed 2026-08-04 with [ADR 0004](../../../docs/adr/0004-hooks-keeps-its-predicate-state-backends.md)).
+landed 2026-08-04 with [ADR 0004](../../../docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md)).
 It drives two turns on one harness — two `build_text_only_host*` calls, so two
 dispatcher mints — with a hook that commits a gate-sink protocol violation.
 Run 1 fails closed and poisons its slot; run 2 must get a clean slot, fire the
@@ -225,7 +225,7 @@ wire, so both the fire count and the egress count flip — verified red by
 temporarily pointing `ironclaw_turn_runner::runtime` at `with_hook_dispatcher`.
 
 ⚠ **Read the history before trusting any claim in this section.** It previously
-named `crates/loop/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests
+named ✎ `crates/loop/ironclaw_turn_runner/tests/hooks_integration.rs` and two tests
 (`per_build_dispatcher_state_does_not_leak_across_runs`,
 `legacy_with_hook_dispatcher_shares_state_across_builds`) that **never
 existed**; #6944 corrected the false claim and #6945 tracked the real gap it

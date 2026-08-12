@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use ironclaw_loop_contracts::{
     LoopCancelReasonKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
-    LoopCompactionResponse, LoopContextCompactionMetadata,
+    LoopCompactionResponse, LoopContextCompactionMetadata, LoopContextWindowTruncation,
 };
 
 use super::MockHost;
@@ -11,6 +11,8 @@ use super::MockHost;
 #[derive(Clone)]
 pub(super) struct MockCompactionSupport {
     prompt_indexes: Arc<Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>>,
+    recent_window_truncation: Arc<Mutex<Option<LoopContextWindowTruncation>>>,
+    requests: Arc<Mutex<Vec<LoopCompactionRequest>>>,
     result: Arc<Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>>,
     delay: Arc<Mutex<Option<std::time::Duration>>>,
     cancel_after_success: Arc<Mutex<bool>>,
@@ -22,6 +24,8 @@ impl MockCompactionSupport {
     pub(super) fn new() -> Self {
         Self {
             prompt_indexes: Arc::new(Mutex::new(VecDeque::new())),
+            recent_window_truncation: Arc::new(Mutex::new(None)),
+            requests: Arc::new(Mutex::new(Vec::new())),
             result: Arc::new(Mutex::new(Err(LoopCompactionError::InputTooLarge))),
             delay: Arc::new(Mutex::new(None)),
             cancel_after_success: Arc::new(Mutex::new(false)),
@@ -44,6 +48,18 @@ impl MockCompactionSupport {
             .expect("lock")
             .pop_front()
             .unwrap_or_default()
+    }
+
+    pub(super) fn set_recent_window_truncation(&self, truncation: LoopContextWindowTruncation) {
+        *self.recent_window_truncation.lock().expect("lock") = Some(truncation);
+    }
+
+    pub(super) fn recent_window_truncation(&self) -> Option<LoopContextWindowTruncation> {
+        self.recent_window_truncation.lock().expect("lock").clone()
+    }
+
+    pub(super) fn requests(&self) -> Vec<LoopCompactionRequest> {
+        self.requests.lock().expect("lock").clone()
     }
 
     pub(super) fn set_result(&self, result: Result<LoopCompactionResponse, LoopCompactionError>) {
@@ -84,8 +100,9 @@ impl MockCompactionSupport {
 
     pub(super) async fn compact_loop_context(
         &self,
-        _request: LoopCompactionRequest,
+        request: LoopCompactionRequest,
     ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
+        self.requests.lock().expect("lock").push(request);
         let delay = *self.delay.lock().expect("lock");
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -109,6 +126,18 @@ impl MockHost {
     ) -> Self {
         self.compaction.set_prompt_indexes(indexes);
         self
+    }
+
+    pub(in crate::executor::tests) fn with_recent_window_truncation(
+        self,
+        truncation: LoopContextWindowTruncation,
+    ) -> Self {
+        self.compaction.set_recent_window_truncation(truncation);
+        self
+    }
+
+    pub(in crate::executor::tests) fn compaction_requests(&self) -> Vec<LoopCompactionRequest> {
+        self.compaction.requests()
     }
 
     pub(in crate::executor::tests) fn with_compaction_result(

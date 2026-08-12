@@ -15,7 +15,7 @@ use ironclaw_product_contracts::inbound::{
 use ironclaw_product_contracts::surface::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId};
 
 use crate::action::ProductInboundAction;
 use crate::error::ProductSurfaceFailure;
@@ -137,13 +137,6 @@ impl FakeConversationBindingService {
                 .map_err(|e| ProductOperationFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
-            subject_user_id: Some(
-                UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(|e| {
-                    ProductOperationFailure::BindingResolutionFailed {
-                        reason: e.to_string(),
-                    }
-                })?,
-            ),
             thread_id: ThreadId::new(format!(
                 "thread:{}:{}",
                 request.installation_id.as_str(),
@@ -158,6 +151,20 @@ impl FakeConversationBindingService {
                 }
             })?),
             project_id: None,
+            source_binding_ref: SourceBindingRef::new(format!(
+                "source:{}",
+                request.external_conversation_ref.conversation_fingerprint()
+            ))
+            .map_err(|e| ProductOperationFailure::BindingResolutionFailed {
+                reason: e.to_string(),
+            })?,
+            reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                "reply:{}",
+                request.external_conversation_ref.conversation_fingerprint()
+            ))
+            .map_err(|e| ProductOperationFailure::BindingResolutionFailed {
+                reason: e.to_string(),
+            })?,
         })
     }
 }
@@ -594,11 +601,6 @@ impl FakeInboundTurnService {
                     reason: e.to_string(),
                 }
             })?,
-            subject_user_id: Some(UserId::new("user:fake").map_err(|e| {
-                ProductSurfaceFailure::BindingResolutionFailed {
-                    reason: e.to_string(),
-                }
-            })?),
             thread_id: ThreadId::new("thread:fake").map_err(|e| {
                 ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
@@ -610,6 +612,16 @@ impl FakeInboundTurnService {
                 }
             })?),
             project_id: None,
+            source_binding_ref: SourceBindingRef::new("source:fake").map_err(|e| {
+                ProductSurfaceFailure::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?,
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:fake").map_err(|e| {
+                ProductSurfaceFailure::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?,
         };
         let accepted_message_ref =
             AcceptedMessageRef::new(format!("msg:{}", envelope.external_event_id()))

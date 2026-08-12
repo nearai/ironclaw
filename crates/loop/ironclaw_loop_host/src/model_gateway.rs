@@ -26,8 +26,8 @@ use crate::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
-    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadContextWindowCache,
+    HostManagedToolResultContent, ModelCost, ProviderModelId, StaticModelCostTable,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
@@ -60,10 +60,14 @@ use ironclaw_turns::{ModelInvalidOutputDetailReason as InvalidOutputReason, Turn
 use tracing::debug;
 
 mod prompt_cache_activity;
+mod redaction;
 
 use prompt_cache_activity::{
     ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
     system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+use redaction::{
+    redact_completion_request, redact_tool_completion_request, redact_tool_definitions,
 };
 
 use crate::{
@@ -403,6 +407,24 @@ impl<P> HostManagedModelGateway for LlmProviderModelGateway<P>
 where
     P: LlmProvider + ?Sized + Send + Sync,
 {
+    fn diagnostic_effective_model(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<ProviderModelId> {
+        let route = self.policy.route_for(model_profile_id)?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        resolve_fallback_route(self.provider.as_ref(), fallback_index, &model_override)
+            .ok()
+            .and_then(|route| ProviderModelId::new(route.model).ok())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -437,7 +459,8 @@ where
             )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             None,
@@ -446,8 +469,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_progress(
@@ -485,7 +508,8 @@ where
             )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             None,
@@ -494,8 +518,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities(
@@ -537,7 +561,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             Some(capabilities),
@@ -546,8 +571,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -590,7 +615,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             Some(capabilities),
@@ -599,8 +625,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 }
 
@@ -765,7 +791,8 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             None,
@@ -774,8 +801,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_progress(
@@ -806,7 +833,8 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             None,
@@ -815,8 +843,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities(
@@ -851,7 +879,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             Some(capabilities),
@@ -860,8 +889,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -897,7 +926,8 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             Some(capabilities),
@@ -906,8 +936,8 @@ where
             ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 }
 
@@ -947,6 +977,20 @@ fn add_request_metadata(
     completion
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
+}
+
+fn with_model_diagnostic_evidence(
+    result: Result<HostManagedModelResponse, HostManagedModelError>,
+    effective_fallback_index: u32,
+    effective_model: String,
+) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    result
+        .map(|response| {
+            response
+                .with_effective_fallback_index(effective_fallback_index)
+                .with_diagnostic_effective_model(effective_model.clone())
+        })
+        .map_err(|error| error.with_diagnostic_effective_model(effective_model))
 }
 
 fn resolve_fallback_route<P>(
@@ -1321,7 +1365,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 )]
 async fn complete_model_request<P>(
     provider: &P,
-    completion: CompletionRequest,
+    mut completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
@@ -1335,6 +1379,23 @@ where
         replay_identity,
         next_fallback_index,
     } = request_context;
+    let redaction_started_at = Instant::now();
+    let redaction_count = redact_completion_request(&mut completion);
+    if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+        debug!(
+            target: CONTEXT_SHADOW_TARGET,
+            message_count = completion.messages.len(),
+            redaction_count,
+            elapsed_micros = redaction_started_at.elapsed().as_micros(),
+            "reborn provider-bound message redaction shadow measurement"
+        );
+    }
+    if redaction_count > 0 {
+        debug!(
+            redaction_count,
+            "reborn model gateway redacted provider-bound message content"
+        );
+    }
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
@@ -1365,13 +1426,30 @@ where
             let unavailable_capability_guard =
                 unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
-            let llm_tool_definitions = tool_definitions
+            let mut llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
                     recovery_tool_names.push(definition.name.as_str().to_string());
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_redaction_started_at = Instant::now();
+            let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions);
+            if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+                debug!(
+                    target: CONTEXT_SHADOW_TARGET,
+                    tool_definition_count = llm_tool_definitions.len(),
+                    redaction_count = tool_redaction_count,
+                    elapsed_micros = tool_redaction_started_at.elapsed().as_micros(),
+                    "reborn provider-bound tool redaction shadow measurement"
+                );
+            }
+            if tool_redaction_count > 0 {
+                debug!(
+                    redaction_count = tool_redaction_count,
+                    "reborn model gateway redacted provider-bound tool metadata"
+                );
+            }
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
@@ -1456,6 +1534,14 @@ where
                             &response,
                             error.safe_summary.as_str(),
                         ));
+                    let repair_redaction_count =
+                        redact_tool_completion_request(&mut repair_request);
+                    if repair_redaction_count > 0 {
+                        debug!(
+                            redaction_count = repair_redaction_count,
+                            "reborn model gateway redacted provider-bound repair content"
+                        );
+                    }
                     let rejected_response = response;
                     let retry_started_at = live_latency_started_at();
                     let response = match provider.complete_with_tools(repair_request).await {
@@ -1658,7 +1744,9 @@ fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
             "description": definition.description.as_str(),
             "parameters": &definition.parameters,
         });
-        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+        total.saturating_add(
+            crate::estimate_tokens_from_chars(&schema.to_string()).saturating_as_u32(),
+        )
     })
 }
 
@@ -1699,7 +1787,12 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
-        if let Some(guard) = unavailable_capability_guard {
+        if let Some(guard) = unavailable_capability_guard
+            && response
+                .tool_calls
+                .iter()
+                .any(|call| !guard.permits_policy_checked_call(call))
+        {
             debug!(
                 requested_capability_id = %guard.capability_id,
                 tool_call_count = response.tool_calls.len(),
@@ -1884,6 +1977,25 @@ fn provider_calls_are_advertised_or_resolvable(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnavailableCapabilityGuard {
     capability_id: CapabilityId,
+}
+
+impl UnavailableCapabilityGuard {
+    fn permits_policy_checked_call(&self, call: &ToolCall) -> bool {
+        if matches!(call.name.as_str(), "tool_search" | "tool_describe") {
+            return true;
+        }
+        let canonical = self.capability_id.as_str();
+        let encoded = canonical.replace('.', "__");
+        if call.name == canonical || call.name == encoded {
+            return true;
+        }
+        call.name == "tool_call"
+            && call
+                .arguments
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name == canonical || name == encoded)
+    }
 }
 
 fn unavailable_requested_capability_guard(
@@ -2833,6 +2945,80 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct StopSequenceRecordingProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StopSequenceRecordingProvider {
+        fn model_name(&self) -> &str {
+            "stop-sequence-recording-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the stop-sequence test has no tool surface")
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_model_request_redacts_stop_sequences_before_provider_dispatch() {
+        let provider = StopSequenceRecordingProvider::default();
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.stop_sequences = Some(vec!["password: swordfish".to_string()]);
+        let replay_identity =
+            ProviderReplayIdentity::new("stop-sequence-recording-provider", provider.model_name())
+                .unwrap();
+
+        complete_model_request(
+            &provider,
+            request,
+            None,
+            None,
+            None,
+            ProviderRequestContext::new(replay_identity, None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = provider
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stop_sequences,
+            Some(vec!["password: [REDACTED_SECRET]".to_string()])
+        );
+    }
 
     #[derive(Default)]
     struct RecordingSafeTextSink {

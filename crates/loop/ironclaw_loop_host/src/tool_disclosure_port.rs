@@ -3,11 +3,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use crate::{
-    CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
-};
+use crate::{CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter};
 use async_trait::async_trait;
+use futures::future::join_all;
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
     resolution::{Resolution, ResolutionBatch},
 };
@@ -23,12 +23,26 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::tool_disclosure::{
-    ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, definition_matches_provider_name,
-    is_bridge_capability_id, is_bridge_name, select_active_set, tool_search_rank,
+    ActiveSet, CapabilityCatalog, CatalogSearchResult, DisclosureCaps, PromotedSet, TOOL_CALL_NAME,
+    TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json,
+    definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
+    select_active_set_for_mode,
+};
+use crate::tool_search::{
+    AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
 };
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
+
+/// Maximum canonical JSON bytes for the complete `tool_search` response.
+/// This mirrors the model-visible inline result ceiling: a result may claim a
+/// complete schema only when the query, metadata, schemas, and JSON envelope
+/// all fit in the bytes the model receives without a follow-up `result_read`.
+const MAX_SEARCH_RESPONSE_BYTES: usize = 24 * 1024;
+
+/// A single schema above this ceiling stays discoverable but requires
+/// `tool_describe`; this prevents one result from consuming the whole budget.
+const MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT: usize = 8 * 1024;
 
 /// Internal bridge name for an auto-loaded schema (describe-first) response.
 ///
@@ -51,24 +65,42 @@ pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    mode: crate::ToolDisclosureMode,
 }
 
 impl ToolDisclosureCapabilityDecorator {
-    pub fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
+    pub fn new(
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        mode: crate::ToolDisclosureMode,
+    ) -> Self {
         Self {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
+            mode,
         }
     }
 
     /// Wrap one run's capability port with disclosure using the exact
-    /// allow-set already resolved by the runner-private profiled factory.
-    pub fn decorate_with_allow_set(
+    /// policy already resolved by the runner-private profiled factory.
+    pub fn decorate_with_policy(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
-        allow_set: Arc<CapabilityAllowSet>,
+        policy: Arc<CapabilitySurfacePolicy>,
+    ) -> Arc<dyn LoopCapabilityPort> {
+        self.decorate_with_policy_and_pins(run_context, inner, policy, Vec::new())
+    }
+
+    /// Wrap one run with profile-owned visibility pins. Pins use canonical
+    /// capability ids and are only applied after the effective authorized
+    /// definitions have been fitted, so they can never grant authority.
+    pub fn decorate_with_policy_and_pins(
+        &self,
+        run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+        policy: Arc<CapabilitySurfacePolicy>,
+        profile_pins: Vec<CapabilityId>,
     ) -> Arc<dyn LoopCapabilityPort> {
         Arc::new(ToolDisclosureCapabilityPort {
             inner,
@@ -76,7 +108,9 @@ impl ToolDisclosureCapabilityDecorator {
             result_writer: Arc::clone(&self.result_writer),
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
-            allow_set,
+            mode: self.mode,
+            policy,
+            profile_pins,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -90,11 +124,15 @@ struct ToolDisclosureCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
-    /// #5712/#5659-w6: the caller's effective allow-set, resolved once in
-    /// `ToolDisclosureCapabilityDecorator::decorate_with_allow_set` — narrows disclosed
+    mode: crate::ToolDisclosureMode,
+    /// #5712/#5659-w6: the caller's effective policy, resolved once in
+    /// `ToolDisclosureCapabilityDecorator::decorate_with_policy` — narrows disclosed
     /// tool_search/tool_describe metadata *and* the tool_search bridge's own
     /// advertised description (the always-on catalog index).
-    allow_set: Arc<CapabilityAllowSet>,
+    policy: Arc<CapabilitySurfacePolicy>,
+    /// Reviewed visibility preferences from the run-profile owner. These are
+    /// not grants; catalog construction sees only authorized definitions.
+    profile_pins: Vec<CapabilityId>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -103,30 +141,18 @@ struct ToolDisclosureCapabilityPort {
 #[derive(Debug, Clone)]
 struct ToolDisclosureTurnState {
     turn_id: TurnId,
-    /// Fingerprint of the inner tool surface the catalog was built from. The
-    /// catalog is rebuilt when this changes so tools that become available
+    /// Fingerprint of the effective authorized tool surface and indexed
+    /// metadata. The catalog and search index are rebuilt when this changes so tools that become available
     /// mid-turn (an activated extension, a completed OAuth connect) enter the
     /// disclosure catalog and become discoverable/describable/callable — without
     /// it, `tool_describe`/`tool_call` report a just-activated tool as "unknown".
     definitions_fingerprint: u64,
     surface_version: Option<CapabilitySurfaceVersion>,
     catalog: CapabilityCatalog,
+    search_index: AuthorizedToolSearchIndex,
     active: ActiveSet,
     disclosed_names: BTreeSet<String>,
-}
-
-/// Cheap order-independent-of-content fingerprint of the visible tool surface,
-/// used to detect mid-turn changes (extension activation / OAuth connect) so the
-/// disclosure catalog can refresh. `tool_definitions()` is already name-sorted,
-/// so hashing count + names in order is deterministic.
-fn definitions_fingerprint(definitions: &[ProviderToolDefinition]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    definitions.len().hash(&mut hasher);
-    for definition in definitions {
-        definition.name.as_str().hash(&mut hasher);
-    }
-    hasher.finish()
+    search_ranks: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +179,103 @@ enum BridgeKind {
     /// directly and never stored as a bridge invocation), so it always errors
     /// recoverably.
     Call,
+}
+
+struct BoundedCountingWriter {
+    bytes_written: usize,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedCountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(next) = self.bytes_written.checked_add(buffer.len()) else {
+            return Err(std::io::Error::other(
+                "serialized schema exceeds byte limit",
+            ));
+        };
+        if next > self.limit {
+            return Err(std::io::Error::other(
+                "serialized schema exceeds byte limit",
+            ));
+        }
+        self.bytes_written = next;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_len_within(value: &Value, limit: usize) -> Option<usize> {
+    let mut writer = BoundedCountingWriter {
+        bytes_written: 0,
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value)
+        .ok()
+        .map(|()| writer.bytes_written)
+}
+
+fn bounded_search_output(
+    query: &str,
+    results: Vec<CatalogSearchResult>,
+    total_response_bytes: usize,
+    per_signature_bytes: usize,
+) -> Value {
+    let mut output_results = Vec::new();
+    for result in results {
+        let output = json!({
+            "name": result.name,
+            "capability_id": result.capability_id.as_str(),
+            "description": result.description,
+            "required": result.required_params,
+            "schema_complete": false,
+        });
+        let schema_fits = serialized_len_within(&result.parameters, per_signature_bytes).is_some();
+        if schema_fits {
+            let mut complete = output.clone();
+            complete["schema_complete"] = Value::Bool(true);
+            complete["parameters"] = result.parameters;
+            let mut candidate_results = output_results.clone();
+            candidate_results.push(complete.clone());
+            if serialized_len_within(
+                &json!({"query": query, "results": candidate_results}),
+                total_response_bytes,
+            )
+            .is_some()
+            {
+                output_results.push(complete);
+                continue;
+            }
+        }
+        let mut candidate_results = output_results.clone();
+        candidate_results.push(output.clone());
+        if serialized_len_within(
+            &json!({"query": query, "results": candidate_results}),
+            total_response_bytes,
+        )
+        .is_none()
+        {
+            break;
+        }
+        output_results.push(output);
+    }
+    json!({"query": query, "results": output_results})
+}
+
+fn compact_search_results(results: Vec<CatalogSearchResult>) -> Vec<Value> {
+    results
+        .into_iter()
+        .map(|result| {
+            json!({
+                "name": result.name,
+                "capability_id": result.capability_id.as_str(),
+                "description": result.description,
+                "required": result.required_params,
+            })
+        })
+        .collect()
 }
 
 impl BridgeKind {
@@ -197,13 +320,17 @@ impl PromotionScopeKey {
 
 #[async_trait]
 impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.inner.requires_ordered_batch_invocation()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let state = self.turn_state()?;
         let Some(state) = state.as_ref() else {
             return Ok(Vec::new());
         };
         let (effective_catalog_count, effective_catalog_schema_tokens) =
-            state.catalog.effective_metrics(&self.allow_set);
+            state.catalog.effective_metrics(&self.policy);
         // Live token savings = how much of the full (authorized) tool surface we
         // avoided advertising this turn. Lets a benchmark/live run report the
         // real reduction directly from one log line (the fixture benchmark can't,
@@ -455,12 +582,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
             .collect();
-        let mut state = self.turn_state()?;
+        let mut state = self.refresh_turn_state(&surface)?;
         let Some(state) = state.as_mut() else {
             surface.callable_capability_ids = Some(callable_capability_ids);
             return Ok(surface);
         };
-        state.surface_version = Some(surface.version.clone());
         let active_or_disclosed_descriptors = state
             .catalog
             .active_or_disclosed_descriptors(&state.active, &state.disclosed_names);
@@ -550,6 +676,25 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        // The executor clears this flag only for a planner-approved parallel
+        // batch. Preserve invocation order in the returned vector while
+        // allowing the read-only bridge futures to overlap.
+        if !request.stop_on_first_suspension {
+            let resolutions = join_all(
+                request
+                    .invocations
+                    .into_iter()
+                    .map(|invocation| self.invoke_capability(invocation)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+            return Ok(ResolutionBatch {
+                resolutions,
+                stopped_on_suspension: false,
+            });
+        }
+
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
@@ -574,14 +719,57 @@ impl ToolDisclosureCapabilityPort {
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
-        let mut guard = self.turn_state.lock().map_err(|e| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                format!("tool disclosure turn state lock is poisoned: {e}"),
-            )
-        })?;
+        let mut guard = self.lock_turn_state()?;
+        let stale_turn = guard
+            .as_ref()
+            .is_some_and(|state| state.turn_id != self.run_context.turn_id);
+        if stale_turn {
+            *guard = None;
+        }
+        Ok(guard)
+    }
+
+    fn refresh_turn_state(
+        &self,
+        surface: &VisibleCapabilitySurface,
+    ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
+        let guard = self.lock_turn_state()?;
+        let current_surface = guard.as_ref().is_some_and(|state| {
+            state.turn_id == self.run_context.turn_id
+                && state.surface_version.as_ref() == Some(&surface.version)
+        });
+        if current_surface {
+            return Ok(guard);
+        }
+        drop(guard);
+        let authorized_capability_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.clone())
+            .collect();
+        self.rebuild_turn_state(surface.version.clone(), authorized_capability_ids)
+    }
+
+    fn rebuild_turn_state(
+        &self,
+        surface_version: CapabilitySurfaceVersion,
+        authorized_capability_ids: BTreeSet<CapabilityId>,
+    ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
+        // The visible-surface version commits to full descriptor metadata,
+        // including schemas. Bridge calls reuse the state until the owning
+        // visible-capability refresh reports a new version. Definition retrieval
+        // and canonical schema hashing therefore happen only on a real refresh,
+        // and remain outside the state critical section.
         let definitions = self.inner.tool_definitions()?;
-        let fingerprint = definitions_fingerprint(&definitions);
+        let authorized_definitions: Vec<_> = definitions
+            .into_iter()
+            .filter(|definition| authorized_capability_ids.contains(&definition.capability_id))
+            .collect();
+        let fingerprint = definitions_fingerprint(&authorized_definitions);
+        let mut guard = self.lock_turn_state()?;
+        // Fit and cache retrieval only over the effective authorized corpus.
+        // Denied schemas therefore cannot affect IDF, ordering, counts, cache
+        // invalidation, or search-index construction work.
         let same_turn = guard
             .as_ref()
             .map(|state| state.turn_id == self.run_context.turn_id)
@@ -590,31 +778,60 @@ impl ToolDisclosureCapabilityPort {
             .as_ref()
             .map(|state| {
                 state.turn_id != self.run_context.turn_id
+                    || state.surface_version.as_ref() != Some(&surface_version)
                     || state.definitions_fingerprint != fingerprint
             })
             .unwrap_or(true);
         if rebuild {
-            let catalog = CapabilityCatalog::new(&definitions, &[]);
+            let index_started_at = std::time::Instant::now();
+            let effective_pins = if self.mode.includes_profile_pins() {
+                self.profile_pins.as_slice()
+            } else {
+                &[]
+            };
+            let catalog = CapabilityCatalog::new(&authorized_definitions, effective_pins);
+            let search_index = AuthorizedToolSearchIndex::new(authorized_definitions.iter());
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                authorized_document_count = authorized_definitions.len(),
+                index_build_micros = index_started_at.elapsed().as_micros(),
+                metadata_fingerprint = fingerprint,
+                "rebuilt authorized deferred-tool search index"
+            );
             let promoted = self.promoted_for_scope()?;
-            let active = select_active_set(&catalog, &promoted, self.caps, &self.allow_set);
+            let active =
+                select_active_set_for_mode(&catalog, &promoted, self.caps, &self.policy, self.mode);
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
-            let (surface_version, disclosed_names) = guard
+            let (disclosed_names, search_ranks) = guard
                 .take()
                 .filter(|_| same_turn)
-                .map(|state| (state.surface_version, state.disclosed_names))
-                .unwrap_or((None, BTreeSet::new()));
+                .map(|state| (state.disclosed_names, state.search_ranks))
+                .unwrap_or((BTreeSet::new(), BTreeMap::new()));
             *guard = Some(ToolDisclosureTurnState {
                 turn_id: self.run_context.turn_id,
                 definitions_fingerprint: fingerprint,
-                surface_version,
+                surface_version: Some(surface_version),
                 catalog,
+                search_index,
                 active,
                 disclosed_names,
+                search_ranks,
             });
         }
         Ok(guard)
+    }
+
+    fn lock_turn_state(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
+        self.turn_state.lock().map_err(|e| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("tool disclosure turn state lock is poisoned: {e}"),
+            )
+        })
     }
 
     fn promoted_for_scope(&self) -> Result<PromotedSet, AgentLoopHostError> {
@@ -629,7 +846,7 @@ impl ToolDisclosureCapabilityPort {
     }
 
     fn promote_target(&self, capability_id: &CapabilityId) -> Result<(), AgentLoopHostError> {
-        let name = {
+        let target = {
             let guard = self.turn_state()?;
             let Some(state) = guard.as_ref() else {
                 return Ok(());
@@ -637,11 +854,23 @@ impl ToolDisclosureCapabilityPort {
             state
                 .catalog
                 .definition_by_capability_id(capability_id)
-                .map(|definition| definition.name.to_string())
+                .map(|definition| {
+                    let name = definition.name.to_string();
+                    let selected_rank = state.search_ranks.get(&name).copied();
+                    (name, selected_rank)
+                })
         };
-        let Some(name) = name else {
+        let Some((name, selected_rank)) = target else {
             return Ok(());
         };
+        if let Some(selected_rank) = selected_rank {
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                selected_rank,
+                selection_action = "invoke",
+                "observed deferred-tool selection without logging tool or query metadata"
+            );
+        }
         let key = PromotionScopeKey::from_run_context(&self.run_context);
         let mut guard = self.promoted_by_scope.lock().map_err(|e| {
             AgentLoopHostError::new(
@@ -930,6 +1159,9 @@ impl ToolDisclosureCapabilityPort {
         if query.is_empty() {
             return Ok(failed_invalid_input("tool_search requires query"));
         }
+        if query.len() > MAX_SEARCH_QUERY_BYTES {
+            return Ok(failed_invalid_input("tool_search query is too long"));
+        }
         let limit = bridge
             .arguments
             .get("limit")
@@ -942,25 +1174,48 @@ impl ToolDisclosureCapabilityPort {
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let names = tool_search_rank(&state.catalog, query, limit, |id| {
-                self.allow_set.permits(id)
-            });
-            let mut results = Vec::new();
-            for name in names {
-                state.disclosed_names.insert(name.clone());
+            let search_started_at = std::time::Instant::now();
+            let outcome = state.search_index.search(query, limit);
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                query_class = outcome.query_class.as_str(),
+                empty_result = outcome.names.is_empty(),
+                returned_count = outcome.names.len(),
+                query_latency_micros = search_started_at.elapsed().as_micros(),
+                "ranked deferred-tool search without logging raw query or schemas"
+            );
+            let mut ranked_results = Vec::new();
+            for (index, name) in outcome.names.into_iter().enumerate() {
+                state
+                    .search_ranks
+                    .insert(name.clone(), index.saturating_add(1));
                 if let Some(result) = state.catalog.search_result(&name) {
-                    results.push(json!({
-                        "name": result.name,
-                        "capability_id": result.capability_id.as_str(),
-                        "description": result.description,
-                        "required": result.required_params,
-                    }));
+                    ranked_results.push(result);
                 }
             }
-            json!({
-                "query": query,
-                "results": results,
-            })
+            let output = if self.mode.includes_complete_signatures() {
+                bounded_search_output(
+                    query,
+                    ranked_results,
+                    MAX_SEARCH_RESPONSE_BYTES,
+                    MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT,
+                )
+            } else {
+                json!({
+                    "query": query,
+                    "results": compact_search_results(ranked_results),
+                })
+            };
+            if let Some(results) = output.get("results").and_then(Value::as_array) {
+                for result in results {
+                    if result.get("schema_complete").and_then(Value::as_bool) == Some(true)
+                        && let Some(name) = result.get("name").and_then(Value::as_str)
+                    {
+                        state.disclosed_names.insert(name.to_string());
+                    }
+                }
+            }
+            output
         };
         self.completed_bridge_result(request, output, "tool_search returned catalog matches")
             .await
@@ -989,8 +1244,16 @@ impl ToolDisclosureCapabilityPort {
             };
             // #5712: same message as a truly unknown name — a narrowed profile
             // must not learn that a non-allowlisted tool exists.
-            if !self.allow_set.permits(&result.capability_id) {
+            if !self.policy.permits_capability_id(&result.capability_id) {
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
+            }
+            if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
+                debug!(
+                    target: "ironclaw::reborn::tool_search",
+                    selected_rank,
+                    selection_action = "describe",
+                    "observed deferred-tool selection without logging tool or query metadata"
+                );
             }
             state.disclosed_names.insert(name.to_string());
             json!({
@@ -1114,8 +1377,8 @@ impl ToolDisclosureCapabilityPort {
         // by name, regardless of whether it has been advertised or discovered
         // this turn. A catalog-known but non-allowlisted target must follow the
         // same recoverable bridge path as a nonexistent target; otherwise this
-        // host-exempt bridge becomes an existence oracle before the outer
-        // capability-surface filter can deny the resolved capability id.
+        // synthetic bridge becomes an existence oracle for targets excluded
+        // from the filtered base surface.
         // A *direct* call to an undisclosed tool already resolves via
         // `direct_deferred_target`, so the `tool_call` bridge must not be
         // stricter than the direct path. Requiring prior disclosure here was a
@@ -1129,7 +1392,7 @@ impl ToolDisclosureCapabilityPort {
         let Some(definition) = self.catalog_target(state, name) else {
             return Ok(None);
         };
-        if !self.allow_set.permits(&definition.capability_id) {
+        if !self.policy.permits_capability_id(&definition.capability_id) {
             return Ok(None);
         }
         let target_call = self.target_call(tool_call, &definition, arguments);
@@ -1395,6 +1658,79 @@ mod tests {
         invocations: Mutex<Vec<LoopRequest>>,
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    struct MutableDefinitionsPort {
+        definitions: Mutex<Vec<ProviderToolDefinition>>,
+        surface_version: Mutex<CapabilitySurfaceVersion>,
+        visible_capability_ids: Option<BTreeSet<CapabilityId>>,
+        tool_definition_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[async_trait]
+    impl LoopCapabilityPort for MutableDefinitionsPort {
+        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+            self.tool_definition_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self
+                .definitions
+                .lock()
+                .expect("mutable definitions lock")
+                .clone())
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            let definitions = self
+                .definitions
+                .lock()
+                .expect("mutable definitions lock")
+                .clone();
+            Ok(VisibleCapabilitySurface {
+                version: self
+                    .surface_version
+                    .lock()
+                    .expect("mutable surface-version lock")
+                    .clone(),
+                descriptors: definitions
+                    .into_iter()
+                    .filter(|definition| {
+                        self.visible_capability_ids
+                            .as_ref()
+                            .is_none_or(|visible| visible.contains(&definition.capability_id))
+                    })
+                    .map(|definition| CapabilityDescriptorView {
+                        capability_id: definition.capability_id,
+                        provider: None,
+                        runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
+                        safe_name: definition.name.to_string(),
+                        safe_description: definition.description,
+                        description_trust: definition.description_trust,
+                        concurrency_hint: ConcurrencyHint::SafeForParallel,
+                        parameters_schema: definition.parameters,
+                    })
+                    .collect(),
+                callable_capability_ids: None,
+            })
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
+            unreachable!("turn-state rebuild test does not dispatch")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
+            unreachable!("turn-state rebuild test does not dispatch")
+        }
+    }
+
     #[async_trait]
     impl LoopCapabilityPort for SpyPort {
         fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -1543,6 +1879,141 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn same_turn_schema_refresh_rebuilds_index_and_preserves_progress() {
+        let inner = Arc::new(MutableDefinitionsPort {
+            definitions: Mutex::new(vec![provider_definition(
+                "fixture.lookup",
+                "fixture__lookup",
+                "Lookup records",
+            )]),
+            surface_version: Mutex::new(
+                CapabilitySurfaceVersion::new("surface:initial")
+                    .expect("valid initial surface version"),
+            ),
+            visible_capability_ids: None,
+            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("initial surface refresh");
+        let original_fingerprint = {
+            let mut guard = port.lock_turn_state().expect("initial turn state");
+            let state = guard.as_mut().expect("initial state exists");
+            state.disclosed_names.insert("fixture__lookup".to_string());
+            state.search_ranks.insert("fixture__lookup".to_string(), 2);
+            state.definitions_fingerprint
+        };
+        let reads_after_initial_refresh = inner
+            .tool_definition_reads
+            .load(std::sync::atomic::Ordering::Relaxed);
+        drop(port.turn_state().expect("cached turn state"));
+        drop(port.turn_state().expect("cached turn state again"));
+        assert_eq!(
+            inner
+                .tool_definition_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            reads_after_initial_refresh,
+            "unchanged same-turn bridge calls must not refetch or rehash definitions"
+        );
+        inner.definitions.lock().expect("mutable definitions lock")[0].parameters = json!({
+            "type": "object",
+            "properties": {"timezone": {"type": "string"}},
+            "required": ["timezone"],
+            "additionalProperties": false
+        });
+        *inner
+            .surface_version
+            .lock()
+            .expect("mutable surface-version lock") =
+            CapabilitySurfaceVersion::new("surface:refreshed")
+                .expect("valid refreshed surface version");
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("same-turn surface refresh");
+        let guard = port.lock_turn_state().expect("refreshed turn state");
+        let state = guard.as_ref().expect("refreshed state exists");
+        assert_ne!(state.definitions_fingerprint, original_fingerprint);
+        assert_eq!(
+            state.search_index.search("timezone", 1).names,
+            vec!["fixture__lookup"]
+        );
+        assert!(state.disclosed_names.contains("fixture__lookup"));
+        assert_eq!(state.search_ranks["fixture__lookup"], 2);
+    }
+
+    #[tokio::test]
+    async fn complete_policy_qualified_surface_limits_disclosure_catalog_and_search_index() {
+        let visible_ids: BTreeSet<_> = (0..6)
+            .map(|index| {
+                CapabilityId::new(format!("fixture.visible_{index}"))
+                    .expect("valid visible capability id")
+            })
+            .collect();
+        let mut definitions: Vec<_> = visible_ids
+            .iter()
+            .enumerate()
+            .map(|(index, capability_id)| {
+                provider_definition(
+                    capability_id.as_str(),
+                    &format!("visible_tool_{index}"),
+                    "Visible operation",
+                )
+            })
+            .collect();
+        definitions.push(provider_definition(
+            "fixture.policy_excluded",
+            "policy_excluded_tool",
+            "Forbidden runtime effect approval vocabulary",
+        ));
+        let inner = Arc::new(MutableDefinitionsPort {
+            definitions: Mutex::new(definitions),
+            surface_version: Mutex::new(
+                CapabilitySurfaceVersion::new("surface:complete-policy")
+                    .expect("valid surface version"),
+            ),
+            visible_capability_ids: Some(visible_ids),
+            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let port = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("complete policy-qualified surface builds turn state");
+
+        let guard = port.lock_turn_state().expect("turn state lock");
+        let state = guard.as_ref().expect("turn state exists");
+        assert!(
+            state
+                .catalog
+                .definition_by_capability_id(
+                    &CapabilityId::new("fixture.policy_excluded")
+                        .expect("valid excluded capability id")
+                )
+                .is_none(),
+            "a capability excluded by non-ID policy dimensions must not enter the disclosure catalog"
+        );
+        assert!(
+            state
+                .search_index
+                .search("forbidden runtime effect approval vocabulary", 5)
+                .names
+                .is_empty(),
+            "excluded capability metadata must not affect or appear in deferred-tool search"
+        );
+    }
+
     struct TestWriter;
 
     #[async_trait]
@@ -1559,6 +2030,111 @@ mod tests {
                 LoopResultRef::new(format!("result:{result_digest}")).expect("valid result ref"),
                 write.output.to_string().len() as u64,
             ))
+        }
+    }
+
+    struct BarrierWriter {
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for BarrierWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.barrier.wait().await;
+            TestWriter.write_capability_result(write).await
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingWriter {
+        outputs: Mutex<Vec<Value>>,
+    }
+
+    #[tokio::test]
+    async fn parallel_discovery_batch_overlaps_bridge_invocations() {
+        let definitions = (0..6)
+            .map(|index| {
+                provider_definition(
+                    &format!("fixture.lookup_{index}"),
+                    &format!("fixture__lookup_{index}"),
+                    "Lookup records",
+                )
+            })
+            .collect();
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:parallel-discovery")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port_with_writer(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(BarrierWriter {
+                barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            }),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface initializes the disclosure catalog");
+
+        let search = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_SEARCH_NAME,
+                json!({"query": "lookup", "limit": 2}),
+            )))
+            .await
+            .expect("search registers");
+        let describe = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_DESCRIBE_NAME,
+                json!({"name": "fixture__lookup_5"}),
+            )))
+            .await
+            .expect("describe registers");
+        let requests = [search, describe]
+            .into_iter()
+            .map(|candidate| LoopRequest {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .collect();
+
+        let batch = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            port.invoke_capability_batch(LoopRequestBatch {
+                invocations: requests,
+                stop_on_first_suspension: false,
+            }),
+        )
+        .await
+        .expect("parallel discovery calls must reach the writer concurrently")
+        .expect("parallel discovery batch succeeds");
+
+        assert_eq!(batch.resolutions.len(), 2);
+        assert!(!batch.stopped_on_suspension);
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for CapturingWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.outputs
+                .lock()
+                .expect("captured outputs lock")
+                .push(write.output.clone());
+            TestWriter.write_capability_result(write).await
         }
     }
 
@@ -1623,16 +2199,41 @@ mod tests {
         });
         let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
         let first_run_context = run_context(TurnId::new()).await;
-        let port = disclosure_port(
+        let writer = Arc::new(CapturingWriter::default());
+        let port = disclosure_port_with_writer(
             Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
             first_run_context,
             Arc::clone(&promoted_by_scope),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
         );
 
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .expect("visible surface");
+        let hint_of = |name: &str| {
+            surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.safe_name == name)
+                .unwrap_or_else(|| panic!("{name} descriptor on the deferred surface"))
+                .concurrency_hint
+        };
+        assert_eq!(
+            hint_of(TOOL_SEARCH_NAME),
+            ConcurrencyHint::SafeForParallel,
+            "tool_search is a side-effect-free catalog lookup"
+        );
+        assert_eq!(
+            hint_of(TOOL_DESCRIBE_NAME),
+            ConcurrencyHint::SafeForParallel,
+            "tool_describe is a side-effect-free schema lookup"
+        );
+        assert_eq!(
+            hint_of(TOOL_CALL_NAME),
+            ConcurrencyHint::Exclusive,
+            "an unresolved tool_call can target an arbitrary capability"
+        );
         assert!(
             !surface
                 .descriptors
@@ -1688,6 +2289,22 @@ mod tests {
             .await
             .expect("search invokes");
         assert!(matches!(search_outcome, Resolution::Done(ref o) if o.verdict.is_success()));
+        {
+            let outputs = writer.outputs.lock().expect("captured outputs lock");
+            assert_eq!(
+                outputs.len(),
+                1,
+                "complete search signature must not require a describe result"
+            );
+            let hidden_result = outputs[0]["results"]
+                .as_array()
+                .expect("search results")
+                .iter()
+                .find(|result| result["name"] == "hidden_tool")
+                .expect("hidden result");
+            assert_eq!(hidden_result["schema_complete"], true);
+            assert_eq!(hidden_result["parameters"]["required"], json!(["path"]));
+        }
 
         let disclosed_surface = port
             .visible_capabilities(VisibleCapabilityRequest)
@@ -1773,6 +2390,106 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name.as_str() == "hidden_tool"),
             "successful deferred tool_call should promote the target on the next turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_search_signature_falls_back_to_describe_before_dispatch() {
+        let mut hidden = provider_definition(
+            "fixture.hidden",
+            "hidden_tool",
+            "Hidden workspace operation",
+        );
+        hidden.parameters = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "x".repeat(9 * 1024)}},
+            "required": ["path"]
+        });
+        let mut definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            hidden,
+        ];
+        definitions.extend((1..=4).map(|index| {
+            provider_definition(
+                &format!("fixture.extra_{index}"),
+                &format!("extra_tool_{index}"),
+                "Extra operation",
+            )
+        }));
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let writer = Arc::new(CapturingWriter::default());
+        let port = disclosure_port_with_writer(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+
+        let search = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_SEARCH_NAME,
+                json!({"query": "hidden", "limit": 1}),
+            )))
+            .await
+            .expect("search registers");
+        port.invoke_capability(LoopRequest {
+            activity_id: search.activity_id,
+            surface_version: search.surface_version,
+            capability_id: search.capability_id,
+            input_ref: search.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("search invokes");
+
+        {
+            let outputs = writer.outputs.lock().expect("captured outputs lock");
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0]["results"][0]["schema_complete"], false);
+            assert!(outputs[0]["results"][0].get("parameters").is_none());
+        }
+
+        let describe_first = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": "{}"}),
+            )))
+            .await
+            .expect("invalid undisclosed call registers describe-first");
+        port.invoke_capability(LoopRequest {
+            activity_id: describe_first.activity_id,
+            surface_version: describe_first.surface_version,
+            capability_id: describe_first.capability_id,
+            input_ref: describe_first.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("describe-first invokes");
+        {
+            let outputs = writer.outputs.lock().expect("captured outputs lock");
+            assert_eq!(outputs.len(), 2, "incomplete signature auto-loads once");
+            assert_eq!(outputs[1]["status"], "schema_loaded");
+            assert_eq!(outputs[1]["name"], "hidden_tool");
+            assert!(outputs[1].get("parameters").is_some());
+        }
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "invalid call must not dispatch before its schema is visible"
         );
     }
 
@@ -3219,6 +3936,7 @@ mod tests {
             json!({"query": 42}),
             json!({"query": ""}),
             json!({"query": "   "}),
+            json!({"query": "x".repeat(MAX_SEARCH_QUERY_BYTES.saturating_add(1))}),
         ] {
             let candidate =
                 port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
@@ -3251,24 +3969,173 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bounded_search_signatures_respect_exact_and_overflow_budgets() {
+        let result = search_result_with_schema("alpha", json!({"type": "object"}));
+        let unlimited =
+            bounded_search_output("alpha", vec![result.clone()], usize::MAX, usize::MAX);
+        let response_bytes = serde_json::to_vec(&unlimited)
+            .expect("test response serializes")
+            .len();
+
+        let exact =
+            bounded_search_output("alpha", vec![result.clone()], response_bytes, usize::MAX);
+        assert_eq!(exact["results"][0]["schema_complete"], true);
+        assert_eq!(exact["results"][0]["parameters"], result.parameters);
+
+        let overflow = bounded_search_output(
+            "alpha",
+            vec![result],
+            response_bytes.saturating_sub(1),
+            usize::MAX,
+        );
+        assert_eq!(overflow["results"][0]["schema_complete"], false);
+        assert!(overflow["results"][0].get("parameters").is_none());
+    }
+
+    #[test]
+    fn bounded_schema_measurement_stops_at_the_limit() {
+        let schema = json!({"value": "x".repeat(1_000_000)});
+
+        assert_eq!(
+            serialized_len_within(&json!({"type": "object"}), 64),
+            Some(17)
+        );
+        assert_eq!(serialized_len_within(&schema, 8 * 1024), None);
+    }
+
+    #[test]
+    fn compact_control_arm_omits_signature_contract_fields() {
+        let results = compact_search_results(vec![search_result_with_schema(
+            "alpha",
+            json!({"type": "object"}),
+        )]);
+
+        assert!(results[0].get("parameters").is_none());
+        assert!(results[0].get("schema_complete").is_none());
+        assert_eq!(results[0]["name"], "alpha");
+    }
+
+    #[test]
+    fn bounded_search_signatures_preserve_rank_and_skip_oversized_schemas() {
+        let oversized = search_result_with_schema("first", json!({"value": "x".repeat(64)}));
+        let small = search_result_with_schema("second", json!({"type": "object"}));
+        let small_bytes = serde_json::to_vec(&small.parameters)
+            .expect("test schema serializes")
+            .len();
+        let results = bounded_search_output(
+            "query",
+            vec![oversized, small.clone()],
+            usize::MAX,
+            small_bytes,
+        );
+
+        assert_eq!(results["results"][0]["name"], "first");
+        assert_eq!(results["results"][0]["schema_complete"], false);
+        assert_eq!(results["results"][1]["name"], "second");
+        assert_eq!(results["results"][1]["schema_complete"], true);
+        assert_eq!(results["results"][1]["parameters"], small.parameters);
+    }
+
+    #[test]
+    fn bounded_search_signatures_are_deterministic_for_empty_and_multiple_results() {
+        assert_eq!(
+            bounded_search_output("query", Vec::new(), 100, 100)["results"],
+            json!([])
+        );
+        let first = search_result_with_schema("first", json!({"type": "object"}));
+        let second = search_result_with_schema("second", json!({"type": "string"}));
+        let total_bytes = [&first, &second]
+            .into_iter()
+            .map(|result| {
+                serde_json::to_vec(&result.parameters)
+                    .expect("test schema serializes")
+                    .len()
+            })
+            .sum();
+        let inputs = vec![first, second];
+        let complete = bounded_search_output("query", inputs.clone(), usize::MAX, total_bytes);
+        assert!(
+            complete["results"]
+                .as_array()
+                .expect("results array")
+                .iter()
+                .all(|result| result["schema_complete"] == true)
+        );
+        let first_only_bytes = serde_json::to_vec(&bounded_search_output(
+            "query",
+            vec![inputs[0].clone()],
+            usize::MAX,
+            total_bytes,
+        ))
+        .expect("first result serializes")
+        .len();
+        let overflow =
+            bounded_search_output("query", inputs.clone(), first_only_bytes, total_bytes);
+        assert_eq!(overflow["results"][0]["schema_complete"], true);
+        assert_eq!(overflow["results"].as_array().expect("results").len(), 1);
+
+        assert_eq!(
+            serde_json::to_vec(&bounded_search_output(
+                "query",
+                inputs.clone(),
+                usize::MAX,
+                usize::MAX
+            ))
+            .expect("first result serializes"),
+            serde_json::to_vec(&bounded_search_output(
+                "query",
+                inputs,
+                usize::MAX,
+                usize::MAX
+            ))
+            .expect("second result serializes")
+        );
+    }
+
+    fn search_result_with_schema(
+        name: &str,
+        parameters: Value,
+    ) -> crate::tool_disclosure::CatalogSearchResult {
+        crate::tool_disclosure::CatalogSearchResult {
+            name: name.to_string(),
+            capability_id: CapabilityId::new(format!("fixture.{name}"))
+                .expect("valid capability id"),
+            description: format!("{name} description"),
+            required_params: vec!["value".to_string()],
+            parameters,
+        }
+    }
+
     fn disclosure_port(
         inner: Arc<dyn LoopCapabilityPort>,
         run_context: LoopRunContext,
         promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     ) -> ToolDisclosureCapabilityPort {
+        disclosure_port_with_writer(inner, run_context, promoted_by_scope, Arc::new(TestWriter))
+    }
+
+    fn disclosure_port_with_writer(
+        inner: Arc<dyn LoopCapabilityPort>,
+        run_context: LoopRunContext,
+        promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    ) -> ToolDisclosureCapabilityPort {
         ToolDisclosureCapabilityPort {
             inner,
             run_context,
-            result_writer: Arc::new(TestWriter),
+            result_writer,
             promoted_by_scope,
             caps: DisclosureCaps {
                 max_tokens: u32::MAX,
                 max_tools: 5,
                 ctx_limit: None,
             },
+            mode: crate::ToolDisclosureMode::Bridged,
             // Unnarrowed — unit tests here exercise disclosure mechanics, not
             // profile narrowing (that's the integration tier).
-            allow_set: Arc::new(CapabilityAllowSet::All),
+            policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
+            profile_pins: Vec::new(),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

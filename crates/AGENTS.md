@@ -18,8 +18,8 @@ those commands before trusting it in a later month.
 3. **`crates/<family>/<crate>/README.md`** — what the crate is, when you want
    it, when you want a different one. Every crate has one.
 4. **Crate working rules** — `crates/<family>/<crate>/AGENTS.md` where the
-   crate has rules beyond orientation, and the module spec (`CLAUDE.md` or
-   `CONTRACT.md`) for crates in the root `CLAUDE.md` Module Specs table. Code
+   crate has rules beyond orientation, and the module spec (`CONTRACT.md`)
+   for crates in the root `AGENTS.md` Module Specs table. Code
    follows spec; spec is the tiebreaker.
 5. **Cross-crate behavior** — `docs/reborn/contracts/*.md` (source-of-truth
    contracts) and `docs/reborn/target-architecture/` (the design record:
@@ -35,7 +35,7 @@ Do not eagerly load every crate guide. Route, then read.
 | [`contracts/`](./contracts/AGENTS.md) | Neutral vocabulary and ports — the leaf tier; nothing executes, persists, or names a vendor. | You are adding or changing a shared type, identity, port trait, or DTO that more than one tier must see. |
 | [`substrates/`](./substrates/AGENTS.md) | Privileged mechanisms the kernel mediates: filesystem, libSQL admission, secrets, network, safety scanning, observability macros. | You are changing storage/network/secret/scanning *mechanism*, not who may use it. |
 | [`events/`](./events/AGENTS.md) | What already happened: redacted evidence vocabulary, durable stores, replay-derived projections, admission-checked streams. | You are changing event vocabulary, event persistence, a read model, or stream delivery. |
-| [`domains/`](./domains/AGENTS.md) | Typed record/service owners behind the kernel: threads, conversations, triggers, memory, skills, auth, attachments, extractors, identity, llm, trace_commons, outbound. | You are changing a domain's record grammar, service contract, or invariants. |
+| [`domains/`](./domains/AGENTS.md) | Typed record/service owners behind the kernel: threads, conversations, triggers, memory, skills, auth, attachments, extractors, identity, llm, trace_commons, outbound, web_push. | You are changing a domain's record grammar, service contract, or invariants. |
 | [`kernel/`](./kernel/AGENTS.md) | The authority perimeter, one crate per mediation stage: trust → authorization → approvals → resources → runtime_policy → capabilities → processes → turns → host_runtime. | You are changing what is *allowed to happen* or how recovery stays safe. |
 | [`lanes/`](./lanes/AGENTS.md) | Execution for already-authorized work: wasm, wasm_limiter, mcp, sandbox. | You are changing how an approved invocation physically runs. |
 | [`loop/`](./loop/AGENTS.md) | Replaceable agent behavior and its hosting: agent_loop, loop_host, turn_runner, hooks. | You are changing what the agent decides next, or the drivers/port adapters that host it. |
@@ -62,11 +62,11 @@ its own layer or below (dev-dependencies are outside the matrix):
 | Layer (low → high) | May depend on | Crates today |
 | --- | --- | --- |
 | `contracts` | contracts | 6 |
-| `substrates` | contracts, substrates | 27 |
+| `substrates` | contracts, substrates | 28 |
 | `runtimes` | + runtimes | 5 |
 | `kernel` | + kernel | 9 |
 | `loops` | + loops | 5 |
-| `products` | + products | 7 |
+| `products` | + products | 8 |
 | `app` | + app (everything) | 5 |
 
 The standing-exception list (`LAYER_MATRIX_EXCEPTIONS`, same file) is
@@ -81,7 +81,7 @@ two do not always rhyme:
 - `lanes/` crates are `runtimes`-layer; `loop/` crates are `loops`-layer.
 - `extensions/` is deliberately *vertical*: registry = substrates, support =
   runtimes, host = loops, manager = products; under `packages/`, the channel
-  adapter crates (slack, telegram) are products and the memory provider
+  adapter crates (slack, telegram, web-push) are products and the memory provider
   crates (memory-native, mem0) are substrates.
 - Two placement surprises: `product/ironclaw_host_ingress` and
   `app/ironclaw_config` are `substrates`-layer.
@@ -92,7 +92,7 @@ files carry their members' exact layers.
 
 ## Workspace facts
 
-**64 packages**: 62 under `crates/`, plus the root package
+**66 packages**: 64 under `crates/`, plus the root package
 `ironclaw_integration_tests` (the in-process Reborn integration suite,
 `tests/integration/`) and `tools/ironclaw_stress`. One documented exclusion:
 `tools/ironclaw_silk_decoder`, a standalone helper that is
@@ -100,11 +100,12 @@ workspace-`exclude`d. Zero crates sit flat under `crates/` and zero owned
 placement exceptions remain. The gate is
 `python3 scripts/ci/check-target-tree.py`, which compares the workspace
 against the documented tree (PROPOSAL §5); on 2026-08-05 it reports:
-`target tree: OK (64 workspace members against 64 documented packages, 1
-documented exclusion(s), 0 owned exception(s))`.
+`target tree: OK (66 workspace members against 66 documented packages, 1
+documented exclusion(s), 0 owned exception(s))` (re-derived 2026-08-08 with the
+web-push channel's two crates).
 
-Under `crates/extensions/packages/`, 14 package directories: 4 are workspace
-crates (`slack`, `telegram`, `memory-native`, `mem0`) and 10 are data-only
+Under `crates/extensions/packages/`, 15 package directories: 5 are workspace
+crates (`slack`, `telegram`, `web-push`, `memory-native`, `mem0`) and 10 are data-only
 (manifest + prompts/schemas, some with prebuilt WASM): github, gmail, the
 five google-*, nearai-mcp, notion-mcp, web-access. Every package directory —
 data-only ones included — carries its own `README.md`, so the read order
@@ -137,13 +138,12 @@ Run the architecture suite whenever dependency edges, layer keys, crate
 placement, or test-pinned guidance files change. Run the E2E script when
 turns, runtime lanes, host services, authorization, approvals, networking,
 secrets, ProductSurface behavior, or capability dispatch change. The full
-workspace gate (`cargo fmt`, workspace clippy, `cargo test`,
-`--features integration`) is the root `CLAUDE.md`'s; test tiers and the
-regression rules are `.claude/rules/testing.md`.
+workspace gate (`cargo fmt`, workspace clippy, `cargo test`) is the root
+`AGENTS.md`'s; test tiers and the regression rules are
+`.claude/rules/testing.md`.
 
-> **Do not reach for `scripts/check-boundaries.sh`.** Measured 2026-08-05: it
-> fails on a clean tree (its check 5 grep false-positives on live test files)
-> and checks 1/2/3/6 target the deleted v1 `src/` tree, passing vacuously.
+> The legacy `check-boundaries.sh` script is deleted (measured 2026-08-05: it
+> failed on a clean tree and its v1-targeted checks passed vacuously).
 > Boundary enforcement for `crates/` is the architecture suite above.
 
 ## Cross-family change routes
@@ -165,7 +165,7 @@ worth naming here because they cross most families:
 | `crates/<family>/AGENTS.md` | Family boundary + crate table (one per family) |
 | `crates/<family>/<crate>/README.md` | Crate orientation (one per crate) |
 | `crates/<family>/<crate>/AGENTS.md` | Crate working rules (only where needed) |
-| Crate `CLAUDE.md` / `CONTRACT.md` | Module spec — the tiebreaker over code |
+| Crate `CONTRACT.md` | Module spec — the tiebreaker over code |
 | `docs/reborn/contracts/*.md` | Cross-crate behavior contracts |
 | `docs/reborn/target-architecture/` | Design record; guidance links it, never forks it |
 | `openwiki/` | Generated prose wiki — never hand-edit |
@@ -173,6 +173,6 @@ worth naming here because they cross most families:
 One canonical home per fact. Where two documents disagree, the code and its
 gates win, and both documents get a dated correction
 (`docs/reborn/guidance-conventions.md`). Some guidance files are pinned by
-tests — before editing one, run
-`rg -l '<file>' crates/app/ironclaw_architecture_tests/tests` and the owning
-suite.
+tests or read by CI classifiers — before editing one, run
+`rg -l '<file>' crates/app/ironclaw_architecture_tests/tests scripts/ci` and
+the owning suite.

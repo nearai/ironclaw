@@ -10,10 +10,10 @@ pub use ironclaw_product_contracts::operator_llm::{
     RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
 };
 pub use llm_admin::{
-    LlmKeyStore, LlmKeyStoreError, LlmReloadTrigger, ProviderActiveModelReader,
-    ProviderProbeOutcome, ProviderRepo, ProviderRepoError, RebornLlmConfigService,
-    RebornLlmReloadAdapter, RebornProviderAdmin, RebornProviderAdminError, RebornProviderFactory,
-    ResolvedRebornLlm, apply_stored_api_key, nearai_login_callback_mount,
+    FilesystemModelSelectionPolicyStore, LlmKeyStore, LlmKeyStoreError, LlmReloadTrigger,
+    ProviderActiveModelReader, ProviderProbeOutcome, ProviderRepo, ProviderRepoError,
+    RebornLlmConfigService, RebornLlmReloadAdapter, RebornProviderAdmin, RebornProviderAdminError,
+    RebornProviderFactory, ResolvedRebornLlm, apply_stored_api_key, nearai_login_callback_mount,
     resolve_reborn_runtime_llm,
 };
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};

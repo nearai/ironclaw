@@ -11,12 +11,31 @@ use super::{
     same_lineage_scope, validate_tree_root,
 };
 use crate::{
-    ClaimedProcess, JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointRecord,
-    ProcessCheckpointRef, ProcessControlResult, ProcessFailureRecovery, ProcessInputRecord,
-    ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessKind,
+    ClaimedProcess, JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointKind,
+    ProcessCheckpointRecord, ProcessCheckpointRef, ProcessControlResult, ProcessFailureRecovery,
+    ProcessInputRecord, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessKind,
     ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessTreeReservation,
     RecoverExpiredProcessLeasesResponse, types::same_scope_owner,
 };
+
+/// Point a process at a new resume checkpoint.
+///
+/// Only a `RecordCheckpoint` command knows a checkpoint's kind, so any other
+/// mutation that repoints the reference drops the kind rather than carry a stale
+/// one forward. A mutation restating the reference the snapshot already holds
+/// keeps the kind it was recorded with. An unknown kind is treated as
+/// side-effecting by [`ProcessJournalMaterializedState::apply_recover_expired`],
+/// so dropping it fails closed.
+fn adopt_checkpoint_ref(
+    snapshot: &mut JournaledProcessSnapshot,
+    checkpoint_ref: Option<ProcessCheckpointRef>,
+) {
+    if checkpoint_ref.is_none() || checkpoint_ref == snapshot.checkpoint_ref {
+        return;
+    }
+    snapshot.checkpoint_ref = checkpoint_ref;
+    snapshot.checkpoint_kind = None;
+}
 
 const MAX_IDEMPOTENCY_RECORDS: usize = 4096;
 /// Maximum number of crash-recovery claims allowed before a checkpointless
@@ -222,7 +241,10 @@ impl ProcessJournalMaterializedState {
                 now,
                 lease_duration_millis,
             } => self.apply_heartbeat(request, now, Duration::from_millis(lease_duration_millis)),
-            StoredProcessCommand::RecoverExpired(request) => self.apply_recover_expired(request),
+            StoredProcessCommand::RecoverExpired {
+                request,
+                lease_duration_millis,
+            } => self.apply_recover_expired(request, Duration::from_millis(lease_duration_millis)),
             StoredProcessCommand::LeasedTransition { request, mutation } => {
                 self.apply_leased_transition(request, mutation)
             }
@@ -337,6 +359,9 @@ impl ProcessJournalMaterializedState {
             status: ProcessLifecycleStatus::Queued,
             suspension: None,
             checkpoint_ref: request.checkpoint_ref,
+            // A submission that carries a checkpoint reference records the
+            // checkpoint itself in the same command, which is what sets the kind.
+            checkpoint_kind: None,
             input_ref: input.as_ref().map(|input| input.input_ref.clone()),
             failure: None,
             journal_cursor: cursor,
@@ -489,6 +514,7 @@ impl ProcessJournalMaterializedState {
     fn apply_recover_expired(
         &mut self,
         request: crate::RecoverExpiredProcessLeasesRequest,
+        lease_duration: Duration,
     ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
         let expired = self.expired_process_ids(
             request.scope_filter.as_ref(),
@@ -497,36 +523,72 @@ impl ProcessJournalMaterializedState {
         );
         let mut recovered = Vec::new();
         for process_id in expired {
+            if self.requeue_awaits_grace(process_id, request.now, lease_duration)? {
+                continue;
+            }
             let cursor = self.next_cursor();
             let snapshot = self.process_mut(process_id)?;
             let claim_count = snapshot.lease.as_ref().map_or(0, |lease| lease.claim_count);
-            let (status, kind, failure) = if snapshot.status
-                == ProcessLifecycleStatus::CancelRequested
-            {
-                (
-                    ProcessLifecycleStatus::Cancelled,
-                    ProcessJournalKind::Cancelled,
-                    None,
-                )
-            } else if snapshot.checkpoint_ref.is_none() && claim_count < MAX_CRASH_RECOVERY_RECLAIMS
-            {
-                (
-                    ProcessLifecycleStatus::Queued,
-                    ProcessJournalKind::Resumed,
-                    None,
-                )
-            } else {
-                let category = if snapshot.checkpoint_ref.is_some() {
-                    "lease_expired"
+            let resumable_checkpoint = snapshot
+                .checkpoint_kind
+                .is_some_and(|kind| !kind.replays_side_effect());
+            let reclaimable = snapshot.checkpoint_ref.is_none() || resumable_checkpoint;
+            let (status, kind, failure) =
+                if snapshot.status == ProcessLifecycleStatus::CancelRequested {
+                    (
+                        ProcessLifecycleStatus::Cancelled,
+                        ProcessJournalKind::Cancelled,
+                        None,
+                    )
+                } else if reclaimable && claim_count < MAX_CRASH_RECOVERY_RECLAIMS {
+                    // Requeuing here does not ask whether the old executor is
+                    // alive. Two windows bound how long it could still have been
+                    // heartbeating: `budget * (heartbeat interval + heartbeat
+                    // timeout) <= lease TTL`, enforced by the turn scheduler
+                    // capping both the interval and the budget against the TTL,
+                    // plus one further full TTL of grace before this branch runs,
+                    // enforced by [`Self::requeue_awaits_grace`].
+                    //
+                    // That is half the guarantee, and it proves only that the
+                    // old worker has stopped *heartbeating* — not that it has
+                    // given the run up. Time-based fencing can never be total: a
+                    // worker whose heartbeat loop died or was starved while its
+                    // main task stayed blocked in a model or capability call
+                    // (the Postgres pool-starvation shape) can wake after the
+                    // grace window and still try to write.
+                    //
+                    // The other half, equally necessary, is that such a worker
+                    // discovers it lost the run at its next lease-fenced write:
+                    // run transitions carry the lease token and `ensure_lease`
+                    // refuses them, and transcript finalization asks the journal
+                    // for the claimed run's lease before appending
+                    // (`ironclaw_loop_host`'s `ThreadBackedLoopTranscriptPort`
+                    // fence, wired by the turn runner's loop-driver host).
+                    // Neither half alone is sufficient — the write-seam fence is
+                    // the missing half of this branch's safety, not optional
+                    // hardening. Regression:
+                    // `run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed`
+                    // in `tests/integration/lease_wedge.rs`.
+                    //
+                    // The journal is the only authority on ownership; do not add
+                    // a runtime liveness probe.
+                    (
+                        ProcessLifecycleStatus::Queued,
+                        ProcessJournalKind::Resumed,
+                        None,
+                    )
                 } else {
-                    "crash_retry_exhausted"
+                    let category = if snapshot.checkpoint_ref.is_some() {
+                        "lease_expired"
+                    } else {
+                        "crash_retry_exhausted"
+                    };
+                    (
+                        ProcessLifecycleStatus::Failed,
+                        ProcessJournalKind::Failed,
+                        Some(SanitizedFailure::from_trusted_static(category)),
+                    )
                 };
-                (
-                    ProcessLifecycleStatus::Failed,
-                    ProcessJournalKind::Failed,
-                    Some(SanitizedFailure::from_trusted_static(category)),
-                )
-            };
             snapshot.status = status;
             snapshot.lease = None;
             if status == ProcessLifecycleStatus::Queued {
@@ -541,6 +603,57 @@ impl ProcessJournalMaterializedState {
         Ok(StoredCommandOutcome::Recovered(
             RecoverExpiredProcessLeasesResponse { recovered },
         ))
+    }
+
+    /// Whether a checkpointed process that recovery would requeue must be left
+    /// alone for now because its lease expired too recently.
+    ///
+    /// Requeuing a checkpointed process re-enters work a worker may still be
+    /// executing — the lease expired because heartbeats stopped arriving, which a
+    /// starved-but-live worker and a dead worker both look like. Waiting one full
+    /// lease TTL past expiry before reclaiming fences the live case: a worker that
+    /// is still running would have renewed the lease inside that window, and one
+    /// that has not is not coming back. A later sweep picks the process up.
+    ///
+    /// This applies only to the checkpointed-requeue branch. Cancellation and the
+    /// checkpointless requeue keep their immediate timing: neither re-enters
+    /// committed work.
+    fn requeue_awaits_grace(
+        &self,
+        process_id: ProcessId,
+        now: ironclaw_host_api::Timestamp,
+        lease_duration: Duration,
+    ) -> Result<bool, ProcessJournalStoreError> {
+        let snapshot = self
+            .processes
+            .get(&process_id)
+            .ok_or(ProcessJournalStoreError::UnknownProcess { process_id })?;
+        if snapshot.status == ProcessLifecycleStatus::CancelRequested
+            || snapshot.checkpoint_ref.is_none()
+        {
+            return Ok(false);
+        }
+        if snapshot
+            .checkpoint_kind
+            .is_none_or(ProcessCheckpointKind::replays_side_effect)
+        {
+            return Ok(false);
+        }
+        let Some(expires_at) = snapshot
+            .lease
+            .as_ref()
+            .and_then(|lease| lease.lease_expires_at)
+        else {
+            return Ok(false);
+        };
+        let Ok(grace) = chrono::Duration::from_std(lease_duration) else {
+            // A lease duration this large cannot bound a grace window, and the
+            // same conversion already left such a lease without an expiry, so
+            // this process should not have been reported expired. Hold it rather
+            // than reclaim on an unbounded window.
+            return Ok(true);
+        };
+        Ok(now < expires_at + grace)
     }
 
     fn apply_leased_transition(
@@ -583,9 +696,7 @@ impl ProcessJournalMaterializedState {
         ensure_transition(snapshot, mutation.status)?;
         snapshot.status = mutation.status;
         snapshot.suspension = mutation.suspension;
-        if mutation.checkpoint_ref.is_some() {
-            snapshot.checkpoint_ref = mutation.checkpoint_ref;
-        }
+        adopt_checkpoint_ref(snapshot, mutation.checkpoint_ref);
         snapshot.failure = mutation.failure;
         if let Some(metadata) = mutation.metadata {
             snapshot.metadata = metadata;
@@ -683,9 +794,7 @@ impl ProcessJournalMaterializedState {
         let snapshot = self.process_mut(mutation.process_id)?;
         snapshot.status = status;
         snapshot.suspension = None;
-        if mutation.checkpoint_ref.is_some() {
-            snapshot.checkpoint_ref = mutation.checkpoint_ref;
-        }
+        adopt_checkpoint_ref(snapshot, mutation.checkpoint_ref);
         if let Some(metadata) = mutation.metadata {
             snapshot.metadata = metadata;
         }
@@ -957,9 +1066,11 @@ impl ProcessJournalMaterializedState {
         self.checkpoints
             .insert(request.checkpoint_id.clone(), record.clone());
         if link_to_process {
-            self.process_mut(request.process_id)?.checkpoint_ref = Some(
-                ProcessCheckpointRef::from_trusted(request.checkpoint_id.as_str().to_string()),
-            );
+            let snapshot = self.process_mut(request.process_id)?;
+            snapshot.checkpoint_ref = Some(ProcessCheckpointRef::from_trusted(
+                request.checkpoint_id.as_str().to_string(),
+            ));
+            snapshot.checkpoint_kind = request.kind;
         }
         Ok(StoredCommandOutcome::Checkpointed(record))
     }
