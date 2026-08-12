@@ -37,21 +37,21 @@ ironclaw serve
 
 <Step title="通过 HTTPS 暴露本地实例（仅本地安装需要）">
 
-如果您的实例已有公网 HTTPS 地址，请跳过此步。否则需要在实例前架设隧道。最省心的稳定方案是 ngrok 配合每个账号可免费领取的静态域名（控制台 → **Domains**）：
+如果您的实例已有公网 HTTPS 地址，请跳过此步。否则需要在实例前架设隧道。最省心的方案是 ngrok —— 免费账号会自动获得一个开发域名（名称由系统分配，可在控制台和 agent 输出中看到）：
 
 ```bash
 brew install ngrok                          # 或参见 ngrok.com/download
 ngrok config add-authtoken <your-token>     # 令牌来自 dashboard.ngrok.com
-ngrok http --domain=<your-name>.ngrok-free.app 3000
+ngrok http 3000
 ```
 
-请使用 IronClaw 实际监听的端口 —— 未修改 `listen_port` 时为 `3000`。下一步要填写的 Webhook URL 即为：
+请使用 IronClaw 实际监听的端口 —— 未修改 `listen_port` 时为 `3000`。复制 ngrok 输出的 HTTPS 地址（形如 `https://<assigned-name>.ngrok-free.app`），拼接 Webhook 路径，即为下一步要填写的 Webhook URL：
 
 ```
-https://<your-name>.ngrok-free.app/webhooks/extensions/telegram/updates
+https://<assigned-name>.ngrok-free.app/webhooks/extensions/telegram/updates
 ```
 
-静态域名在 ngrok 重启后保持不变。如果您使用主机名会变化的隧道（随机的 `trycloudflare.com` 快速隧道、未配静态域名的 ngrok），每次重启后需要更新 **Public webhook URL** 字段并重新保存 —— 保存后会自动向 Telegram 重新注册 Webhook。
+如果隧道的主机名发生变化（随机的 `trycloudflare.com` 快速隧道，或更换了保留域名），需要更新 **Public webhook URL** 字段并重新保存 —— 保存后会自动向 Telegram 重新注册 Webhook。ngrok 付费套餐可通过 `ngrok http --url=https://<your-domain> 3000` 固定保留域名。
 
 <Note>
 其他选择：已使用 Tailscale 的话，`tailscale funnel 3000` 可提供稳定的 `https://<machine>.<tailnet>.ts.net` 地址；`cloudflared tunnel --url http://localhost:3000` 无需注册，适合快速测试（每次启动主机名随机）。注意隧道会暴露整个 IronClaw 实例，而不仅是 Webhook 路径 —— WebUI 仍需访问令牌，Telegram 路由也会拒绝缺少 Webhook 密钥的调用，但请勿将主机名扩散给不必要的人。

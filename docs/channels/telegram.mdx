@@ -47,26 +47,28 @@ ironclaw serve
 <Step title="Expose a local instance over HTTPS (local installations only)">
 
 Skip this step if your instance already has a public HTTPS address. Otherwise, put a
-tunnel in front of it. The easiest stable setup is ngrok with the free static domain
-every ngrok account can claim (dashboard → **Domains**):
+tunnel in front of it. The easiest setup is ngrok — free accounts get one
+automatically assigned development domain (you don't pick the name; it's shown in the
+dashboard and in the agent's output):
 
 ```bash
 brew install ngrok                          # or see ngrok.com/download
 ngrok config add-authtoken <your-token>     # token from dashboard.ngrok.com
-ngrok http --domain=<your-name>.ngrok-free.app 3000
+ngrok http 3000
 ```
 
-Use the port IronClaw listens on — `3000` unless you changed `listen_port`. Your
-webhook URL for the next step is then:
+Use the port IronClaw listens on — `3000` unless you changed `listen_port`. Copy the
+HTTPS address ngrok prints (something like `https://<assigned-name>.ngrok-free.app`)
+and append the webhook path — that's your webhook URL for the next step:
 
 ```
-https://<your-name>.ngrok-free.app/webhooks/extensions/telegram/updates
+https://<assigned-name>.ngrok-free.app/webhooks/extensions/telegram/updates
 ```
 
-Because the domain is static, the URL survives ngrok restarts. If you use a tunnel
-whose hostname changes (a random `trycloudflare.com` quick tunnel, ngrok without a
-static domain), you'll need to update the **Public webhook URL** field and save again
-after each restart — saving re-registers the webhook with Telegram automatically.
+If your tunnel's hostname ever changes (a random `trycloudflare.com` quick tunnel, or
+a reserved domain you move to), update the **Public webhook URL** field and save again
+— saving re-registers the webhook with Telegram automatically. Paid ngrok plans can
+pin a reserved domain with `ngrok http --url=https://<your-domain> 3000`.
 
 <Note>
 Alternatives: `tailscale funnel 3000` gives a stable `https://<machine>.<tailnet>.ts.net`

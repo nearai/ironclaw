@@ -198,6 +198,12 @@ test("configuration group renders generic operator fields and no lifecycle actio
   assert.match(html, /Fixture credentials/);
   assert.match(html, /Client secret/);
   assert.match(html, /Issued in the fixture console under App credentials\./);
+  // The described field's input points at the description paragraph so
+  // assistive technology reads the guidance with the control.
+  assert.match(html, /aria-describedby="fixture\.shared-fixture_secret-description"/);
+  assert.match(html, /<p id="fixture\.shared-fixture_secret-description"/);
+  // A field without a description carries no dangling aria reference.
+  assert.doesNotMatch(html, /aria-describedby="fixture\.shared-public_name-description"/);
   assert.match(html, /Configured\. Leave blank to keep/);
   assert.match(html, /value="fixture-bot"/);
   assert.doesNotMatch(html, /Set automatically by the provider/);
