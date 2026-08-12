@@ -1,8 +1,9 @@
 use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
-use ironclaw_loop_contracts::LoopRunContext;
+use ironclaw_loop_contracts::{CompactionInitiator, LoopRunContext};
 
 use super::compaction::{
-    CompactionDecision, CompactionStrategy, DefaultCompactionStrategy, is_eligible_user_boundary,
+    CompactionDecision, CompactionStrategy, DefaultCompactionStrategy,
+    eligible_window_eviction_boundary, is_eligible_user_boundary,
 };
 
 /// Compaction policy for Reborn runs that must preserve the live active task.
@@ -49,6 +50,18 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
         }
 
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
+        if state.compaction_state.force_compact_initiator
+            == Some(CompactionInitiator::WindowEviction)
+        {
+            let preserve_from_sequence = latest_additional_user_sequence(state);
+            return eligible_window_eviction_boundary(
+                state,
+                prompt_fingerprint,
+                preserve_from_sequence,
+            )
+            .map(|sequence| self.base.trigger_at(state, sequence))
+            .unwrap_or(CompactionDecision::Skip);
+        }
         active_task_preserving_user_boundary(
             state,
             prompt_fingerprint,
@@ -59,6 +72,20 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
         .map(|sequence| self.base.trigger_at(state, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
+}
+
+fn latest_additional_user_sequence(state: &LoopExecutionState) -> Option<u64> {
+    let mut user_entries = state
+        .compaction_prompt
+        .message_index
+        .iter()
+        .rev()
+        .filter(|entry| entry.kind == IndexedMessageKind::User);
+    let latest_user = user_entries.next()?;
+    // The accepted task is re-pinned by the context port after compaction. A
+    // second user entry is a later follow-up or steering instruction and has
+    // no equivalent pin, so the cut point must remain strictly before it.
+    user_entries.next().map(|_| latest_user.sequence)
 }
 
 fn active_task_preserving_user_boundary(
@@ -250,6 +277,100 @@ mod tests {
                 effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
                     tokens: 90
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn window_eviction_bypasses_active_task_tail_thresholds_at_safe_tool_result() {
+        let context = crate::test_support::test_run_context("active-task-window-eviction");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_state.force_compact_initiator = Some(CompactionInitiator::WindowEviction);
+        state.compaction_state.window_eviction =
+            Some(ironclaw_loop_contracts::LoopContextWindowTruncation {
+                omitted_through_sequence: 2,
+                omitted_through_kind:
+                    ironclaw_loop_contracts::LoopContextCompactionKind::ToolResult,
+            });
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 129,
+                kind: IndexedMessageKind::ToolResult,
+                estimated_tokens: 10,
+            },
+        ]);
+        let strategy = ActiveTaskPreservingCompactionStrategy::from(DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(128_000, 20_000, 0),
+            preserve_tail_tokens: 8_000,
+            deadline_ms: 7,
+        });
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 129,
+                preserve_tail_tokens: 8_000,
+                deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 20 },
+            }
+        );
+    }
+
+    #[test]
+    fn window_eviction_keeps_latest_steering_user_outside_compacted_prefix() {
+        let context = crate::test_support::test_run_context("active-task-window-steering");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_state.force_compact_initiator = Some(CompactionInitiator::WindowEviction);
+        state.compaction_state.window_eviction =
+            Some(ironclaw_loop_contracts::LoopContextWindowTruncation {
+                omitted_through_sequence: 2,
+                omitted_through_kind:
+                    ironclaw_loop_contracts::LoopContextCompactionKind::ToolResult,
+            });
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 129,
+                kind: IndexedMessageKind::ToolResult,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 130,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 131,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+        ]);
+        let strategy = ActiveTaskPreservingCompactionStrategy::from(DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(128_000, 20_000, 0),
+            preserve_tail_tokens: 8_000,
+            deadline_ms: 7,
+        });
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 129,
+                preserve_tail_tokens: 8_000,
+                deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 40 },
             }
         );
     }

@@ -16,3 +16,6 @@ resolver:
   auto_resolve:
     enabled: true
     max_runs: 10
+
+tester:
+  network_access: true
