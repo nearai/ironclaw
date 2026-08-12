@@ -51,7 +51,11 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // initial route, and prevents model-authored `data-workspace-path` metadata
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
 // retains about 1.2 KB of explicit headroom without weakening the feature.
-// Two changes then landed on the merged tree, each adding a little to /chat:
+// The inspector shell then brought current `main` to 216.9 KB gzip. The SSE
+// reconnect coordinator adds ~0.4 KB of deterministic retry/backpressure logic
+// to the eager chat transport path, where it must be available before the first
+// stream opens. Two more changes then landed on the merged tree, each adding a
+// little to /chat:
 //  - Web Push notifications added ~13 `automations.notificationChannels.webPush.*`
 //    keys + a reworded `noSelectionHelper` to the eager `en.ts` fallback pack.
 //    Eager code was kept OUT of /chat: `registerServiceWorker` is in the
@@ -60,7 +64,9 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //  - The shared native file-picker interaction (#7337) replaced three
 //    route-local impls; Vite emits its ~0.3 KB gzip helper as a shared chunk
 //    (Chat/Settings/Extensions all consume it).
-// Re-measured on the MERGED tree with `vite build` + this check.
+// Re-measured on the MERGED tree with `vite build` + this check. `main`
+// concurrently re-measured 217.7 KB gzip after its own changes (#7480, #7284
+// et al.); both deltas are in the measurement below.
 // The Telegram device-link card then added a multi-step link flow to /chat.
 // Everything deferrable was deferred FIRST, and measured at each step:
 //  - `auth-device-link-card.tsx` and the `device-link-panel` /
@@ -84,9 +90,9 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //  - ~31 `deviceLink.*` keys in `en.ts`, which `i18n.tsx` loads eagerly as the
 //    fallback pack on every page. Measured at 0.5 KB gzip; the other ten
 //    locale packs stay lazy per-locale imports and cost nothing here.
-// Measured /chat closure is 219.5 KB gzip; 221.0 KB retains about 1.5 KB of
-// explicit headroom.
-const CHAT_GZIP_BUDGET = 221_000;
+// Measured /chat closure on the merged tree is 220.4 KB gzip; 222.0 KB
+// retains about 1.6 KB of explicit headroom.
+const CHAT_GZIP_BUDGET = 222_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

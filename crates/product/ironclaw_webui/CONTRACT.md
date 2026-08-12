@@ -146,7 +146,7 @@ candidate module.
 | `admin-config` | Per-extension admin configuration: read, replace, idempotency, and its failure projections | Extension lifecycle — that is `extensions` | `ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES`, `require_operator_webui_config`, `ExtensionAdminConfigurationPath`, `ExtensionAdminConfigurationValue`, `ReplaceExtensionAdminConfigurationBody`, `ReplaceExtensionAdminConfigurationInput`, `list_extension_admin_configuration`, `replace_extension_admin_configuration`, `query_extension_admin_configuration`, `select_extension_admin_configuration_group`, `admin_configuration_activity_id`, `admin_configuration_conflict`, `admin_configuration_unavailable`, `admin_configuration_forbidden`, `admin_configuration_done_failure`, `admin_configuration_blocked` |
 | `dispatch` | The shared `ProductSurface` call shapes every other owner goes through: invoke/query/page helpers, the generic activity-id derivation, and idempotency/client-action-id validation | A route-specific decision — those belong to the owner that made them | `CLIENT_ACTION_ID_MAX_BYTES`, `product_surface_input`, `invoke_product_capability`, `invoke_product_capability_with_activity_id`, `invoke_product_command`, `product_capability_activity_id`, `product_surface_activity_id`, `query_product_view`, `query_product_page`, `decode_product_outbound_events`, `validate_idempotency_key`, `parse_client_action_id` |
 | `operator` | The operator console: first-run setup, tool settings, operator config keys, diagnostics, status, logs, and service lifecycle | LLM provider administration — that is `llm-admin` | `SETTINGS_TOOLS_AUTO_APPROVE_KEY`, `SETTINGS_TOOL_CONFIG_PREFIX`, `SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES`, `get_operator_setup`, `query_operator_setup_response`, `run_operator_setup`, `list_settings_tools`, `SettingsToolsAutoApproveRequest`, `set_settings_tools_auto_approve`, `SettingsToolPermissionPath`, `SettingsToolPermissionRequest`, `set_settings_tool_permission`, `validate_settings_tool_capability_id`, `validate_settings_tool_config_response`, `list_operator_config`, `OperatorConfigKeyPath`, `OPERATOR_CONFIG_KEY_MAX_BYTES`, `OPERATOR_CONFIG_RESERVED_VALIDATE_KEY`, `validate_operator_config_key`, `operator_config_key_error`, `query_operator_config_key_response`, `get_operator_config_key`, `set_operator_config_key`, `reject_reserved_operator_config_key`, `validate_operator_config`, `get_operator_diagnostics`, `get_operator_status`, `query_operator_logs`, `query_logs`, `run_operator_service_lifecycle` |
-| `llm-admin` | LLM provider administration and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
+| `llm-admin` | LLM provider administration, tenant user-model policy/catalog, and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_user_model_catalog`, `query_user_model_catalog`, `set_user_model_policy`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
 | `run-artifact` | Run and thread artifact reads — already its own file, the one seam plan #5985 has taken so far | Anything not artifact-shaped | `handlers/run_artifact.rs::RunArtifactPath`, `handlers/run_artifact.rs::ThreadArtifactPath`, `handlers/run_artifact.rs::AdminThreadScrapeListQuery`, `handlers/run_artifact.rs::AdminThreadScrapeThreadPath`, `handlers/run_artifact.rs::AdminThreadScrapeRunPath`, `handlers/run_artifact.rs::query_single`, `handlers/run_artifact.rs::get_run_artifact`, `handlers/run_artifact.rs::get_thread_artifact`, `handlers/run_artifact.rs::admin_list_thread_scrape_threads`, `handlers/run_artifact.rs::admin_get_thread_scrape_artifact`, `handlers/run_artifact.rs::admin_get_thread_scrape_run_artifact` |
 
 Three placement calls worth stating, because each is an item whose *name*
@@ -249,12 +249,19 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
-  `Last-Event-ID`, abort, and retry/backoff over `fetch`/`ReadableStream`. The
-  bearer is sent in the `Authorization` header rather than the request URL. A
-  bounded, random `connection_id` remains stable for one browser tab across SPA
-  mounts and document reloads, while `connection_generation` increments for
-  every package-managed request. Fresh top-level navigations use a new identity
-  even when a duplicated tab copied `sessionStorage`. A same-caller, same-id
+  `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
+  IronClaw owns one reconnect coordinator across transport failures, stream
+  endings, activity stalls, visibility recovery, and network recovery. It uses
+  jittered 1/2/4/8/16/30-second backoff and honors `Retry-After`. A valid
+  application frame starts the stability interval, and backoff resets only if
+  that stream remains open for the full 15 seconds; HTTP headers and the
+  immediate admission keep-alive alone do not reset it. The
+  bearer is sent in the `Authorization` header rather than
+  the request URL. A bounded, random `connection_id` remains stable for one
+  browser tab across SPA mounts and document reloads, while
+  `connection_generation` increments for every package-managed request. Fresh
+  top-level navigations use a new identity even when a duplicated tab copied
+  `sessionStorage`. A same-caller, same-id
   stream supersedes its prior generation without consuming another slot; a
   delayed older generation receives `204` and cannot cancel the current stream.
   This prevents proxy-reordered closes/opens during thread navigation or reload

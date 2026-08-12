@@ -22,7 +22,7 @@ use crate::{
     strategies::ReplyAdmissionOutcome,
 };
 
-use super::{AgentLoopExecutorError, ExecutorStage, StageContext};
+use super::{AgentLoopExecutorError, ExecutorStage, StageContext, scheduled_trigger_run};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ReplyAdmissionStage;
@@ -62,12 +62,20 @@ impl ExecutorStage<ReplyAdmissionInput> for ReplyAdmissionStage {
         input: ReplyAdmissionInput,
     ) -> Result<ReplyAdmissionStep, AgentLoopExecutorError> {
         let mut state = input.state;
-        match ctx
-            .planner
-            .reply_admission()
-            .admit_reply(&state, &input.reply)
-            .await
+        // Scheduled runs must retain an empty candidate as transcript evidence
+        // so completion handling can classify it as a typed invalid-output
+        // failure. Interactive runs keep the default admission behavior and
+        // reject empty replies before they become user-visible.
+        let admission = if scheduled_trigger_run(ctx.host) && input.reply.content.trim().is_empty()
         {
+            ReplyAdmissionOutcome::AcceptFinal
+        } else {
+            ctx.planner
+                .reply_admission()
+                .admit_reply(&state, &input.reply)
+                .await
+        };
+        match admission {
             ReplyAdmissionOutcome::AcceptFinal => {
                 // A real final reply supersedes any earlier rejected candidate.
                 // Clear the pending control state so the next turn starts clean.

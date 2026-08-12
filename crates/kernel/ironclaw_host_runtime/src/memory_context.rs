@@ -7,7 +7,7 @@
 //! invocation, and owns the ENTIRE prompt-safety pipeline for whatever comes
 //! back: the [`ExpectedScope`] cross-scope drop filter, control-stripping +
 //! truncation + the untrusted-memory envelope, the per-snippet and aggregate
-//! model-visible byte budgets, the loop prompt-content denylist, and
+//! model-visible byte budgets, deterministic credential redaction, and
 //! empty-on-error lane degradation. Providers return raw snippets and never
 //! shape model-visible content — the host is the sole constructor of admitted
 //! loop-context snippets.
@@ -24,8 +24,8 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopSafeSummary,
-    MemoryPromptContextRequest, MemoryPromptContextService, memory_snippet_display_ref,
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, MemoryPromptContextRequest,
+    MemoryPromptContextService, memory_snippet_display_ref,
 };
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
@@ -33,6 +33,7 @@ use ironclaw_memory::{
     memory_context_disabled,
 };
 use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_with_limit};
+use ironclaw_safety::redact_model_input_text;
 
 /// Aggregate model-visible byte budget across all admitted snippets in one turn.
 /// This combined ceiling is the one budget that must see both lanes, so it stays
@@ -147,7 +148,7 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             let Some(loop_snippet) = to_loop_context_snippet(snippet) else {
                 continue;
             };
-            let snippet_bytes = loop_snippet.safe_summary.len();
+            let snippet_bytes = loop_snippet.model_content.len();
             if total_bytes.saturating_add(snippet_bytes) > MAX_MEMORY_CONTEXT_TOTAL_BYTES {
                 break;
             }
@@ -237,8 +238,8 @@ fn sanitize_context_snippet(
 /// wrapped result fits the per-snippet budget, then wrap in the untrusted-memory
 /// envelope (which also rejects instruction-hijack markers). Re-wrapping is
 /// unconditional, so text that already begins with the untrusted prefix is wrapped
-/// again rather than trusted. The model-prompt content denylist is applied by
-/// [`to_loop_context_snippet`] as a separate prompt-layer policy.
+/// again rather than trusted. Credential values are redacted before truncation
+/// so the admitted model-visible envelope is both bounded and secret-free.
 fn sanitize_snippet_text(raw: &str) -> Option<String> {
     const PROBE_BODY: &str = "x";
     let probe = wrap_untrusted_with_limit(
@@ -255,9 +256,10 @@ fn sanitize_snippet_text(raw: &str) -> Option<String> {
     if cleaned.is_empty() {
         return None;
     }
+    let redacted = redact_model_input_text(cleaned).into_text();
 
     let max_payload_bytes = MAX_MEMORY_CONTEXT_SNIPPET_BYTES.saturating_sub(prefix_len);
-    let truncated = truncate_to_char_boundary(cleaned, max_payload_bytes);
+    let truncated = truncate_to_char_boundary(&redacted, max_payload_bytes);
     if truncated.is_empty() {
         return None;
     }
@@ -289,10 +291,9 @@ fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
 /// untrusted-enveloped) and scope-checked by the host pipeline above. This step
 /// adds the two host concerns that depend on loop-layer types: it builds the
 /// model-visible `memory-snippet:*` reference from the scope/path components,
-/// and runs the loop's prompt-content denylist ([`LoopSafeSummary`]) as a
-/// DROP-filter — a prompt-layer policy applied to all model context — so a
-/// memory doc carrying a denylisted secret/path is skipped here rather than
-/// failing the instruction bundle at render time.
+/// and constructs an untrusted memory snippet through the loop contract's
+/// structural prompt validation. Credential values were already redacted by
+/// [`sanitize_snippet_text`], while surrounding prose and paths remain useful.
 fn to_loop_context_snippet(snippet: MemoryServiceContextSnippet) -> Option<LoopContextSnippet> {
     let snippet_ref = memory_snippet_display_ref([
         snippet.tenant_id.as_str(),
@@ -301,16 +302,7 @@ fn to_loop_context_snippet(snippet: MemoryServiceContextSnippet) -> Option<LoopC
         snippet.project_id.as_deref().unwrap_or(""),
         snippet.relative_path.as_str(),
     ]);
-    let safe = LoopSafeSummary::new(snippet.text)
-        .ok()?
-        .as_str()
-        .to_string();
-    Some(LoopContextSnippet {
-        snippet_ref,
-        safe_summary: safe.clone(),
-        model_content: safe,
-        metadata: None,
-    })
+    LoopContextSnippet::from_untrusted_memory(snippet_ref, snippet.text).ok()
 }
 
 fn invocation_for_context_request(request: &MemoryPromptContextRequest) -> MemoryInvocation {
@@ -352,7 +344,7 @@ fn map_memory_service_error(error: MemoryServiceError) -> AgentLoopHostError {
 mod tests {
     //! Host-side pipeline unit tests: per-snippet sanitization (control-strip /
     //! truncate / envelope), the `ExpectedScope` cross-scope drop filter, the
-    //! loop prompt-denylist drop-filter, and the model-visible reference.
+    //! credential redaction, structural prompt validation, and the reference.
     //! End-to-end admission coverage through the caller lives in
     //! `tests/memory_prompt_context.rs`.
 
@@ -489,10 +481,10 @@ mod tests {
         assert!(sanitize_context_snippet(&expected("tenant-a", "user-x"), in_scope).is_some());
     }
 
-    // --- to_loop_context_snippet: loop denylist drop-filter + reference ---
+    // --- to_loop_context_snippet: structural validation + reference ---
 
     /// Benign content is mapped onto a loop snippet with a stable `memory-snippet:*`
-    /// reference and identical safe-summary / model-content.
+    /// reference and a fixed metadata-only safe summary.
     #[test]
     fn maps_benign_snippet_with_reference() {
         let mapped =
@@ -503,25 +495,34 @@ mod tests {
             mapped.snippet_ref,
             memory_snippet_display_ref(["tenant-a", "user-x", "", "", "notes/alpha.md"])
         );
-        assert_eq!(mapped.safe_summary, mapped.model_content);
-        assert!(mapped.safe_summary.contains("ordinary planning note"));
+        assert_eq!(mapped.safe_summary, "memory context snippet");
+        assert!(mapped.model_content.contains("ordinary planning note"));
     }
 
-    /// A snippet carrying a filesystem path is dropped by the loop denylist
-    /// (rather than erroring the bundle later at render time).
+    /// Filesystem paths are useful recovery context and are not credentials.
     #[test]
-    fn drops_snippet_with_path_delimiters() {
-        assert!(to_loop_context_snippet(snippet("/etc/passwd")).is_none());
+    fn keeps_snippet_with_path_delimiters() {
+        assert!(to_loop_context_snippet(snippet("/etc/passwd")).is_some());
     }
 
-    /// A snippet mentioning a secret marker is dropped by the loop denylist.
+    /// A snippet carrying a credential value keeps its useful context while the
+    /// value is removed from the model-facing view.
     #[test]
-    fn drops_snippet_with_sensitive_marker() {
-        assert!(to_loop_context_snippet(snippet("the api key is exposed")).is_none());
+    fn redacts_snippet_with_credential_value() {
+        let mapped = sanitize_context_snippet(
+            &expected("tenant-a", "user-x"),
+            snippet("backup failed; password was hunter2; retry from /srv/archive"),
+        )
+        .and_then(to_loop_context_snippet)
+        .expect("credential-bearing memory must remain usable");
+
+        assert!(!mapped.model_content.contains("hunter2"));
+        assert!(mapped.model_content.contains("[REDACTED_SECRET]"));
+        assert!(mapped.model_content.contains("/srv/archive"));
     }
 
-    /// The denylist must not false-positive on benign substrings ("impact"
-    /// contains "pa" but is not "passwd").
+    /// Benign substrings remain usable ("impact" contains "pa" but is not
+    /// a labeled credential value).
     #[test]
     fn keeps_snippet_with_benign_marker_substring() {
         assert!(to_loop_context_snippet(snippet("impact assessment notes")).is_some());

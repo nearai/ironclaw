@@ -84,6 +84,8 @@ pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
 pub const WEBUI_V2_ROUTE_SET_ACTIVE_LLM: &str = "webui.v2.set_active_llm";
+pub const WEBUI_V2_ROUTE_GET_USER_MODEL_CATALOG: &str = "webui.v2.get_user_model_catalog";
+pub const WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY: &str = "webui.v2.set_user_model_policy";
 pub const WEBUI_V2_ROUTE_TEST_LLM_CONNECTION: &str = "webui.v2.test_llm_connection";
 pub const WEBUI_V2_ROUTE_LIST_LLM_MODELS: &str = "webui.v2.list_llm_models";
 pub const WEBUI_V2_ROUTE_START_NEARAI_LOGIN: &str = "webui.v2.start_nearai_login";
@@ -219,6 +221,8 @@ pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/prov
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
     "/api/webchat/v2/llm/providers/{provider_id}/delete";
 pub const WEBUI_V2_PATTERN_SET_ACTIVE_LLM: &str = "/api/webchat/v2/llm/active";
+pub const WEBUI_V2_PATTERN_USER_MODEL_CATALOG: &str = "/api/webchat/v2/llm/models";
+pub const WEBUI_V2_PATTERN_USER_MODEL_POLICY: &str = "/api/webchat/v2/llm/model-policy";
 pub const WEBUI_V2_PATTERN_TEST_LLM_CONNECTION: &str = "/api/webchat/v2/llm/test-connection";
 pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-models";
 pub const WEBUI_V2_PATTERN_START_NEARAI_LOGIN: &str = "/api/webchat/v2/llm/nearai/login";
@@ -352,6 +356,8 @@ pub fn webui_v2_routes_with_artifact_flags(
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
         set_active_llm_descriptor(),
+        get_user_model_catalog_descriptor(),
+        set_user_model_policy_descriptor(),
         test_llm_connection_descriptor(),
         list_llm_models_descriptor(),
         start_nearai_login_descriptor(),
@@ -420,6 +426,7 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER
             | WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER
             | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
+            | WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY
             | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
             | WEBUI_V2_ROUTE_LIST_LLM_MODELS
             | WEBUI_V2_ROUTE_START_NEARAI_LOGIN
@@ -1600,6 +1607,34 @@ fn set_active_llm_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn get_user_model_catalog_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_USER_MODEL_CATALOG,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_user_model_policy_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_USER_MODEL_POLICY,
+        mutation_policy(
+            body_limit_kib(64),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
 fn test_llm_connection_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
@@ -2013,18 +2048,15 @@ fn stream_rate_limit() -> RateLimitPolicy {
     // request-rate window here is just for burst protection against
     // reconnect storms.
     //
-    // Set to 30/60s — the SSE route additionally accepts `?token=…`
-    // because `EventSource` can't set headers, which leaks the
-    // bearer into browser history, server access logs, and proxy
-    // logs. Keeping the request rate higher than necessary widens
-    // the replay surface for a logged token, so the budget is capped
-    // at 2x a worst-case exponential-backoff reconnect cycle (≈ 1,
-    // 2, 4, 8, 16, 32s per minute = 6 opens) rather than parity with
-    // the mutation budget. The WS route doesn't carry the same
-    // URL-token risk (headers + `WebSocketOriginPolicy::SameOriginRequired`),
-    // but the lower limit costs it nothing — the same reconnect-storm
-    // math applies, the same concurrency cap is the real load gate,
-    // and using one helper for both keeps the descriptors aligned.
+    // Set to 30/60s. The SPA's one-owner reconnect policy opens at most
+    // seven streams per minute for one continuously failing tab (1, 2, 4,
+    // 8, 16, then 30-second bounded backoff). Three legitimate tabs therefore
+    // stay below this budget with headroom for reload and network transitions.
+    // The route also retains the `?token=…` compatibility escape hatch, so a
+    // materially higher budget would widen the replay surface for a token
+    // captured from browser history or proxy logs. The concurrency cap remains
+    // the primary bound on healthy long-lived streams; this request-rate window
+    // bounds churn from broken or hostile clients.
     rate_limit_per_caller(30, 60)
 }
 

@@ -107,7 +107,8 @@ reviews:
         keep ironclaw_hooks_postgres / ironclaw_hooks_libsql in parity via hooks_parity).
         Multi-step DB operations must be wrapped in a transaction. Driver types
         (tokio_postgres::, libsql::) must not leak outside the allowed modules
-        (scripts/check-boundaries.sh).
+        (enforced by reborn_persistence_driver_boundary in
+        crates/app/ironclaw_architecture_tests).
     - path: "**/*.wit"
       instructions: |
         Hand-written WIT contracts define the trusted/untrusted WASM ABI. Interface changes

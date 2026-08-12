@@ -1,6 +1,6 @@
 //! System-prompt content owned by the loop tier.
 //!
-//! These four assets are the *content* half of the default system prompt. They
+//! These five assets are the *content* half of the default system prompt. They
 //! live here — beside the other `prompts/*.md` assets this crate ships and
 //! beside [`identity_context`](crate::identity_context), whose
 //! `HostIdentityContextSource` is what puts them in front of a model — rather
@@ -53,6 +53,15 @@ pub const SELF_KNOWLEDGE_PROTOCOL_PROMPT: &str = include_str!("../prompts/self_k
 /// question no one will ever answer.
 pub const BENCHMARKING_MODE_PROTOCOL_PROMPT: &str = include_str!("../prompts/benchmarking_mode.md");
 
+/// Appended only to runs with trusted scheduled-trigger origin.
+///
+/// Scheduled runs have no human available to answer the base prompt's
+/// clarifying questions. This protocol tells the model to execute the stored
+/// request with bounded assumptions while preserving host approval,
+/// authentication, authorization, and policy gates.
+pub const SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT: &str =
+    include_str!("../prompts/scheduled_trigger_mode.md");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,12 +79,16 @@ mod tests {
             ),
             ("self_knowledge.md", SELF_KNOWLEDGE_PROTOCOL_PROMPT),
             ("benchmarking_mode.md", BENCHMARKING_MODE_PROTOCOL_PROMPT),
+            (
+                "scheduled_trigger_mode.md",
+                SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
+            ),
         ] {
             assert!(!content.trim().is_empty(), "{name} must not be empty");
         }
     }
 
-    /// The three *appended* protocols are concatenated after the user's file,
+    /// The four *appended* protocols are concatenated after the user's file,
     /// separated by a blank line; each must open with a markdown heading so it
     /// reads as its own section rather than running into the previous
     /// paragraph. The base prompt is a whole document and is exempt.
@@ -88,6 +101,10 @@ mod tests {
             ),
             ("self_knowledge.md", SELF_KNOWLEDGE_PROTOCOL_PROMPT),
             ("benchmarking_mode.md", BENCHMARKING_MODE_PROTOCOL_PROMPT),
+            (
+                "scheduled_trigger_mode.md",
+                SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
+            ),
         ] {
             assert!(
                 content.starts_with('#'),
@@ -98,7 +115,7 @@ mod tests {
         }
     }
 
-    /// The three appended protocols are distinct sections — a copy/paste that
+    /// The four appended protocols are distinct sections — a copy/paste that
     /// duplicated one would silently double a section in the resolved prompt.
     #[test]
     fn appended_protocol_assets_are_distinct() {
@@ -106,6 +123,7 @@ mod tests {
             TOOL_DISCLOSURE_PROTOCOL_PROMPT,
             SELF_KNOWLEDGE_PROTOCOL_PROMPT,
             BENCHMARKING_MODE_PROTOCOL_PROMPT,
+            SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
         ];
         for (i, left) in appended.iter().enumerate() {
             for right in appended.iter().skip(i + 1) {

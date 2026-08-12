@@ -196,6 +196,11 @@ def real_owner_metadata() -> dict:
             "ironclaw_slack_extension",
             "crates/extensions/packages/slack/Cargo.toml",
         ),
+        # Not an asset owner: the crate `DOCKER_RUNTIME_CONFIG_OWNERS` routes
+        # the shipped container configs to, through the same real manifest
+        # paths, so that table is exercised against a real package directory
+        # too.
+        package("ironclaw", "crates/app/ironclaw_cli/Cargo.toml"),
     ]
     return {
         "workspace_members": [entry["id"] for entry in packages],
@@ -1481,16 +1486,72 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertNotEqual(plan["crate_buckets"], [])
 
+    def test_shipped_container_configs_select_their_parsing_test(self) -> None:
+        """`docker/reborn/config*.toml` is read by a Reborn Rust lane.
+
+        `ironclaw_cli`'s `smoke` test parses both shipped configs through
+        `RebornConfigFile::parse_text` and asserts on the result, so a change to
+        one must select that test — not be waved through as prose, which would
+        under-select the only lane that catches a broken production config.
+        Unclassified until #7471 (2026-08-11), where the fail-closed arm failed
+        `Detect Reborn test scope` and cascaded into `Tests (Reborn)`.
+        """
+        owner = "crates/app/ironclaw_cli/tests/smoke.rs"
+        # Pin the owner to the actual caller-level behavior rather than the
+        # file's existence: both container-config path literals must reach
+        # `RebornConfigFile::parse_text` inside `smoke.rs`.
+        smoke_source = (ROOT / owner).read_text(encoding="utf-8")
+        for path in (
+            "docker/reborn/config.toml",
+            "docker/reborn/config.production.toml",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    path,
+                    smoke_source,
+                    f"{owner} must read the shipped container config {path}",
+                )
+        self.assertIn(
+            "RebornConfigFile::parse_text",
+            smoke_source,
+            f"{owner} must parse the shipped container configs through "
+            "RebornConfigFile::parse_text",
+        )
+        for path in (
+            "docker/reborn/config.toml",
+            "docker/reborn/config.production.toml",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan_real_owners([path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertEqual(plan["changed_packages"], ["ironclaw"])
+                self.assertIn(
+                    f"shipped container config parsed by {owner}: {path}",
+                    plan["reasons"],
+                )
+                exact_targets = [
+                    target
+                    for bucket in plan["crate_buckets"]
+                    for target in bucket.get("exact_targets", [])
+                ]
+                self.assertIn(
+                    {"package": "ironclaw", "kind": "test", "name": "smoke"},
+                    exact_targets,
+                )
+
     def test_sibling_container_inputs_still_require_a_decision(self) -> None:
-        """The entrypoint is decided; its neighbours are not.
+        """The entrypoint and configs are decided; their neighbours are not.
 
         `docker/` is classified per-file for the same reason repo-root
-        `scripts/` is: a blanket prefix would silently absorb the runtime
-        configs, which have no owning lane yet. Keep the fail-closed arm proven
-        for the paths nobody has decided.
+        `scripts/` is: a blanket prefix would silently absorb paths with no
+        owning lane. Keep the fail-closed arm proven for the ones nobody has
+        decided — the hosted-single-tenant configs are read only by
+        `tests/dockerfile_runtime_home.rs`, which `_root_test_partitions()` does
+        not inventory, so no lane can be selected for them.
         """
         for path in (
-            "docker/reborn/config.production.toml",
+            "docker/reborn/config.hosted-single-tenant.toml",
+            "docker/reborn/config.hosted-single-tenant-volume.toml",
             "docker/process-sandbox-entrypoint.sh",
         ):
             with self.subTest(path=path):
