@@ -737,7 +737,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // truncation-watermark DTO carried across the existing context and
         // prompt contracts. Window selection and task-pinning behavior remain
         // in ironclaw_threads and ironclaw_loop_host.
-        ("ironclaw_loop_contracts", 13_316),
+        // 13_316 -> 13_324 (2026-08-11, #7484 eviction compaction): typed
+        // tool-result compaction metadata plus window-eviction initiator/mode
+        // variants. Cut-point policy and execution remain in agent_loop and
+        // loop_host. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_324),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -763,7 +767,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // thread, carried through the wire contract), net of the ephemeral-per-ping
         // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
         // retired). Declaration only. Count read from failure.
-        ("ironclaw_product_contracts", 15_909),
+        // Raised 15_909 -> 16_024 by #7419 (tenant model allowlist): the
+        // growth is limited to the policy persistence port, user-safe DTOs,
+        // and transport-consumed descriptors; validation, storage, and request
+        // enforcement stay in owning crates.
+        ("ironclaw_product_contracts", 16_024),
         ("ironclaw_prompt_envelope", 832),
     ];
 

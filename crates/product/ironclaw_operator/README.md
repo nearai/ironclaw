@@ -26,6 +26,7 @@ Implementations of the operator-service ports declared in
 | Port (contracts module) | Implemented here by |
 | --- | --- |
 | `LlmConfigService` (`operator_llm`) | `llm_admin::llm_config_service::RebornLlmConfigService` |
+| `ModelSelectionPolicyStore` (`operator_llm`) | `llm_admin::model_selection_policy_store::FilesystemModelSelectionPolicyStore` |
 | `ActiveModelReader` (`operator_llm`) | `llm_admin::active_model::ProviderActiveModelReader` |
 | `OperatorLogsService` (`operator_service`) | `operator_logs::OperatorLogBuffer` |
 | `OperatorServiceLifecycleService` (`operator_service`) | `operator_service_lifecycle::OperatorServiceLifecycle` |

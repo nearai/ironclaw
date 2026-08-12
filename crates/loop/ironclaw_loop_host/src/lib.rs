@@ -2978,7 +2978,21 @@ where
         return Ok(context);
     };
     if context.messages.len() >= max_messages {
-        let displaced = context.messages.remove(0);
+        let mut displaced = context.messages.remove(0);
+        // The pinned task consumes one recent-window slot. If that slot is the
+        // assistant half of a durable assistant/tool-result exchange, evict
+        // the adjacent finalized result as well. This keeps the newest omitted
+        // boundary exact while making it safe for window-eviction compaction;
+        // retaining an orphaned result would also give the model an incomplete
+        // exchange.
+        if displaced.kind == MessageKind::Assistant
+            && context
+                .messages
+                .first()
+                .is_some_and(|message| message.kind == MessageKind::ToolResultReference)
+        {
+            displaced = context.messages.remove(0);
+        }
         if context
             .recent_window_truncation
             .as_ref()
@@ -3145,11 +3159,12 @@ fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
     match kind {
         MessageKind::User => LoopContextCompactionKind::User,
         MessageKind::Assistant => LoopContextCompactionKind::Assistant,
+        MessageKind::ToolResultReference => LoopContextCompactionKind::ToolResult,
         MessageKind::System => LoopContextCompactionKind::System,
         MessageKind::Summary => LoopContextCompactionKind::Summary,
-        MessageKind::CheckpointReference
-        | MessageKind::ToolResultReference
-        | MessageKind::CapabilityDisplayPreview => LoopContextCompactionKind::Other,
+        MessageKind::CheckpointReference | MessageKind::CapabilityDisplayPreview => {
+            LoopContextCompactionKind::Other
+        }
     }
 }
 
