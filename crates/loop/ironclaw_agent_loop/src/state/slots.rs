@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_loop_contracts::CompactionInitiator;
+use ironclaw_loop_contracts::{CompactionInitiator, LoopContextWindowTruncation};
 
 use super::CapabilityCallSignature;
 
@@ -32,6 +32,11 @@ pub struct CompactionStrategyState {
     /// instead of falling back to `Auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_compact_initiator: Option<CompactionInitiator>,
+    /// Exact durable boundary omitted by the bounded recent-message window.
+    /// This watermark triggers selection of the newest safe compaction cut
+    /// point in the retained prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_eviction: Option<LoopContextWindowTruncation>,
     /// Consecutive completed compactions whose refreshed prompt token
     /// estimate stayed at or above their effectiveness baseline —
     /// compaction ran but did not relieve context pressure, so it would fire
@@ -183,9 +188,10 @@ fn indexed_message_kind_code(kind: IndexedMessageKind) -> u64 {
     match kind {
         IndexedMessageKind::User => 1,
         IndexedMessageKind::Assistant => 2,
-        IndexedMessageKind::System => 3,
-        IndexedMessageKind::Summary => 4,
-        IndexedMessageKind::Other => 5,
+        IndexedMessageKind::ToolResult => 3,
+        IndexedMessageKind::System => 4,
+        IndexedMessageKind::Summary => 5,
+        IndexedMessageKind::Other => 6,
     }
 }
 
@@ -201,6 +207,7 @@ pub struct MessageIndexEntry {
 pub enum IndexedMessageKind {
     User,
     Assistant,
+    ToolResult,
     System,
     Summary,
     Other,

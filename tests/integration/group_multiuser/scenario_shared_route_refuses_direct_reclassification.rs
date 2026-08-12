@@ -57,7 +57,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ProductTriggerReason::BotMention,
     )?;
     let binding = binding_service
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope_probe))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope_probe)
+                .expect("verified envelope binding request"),
+        )
         .await
         .map_err(|e| format!("[shared resolve] {e}"))?;
 
@@ -109,7 +112,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ProductTriggerReason::BotMention,
     )?;
     let binding_b = binding_service
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope_b_probe))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope_b_probe)
+                .expect("verified envelope binding request"),
+        )
         .await
         .map_err(|e| format!("[shared resolve b] {e}"))?;
     if binding_b.actor_user_id == binding.actor_user_id {

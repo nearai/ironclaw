@@ -64,7 +64,7 @@ fn acme_record() -> ExtensionManifestRecord {
     parse_v3(ACME_MANIFEST).expect("acme fixture manifest must parse")
 }
 
-// ---------------------------------------------------------------------------
+// arch-exempt: large_file, manifest-v3 cases remain one conformance suite pending fixture split, plan #7477
 // Parsing the documented v3 shape
 // ---------------------------------------------------------------------------
 
@@ -146,7 +146,14 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
     assert_eq!(channel.id, "messages");
     assert_eq!(channel.conversation_model, ConversationModel::Continuous);
     let ingress = channel.ingress.as_ref().expect("ingress declared");
-    assert_eq!(ingress.route_suffix.as_str(), "events");
+    assert_eq!(
+        ingress
+            .route_suffix
+            .as_ref()
+            .expect("webhook ingress declares a route_suffix")
+            .as_str(),
+        "events"
+    );
 
     assert_eq!(resolved.auth.len(), 1);
     let auth = &resolved.auth[0];
@@ -348,12 +355,10 @@ fn undeclared_channel_connection_placeholder_fails_closed() {
     let toml = ACME_MANIFEST.replace(
         "[channel.presentation]\n\
          supports_markdown = true\n\
-         supports_threads = false\n\
-         max_message_chars = 4000\n",
+         supports_threads = false\n",
         "[channel.presentation]\n\
          supports_markdown = true\n\
-         supports_threads = false\n\
-         max_message_chars = 4000\n\n\
+         supports_threads = false\n\n\
          [channel.connection]\n\
          provider = \"acme\"\n\
          strategy = \"web_generated_code\"\n\

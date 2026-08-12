@@ -13,10 +13,10 @@ use std::{collections::BTreeSet, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
-use ironclaw_extension_contracts::channel_adapter::{ChannelAttachmentRef, ChannelError};
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::ProductAttachmentDescriptor;
 use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::ids::ThreadId;
 #[cfg(test)]
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::product_adapter::ProductAdapterId;
@@ -24,9 +24,10 @@ use ironclaw_loop_host::HostInputEnqueuePort;
 #[cfg(doc)]
 use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_product_contracts::inbound::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductSourceChannel,
+    AcceptedTurnSubmission, BusyRunSnapshot, ProductInboundAck, ProductInboundBindingDirective,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductSourceChannel,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
@@ -39,7 +40,10 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::binding_ref::{DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key};
+use crate::binding_ref::{
+    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
+    bounded_source_binding_ref,
+};
 use crate::error::ProductSurfaceFailure;
 use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
@@ -58,6 +62,12 @@ const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
 const ATTACHMENT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 const ATTACHMENT_CLEANUP_MAX_THREADS: usize = 50;
 const ATTACHMENT_CLEANUP_MAX_MESSAGES: usize = 10_000;
+/// Persisted session-lane binding-ref prefixes — byte-identical to what the
+/// dedicated browser path always wrote. Changing either breaks replay of
+/// already-accepted messages; they are defined once so the two construction
+/// sites cannot drift.
+const SESSION_SOURCE_BINDING_PREFIX: &str = "webui-src";
+const SESSION_REPLY_BINDING_PREFIX: &str = "webui-reply";
 
 /// Run a before-inbound policy with the workflow-owned wall-clock budget.
 ///
@@ -88,6 +98,10 @@ pub enum InboundTurnOutcome {
         accepted_message_ref: AcceptedMessageRef,
         submitted_run_id: TurnRunId,
         binding: ResolvedBinding,
+        /// Submit-time coordinator metadata. `Some` on a fresh submission;
+        /// `None` on an idempotent replay of an already-submitted message
+        /// (replays report the run's *current* state, read separately).
+        submission: Option<AcceptedTurnSubmission>,
     },
     /// Turn submission was busy (thread already has an active run). The message
     /// was recorded as RejectedBusy — it will NOT be auto-resubmitted; the user
@@ -96,11 +110,15 @@ pub enum InboundTurnOutcome {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: Option<TurnRunId>,
         binding: ResolvedBinding,
+        /// Blocking-run snapshot at decision time. `None` on replays of a
+        /// stored busy outcome.
+        busy: Option<BusyRunSnapshot>,
     },
     DeferredBusy {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
         binding: ResolvedBinding,
+        busy: Option<BusyRunSnapshot>,
     },
 }
 
@@ -111,35 +129,74 @@ impl InboundTurnOutcome {
             Self::Submitted {
                 accepted_message_ref,
                 submitted_run_id,
+                submission,
                 ..
             } => ProductInboundAck::Accepted {
                 accepted_message_ref: accepted_message_ref.clone(),
                 submitted_run_id: *submitted_run_id,
+                submission: submission.clone().map(Box::new),
             },
             Self::RejectedBusy {
                 accepted_message_ref,
                 active_run_id,
+                busy,
                 ..
             } => ProductInboundAck::RejectedBusy {
                 accepted_message_ref: accepted_message_ref.clone(),
                 active_run_id: *active_run_id,
+                busy: busy.clone().map(Box::new),
             },
             Self::DeferredBusy {
                 accepted_message_ref,
                 active_run_id,
+                busy,
                 ..
             } => ProductInboundAck::DeferredBusy {
                 accepted_message_ref: accepted_message_ref.clone(),
                 active_run_id: *active_run_id,
+                busy: busy.clone().map(Box::new),
             },
         }
     }
 }
 
 /// Result of running replay, before-inbound policy, and fresh user-message acceptance.
+/// The accepted arm is boxed: `InboundTurnOutcome` carries the full ack +
+/// resolution payload (~280 bytes) while a rejection is a slim reason.
 pub enum InboundUserMessageDispatch {
-    Accepted(InboundTurnOutcome),
+    Accepted(Box<InboundTurnOutcome>),
     Rejected(ProductRejection),
+}
+
+/// The two submission lanes of the one inbound core, selected by the
+/// envelope's binding directive. Everything below `submit_turn` is shared;
+/// the lane decides binding resolution, the persisted binding-id schemes,
+/// the turn-ref prefixes, the idempotency-key shape, and the resolved
+/// product context — enum arms, never a second pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionLane {
+    /// Webhook-verified channel inbound: external refs resolved through the
+    /// binding resolver, untrusted-inbound product context.
+    Webhook,
+    /// Authenticated-session inbound: the caller owns the thread; trusted
+    /// first-party product context.
+    Session,
+}
+
+/// Session skill-activation recorder: mirrors the product-layer closure shape
+/// so the same composition-wired hooks serve both. Failures surface as
+/// internal errors — the message was accepted but the turn must not submit
+/// with stale skill bookkeeping.
+pub type SessionSkillActivationRecorder =
+    dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
+pub type SessionSkillActivationClearer =
+    dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), ProductSurfaceError> + Send + Sync;
+
+/// The pair of session skill-activation hooks, wired together or not at all.
+#[derive(Clone)]
+pub struct SessionSkillActivationPorts {
+    pub recorder: Arc<SessionSkillActivationRecorder>,
+    pub clearer: Arc<SessionSkillActivationClearer>,
 }
 
 struct PreparedUserMessage {
@@ -151,6 +208,11 @@ struct PreparedUserMessage {
     adapter_id: ProductAdapterId,
     source_channel: ProductSourceChannel,
     surface_type: TurnSurfaceType,
+    lane: SubmissionLane,
+    /// The user-message text, carried so the session lane can record skill
+    /// activation between acceptance and submission. `None` on the webhook
+    /// lane, which has no skill-activation hook today.
+    skill_activation_text: Option<String>,
 }
 
 struct ReplaySubmissionContext {
@@ -159,6 +221,8 @@ struct ReplaySubmissionContext {
     adapter_id: ProductAdapterId,
     source_channel: ProductSourceChannel,
     surface_type: TurnSurfaceType,
+    lane: SubmissionLane,
+    skill_activation_text: Option<String>,
 }
 
 /// Port for the inbound turn submission path.
@@ -218,24 +282,6 @@ pub trait InboundTurnService: Send + Sync {
         self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
             .await
     }
-
-    /// Accept a channel user message with the exact transient adapter and
-    /// restricted egress authority pinned by the ingress router.
-    async fn accept_user_message_with_before_policy_and_channel_transfer(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        before_inbound_policy: &dyn BeforeInboundPolicy,
-        _channel_adapter: Arc<dyn ChannelAdapter>,
-        _channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        if !envelope.channel_attachment_refs().is_empty() {
-            return Err(permanent_attachment_failure(
-                "channel attachment transfer is not supported by this turn service",
-            ));
-        }
-        self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
-            .await
-    }
 }
 
 /// Default implementation that composes a [`ProductBindingResolver`] with a
@@ -246,6 +292,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     input_enqueue: Arc<dyn HostInputEnqueuePort>,
+    session_skill_activation: Option<SessionSkillActivationPorts>,
 }
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
@@ -271,6 +318,7 @@ where
             turn_coordinator,
             inbound_attachments: None,
             input_enqueue,
+            session_skill_activation: None,
         }
     }
 
@@ -282,6 +330,17 @@ where
         inbound_attachments: Arc<dyn InboundAttachmentLander>,
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
+        self
+    }
+
+    /// Wire the session skill-activation hooks recorded between message
+    /// acceptance and turn submission (and cleared on busy/error). Session
+    /// lane only; the webhook lane has no skill-activation hook today.
+    pub fn with_session_skill_activation(
+        mut self,
+        session_skill_activation: SessionSkillActivationPorts,
+    ) -> Self {
+        self.session_skill_activation = Some(session_skill_activation);
         self
     }
 
@@ -386,7 +445,7 @@ where
             .accept_user_message_with_before_policy(envelope, &policy)
             .await?
         {
-            InboundUserMessageDispatch::Accepted(outcome) => Ok(outcome),
+            InboundUserMessageDispatch::Accepted(outcome) => Ok(*outcome),
             InboundUserMessageDispatch::Rejected(_) => {
                 Err(ProductSurfaceFailure::TurnSubmissionRejected {
                     reason: "noop before-inbound policy unexpectedly rejected message".into(),
@@ -400,14 +459,8 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(
-            envelope,
-            before_inbound_policy,
-            Vec::new(),
-            None,
-            None,
-        )
-        .await
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, Vec::new())
+            .await
     }
 
     async fn accept_user_message_with_before_policy_and_attachments(
@@ -416,31 +469,8 @@ where
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(
-            envelope,
-            before_inbound_policy,
-            attachments,
-            None,
-            None,
-        )
-        .await
-    }
-
-    async fn accept_user_message_with_before_policy_and_channel_transfer(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        before_inbound_policy: &dyn BeforeInboundPolicy,
-        channel_adapter: Arc<dyn ChannelAdapter>,
-        channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(
-            envelope,
-            before_inbound_policy,
-            Vec::new(),
-            Some(channel_adapter),
-            Some(channel_egress),
-        )
-        .await
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, attachments)
+            .await
     }
 }
 
@@ -455,8 +485,6 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
-        pinned_channel_adapter: Option<Arc<dyn ChannelAdapter>>,
-        pinned_channel_egress: Option<Arc<dyn RestrictedEgress>>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
@@ -464,23 +492,22 @@ where
             });
         };
         let original_trigger = payload.trigger;
+        let original_descriptors = payload.attachments.clone();
         let prepared = self.prepare_user_message(envelope).await?;
         if let Some(outcome) = self
             .replay_prepared_user_message(envelope, &prepared)
             .await?
         {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+            return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
-        // Bound the original untrusted channel descriptor set before it
-        // reaches a policy backend. Rewritten descriptors are reconciled and
-        // revalidated later, immediately before provider fetch.
-        if !envelope.channel_attachment_refs().is_empty() {
-            validate_attachment_sources(
-                payload.attachments.as_slice(),
-                envelope.channel_attachment_refs(),
-            )?;
-        }
+        // The adapter has already completed vendor transfer. Validate the
+        // descriptor/byte pairing and canonicalize media types before either
+        // the policy backend or durable message acceptance sees it.
+        let attachments = validate_and_normalize_inbound_attachments(
+            original_descriptors.as_slice(),
+            attachments,
+        )?;
 
         let policy_outcome = check_before_inbound_policy(
             before_inbound_policy,
@@ -510,113 +537,21 @@ where
             }
         };
 
-        let attachments = self
-            .resolve_inbound_attachments(
-                envelope_for_turn,
-                attachments,
-                pinned_channel_adapter.as_deref(),
-                pinned_channel_egress.as_deref(),
-            )
-            .await?;
-
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
-            .await
-            .map(InboundUserMessageDispatch::Accepted)
-    }
-
-    async fn resolve_inbound_attachments(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        inline_attachments: Vec<InboundAttachment>,
-        pinned_channel_adapter: Option<&dyn ChannelAdapter>,
-        pinned_channel_egress: Option<&dyn RestrictedEgress>,
-    ) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
-        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+        let ProductInboundPayload::UserMessage(rewritten_payload) = envelope_for_turn.payload()
+        else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
                 kind: "non_user_message".into(),
             });
         };
-        let sources = envelope.channel_attachment_refs();
-        if !inline_attachments.is_empty() {
-            if !sources.is_empty() {
-                return Err(permanent_attachment_failure(
-                    "mixed inline and channel attachment sources are not allowed",
-                ));
-            }
-            return Ok(inline_attachments);
-        }
-        if payload.attachments.is_empty() {
-            return Ok(Vec::new());
-        }
-        if sources.is_empty() {
-            return Err(permanent_attachment_failure(
-                "attachment descriptors have no channel transfer references",
-            ));
-        }
-        validate_attachment_sources(payload.attachments.as_slice(), sources)?;
+        let attachments = reconcile_inbound_attachments_after_policy(
+            original_descriptors.as_slice(),
+            rewritten_payload.attachments.as_slice(),
+            attachments,
+        )?;
 
-        let adapter = pinned_channel_adapter.ok_or_else(|| {
-            permanent_attachment_failure("channel attachment transfer is not configured")
-        })?;
-        let egress = pinned_channel_egress.ok_or_else(|| {
-            permanent_attachment_failure("channel attachment transfer is not configured")
-        })?;
-        let mut fetched = Vec::with_capacity(sources.len());
-        let mut total_bytes = 0usize;
-        for source in sources {
-            let mut attachment = adapter
-                .fetch_attachment(source, egress)
-                .await
-                .map_err(channel_attachment_error)?;
-            if attachment.id != source.descriptor.external_file_id {
-                return Err(permanent_attachment_failure(
-                    "fetched attachment id does not match its descriptor",
-                ));
-            }
-            // Compare canonical forms on both sides. The descriptor keeps the
-            // vendor's raw media type (which legitimately carries parameters
-            // such as `; charset=utf-8`), so normalizing only the fetched side
-            // would reject every attachment whose declared type is not already
-            // canonical instead of catching a genuine provider mismatch.
-            let mime_type = ironclaw_common::normalize_mime_type(&attachment.mime_type);
-            let declared_mime_type =
-                ironclaw_common::normalize_mime_type(&source.descriptor.mime_type);
-            if mime_type != declared_mime_type || !ironclaw_common::is_supported_mime(&mime_type) {
-                return Err(permanent_attachment_failure(
-                    "fetched attachment MIME type does not match its descriptor",
-                ));
-            }
-            attachment.mime_type = mime_type;
-            // The descriptor's filename wins when the vendor supplied one;
-            // otherwise keep whatever the adapter recovered. Some vendor
-            // payload kinds (inline photos, voice notes, stickers) carry no
-            // filename at all, and the adapter derives one from the provider
-            // download path — overwriting unconditionally discarded it.
-            if let Some(descriptor_filename) = source.descriptor.filename.clone() {
-                attachment.filename = Some(descriptor_filename);
-            }
-            if attachment.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
-                return Err(permanent_attachment_failure(
-                    "attachment exceeds the per-file byte limit",
-                ));
-            }
-            if let Some(declared_size) = source.descriptor.size_bytes
-                && declared_size != attachment.bytes.len() as u64
-            {
-                return Err(ProductSurfaceFailure::InboundAttachmentFailed {
-                    reason: "fetched attachment size does not match its descriptor".into(),
-                    retryable: true,
-                });
-            }
-            total_bytes = total_bytes.saturating_add(attachment.bytes.len());
-            if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
-                return Err(permanent_attachment_failure(
-                    "attachments exceed the total byte limit",
-                ));
-            }
-            fetched.push(attachment);
-        }
-        Ok(fetched)
+        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
+            .await
+            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 
     async fn prepare_user_message(
@@ -628,11 +563,34 @@ where
                 kind: "non_user_message".into(),
             });
         };
-        let (route_kind, creation_policy) = binding_profile_for_trigger(payload.trigger);
+        match envelope.binding_directive() {
+            ProductInboundBindingDirective::ExternalRef => {
+                self.prepare_external_ref_message(envelope, payload.trigger)
+                    .await
+            }
+            ProductInboundBindingDirective::OwnedThread { thread_id } => {
+                self.prepare_owned_thread_message(envelope, thread_id, &payload.text)
+                    .await
+            }
+        }
+    }
+
+    async fn prepare_external_ref_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        trigger: ProductTriggerReason,
+    ) -> Result<PreparedUserMessage, ProductSurfaceFailure> {
+        let (route_kind, creation_policy) = binding_profile_for_trigger(trigger);
         let surface_type = match route_kind {
             ProductConversationRouteKind::Direct => TurnSurfaceType::Direct,
             ProductConversationRouteKind::Shared => TurnSurfaceType::Channel,
         };
+        let auth_claim = envelope
+            .require_verified_auth_claim()
+            .map_err(|error| ProductSurfaceFailure::BindingResolutionFailed {
+                reason: error.to_string(),
+            })?
+            .clone();
         let binding_request = ResolveBindingRequest {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
@@ -640,7 +598,7 @@ where
             external_conversation_ref: envelope.external_conversation_ref().clone(),
             external_event_id: envelope.external_event_id().clone(),
             route_kind,
-            auth_claim: envelope.auth_claim().clone(),
+            auth_claim,
         };
         let binding = match creation_policy {
             ProductConversationBindingCreationPolicy::CreateAllowed => {
@@ -671,6 +629,94 @@ where
             adapter_id: envelope.adapter_id().clone(),
             source_channel: envelope.source_channel().clone(),
             surface_type,
+            lane: SubmissionLane::Webhook,
+            skill_activation_text: None,
+        })
+    }
+
+    /// The session lane's binding step: the authenticated caller *is* the
+    /// binding authority. The thread must already exist and be owned by the
+    /// caller — never created implicitly — and the ownership probe collapses
+    /// "missing" and "someone else's" into one indistinguishable failure so
+    /// the response is not an existence oracle. The external binding
+    /// resolver and the webhook pairing machinery never run on this lane.
+    async fn prepare_owned_thread_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        thread_id: &ThreadId,
+        message_text: &str,
+    ) -> Result<PreparedUserMessage, ProductSurfaceFailure> {
+        let Some(caller) = envelope.session_caller() else {
+            return Err(ProductSurfaceFailure::BindingResolutionFailed {
+                reason: "owned-thread binding requires a session caller".into(),
+            });
+        };
+        let scope = caller.turn_scope(thread_id.clone());
+        let Some(agent_id) = scope.agent_id.clone() else {
+            return Err(ProductSurfaceFailure::BindingResolutionFailed {
+                reason: "session caller is missing an agent scope".into(),
+            });
+        };
+        let thread_scope = ThreadScope {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id,
+            project_id: scope.project_id.clone(),
+            owner_user_id: Some(caller.user_id.clone()),
+            mission_id: None,
+        };
+        self.thread_service
+            .read_thread(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(owned_thread_probe_failure)?;
+        let actor = TurnActor::new(caller.user_id.clone());
+        // One caller-scoped id backs BOTH binding halves on the session lane
+        // (the browser transport's historical scheme): the source and reply
+        // refs are the same raw id under the "webui-src"/"webui-reply"
+        // prefixes, kept byte-identical so persisted records and replays
+        // written by the dedicated browser path keep matching.
+        let session_binding_id = session_source_binding_id(&scope, &actor);
+        let source_binding_ref = bounded_source_binding_ref(
+            SESSION_SOURCE_BINDING_PREFIX,
+            &session_binding_id,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
+            reason: format!("invalid session src ref: {e}"),
+        })?;
+        let reply_target_binding_ref = bounded_reply_target_binding_ref(
+            SESSION_REPLY_BINDING_PREFIX,
+            &session_binding_id,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
+            reason: format!("invalid session reply ref: {e}"),
+        })?;
+        let binding = ResolvedBinding {
+            tenant_id: scope.tenant_id.clone(),
+            actor_user_id: caller.user_id.clone(),
+            thread_id: thread_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            source_binding_ref,
+            reply_target_binding_ref,
+        };
+        Ok(PreparedUserMessage {
+            source_binding_id: session_binding_id.clone(),
+            reply_target_binding_id: session_binding_id,
+            // The session submit idempotency key is the caller's client
+            // action id verbatim — the same value the transport has always
+            // handed the coordinator.
+            submit_idempotency_key: envelope.external_event_id().as_str().to_string(),
+            binding,
+            thread_scope,
+            adapter_id: envelope.adapter_id().clone(),
+            source_channel: envelope.source_channel().clone(),
+            surface_type: TurnSurfaceType::Direct,
+            lane: SubmissionLane::Session,
+            skill_activation_text: Some(message_text.to_string()),
         })
     }
 
@@ -679,26 +725,24 @@ where
         envelope: &ProductInboundEnvelope,
         prepared: &PreparedUserMessage,
     ) -> Result<Option<InboundTurnOutcome>, ProductSurfaceFailure> {
-        let Some(replay) = self
-            .thread_service
-            .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-                scope: prepared.thread_scope.clone(),
-                actor_id: prepared.binding.actor_user_id.as_str().to_string(),
-                source_binding_id: prepared.source_binding_id.clone(),
-                external_event_id: envelope.external_event_id().as_str().to_string(),
-            })
-            .await
-            .map_err(|e| ProductSurfaceFailure::Transient {
-                reason: format!("failed to replay accepted inbound message: {e}"),
-            })?
-        else {
+        let Some(replay) = self.lookup_accepted_replay(envelope, prepared).await? else {
             return Ok(None);
         };
+
+        // A session client action id is caller-scoped, not thread-scoped: the
+        // same id replayed against a different thread is a duplicate action,
+        // not a fresh submission for the new thread.
+        if prepared.lane == SubmissionLane::Session
+            && replay.thread_id != prepared.binding.thread_id
+        {
+            return Err(ProductSurfaceFailure::ClientActionReplayMismatch);
+        }
 
         submit_or_replay_accepted_message(
             &self.thread_service,
             &self.turn_coordinator,
             self.input_enqueue.as_ref(),
+            self.session_skill_activation.as_ref(),
             replay,
             prepared.submit_idempotency_key.clone(),
             envelope.received_at(),
@@ -706,6 +750,49 @@ where
         )
         .await
         .map(Some)
+    }
+
+    /// Replay lookup for one prepared message. The session lane additionally
+    /// probes the legacy persisted binding-id schemes so messages accepted by
+    /// earlier builds still replay instead of double-accepting.
+    async fn lookup_accepted_replay(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        prepared: &PreparedUserMessage,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, ProductSurfaceFailure> {
+        let mut candidate_binding_ids = vec![prepared.source_binding_id.clone()];
+        if prepared.lane == SubmissionLane::Session {
+            let scope = TurnScope::new_with_owner(
+                prepared.binding.tenant_id.clone(),
+                prepared.binding.agent_id.clone(),
+                prepared.binding.project_id.clone(),
+                prepared.binding.thread_id.clone(),
+                prepared.thread_scope.owner_user_id.clone(),
+            );
+            let actor = TurnActor::new(prepared.binding.actor_user_id.clone());
+            let legacy = legacy_session_source_binding_id(&scope, &actor);
+            if !candidate_binding_ids.contains(&legacy) {
+                candidate_binding_ids.push(legacy);
+            }
+        }
+        for source_binding_id in candidate_binding_ids {
+            let replay = self
+                .thread_service
+                .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+                    scope: prepared.thread_scope.clone(),
+                    actor_id: prepared.binding.actor_user_id.as_str().to_string(),
+                    source_binding_id,
+                    external_event_id: envelope.external_event_id().as_str().to_string(),
+                })
+                .await
+                .map_err(|e| ProductSurfaceFailure::Transient {
+                    reason: format!("failed to replay accepted inbound message: {e}"),
+                })?;
+            if replay.is_some() {
+                return Ok(replay);
+            }
+        }
+        Ok(None)
     }
 
     async fn accept_prepared_user_message(
@@ -719,18 +806,24 @@ where
                 kind: "non_user_message".into(),
             });
         };
-        self.thread_service
-            .ensure_thread(EnsureThreadRequest {
-                scope: prepared.thread_scope.clone(),
-                thread_id: Some(prepared.binding.thread_id.clone()),
-                created_by_actor_id: prepared.binding.actor_user_id.as_str().to_string(),
-                title: None,
-                metadata_json: None,
-            })
-            .await
-            .map_err(|e| ProductSurfaceFailure::Transient {
-                reason: format!("failed to ensure thread: {e}"),
-            })?;
+        // The session lane never creates threads: the caller-owned thread was
+        // ownership-probed during prepare, and send-message must not
+        // implicitly mint one. Only the webhook lane, whose binding resolver
+        // decided a thread identity, ensures it exists.
+        if prepared.lane == SubmissionLane::Webhook {
+            self.thread_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: prepared.thread_scope.clone(),
+                    thread_id: Some(prepared.binding.thread_id.clone()),
+                    created_by_actor_id: prepared.binding.actor_user_id.as_str().to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .map_err(|e| ProductSurfaceFailure::Transient {
+                    reason: format!("failed to ensure thread: {e}"),
+                })?;
+        }
 
         // Inbound attachment bytes (inline or fetched after channel policy)
         // are landed into project storage through the same authority
@@ -739,11 +832,10 @@ where
         let (content, landed_refs) = if attachments.is_empty() {
             (MessageContent::text(payload.text.clone()), None)
         } else {
-            let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
-                ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: "inbound attachment lander not configured".into(),
-                }
-            })?;
+            let lander = self
+                .inbound_attachments
+                .as_ref()
+                .ok_or(ProductSurfaceFailure::AttachmentLanderUnavailable)?;
             let refs = lander
                 .land(
                     &prepared.thread_scope,
@@ -815,12 +907,15 @@ where
                 source_channel: prepared.source_channel,
                 surface_type: prepared.surface_type,
                 requested_model: payload.requested_model.clone(),
+                lane: prepared.lane,
+                skill_activation_text: prepared.skill_activation_text,
                 channel_context: payload.channel_context.clone(),
             }))
             .submit_or_replay(
                 &self.thread_service,
                 &self.turn_coordinator,
                 self.input_enqueue.as_ref(),
+                self.session_skill_activation.as_ref(),
             )
             .await?;
         if cleanup_needed {
@@ -831,70 +926,99 @@ where
     }
 }
 
-fn validate_attachment_sources(
-    descriptors: &[ironclaw_extension_contracts::external::ProductAttachmentDescriptor],
-    sources: &[ChannelAttachmentRef],
-) -> Result<(), ProductSurfaceFailure> {
-    if descriptors.len() != sources.len() {
+fn validate_and_normalize_inbound_attachments(
+    descriptors: &[ProductAttachmentDescriptor],
+    attachments: Vec<InboundAttachment>,
+) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
+    if descriptors.len() != attachments.len() {
         return Err(permanent_attachment_failure(
-            "channel attachment references do not match message descriptors",
+            "attachment bytes do not match message descriptors",
         ));
     }
-    if sources.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
+    if attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
         return Err(permanent_attachment_failure(
             "attachments exceed the count limit",
         ));
     }
-    let mut declared_total = 0u64;
-    for (descriptor, source) in descriptors.iter().zip(sources) {
-        if descriptor != &source.descriptor {
+    let mut external_file_ids = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    let mut normalized = Vec::with_capacity(attachments.len());
+    for (descriptor, mut attachment) in descriptors.iter().zip(attachments) {
+        if !external_file_ids.insert(descriptor.external_file_id.clone()) {
             return Err(permanent_attachment_failure(
-                "channel attachment references do not match message descriptors",
+                "attachment descriptors contain duplicate external file ids",
             ));
         }
-        if !ironclaw_common::is_supported_mime(&descriptor.mime_type) {
+        if attachment.id != descriptor.external_file_id {
             return Err(permanent_attachment_failure(
-                "attachment MIME type is not supported",
+                "fetched attachment id does not match its descriptor",
             ));
         }
-        if let Some(size) = descriptor.size_bytes {
-            if size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
-                return Err(permanent_attachment_failure(
-                    "attachment exceeds the per-file byte limit",
-                ));
-            }
-            declared_total = declared_total.saturating_add(size);
-            if declared_total > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 {
-                return Err(permanent_attachment_failure(
-                    "attachments exceed the total byte limit",
-                ));
-            }
+        let mime_type = ironclaw_common::normalize_mime_type(&attachment.mime_type);
+        let declared_mime_type = ironclaw_common::normalize_mime_type(&descriptor.mime_type);
+        if mime_type != declared_mime_type || !ironclaw_common::is_supported_mime(&mime_type) {
+            return Err(permanent_attachment_failure(
+                "fetched attachment MIME type does not match its descriptor",
+            ));
         }
+        attachment.mime_type = mime_type;
+        if let Some(descriptor_filename) = descriptor.filename.clone() {
+            attachment.filename = Some(descriptor_filename);
+        }
+        if attachment.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
+            return Err(permanent_attachment_failure(
+                "attachment exceeds the per-file byte limit",
+            ));
+        }
+        if let Some(declared_size) = descriptor.size_bytes
+            && declared_size != attachment.bytes.len() as u64
+        {
+            return Err(permanent_attachment_failure(
+                "fetched attachment size does not match its descriptor",
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(attachment.bytes.len());
+        if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
+            return Err(permanent_attachment_failure(
+                "attachments exceed the total byte limit",
+            ));
+        }
+        normalized.push(attachment);
     }
-    Ok(())
+    Ok(normalized)
 }
 
-fn channel_attachment_error(error: ChannelError) -> ProductSurfaceFailure {
-    match error {
-        ChannelError::AttachmentTransfer { retryable, .. } => {
-            ProductSurfaceFailure::InboundAttachmentFailed {
-                reason: "channel attachment transfer failed".into(),
-                retryable,
-            }
-        }
-        ChannelError::Configuration { .. } => ProductSurfaceFailure::InboundAttachmentFailed {
-            reason: "channel attachment transfer failed".into(),
-            retryable: true,
-        },
-        ChannelError::Unsupported => permanent_attachment_failure(
-            "channel adapter does not support inbound attachment transfer",
-        ),
-        ChannelError::Parse { .. }
-        | ChannelError::Render { .. }
-        | ChannelError::VendorWiring { .. } => {
-            permanent_attachment_failure("channel attachment transfer failed")
-        }
+fn reconcile_inbound_attachments_after_policy(
+    original_descriptors: &[ProductAttachmentDescriptor],
+    rewritten_descriptors: &[ProductAttachmentDescriptor],
+    attachments: Vec<InboundAttachment>,
+) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
+    if original_descriptors.len() != attachments.len() {
+        return Err(permanent_attachment_failure(
+            "attachment bytes do not match original message descriptors",
+        ));
     }
+    let mut used = BTreeSet::new();
+    let mut reconciled = Vec::with_capacity(rewritten_descriptors.len());
+    for rewritten in rewritten_descriptors {
+        let Some((index, _)) = original_descriptors
+            .iter()
+            .enumerate()
+            .find(|(index, original)| !used.contains(index) && *original == rewritten)
+        else {
+            return Err(permanent_attachment_failure(
+                "policy rewrite changed or invented an attachment descriptor",
+            ));
+        };
+        used.insert(index);
+        let attachment = attachments.get(index).cloned().ok_or_else(|| {
+            permanent_attachment_failure(
+                "attachment bytes do not match original message descriptors",
+            )
+        })?;
+        reconciled.push(attachment);
+    }
+    Ok(reconciled)
 }
 
 fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFailure {
@@ -904,10 +1028,13 @@ fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFail
     }
 }
 
+// arch-exempt: too_many_args, replay tail wants a SubmissionPorts bundle once the session lane settles, plan docs/internal/design/2026-08-10-unified-channel-model.md
+#[allow(clippy::too_many_arguments)]
 async fn submit_or_replay_accepted_message<T, C>(
     thread_service: &T,
     turn_coordinator: &C,
     input_enqueue: &dyn HostInputEnqueuePort,
+    session_skill_activation: Option<&SessionSkillActivationPorts>,
     replay: AcceptedInboundMessageReplay,
     submit_idempotency_key: String,
     received_at: DateTime<Utc>,
@@ -923,7 +1050,12 @@ where
         received_at,
         prepared,
     )?
-    .submit_or_replay(thread_service, turn_coordinator, input_enqueue)
+    .submit_or_replay(
+        thread_service,
+        turn_coordinator,
+        input_enqueue,
+        session_skill_activation,
+    )
     .await
 }
 
@@ -974,6 +1106,8 @@ impl ProductInboundTurnHandoff {
                 source_channel,
                 // Surface type is unknown at replay time without the original trigger.
                 surface_type: TurnSurfaceType::Direct,
+                lane: SubmissionLane::Webhook,
+                skill_activation_text: None,
             },
         )
     }
@@ -994,6 +1128,8 @@ impl ProductInboundTurnHandoff {
                 adapter_id: prepared.adapter_id.clone(),
                 source_channel: prepared.source_channel.clone(),
                 surface_type: prepared.surface_type,
+                lane: prepared.lane,
+                skill_activation_text: prepared.skill_activation_text.clone(),
             },
         )
     }
@@ -1010,19 +1146,31 @@ impl ProductInboundTurnHandoff {
             adapter_id,
             source_channel,
             surface_type,
+            lane,
+            skill_activation_text,
         } = context;
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
         if replay.status == MessageStatus::Submitted {
             let Some(turn_run_id) = replay.turn_run_id.as_deref() else {
-                return Err(ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: "submitted replay missing turn_run_id".into(),
+                return Err(match lane {
+                    SubmissionLane::Session => ProductSurfaceFailure::ReplayUnavailable {
+                        reason: "submitted replay missing turn_run_id".into(),
+                    },
+                    SubmissionLane::Webhook => ProductSurfaceFailure::TurnSubmissionRejected {
+                        reason: "submitted replay missing turn_run_id".into(),
+                    },
                 });
             };
             let submitted_run_id = Uuid::parse_str(turn_run_id)
                 .map(TurnRunId::from_uuid)
-                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: format!("invalid submitted turn_run_id: {e}"),
+                .map_err(|e| match lane {
+                    SubmissionLane::Session => ProductSurfaceFailure::ReplayUnavailable {
+                        reason: format!("invalid submitted turn_run_id: {e}"),
+                    },
+                    SubmissionLane::Webhook => ProductSurfaceFailure::TurnSubmissionRejected {
+                        reason: format!("invalid submitted turn_run_id: {e}"),
+                    },
                 })?;
             return Ok(Self::AlreadySubmitted {
                 accepted_message_ref,
@@ -1032,17 +1180,24 @@ impl ProductInboundTurnHandoff {
         }
 
         if replay.status == MessageStatus::RejectedBusy {
-            let active_run_id = replay
-                .turn_run_id
-                .as_deref()
-                .map(|s| {
-                    Uuid::parse_str(s).map(TurnRunId::from_uuid).map_err(|e| {
-                        ProductSurfaceFailure::TurnSubmissionRejected {
-                            reason: format!("invalid rejected busy turn_run_id: {e}"),
-                        }
+            let active_run_id = match lane {
+                // The session surface has always reported a replayed busy
+                // rejection with no run metadata: the original blocking run
+                // may be long gone, and handing the client a reference it
+                // cannot query invites dead lookups.
+                SubmissionLane::Session => None,
+                SubmissionLane::Webhook => replay
+                    .turn_run_id
+                    .as_deref()
+                    .map(|s| {
+                        Uuid::parse_str(s).map(TurnRunId::from_uuid).map_err(|e| {
+                            ProductSurfaceFailure::TurnSubmissionRejected {
+                                reason: format!("invalid rejected busy turn_run_id: {e}"),
+                            }
+                        })
                     })
-                })
-                .transpose()?;
+                    .transpose()?,
+            };
             return Ok(Self::AlreadyRejected {
                 accepted_message_ref,
                 binding,
@@ -1101,6 +1256,8 @@ impl ProductInboundTurnHandoff {
                 // idempotent resubmission of an accepted message falls back to the
                 // deployment's active model rather than recovering the original hint.
                 requested_model: None,
+                lane,
+                skill_activation_text,
                 // Channel conversation context is likewise not persisted in the
                 // message store; an idempotent resubmission degrades to no
                 // context (it is advisory).
@@ -1114,6 +1271,7 @@ impl ProductInboundTurnHandoff {
         thread_service: &T,
         turn_coordinator: &C,
         input_enqueue: &dyn HostInputEnqueuePort,
+        session_skill_activation: Option<&SessionSkillActivationPorts>,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure>
     where
         T: SessionThreadService,
@@ -1128,6 +1286,7 @@ impl ProductInboundTurnHandoff {
                 accepted_message_ref,
                 submitted_run_id,
                 binding,
+                submission: None,
             }),
             Self::AlreadyRejected {
                 accepted_message_ref,
@@ -1137,6 +1296,7 @@ impl ProductInboundTurnHandoff {
                 accepted_message_ref,
                 active_run_id,
                 binding,
+                busy: None,
             }),
             Self::AlreadyDeferred {
                 accepted_message_ref,
@@ -1169,11 +1329,15 @@ impl ProductInboundTurnHandoff {
                 )
                 .await
                 {
-                    Ok(crate::steering::SteeringAdmission::Deferred { .. }) => {
+                    Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
                         Ok(InboundTurnOutcome::DeferredBusy {
                             accepted_message_ref,
                             active_run_id,
                             binding,
+                            busy: Some(BusyRunSnapshot {
+                                status: run.status,
+                                event_cursor: run.event_cursor,
+                            }),
                         })
                     }
                     Ok(crate::steering::SteeringAdmission::Rejected) => {
@@ -1181,6 +1345,7 @@ impl ProductInboundTurnHandoff {
                             accepted_message_ref,
                             active_run_id: Some(active_run_id),
                             binding,
+                            busy: None,
                         })
                     }
                     Err(error) => Err(steering_admission_failure(error)),
@@ -1188,7 +1353,12 @@ impl ProductInboundTurnHandoff {
             }
             Self::NeedsSubmission(submission) => {
                 submission
-                    .submit(thread_service, turn_coordinator, input_enqueue)
+                    .submit(
+                        thread_service,
+                        turn_coordinator,
+                        input_enqueue,
+                        session_skill_activation,
+                    )
                     .await
             }
         }
@@ -1207,6 +1377,8 @@ struct AcceptedProductInboundTurn {
     source_channel: ProductSourceChannel,
     surface_type: TurnSurfaceType,
     requested_model: Option<String>,
+    lane: SubmissionLane,
+    skill_activation_text: Option<String>,
     channel_context: Option<String>,
 }
 
@@ -1216,6 +1388,7 @@ impl AcceptedProductInboundTurn {
         thread_service: &T,
         turn_coordinator: &C,
         input_enqueue: &dyn HostInputEnqueuePort,
+        session_skill_activation: Option<&SessionSkillActivationPorts>,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure>
     where
         T: SessionThreadService,
@@ -1233,6 +1406,8 @@ impl AcceptedProductInboundTurn {
             source_channel,
             surface_type,
             requested_model,
+            lane,
+            skill_activation_text,
             channel_context,
         } = self;
         // The run is scoped to the person who pinged (its actor); owner ==
@@ -1248,49 +1423,96 @@ impl AcceptedProductInboundTurn {
             Some(binding.actor_user_id.clone()),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        // The source/reply ids are already the canonical per-event binding
-        // refs the conversation resolution minted (`source:…` / `reply:…`) and
-        // that `accept_inbound_message` stored verbatim. Rebuild the refs
-        // directly — do NOT re-wrap with a `bounded_*("src"/"reply", …)`
-        // prefix, which would produce `src:source:…` / `reply:reply:…` and no
-        // longer match the per-event refs anchored to this event's thread.
-        let source_binding_ref = SourceBindingRef::new(source_binding_id).map_err(|e| {
-            ProductSurfaceFailure::TurnSubmissionRejected {
-                reason: format!("invalid src ref: {e}"),
-            }
-        })?;
+        // Ref construction is lane-split:
+        // - Webhook: the conversation resolution minted canonical per-event
+        //   refs ("source:…"/"reply:…") that `accept_inbound_message` stored
+        //   verbatim — rebuild them directly; re-wrapping with a
+        //   `bounded_*("src"/"reply", …)` prefix would produce
+        //   "src:source:…" / "reply:reply:…" and no longer match the
+        //   per-event refs anchored to this event's thread.
+        // - Session: keeps the exact scheme the browser transport has always
+        //   written ("webui-src"/"webui-reply" prefixes, the raw client
+        //   action id as the coordinator idempotency key) so durable records
+        //   and replays stay byte-compatible.
+        let (source_binding_ref, reply_target_binding_ref) = match lane {
+            SubmissionLane::Webhook => (
+                SourceBindingRef::new(source_binding_id.clone()).map_err(|e| {
+                    ProductSurfaceFailure::TurnSubmissionRejected {
+                        reason: format!("invalid src ref: {e}"),
+                    }
+                })?,
+                ReplyTargetBindingRef::new(reply_target_binding_id.clone()).map_err(|e| {
+                    ProductSurfaceFailure::TurnSubmissionRejected {
+                        reason: format!("invalid reply ref: {e}"),
+                    }
+                })?,
+            ),
+            SubmissionLane::Session => (
+                bounded_source_binding_ref(
+                    SESSION_SOURCE_BINDING_PREFIX,
+                    &source_binding_id,
+                    DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+                )
+                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
+                    reason: format!("invalid src ref: {e}"),
+                })?,
+                bounded_reply_target_binding_ref(
+                    SESSION_REPLY_BINDING_PREFIX,
+                    &reply_target_binding_id,
+                    DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+                )
+                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
+                    reason: format!("invalid reply ref: {e}"),
+                })?,
+            ),
+        };
         let accepted_message_ref = accepted_message_ref(message_id)?;
-        let reply_target_binding_ref = ReplyTargetBindingRef::new(reply_target_binding_id)
+        let idempotency_key = match lane {
+            SubmissionLane::Webhook => bounded_idempotency_key(
+                "turn",
+                &idempotency_key_raw,
+                DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+            )
             .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                reason: format!("invalid reply ref: {e}"),
-            })?;
-        let idempotency_key = bounded_idempotency_key(
-            "turn",
-            &idempotency_key_raw,
-            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-        )
-        .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-            reason: format!("invalid turn ref: {e}"),
-        })?;
+                reason: format!("invalid turn ref: {e}"),
+            })?,
+            SubmissionLane::Session => {
+                ironclaw_turns::IdempotencyKey::new(idempotency_key_raw.clone()).map_err(|e| {
+                    ProductSurfaceFailure::TurnSubmissionRejected {
+                        reason: format!("invalid client action id: {e}"),
+                    }
+                })?
+            }
+        };
 
-        let run_adapter =
-            ironclaw_turns::RunOriginAdapter::new(adapter_id.as_str()).map_err(|e| {
-                ProductSurfaceFailure::TurnSubmissionRejected {
+        let product_context = match lane {
+            SubmissionLane::Webhook => {
+                let run_adapter = ironclaw_turns::RunOriginAdapter::new(adapter_id.as_str())
+                    .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
+                        reason: e.to_string(),
+                    })?;
+                let run_source_channel = ironclaw_turns::RunOriginAdapter::new(
+                    source_channel.as_str(),
+                )
+                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
                     reason: e.to_string(),
-                }
-            })?;
-        let run_source_channel = ironclaw_turns::RunOriginAdapter::new(source_channel.as_str())
-            .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                reason: e.to_string(),
-            })?;
-        let product_context = ironclaw_turns::product_context::resolve_inbound_with_source_channel(
-            ironclaw_turns::product_context::InboundClassification::Untrusted,
-            run_adapter,
-            Some(run_source_channel),
-            Some(surface_type),
-            turn_scope.product_owner(&actor),
-        )
-        .with_channel_context(channel_context);
+                })?;
+                ironclaw_turns::product_context::resolve_inbound_with_source_channel(
+                    ironclaw_turns::product_context::InboundClassification::Untrusted,
+                    run_adapter,
+                    Some(run_source_channel),
+                    Some(surface_type),
+                    turn_scope.product_owner(&actor),
+                )
+                .with_channel_context(channel_context)
+            }
+            // A session submission is the trusted first-party chat surface;
+            // its product context is the WebUi origin, exactly as the
+            // dedicated browser path always resolved it.
+            SubmissionLane::Session => {
+                ironclaw_turns::product_context::resolve_web_ui(turn_scope.product_owner(&actor))
+            }
+        };
         let request = SubmitTurnRequest {
             scope: turn_scope.clone(),
             actor,
@@ -1308,29 +1530,56 @@ impl AcceptedProductInboundTurn {
             product_context: Some(product_context),
         };
 
+        record_session_skill_activation(
+            lane,
+            session_skill_activation,
+            skill_activation_text.as_deref(),
+            &turn_scope,
+            &accepted_message_ref,
+        )?;
+
         match turn_coordinator.submit_turn(request).await {
             Ok(SubmitTurnResponse::Accepted {
-                turn_id, run_id, ..
+                turn_id,
+                run_id,
+                status,
+                resolved_run_profile_id,
+                resolved_run_profile_version,
+                event_cursor,
+                ..
             }) => {
-                thread_service
-                    .mark_message_submitted(
-                        &thread_scope,
-                        &binding.thread_id,
-                        message_id,
-                        turn_id.to_string(),
-                        run_id.to_string(),
-                    )
-                    .await
-                    .map_err(|e| ProductSurfaceFailure::Transient {
-                        reason: format!("failed to mark message submitted: {e}"),
-                    })?;
+                mark_message_submitted_or_reconcile(
+                    thread_service,
+                    &thread_scope,
+                    &binding,
+                    message_id,
+                    lane,
+                    &source_binding_id,
+                    &idempotency_key_raw,
+                    turn_id.to_string(),
+                    run_id.to_string(),
+                )
+                .await?;
                 Ok(InboundTurnOutcome::Submitted {
                     accepted_message_ref,
                     submitted_run_id: run_id,
                     binding,
+                    submission: Some(AcceptedTurnSubmission {
+                        turn_id: turn_id.to_string(),
+                        status,
+                        resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
+                        resolved_run_profile_version: resolved_run_profile_version.as_u64(),
+                        event_cursor,
+                    }),
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                clear_session_skill_activation(
+                    lane,
+                    session_skill_activation,
+                    &turn_scope,
+                    &accepted_message_ref,
+                )?;
                 match crate::steering::admit_busy_steering(
                     turn_coordinator,
                     input_enqueue,
@@ -1345,11 +1594,15 @@ impl AcceptedProductInboundTurn {
                 )
                 .await
                 {
-                    Ok(crate::steering::SteeringAdmission::Deferred { .. }) => {
+                    Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
                         Ok(InboundTurnOutcome::DeferredBusy {
                             accepted_message_ref,
                             active_run_id: busy.active_run_id,
                             binding,
+                            busy: Some(BusyRunSnapshot {
+                                status: run.status,
+                                event_cursor: run.event_cursor,
+                            }),
                         })
                     }
                     Ok(crate::steering::SteeringAdmission::Rejected) => {
@@ -1357,13 +1610,131 @@ impl AcceptedProductInboundTurn {
                             accepted_message_ref,
                             active_run_id: Some(busy.active_run_id),
                             binding,
+                            busy: Some(BusyRunSnapshot {
+                                status: busy.status,
+                                event_cursor: busy.event_cursor,
+                            }),
                         })
                     }
                     Err(error) => Err(steering_admission_failure(error)),
                 }
             }
-            Err(error) => Err(ProductSurfaceFailure::TurnSubmissionFailed { error }),
+            Err(error) => {
+                clear_session_skill_activation(
+                    lane,
+                    session_skill_activation,
+                    &turn_scope,
+                    &accepted_message_ref,
+                )?;
+                Err(ProductSurfaceFailure::TurnSubmissionFailed { error })
+            }
         }
+    }
+}
+
+/// Record the session skill-activation bookkeeping between message acceptance
+/// and turn submission. Webhook-lane submissions skip it entirely.
+fn record_session_skill_activation(
+    lane: SubmissionLane,
+    ports: Option<&SessionSkillActivationPorts>,
+    text: Option<&str>,
+    scope: &TurnScope,
+    accepted_message_ref: &AcceptedMessageRef,
+) -> Result<(), ProductSurfaceFailure> {
+    if lane != SubmissionLane::Session {
+        return Ok(());
+    }
+    let (Some(ports), Some(text)) = (ports, text) else {
+        return Ok(());
+    };
+    (ports.recorder)(scope, accepted_message_ref, text).map_err(|error| {
+        ProductSurfaceFailure::SkillActivationFailed {
+            reason: format!("skill activation recorder failed: {:?}", error.code),
+        }
+    })
+}
+
+/// Clear session skill-activation bookkeeping when the accepted message did
+/// not become the submitted turn (busy or submission failure).
+fn clear_session_skill_activation(
+    lane: SubmissionLane,
+    ports: Option<&SessionSkillActivationPorts>,
+    scope: &TurnScope,
+    accepted_message_ref: &AcceptedMessageRef,
+) -> Result<(), ProductSurfaceFailure> {
+    if lane != SubmissionLane::Session {
+        return Ok(());
+    }
+    let Some(ports) = ports else {
+        return Ok(());
+    };
+    (ports.clearer)(scope, accepted_message_ref).map_err(|error| {
+        ProductSurfaceFailure::SkillActivationFailed {
+            reason: format!("skill activation clearer failed: {:?}", error.code),
+        }
+    })
+}
+
+/// Mark the accepted message submitted, reconciling a session-lane duplicate:
+/// when a concurrent retry already marked the same message with the same run,
+/// the mark failure is benign and the submission stands.
+// arch-exempt: too_many_args, wants a SubmittedMarkContext bundle once the session lane settles, plan docs/internal/design/2026-08-10-unified-channel-model.md
+#[allow(clippy::too_many_arguments)]
+async fn mark_message_submitted_or_reconcile<T>(
+    thread_service: &T,
+    thread_scope: &ThreadScope,
+    binding: &ResolvedBinding,
+    message_id: ThreadMessageId,
+    lane: SubmissionLane,
+    source_binding_id: &str,
+    external_event_id: &str,
+    turn_id: String,
+    run_id: String,
+) -> Result<(), ProductSurfaceFailure>
+where
+    T: SessionThreadService,
+{
+    let mark_error = match thread_service
+        .mark_message_submitted(
+            thread_scope,
+            &binding.thread_id,
+            message_id,
+            turn_id,
+            run_id.clone(),
+        )
+        .await
+    {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    if lane != SubmissionLane::Session {
+        return Err(ProductSurfaceFailure::Transient {
+            reason: format!("failed to mark message submitted: {mark_error}"),
+        });
+    }
+    let replay = thread_service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: thread_scope.clone(),
+            actor_id: binding.actor_user_id.as_str().to_string(),
+            source_binding_id: source_binding_id.to_string(),
+            external_event_id: external_event_id.to_string(),
+        })
+        .await
+        .map_err(|error| ProductSurfaceFailure::Transient {
+            reason: format!("failed to reconcile submitted mark: {error}"),
+        })?;
+    match replay {
+        Some(replay)
+            if replay.thread_id == binding.thread_id
+                && replay.message_id == message_id
+                && replay.status == MessageStatus::Submitted
+                && replay.turn_run_id == Some(run_id) =>
+        {
+            Ok(())
+        }
+        _ => Err(ProductSurfaceFailure::Transient {
+            reason: format!("failed to mark message submitted: {mark_error}"),
+        }),
     }
 }
 
@@ -1445,6 +1816,77 @@ fn binding_from_replay(
 }
 
 use crate::run_delivery::thread_scope_from_binding;
+
+/// Map an owned-thread ownership probe failure. "Does not exist" and
+/// "owned by another caller" collapse into one indistinguishable failure
+/// (no existence oracle); anything else is a transient store fault.
+fn owned_thread_probe_failure(
+    error: ironclaw_threads::SessionThreadError,
+) -> ProductSurfaceFailure {
+    match error {
+        ironclaw_threads::SessionThreadError::UnknownThread { .. }
+        | ironclaw_threads::SessionThreadError::ThreadScopeMismatch { .. } => {
+            ProductSurfaceFailure::OwnedThreadUnavailable
+        }
+        other => ProductSurfaceFailure::Transient {
+            reason: format!("owned-thread probe failed: {other}"),
+        },
+    }
+}
+
+/// The session lane's persisted source-binding-id scheme. Byte-identical to
+/// what the dedicated browser path always wrote (caller-scoped, deliberately
+/// thread-free so a retry replays across the caller context): changing it
+/// breaks replay of already-accepted messages.
+fn session_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
+    format!(
+        "{}{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", scope.tenant_id.as_str()),
+        segment(
+            "agent",
+            scope
+                .agent_id
+                .as_ref()
+                .map(ironclaw_host_api::ids::AgentId::as_str)
+                .unwrap_or("")
+        ),
+        segment(
+            "project_scope",
+            if scope.project_id.is_some() {
+                "bound"
+            } else {
+                "none"
+            }
+        ),
+        scope
+            .project_id
+            .as_ref()
+            .map(|project_id| segment("project", project_id.as_str()))
+            .unwrap_or_default(),
+        segment("actor", actor.user_id.as_str())
+    )
+}
+
+/// The session lane's pre-migration thread-scoped binding-id scheme, probed
+/// on replay so messages accepted by older builds do not double-accept.
+fn legacy_session_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", scope.tenant_id.as_str()),
+        segment(
+            "agent",
+            scope
+                .agent_id
+                .as_ref()
+                .map(ironclaw_host_api::ids::AgentId::as_str)
+                .unwrap_or("")
+        ),
+        segment("thread", scope.thread_id.as_str()),
+        segment("actor", actor.user_id.as_str())
+    )
+}
 
 fn submit_idempotency_key(envelope: &ProductInboundEnvelope, binding: &ResolvedBinding) -> String {
     format!(

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, two-axis reply/delivery routing remains consolidated in its owning coordinator while follow-up decomposition is tracked, plan #7477
 //! The generic outbound delivery coordinator (extension-runtime §5.4,
 //! OUT-1..7).
 //!
@@ -6,7 +7,7 @@
 //! retry, crash recovery — identical for every channel, owned here,
 //! once) and **vendor mechanics** (rendering, splitting, API selection,
 //! error mapping — owned by each extension's
-//! [`ChannelAdapter::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelAdapter)).
+//! [`ChannelDelivery::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver)).
 //!
 //! Rules this module owns:
 //! - Every user-visible channel output is a semantic [`DeliveryIntent`];
@@ -21,7 +22,7 @@
 //!   the vendor already accepted (OUT-7).
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -40,10 +41,15 @@ use ironclaw_outbound::{
     ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_contracts::delivery::{
-    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
+    ChannelDeliveryResolver, DeliveryRegistrationService, DeliveryReplyContextSource,
+    ResolvedChannelDelivery,
 };
+use ironclaw_product_contracts::outbound::{
+    ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
+};
+use ironclaw_product_contracts::projection::{ProjectionStream, ProjectionSubscriptionRequest};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_turns::{TurnActor, TurnRunId, TurnScope};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::debug;
@@ -89,6 +95,75 @@ pub enum DeliveryIntent {
     ModelDelivery,
 }
 
+/// Return the real cursor whose payload proves the expected stream reply is
+/// visible. Final answers require both text and a completed run; a partial
+/// live-text update alone is not delivery evidence.
+fn stream_delivery_cursor(
+    envelopes: &[ProductOutboundEnvelope],
+    run_id: TurnRunId,
+    intent: DeliveryIntent,
+) -> Option<String> {
+    for envelope in envelopes {
+        let direct_match = match envelope.payload() {
+            // The direct final-reply payload has no durable producer. It may
+            // still appear on compatibility/test streams, but cannot prove a
+            // reply survived process restart or crossed replicas.
+            ProductOutboundPayload::FinalReply(_) => false,
+            ProductOutboundPayload::GatePrompt(prompt) => {
+                intent == DeliveryIntent::GatePrompt && prompt.turn_run_id == run_id
+            }
+            ProductOutboundPayload::AuthPrompt(prompt) => {
+                intent == DeliveryIntent::AuthPrompt && prompt.turn_run_id == run_id
+            }
+            ProductOutboundPayload::ProjectionSnapshot { state }
+            | ProductOutboundPayload::ProjectionUpdate { state } => {
+                let mut saw_finalized_text = false;
+                let mut saw_completed = false;
+                for item in &state.items {
+                    match item {
+                        ProductProjectionItem::Text {
+                            run_id: Some(item_run_id),
+                            finalized: true,
+                            ..
+                        } if *item_run_id == run_id => saw_finalized_text = true,
+                        ProductProjectionItem::RunStatus {
+                            run_id: item_run_id,
+                            status,
+                            ..
+                        } if *item_run_id == run_id && status == "completed" => {
+                            saw_completed = true;
+                        }
+                        ProductProjectionItem::Gate {
+                            run_id: item_run_id,
+                            gate_kind,
+                            ..
+                        } if *item_run_id == run_id => match intent {
+                            DeliveryIntent::AuthPrompt if *gate_kind == ProductGateKind::Auth => {
+                                return Some(envelope.projection_cursor().as_str().to_string());
+                            }
+                            DeliveryIntent::GatePrompt => {
+                                return Some(envelope.projection_cursor().as_str().to_string());
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+                // A final reply is proven only when the durable turn-event
+                // projection embeds the finalized transcript text and the
+                // completed run status in the same state. Process-local live
+                // text in an earlier envelope can never satisfy this seal.
+                intent == DeliveryIntent::FinalReply && saw_finalized_text && saw_completed
+            }
+            _ => false,
+        };
+        if direct_match {
+            return Some(envelope.projection_cursor().as_str().to_string());
+        }
+    }
+    None
+}
+
 impl DeliveryIntent {
     /// Policy-class intents run the outbound-policy pipeline (validated
     /// reply-target bindings + preference targets). Notice-class intents are
@@ -129,6 +204,142 @@ impl DeliveryIntent {
     }
 }
 
+/// Where an outbound thing is going — **the axis, decided once, by the
+/// router**.
+///
+/// Reply and delivery are orthogonal, not alternatives. Reply answers the
+/// run's input and is *source-routed*; delivery reaches someone out of band
+/// and is *target-resolved*, and may exist with no run at all. One run can do
+/// both: the answer streams into an open tab (reply) *and* a push fires
+/// because nobody is looking (delivery).
+///
+/// **This type exists because dispatching on [`DeliveryIntent`] instead of on
+/// the axis already shipped a defect.** A gate prompt is a reply when a human
+/// is sitting in the thread and a delivery when a 3am routine is blocked and
+/// nobody is there — same intent, same content, different axis. Keying the
+/// streaming decision on the intent silently dropped the second case and
+/// blocked-routine pushes vanished. Naming the axis makes that class of bug
+/// unexpressible: content never implies routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundRoute {
+    /// Back to the conversation or session the run came from.
+    Reply,
+    /// To a resolved target, with no assumption that a run exists.
+    Delivery,
+}
+
+impl OutboundRoute {
+    /// Decide the axis for a policy-class send, **once**, from the resolved
+    /// routing decision rather than from what is being said.
+    ///
+    /// A run notification that resolved to the live source route is a reply:
+    /// a human is in the thread. One that resolved to a preference target
+    /// is a delivery, whatever its content happens to be.
+    fn for_policy(resolution: &ironclaw_outbound::CommunicationDeliveryIntent) -> Self {
+        match resolution {
+            ironclaw_outbound::CommunicationDeliveryIntent::RequestedOutbound(_) => Self::Delivery,
+            ironclaw_outbound::CommunicationDeliveryIntent::RunNotification(context)
+                if matches!(
+                    context.origin,
+                    ironclaw_outbound::RunNotificationOrigin::LiveSourceRoute { .. }
+                ) =>
+            {
+                Self::Reply
+            }
+            ironclaw_outbound::CommunicationDeliveryIntent::RunNotification(_) => Self::Delivery,
+        }
+    }
+
+    /// Notice-class sends are source-routed by construction — the target IS
+    /// the originating conversation — so they are always the reply axis.
+    fn for_notice() -> Self {
+        Self::Reply
+    }
+
+    fn is_reply(self) -> bool {
+        matches!(self, Self::Reply)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Reply => "reply",
+            Self::Delivery => "delivery",
+        }
+    }
+}
+
+/// The registration scope for one delivery: the run's scope owner, which is
+/// the user whose channels were resolved. `None` for a run with no explicit
+/// owner — an ownerless run has no enrolled client set to reach, which the
+/// caller reads as "no registrations" rather than as an error.
+fn registration_scope_for(
+    attempt: &OutboundDeliveryAttempt,
+    channel: &ResolvedChannelDelivery,
+) -> Option<ironclaw_product_contracts::delivery::DeliveryRegistrationScope> {
+    let ironclaw_host_api::turn::TurnThreadOwner::ExplicitUser { owner_user_id } =
+        &attempt.scope.thread_owner
+    else {
+        return None;
+    };
+    Some(
+        ironclaw_product_contracts::delivery::DeliveryRegistrationScope {
+            tenant_id: attempt.scope.tenant_id.clone(),
+            user_id: owner_user_id.clone(),
+            extension_id: channel.extension_id.clone(),
+        },
+    )
+}
+
+/// A no-registration source for deployments and tests with no
+/// enrollment-requiring channel. Deliberately not a `None` dependency: a
+/// coordinator that cannot answer "is this user enrolled?" must still answer
+/// it, and "nobody is" is a real answer.
+pub struct NoDeliveryRegistrations;
+
+#[async_trait]
+impl ironclaw_product_contracts::delivery::DeliveryRegistrationService for NoDeliveryRegistrations {
+    async fn list(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+    ) -> Result<
+        Vec<ironclaw_extension_contracts::channel_adapter::DeliveryRegistration>,
+        ironclaw_product_contracts::delivery::DeliveryRegistrationError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn enroll(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        _request: ironclaw_product_contracts::delivery::DeliveryRegistrationRequest,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryRegistration,
+        ironclaw_product_contracts::delivery::DeliveryRegistrationError,
+    > {
+        Err(
+            ironclaw_product_contracts::delivery::DeliveryRegistrationError::Rejected {
+                reason: "this deployment stores no delivery registrations".to_string(),
+            },
+        )
+    }
+
+    async fn remove(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        _endpoint: &str,
+    ) -> Result<bool, ironclaw_product_contracts::delivery::DeliveryRegistrationError> {
+        Ok(false)
+    }
+
+    async fn prune(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        _registration_ids: &[String],
+    ) -> Result<usize, ironclaw_product_contracts::delivery::DeliveryRegistrationError> {
+        Ok(0)
+    }
+}
+
 /// A no-context source for channels/tests without stored contexts.
 pub struct NoReplyContext;
 
@@ -139,8 +350,9 @@ impl DeliveryReplyContextSource for NoReplyContext {
         _: &ExtensionId,
         _: &AdapterInstallationId,
         _: &str,
-    ) -> Option<Vec<u8>> {
-        None
+    ) -> Result<Option<Vec<u8>>, ironclaw_product_contracts::delivery::DeliveryReplyContextError>
+    {
+        Ok(None)
     }
 }
 
@@ -178,6 +390,7 @@ struct AuthorizedDeliveryTarget {
 /// triggered assistant text into materialized [`OutboundPart::File`] parts.
 struct WorkspaceMaterialization<'a> {
     intent: DeliveryIntent,
+    actor: TurnActor,
     project_filesystem: &'a dyn ProjectFilesystemReader,
     thread_scope: &'a ThreadScope,
     attachments: Vec<AttachmentRef>,
@@ -237,6 +450,21 @@ pub enum CoordinatedDeliveryOutcome {
     /// are intentionally absent because attempt persistence does not retain
     /// them; callers may claim durable prior delivery, but not invent refs.
     AlreadyDelivered { attempt: OutboundDeliveryAttempt },
+    /// Delivered by the durable projection pipeline rather than a vendor
+    /// call — a `stream` reply. `cursor` is the projection ref at which the
+    /// reply is visible to the subscribed client: durable proof the user can
+    /// see it, which is what makes this evidence rather than an assumption.
+    StreamDelivered {
+        attempt: OutboundDeliveryAttempt,
+        cursor: String,
+    },
+    /// The stream reply is visible, but the durable `Delivered` write failed.
+    /// The weaker evidence type, for the same reason
+    /// [`Self::DeliveredUnconfirmed`] exists on the vendor path.
+    StreamDeliveredUnconfirmed {
+        attempt: OutboundDeliveryAttempt,
+        cursor: String,
+    },
     /// Terminal failure (permanent, retries exhausted, or partial-multipart).
     Failed {
         attempt: OutboundDeliveryAttempt,
@@ -253,6 +481,8 @@ pub enum CoordinatedDeliveryError {
     Workflow(#[from] ProductSurfaceFailure),
     #[error("no active channel for extension `{extension_id}`")]
     ChannelUnavailable { extension_id: String },
+    #[error("stored reply context is unavailable")]
+    ReplyContextUnavailable,
     #[error("delivery is already in flight for this attempt")]
     AlreadyInFlight,
     #[error("intent {intent:?} does not belong to this delivery path")]
@@ -301,13 +531,14 @@ pub struct DeliveryCoordinator {
     store: Arc<dyn OutboundStateStorePort>,
     resolver: Arc<dyn ChannelDeliveryResolver>,
     reply_context: Arc<dyn DeliveryReplyContextSource>,
+    registrations: Arc<dyn DeliveryRegistrationService>,
+    /// Late-bound because channel egress is assembled before the product
+    /// projection graph. Stream replies fail closed until the one canonical
+    /// projection stream is installed by composition.
+    projection_stream: OnceLock<Arc<dyn ProjectionStream>>,
     retry: DeliveryRetryPolicy,
     /// Per-delivery single-flight: a delivery id enters once.
     in_flight: Mutex<HashSet<ironclaw_outbound::OutboundDeliveryId>>,
-    /// Scopes whose interrupted (`Sending`) attempts from prior lifetimes
-    /// have been reconciled this lifetime. The store enumerates attempts per
-    /// scope only, so recovery runs lazily before a scope's first delivery.
-    recovered_scopes: Mutex<HashSet<TurnScope>>,
 }
 
 impl DeliveryCoordinator {
@@ -318,43 +549,34 @@ impl DeliveryCoordinator {
         store: Arc<dyn OutboundStateStorePort>,
         resolver: Arc<dyn ChannelDeliveryResolver>,
         reply_context: Arc<dyn DeliveryReplyContextSource>,
+        registrations: Arc<dyn DeliveryRegistrationService>,
         retry: DeliveryRetryPolicy,
     ) -> Self {
         Self {
             store,
             resolver,
             reply_context,
+            registrations,
+            projection_stream: OnceLock::new(),
             retry,
             in_flight: Mutex::new(HashSet::new()),
-            recovered_scopes: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Run crash recovery for `scope` exactly once per coordinator lifetime,
-    /// before the scope's first delivery. Recovery failures are logged and
-    /// do not block the new delivery: the stray attempt stays `Sending` and
-    /// the next lifetime reconciles it.
-    async fn ensure_scope_recovered(&self, scope: &TurnScope) {
-        {
-            let mut recovered = self
-                .recovered_scopes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !recovered.insert(scope.clone()) {
-                return;
-            }
-        }
-        if let Err(error) = self.recover_interrupted_deliveries(scope.clone()).await {
-            debug!(
-                error = %error,
-                "delivery coordinator: lazy interrupted-delivery recovery failed"
-            );
-        }
+    /// Attach the canonical product projection stream. First write wins so a
+    /// runtime cannot silently swap the evidence source under in-flight
+    /// deliveries.
+    pub fn bind_projection_stream(&self, stream: Arc<dyn ProjectionStream>) -> bool {
+        self.projection_stream.set(stream).is_ok()
     }
 
     /// Crash recovery (OUT-6): every attempt still `Sending` in this scope
-    /// crashed between vendor egress and the result write. Mark each
-    /// `Unknown`; never blindly resend.
+    /// is marked `Unknown`; never blindly resend.
+    ///
+    /// Callers must guarantee exclusive/quiescent ownership of the scope.
+    /// Normal delivery never invokes this automatically: without a persisted
+    /// owner lease, another replica cannot distinguish a crashed send from a
+    /// live one and must leave `Sending` fail-closed.
     pub async fn recover_interrupted_deliveries(
         &self,
         scope: ironclaw_turns::TurnScope,
@@ -365,16 +587,18 @@ impl DeliveryCoordinator {
             if attempt.status != OutboundDeliveryStatus::Sending {
                 continue;
             }
-            self.store
-                .update_delivery_status(UpdateDeliveryStatusRequest {
-                    delivery_id: attempt.delivery_id,
-                    scope: scope.clone(),
-                    status: OutboundDeliveryStatus::Unknown,
-                    updated_at: chrono::Utc::now(),
-                    failure_kind: None,
-                })
-                .await?;
-            recovered += 1;
+            if self
+                .store
+                .recover_interrupted_delivery_attempt(
+                    ironclaw_outbound::RecoverInterruptedDeliveryRequest {
+                        delivery_id: attempt.delivery_id,
+                        scope: scope.clone(),
+                    },
+                )
+                .await?
+            {
+                recovered += 1;
+            }
         }
         if recovered > 0 {
             debug!(
@@ -403,9 +627,16 @@ impl DeliveryCoordinator {
             });
         }
         reject_caller_supplied_files(&request.parts)?;
-        self.ensure_scope_recovered(&request.delivery.resolution_request.scope)
-            .await;
-
+        // §7a classification, decided before the request is consumed by the
+        // policy step: a run-notification that is NOT source-routed (i.e. it
+        // targets a notification channel rather than the originating
+        // conversation) and is not an explicitly routed final answer rides
+        // the adapter's notification send.
+        // The axis, decided ONCE, from the resolved routing decision — not
+        // from what is being said. Everything downstream is handed this
+        // instead of re-deriving "is this a notification?" from the intent.
+        let route = OutboundRoute::for_policy(&request.delivery.resolution_request.intent);
+        let stream_actor = request.delivery.resolution_request.actor.clone();
         // 1. Policy: authorize the candidate and persist the attempt.
         let Some(decision) = outbound_policy
             .prepare_communication_delivery_attempt(request.delivery)
@@ -414,6 +645,9 @@ impl DeliveryCoordinator {
             return Ok(CoordinatedDeliveryOutcome::NoDelivery);
         };
         let (attempt, target) = match decision {
+            OutboundDeliveryDecision::AlreadyRecorded { attempt } => {
+                return self.outcome_for_claimed_delivery(&attempt).await;
+            }
             OutboundDeliveryDecision::Authorized { attempt, target } => (attempt, target),
             OutboundDeliveryDecision::Rejected { attempt } => {
                 return Ok(CoordinatedDeliveryOutcome::Rejected { attempt });
@@ -452,10 +686,12 @@ impl DeliveryCoordinator {
                 request.extension_id,
                 WorkspaceMaterialization {
                     intent: request.intent,
+                    actor: stream_actor,
                     project_filesystem,
                     thread_scope: request.thread_scope,
                     attachments: request.attachments,
                 },
+                route,
             )
             .await;
         self.in_flight
@@ -479,7 +715,21 @@ impl DeliveryCoordinator {
             });
         }
         reject_caller_supplied_files(&request.parts)?;
-        self.ensure_scope_recovered(&request.scope).await;
+        // Unlike `deliver`, this guard is unconditional — and deliberately so.
+        // Notice-class intents are SOURCE-routed: they target the originating
+        // conversation, never a policy-resolved notification target, so none
+        // of them is ever notification-routed and the `as_notification`
+        // carve-out `deliver` needs cannot apply here. For a streaming
+        // channel the originating conversation IS the durable projection
+        // stream the client already renders from, which carries run status
+        // and failure transitions; and the vendor-message operations in this
+        // class (`Retract`, `React`) have no counterpart there — the web-app
+        // adapter reports both as unsupported parts, so delivering them would
+        // only persist a failed attempt. Background-run notices, the sends
+        // that must reach a closed tab, are policy-class and flow through
+        // `deliver`'s notification path instead. Pinned by
+        // `streaming_channel_skips_source_routed_notices_but_not_notifications`.
+        let route = OutboundRoute::for_notice();
 
         // Persist the attempt before anything else. The synthetic reply
         // target names the source conversation (hashed: fingerprints can
@@ -495,7 +745,11 @@ impl DeliveryCoordinator {
         ))
         .map_err(|reason| CoordinatedDeliveryError::InvalidNotice { reason })?;
         let attempt = OutboundDeliveryAttempt {
-            delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+            delivery_id: ironclaw_outbound::OutboundDeliveryId::for_projection_fact(
+                &request.scope,
+                &target,
+                &projection_ref,
+            )?,
             scope: request.scope.clone(),
             candidate: OutboundPushCandidate {
                 tenant_id: request.scope.tenant_id.clone(),
@@ -536,6 +790,7 @@ impl DeliveryCoordinator {
                 request.conversation,
                 request.thread_anchor,
                 request.parts,
+                route,
             )
             .await;
         self.in_flight
@@ -545,6 +800,8 @@ impl DeliveryCoordinator {
         result
     }
 
+    // arch-exempt: too_many_args, delivery drive wants a PreparedDriveContext bundle, plan docs/internal/design/2026-08-10-unified-channel-model.md
+    #[allow(clippy::too_many_arguments)]
     async fn drive_authorized(
         &self,
         target_resolver: &dyn ProductOutboundTargetResolver,
@@ -553,6 +810,7 @@ impl DeliveryCoordinator {
         parts: Vec<OutboundPart>,
         extension_id: &str,
         materialization: WorkspaceMaterialization<'_>,
+        route: OutboundRoute,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         // 2. Resolve the trusted conversation metadata for the sealed target.
         let metadata: VerifiedProductOutboundTargetMetadata = match target_resolver
@@ -579,6 +837,20 @@ impl DeliveryCoordinator {
             .resolve_channel_context(&attempt, extension_id, &metadata.external_conversation_ref)
             .await?;
 
+        // A stream reply is published by the projection pipeline, so the
+        // adapter path must not also send it. This decision reads the exact
+        // same resolved generation as the adapter/egress/enrollment facts;
+        // policy, target authorization, and the stable attempt claim have
+        // already completed.
+        if route.is_reply()
+            && channel.reply_transport
+                == Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream)
+        {
+            return self
+                .record_stream_reply(attempt, &materialization.actor, materialization.intent)
+                .await;
+        }
+
         let parts = match materialize_workspace_file_parts(materialization, parts).await {
             Ok(parts) => parts,
             Err(error) => {
@@ -596,6 +868,7 @@ impl DeliveryCoordinator {
             target.thread_anchor,
             parts,
             reply_context,
+            route,
         )
         .await
     }
@@ -603,6 +876,8 @@ impl DeliveryCoordinator {
     /// Shared delivery drive: channel resolution (generation-pinned), reply
     /// context, `Sending` persisted before egress (OUT-3), bounded retries,
     /// and the partial-multipart terminal rule (OUT-7).
+    // arch-exempt: too_many_args, delivery drive wants a PreparedDriveContext bundle, plan docs/internal/design/2026-08-10-unified-channel-model.md
+    #[allow(clippy::too_many_arguments)]
     async fn drive_resolved(
         &self,
         attempt: OutboundDeliveryAttempt,
@@ -610,10 +885,22 @@ impl DeliveryCoordinator {
         conversation: ExternalConversationRef,
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
+        route: OutboundRoute,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let (channel, reply_context) = self
             .resolve_channel_context(&attempt, extension_id, &conversation)
             .await?;
+        if route.is_reply()
+            && channel.reply_transport
+                == Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream)
+        {
+            // Source-routed notices have no projection-evidence request: the
+            // projection owner may already render equivalent UI state, but
+            // the delivery coordinator must not invent proof for it.
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::NoTarget, None)
+                .await;
+            return Ok(CoordinatedDeliveryOutcome::NoDelivery);
+        }
         self.drive_prepared(
             attempt,
             channel,
@@ -621,8 +908,109 @@ impl DeliveryCoordinator {
             thread_anchor,
             parts,
             reply_context,
+            route,
         )
         .await
+    }
+
+    /// Verify and record a stream reply as a **delivered** attempt.
+    ///
+    /// This is the hole design §4 exists to close. A `stream` channel's reply
+    /// is published by the projection pipeline rather than sent by an
+    /// adapter, and the coordinator used to answer that with `NoDelivery` —
+    /// so a browser reply produced **no delivery record at all**, "was the
+    /// user's answer delivered?" had no uniform answer, and the whole channel
+    /// was invisible in delivery audits.
+    ///
+    /// It is a full attempt row, not a lighter marker (§10.4): uniform beats
+    /// cheap, and a per-transport audit shape is exactly the kind of split
+    /// that makes two queries necessary where one should do. Revisit only on
+    /// a measurement.
+    ///
+    /// The evidence is a real cursor returned by the canonical projection
+    /// stream after it exposes the expected run fact. The candidate's semantic
+    /// projection ref is an idempotency identity, never a substitute cursor.
+    async fn record_stream_reply(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+        actor: &TurnActor,
+        intent: DeliveryIntent,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
+        let Some(run_id) = attempt.candidate.turn_run_id else {
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                .await;
+            return Ok(CoordinatedDeliveryOutcome::Failed {
+                attempt,
+                failure_kind: DeliveryFailureKind::Unknown,
+            });
+        };
+        let Some(stream) = self.projection_stream.get() else {
+            debug!(
+                target: "ironclaw::reborn::delivery",
+                intent = intent.as_str(),
+                "stream reply could not be verified because the projection stream is unbound"
+            );
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                .await;
+            return Ok(CoordinatedDeliveryOutcome::Failed {
+                attempt,
+                failure_kind: DeliveryFailureKind::Unknown,
+            });
+        };
+        let envelopes = match stream
+            .drain(ProjectionSubscriptionRequest {
+                actor: actor.clone(),
+                scope: attempt.scope.clone(),
+                after_cursor: None,
+            })
+            .await
+        {
+            Ok(envelopes) => envelopes,
+            Err(error) => {
+                debug!(
+                    target: "ironclaw::reborn::delivery",
+                    intent = intent.as_str(),
+                    error = %error,
+                    "stream reply projection verification failed"
+                );
+                self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                    .await;
+                return Ok(CoordinatedDeliveryOutcome::Failed {
+                    attempt,
+                    failure_kind: DeliveryFailureKind::Unknown,
+                });
+            }
+        };
+        let Some(cursor) = stream_delivery_cursor(&envelopes, run_id, intent) else {
+            debug!(
+                target: "ironclaw::reborn::delivery",
+                intent = intent.as_str(),
+                %run_id,
+                "stream reply projection did not contain the expected run fact"
+            );
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                .await;
+            return Ok(CoordinatedDeliveryOutcome::Failed {
+                attempt,
+                failure_kind: DeliveryFailureKind::Unknown,
+            });
+        };
+        let confirmed = self
+            .mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
+            .await;
+        debug!(
+            target: "ironclaw::reborn::delivery",
+            intent = intent.as_str(),
+            cursor = %cursor,
+            confirmed,
+            "stream reply delivered by the projection pipeline"
+        );
+        if !confirmed {
+            // Same rule as a vendor send whose terminal write failed: the
+            // user can see the reply, but we cannot durably claim it.
+            return Ok(CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed { attempt, cursor });
+        }
+        Ok(CoordinatedDeliveryOutcome::StreamDelivered { attempt, cursor })
     }
 
     async fn resolve_channel_context(
@@ -652,11 +1040,37 @@ impl DeliveryCoordinator {
                 &channel.installation_id,
                 &conversation.conversation_fingerprint(),
             )
-            .await;
+            .await
+            .map_err(|error| {
+                // The attempt settles Failed/TransportUnavailable below — log
+                // the bound source first so a reply-context store outage is
+                // distinguishable from a genuine transport fault.
+                debug!(
+                    extension_id = %channel.extension_id,
+                    %error,
+                    "delivery coordinator: reply-context read failed"
+                );
+                CoordinatedDeliveryError::ReplyContextUnavailable
+            });
+
+        let reply_context = match reply_context {
+            Ok(context) => context,
+            Err(error) => {
+                self.mark_terminal(
+                    attempt,
+                    OutboundDeliveryStatus::Failed,
+                    Some(DeliveryFailureKind::TransportUnavailable),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         Ok((channel, reply_context))
     }
 
+    // arch-exempt: too_many_args, delivery drive wants a PreparedDriveContext bundle, plan docs/internal/design/2026-08-10-unified-channel-model.md
+    #[allow(clippy::too_many_arguments)]
     async fn drive_prepared(
         &self,
         attempt: OutboundDeliveryAttempt,
@@ -665,17 +1079,90 @@ impl DeliveryCoordinator {
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
         reply_context: Option<Vec<u8>>,
+        route: OutboundRoute,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
+        // Per-user delivery registrations (design §8). Resolved on the
+        // DELIVERY axis only — a reply is source-routed and has no enrolled
+        // client set — and BEFORE the adapter call, so a channel with zero
+        // registrations is a resolvable "no target" rather than a failure
+        // discovered inside the vendor path.
+        let enrollment_required =
+            matches!(route, OutboundRoute::Delivery) && channel.requires_enrollment;
+        let registration_scope = enrollment_required
+            .then(|| registration_scope_for(&attempt, &channel))
+            .flatten();
+        if enrollment_required && registration_scope.is_none() {
+            debug!(
+                extension_id = %channel.extension_id,
+                "delivery coordinator: enrollment-required delivery has no user scope"
+            );
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::NoTarget, None)
+                .await;
+            return Ok(CoordinatedDeliveryOutcome::NoDelivery);
+        }
+        let registrations = match &registration_scope {
+            Some(scope) => match self.registrations.list(scope).await {
+                Ok(registrations) => registrations,
+                Err(error) => {
+                    debug!(
+                        extension_id = %channel.extension_id,
+                        error = %error,
+                        "delivery coordinator: registration lookup failed"
+                    );
+                    let kind = DeliveryFailureKind::TransportUnavailable;
+                    self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
+                        .await;
+                    return Ok(CoordinatedDeliveryOutcome::Failed {
+                        attempt,
+                        failure_kind: kind,
+                    });
+                }
+            },
+            None => Vec::new(),
+        };
+        if enrollment_required && registrations.is_empty() {
+            // The guardrail the host could not have before §8: no enrolled
+            // client is a resolved absence of target, not a vendor failure.
+            debug!(
+                extension_id = %channel.extension_id,
+                "delivery coordinator: channel requires enrollment and has no registrations"
+            );
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::NoTarget, None)
+                .await;
+            return Ok(CoordinatedDeliveryOutcome::NoDelivery);
+        }
+
         let envelope = OutboundEnvelope {
-            extension_id: channel.extension_id.as_str().to_string(),
-            installation_id: channel.installation_id.as_str().to_string(),
-            delivery_attempt_id: attempt.delivery_id.to_string(),
             target: OutboundTarget {
                 conversation: conversation.clone(),
                 thread_anchor,
             },
             parts,
             reply_context,
+            registrations,
+        };
+
+        // Resolve the half ONCE, by axis, before the retry loop. A channel
+        // that declares an axis binds its half or fails activation, so a
+        // missing half here means the coordinator routed to a channel that
+        // never claimed the route.
+        let half = match route {
+            OutboundRoute::Reply => channel.reply.clone().map(OutboundHalf::Reply),
+            OutboundRoute::Delivery => channel.delivery.clone().map(OutboundHalf::Delivery),
+        };
+        let Some(half) = half else {
+            let kind = DeliveryFailureKind::Rejected;
+            self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
+                .await;
+            debug!(
+                extension_id = %channel.extension_id,
+                route = route.as_str(),
+                "delivery coordinator: channel implements no half for this route"
+            );
+            return Ok(CoordinatedDeliveryOutcome::Failed {
+                attempt,
+                failure_kind: kind,
+            });
         };
 
         // Drive the adapter with bounded retries. Once any part has been
@@ -683,14 +1170,47 @@ impl DeliveryCoordinator {
         let mut attempts_used = 0u32;
         loop {
             attempts_used += 1;
-            let report = channel
-                .adapter
-                .deliver(envelope.clone(), channel.egress.as_ref())
-                .await;
+            let report = half.send(envelope.clone(), channel.egress.as_ref()).await;
             match report {
                 Ok(report) => {
+                    // Coverage, not equality: adapters own part fan-out and
+                    // may report one outcome per vendor chunk (the adapter
+                    // conformance suite legalizes outcomes >= parts), so a
+                    // longer report is chunking evidence. Fewer outcomes than
+                    // envelope parts means some part has no evidence at all —
+                    // malformed, settled Unknown, never blindly retried.
+                    if report.parts.len() < envelope.parts.len() {
+                        debug!(
+                            extension_id = %channel.extension_id,
+                            expected_parts = envelope.parts.len(),
+                            reported_parts = report.parts.len(),
+                            "delivery coordinator: adapter report covers fewer outcomes than envelope parts"
+                        );
+                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                            .await;
+                        return Ok(CoordinatedDeliveryOutcome::Failed {
+                            attempt,
+                            failure_kind: DeliveryFailureKind::Unknown,
+                        });
+                    }
+                    // The adapter describes; the host writes. Pruning failure
+                    // never fails the delivery that discovered it.
+                    if let Some(scope) = &registration_scope
+                        && !report.prune_registrations.is_empty()
+                        && let Err(error) = self
+                            .registrations
+                            .prune(scope, &report.prune_registrations)
+                            .await
+                    {
+                        debug!(
+                            extension_id = %channel.extension_id,
+                            error = %error,
+                            "delivery coordinator: registration prune failed"
+                        );
+                    }
                     let mut sent_refs = Vec::new();
                     let mut retryable = false;
+                    let mut ambiguous = false;
                     let mut permanent = false;
                     let mut unauthorized = false;
                     for part in &report.parts {
@@ -701,6 +1221,7 @@ impl DeliveryCoordinator {
                                 }
                             }
                             PartDeliveryOutcome::Retryable { .. } => retryable = true,
+                            PartDeliveryOutcome::Ambiguous { .. } => ambiguous = true,
                             PartDeliveryOutcome::Permanent { .. } => permanent = true,
                             PartDeliveryOutcome::Unauthorized { .. } => unauthorized = true,
                         }
@@ -729,6 +1250,14 @@ impl DeliveryCoordinator {
                             attempt,
                             conversation,
                             vendor_message_refs: sent_refs,
+                        });
+                    }
+                    if ambiguous {
+                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                            .await;
+                        return Ok(CoordinatedDeliveryOutcome::Failed {
+                            attempt,
+                            failure_kind: DeliveryFailureKind::Unknown,
                         });
                     }
                     if unauthorized {
@@ -769,16 +1298,16 @@ impl DeliveryCoordinator {
                         error = %error,
                         "delivery coordinator: adapter deliver failed"
                     );
-                    if attempts_used >= self.retry.max_attempts {
-                        let kind = DeliveryFailureKind::TransportUnavailable;
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                            .await;
-                        return Ok(CoordinatedDeliveryOutcome::Failed {
-                            attempt,
-                            failure_kind: kind,
-                        });
-                    }
-                    tokio::time::sleep(self.retry.backoff).await;
+                    // A trait-level adapter error carries no proof that the
+                    // request failed before provider transmission. Retrying
+                    // could duplicate a message, so preserve the uncertainty
+                    // exactly as crash recovery does.
+                    self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
+                        .await;
+                    return Ok(CoordinatedDeliveryOutcome::Failed {
+                        attempt,
+                        failure_kind: DeliveryFailureKind::Unknown,
+                    });
                 }
             }
         }
@@ -818,6 +1347,7 @@ impl DeliveryCoordinator {
                 ironclaw_outbound::OutboundError::DeliveryNotFound,
             ))?;
         match existing.status {
+            OutboundDeliveryStatus::NoTarget => Ok(CoordinatedDeliveryOutcome::NoDelivery),
             OutboundDeliveryStatus::Delivered => {
                 Ok(CoordinatedDeliveryOutcome::AlreadyDelivered { attempt: existing })
             }
@@ -878,6 +1408,29 @@ impl DeliveryCoordinator {
     }
 }
 
+/// The outbound half one route resolves to. Resolved once per delivery so
+/// the retry loop cannot drift onto the other axis between attempts.
+enum OutboundHalf {
+    Reply(Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelReply>),
+    Delivery(Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelDelivery>),
+}
+
+impl OutboundHalf {
+    async fn send(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        match self {
+            Self::Reply(reply) => reply.send_reply(envelope, egress).await,
+            Self::Delivery(delivery) => delivery.deliver(envelope, egress).await,
+        }
+    }
+}
+
 async fn materialize_workspace_file_parts(
     materialization: WorkspaceMaterialization<'_>,
     mut parts: Vec<OutboundPart>,
@@ -887,6 +1440,7 @@ async fn materialize_workspace_file_parts(
         project_filesystem,
         thread_scope,
         attachments,
+        ..
     } = materialization;
     reject_caller_supplied_files(&parts)?;
     if !matches!(intent, DeliveryIntent::FinalReply) {

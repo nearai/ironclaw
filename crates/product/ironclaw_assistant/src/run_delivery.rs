@@ -8,7 +8,7 @@
 //! for every channel, so it lives here, once, and speaks only in
 //! [`DeliveryIntent`]s through the [`DeliveryCoordinator`]. Vendor mechanics
 //! (rendering, splitting, API selection) stay behind each extension's
-//! `ChannelAdapter::deliver`.
+//! [`ChannelDelivery::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver).
 //!
 //! Two components:
 //! - [`RunDeliveryObserver`] — the live source-route path: watches the run an
@@ -52,6 +52,7 @@ use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
 
 mod gate_routes;
+pub mod notifications;
 mod observer;
 pub(crate) mod prompts;
 mod triggered;

@@ -289,8 +289,11 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel.presentation]
 supports_markdown = false
 supports_threads = false
-max_message_chars = 4096
 ```
+
+Message-size limits are provider protocol details. Enforce the provider's
+actual unit (bytes, Unicode scalar values, or UTF-16 code units) inside the
+channel adapter while rendering and chunking outbound parts.
 
 Place the manifest alongside the WASM binary with this layout:
 

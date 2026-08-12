@@ -136,7 +136,9 @@ use crate::outbound::{
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
-use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::root::default_system_prompt::{
+    DefaultSystemPromptIdentitySource, SystemPromptProtocols,
+};
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_assistant::{
     OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID, RebornOutboundPreferencesService,
@@ -600,6 +602,10 @@ pub struct RebornRuntime {
         Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
+    pub(crate) session_inbound_ledger: Arc<dyn ironclaw_assistant::IdempotencyLedger>,
+    pub(crate) session_channel_directory:
+        Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
+    pub(crate) session_channel_extension_id: Option<String>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -625,9 +631,19 @@ pub struct RebornRuntime {
         Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
-    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
+    /// Host-owned per-user delivery registrations (design §8). Always wired:
+    /// a coordinator that cannot answer "is this user enrolled?" must still
+    /// answer it, and a deployment with no enrollment-requiring channel gets
+    /// the no-op that answers "nobody is".
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes the non-secret bootstrap document a channel's client needs
+    /// in order to enroll — the public half of a credential the host already
+    /// holds, published generically rather than through a per-channel status
+    /// document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -847,6 +863,12 @@ pub(crate) fn staged_capability_io_with_observer_for_test(
 }
 
 impl RebornRuntime {
+    /// The deployment's authenticated-session channel extension id, when
+    /// exactly one is declared. The serve path advertises it to the SPA.
+    pub fn session_channel_extension_id(&self) -> Option<&str> {
+        self.session_channel_extension_id.as_deref()
+    }
+
     pub fn readiness(&self) -> &RebornReadiness {
         &self.readiness
     }
@@ -3346,7 +3368,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let mut projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
-    );
+    )
+    .with_thread_service(Arc::clone(&thread_service));
     if let Some(local_runtime) = local_runtime {
         let approval_requests = &local_runtime.approval_requests;
         projection_services = projection_services
@@ -3660,6 +3683,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         resolved_memory_provider,
         &memory_lifecycle,
     );
+    // The bound provider's own memory guidance for the model, if it ships any
+    // (#7185). The text is the provider's — it names that provider's tools and
+    // describes that provider's recall behavior — resolved generically at
+    // bundle-construction time against the BOUND provider's own asset table
+    // (`memory_provider_factory::resolve_memory_provider`), never by a
+    // host-side match on a specific provider's constants. Two conditions, both
+    // necessary: a provider must actually be resolved (a `Disabled` binding
+    // registers no package, so the model sees no `ironclaw.memory.*` tools and
+    // must not be told they exist), and that provider must declare a
+    // `guidance_doc`. Either missing ⇒ nothing is appended.
+    let memory_guidance = wired_memory_context_service
+        .is_some()
+        .then(|| {
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_guidance.clone())
+                .unwrap_or_default()
+        })
+        .flatten();
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -3778,6 +3819,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
+            parallel_tool_batch: default_runtime_config.parallel_tool_batch,
             tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
@@ -3812,8 +3854,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     DefaultSystemPromptIdentitySource::try_new(
                         standalone_storage_root,
                         default_system_prompt_path,
-                        resolved_tool_disclosure.is_enabled(),
-                        bool_env_flag("BENCHMARKING_MODE"),
+                        SystemPromptProtocols {
+                            // `is_enabled()` (not `is_bridged()`): #7410 widened
+                            // the disclosure protocol to every enabled mode.
+                            disclosure: resolved_tool_disclosure.is_enabled(),
+                            benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
+                            // Provider-shipped, not host-owned: whatever the
+                            // bound memory extension declares as its guidance,
+                            // or nothing.
+                            memory_guidance,
+                        },
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
                         reason: error.to_string(),
@@ -3975,6 +4025,66 @@ pub(crate) async fn build_runtime_with_resource_governor(
         projection_services.with_auth_challenges(provider)
     } else {
         projection_services
+    };
+    if let Some(coordinator) = services.delivery_coordinator.as_ref() {
+        let bound = coordinator.bind_projection_stream(projection_services.product_event_stream());
+        if !bound {
+            tracing::debug!(
+                "delivery coordinator projection stream was already bound; keeping the first source"
+            );
+        }
+    }
+
+    // Durable idempotency ledger for the authenticated-session inbound lane
+    // (browser + API transports riding `submit_turn`): the session half of the
+    // same durable-admission discipline the per-extension channel ledgers
+    // provide, on the same filesystem substrate.
+    let session_inbound_ledger = ironclaw_assistant::build_session_inbound_ledger(
+        &(services.extension_filesystem.clone() as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+        &validated_identity.tenant_id,
+        ironclaw_host_api::resource::ResourceScope {
+            tenant_id: validated_identity.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(validated_identity.agent_id.clone()),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        },
+    )
+    .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
+    let session_channel_directory: Arc<
+        dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory,
+    > = Arc::new(
+        ironclaw_extension_host::session_ingress::DeploymentSessionChannelDirectory::new(
+            services.deployment_channels.clone(),
+        ),
+    );
+    // The deployment's session channel, advertised to the SPA on
+    // `GET /session`. Exactly one session channel resolves; zero or several
+    // resolve to none — fail closed, never guess.
+    let session_channel_extension_id = {
+        let session_ids: Vec<String> = services
+            .deployment_channels
+            .extension_ids()
+            .into_iter()
+            .filter(|extension_id| session_channel_directory.is_session_channel(extension_id))
+            .collect();
+        match session_ids.as_slice() {
+            [only] => Some(only.clone()),
+            [] => None,
+            // Ambiguous: fail closed rather than pick one. The built-in
+            // surface is not a safe answer here either, because a channel
+            // that believes it owns the session would silently stop
+            // receiving browser turns.
+            several => {
+                tracing::debug!(
+                    count = several.len(),
+                    "multiple session channels declared; advertising none"
+                );
+                None
+            }
+        }
     };
 
     let started_channel_host = crate::extension_host_assembly::build_runtime_channel_host(
@@ -4338,6 +4448,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
+        session_inbound_ledger,
+        session_channel_directory,
+        session_channel_extension_id,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
@@ -4361,9 +4474,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_ingress: services.extension_ingress.clone(),
         #[cfg(any(test, feature = "test-support"))]
         deployment_channels: services.deployment_channels.clone(),
-        web_push: services.web_push.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
+        delivery_registrations: services.delivery_registrations.clone(),
+        delivery_client_bootstrap: services.delivery_client_bootstrap.clone(),
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,

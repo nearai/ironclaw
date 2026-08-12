@@ -623,6 +623,12 @@ pub enum RecipeValidationError {
 pub enum IngressVerificationRecipe {
     HmacSha256(HmacSha256VerificationRecipe),
     SharedSecretHeader(SharedSecretHeaderRecipe),
+    /// The host's authenticated transport (the WebUI / OpenAI-compat session)
+    /// already verified the caller's bearer/session before dispatch, so the
+    /// inbound is a trusted first-party session rather than an external webhook.
+    /// There is no mounted route and no signature to check here; the channel's
+    /// ingress descriptor carries no `route_suffix`.
+    AuthenticatedSession,
     /// No verification (explicit; e.g. a vendor with IP allowlisting only).
     None,
 }
@@ -631,7 +637,7 @@ impl IngressVerificationRecipe {
     pub fn validate(&self) -> Result<(), RecipeValidationError> {
         match self {
             Self::HmacSha256(recipe) => recipe.validate(),
-            Self::SharedSecretHeader(_) | Self::None => Ok(()),
+            Self::SharedSecretHeader(_) | Self::AuthenticatedSession | Self::None => Ok(()),
         }
     }
 
@@ -640,8 +646,15 @@ impl IngressVerificationRecipe {
         match self {
             Self::HmacSha256(recipe) => Some(&recipe.secret_handle),
             Self::SharedSecretHeader(recipe) => Some(&recipe.secret_handle),
-            Self::None => None,
+            Self::AuthenticatedSession | Self::None => None,
         }
+    }
+
+    /// Whether this channel's inbound arrives over the host's own authenticated
+    /// session transport (no mounted webhook route) rather than an external
+    /// webhook. The generic ingress mount and trust classification branch on it.
+    pub fn is_authenticated_session(&self) -> bool {
+        matches!(self, Self::AuthenticatedSession)
     }
 }
 

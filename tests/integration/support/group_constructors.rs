@@ -124,14 +124,13 @@ impl RebornIntegrationGroup {
     }
 
     /// [`Self::extension_delivery_with_gated_write`] PLUS the complete
-    /// web-push channel: deployment binding (adapter + codec + catalog
-    /// provider) around one late-bound runtime slot, the slot on the
-    /// composition input (so `assemble_web_push` installs the subscription
-    /// store and seeds the VAPID credential), the bundled manifest, and a
-    /// vendor router answering push-service POSTs with `201` (`410` for the
-    /// reserved dead-subscription token).
-    pub async fn extension_delivery_with_web_push() -> HarnessResult<Self> {
-        Self::builder().extension_delivery_with_web_push().await
+    /// web-app channel: deployment binding (adapter + codec + catalog
+    /// provider), its generic first-party initializer (which seeds VAPID
+    /// material and publishes the public bootstrap), the bundled manifest,
+    /// and a vendor router answering push-service POSTs with `201` (`410` for
+    /// the reserved dead-subscription token).
+    pub async fn extension_delivery_with_web_app() -> HarnessResult<Self> {
+        Self::builder().extension_delivery_with_web_app().await
     }
 
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
@@ -598,21 +597,21 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
-    /// Build a delivery group with the web-push channel wired. See
-    /// [`RebornIntegrationGroup::extension_delivery_with_web_push`].
-    pub async fn extension_delivery_with_web_push(
+    /// Build a delivery group with the web-app channel wired. See
+    /// [`RebornIntegrationGroup::extension_delivery_with_web_app`].
+    pub async fn extension_delivery_with_web_app(
         mut self,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        let (web_push_profile, _web_push_slot) = super::super::harness::profiles::extension::extension_delivery_with_web_push_tools_profile()?;
-        let host_runtime = build_group_capability_with_base(web_push_profile, &base)
+        let web_app_profile = super::super::harness::profiles::extension::extension_delivery_with_web_app_tools_profile()?;
+        let host_runtime = build_group_capability_with_base(web_app_profile, &base)
             .await?
             .with_run_owner_scoped_capability_dispatch();
         let scope = &base.product_harness.scope;
         let channel_connection =
             ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime.reborn_services_for_test().ok_or(
-                    "extension_delivery_with_web_push harness is missing its RebornServices bundle",
+                    "extension_delivery_with_web_app harness is missing its RebornServices bundle",
                 )?,
                 ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),

@@ -84,8 +84,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CommunicationDeliveryKind, CommunicationModality, RequestedOutboundKind,
-        RunNotificationEventKind, SourceRouteContext, SystemEventReasonCode,
+        CommunicationModality, OutboundPushKind, RequestedOutboundKind, RunNotificationEventKind,
+        SourceRouteContext, SystemEventReasonCode,
     };
 
     #[tokio::test]
@@ -100,7 +100,7 @@ mod tests {
         let candidate = expect_candidate(candidate);
 
         assert_eq!(candidate.target, reply_ref("reply:requested"));
-        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+        assert_eq!(candidate.kind, OutboundPushKind::FinalReply);
     }
 
     #[tokio::test]
@@ -118,7 +118,7 @@ mod tests {
         let candidate = expect_candidate(candidate);
 
         assert_eq!(candidate.target, reply_ref("reply:delivery-status"));
-        assert_eq!(candidate.kind, CommunicationDeliveryKind::DeliveryStatus);
+        assert_eq!(candidate.kind, OutboundPushKind::DeliveryStatus);
     }
 
     #[tokio::test]
@@ -139,7 +139,7 @@ mod tests {
         let candidate = expect_candidate(candidate);
 
         assert_eq!(candidate.target, reply_ref("reply:source-route"));
-        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+        assert_eq!(candidate.kind, OutboundPushKind::FinalReply);
     }
 
     #[tokio::test]
@@ -155,7 +155,7 @@ mod tests {
                 },
             },
             "reply:source-route",
-            CommunicationDeliveryKind::ApprovalPrompt,
+            OutboundPushKind::GateRequired,
         )
         .await;
     }
@@ -173,7 +173,7 @@ mod tests {
                 },
             },
             "reply:source-route",
-            CommunicationDeliveryKind::AuthPrompt,
+            OutboundPushKind::AuthPrompt,
         )
         .await;
     }
@@ -212,7 +212,7 @@ mod tests {
                 target: reply_ref("reply:trigger-failure"),
             },
             "reply:trigger-failure",
-            CommunicationDeliveryKind::ApprovalPrompt,
+            OutboundPushKind::GateRequired,
         )
         .await;
     }
@@ -227,19 +227,19 @@ mod tests {
         for (event_kind, expected_kind) in [
             (
                 RunNotificationEventKind::ApprovalNeeded,
-                CommunicationDeliveryKind::ApprovalPrompt,
+                OutboundPushKind::GateRequired,
             ),
             (
                 RunNotificationEventKind::AuthRequired,
-                CommunicationDeliveryKind::AuthPrompt,
+                OutboundPushKind::AuthPrompt,
             ),
             (
                 RunNotificationEventKind::RunBlocked,
-                CommunicationDeliveryKind::ApprovalPrompt,
+                OutboundPushKind::GateRequired,
             ),
             (
                 RunNotificationEventKind::ModelDelivery,
-                CommunicationDeliveryKind::ModelDelivery,
+                OutboundPushKind::ModelDelivery,
             ),
         ] {
             let candidate = engine
@@ -329,7 +329,7 @@ mod tests {
         event_kind: RunNotificationEventKind,
         origin: RunNotificationOrigin,
         expected_target: &str,
-        expected_kind: CommunicationDeliveryKind,
+        expected_kind: OutboundPushKind,
     ) {
         let candidate = engine
             .resolve(&run_notification_request(event_kind, origin))

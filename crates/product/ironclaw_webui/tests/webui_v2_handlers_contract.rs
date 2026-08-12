@@ -121,7 +121,10 @@ use ironclaw_product_contracts::ironhub::{
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog,
+};
+use ironclaw_product_contracts::operator_llm::{
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, USER_MODEL_CATALOG_VIEW,
 };
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView, ProductOutboundEnvelope,
@@ -952,6 +955,15 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == USER_MODEL_CATALOG_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(UserModelCatalog {
+                    selection_enabled: true,
+                    workspace_default: Some("model-a".to_string()),
+                    models: vec!["model-a".to_string(), "model-b".to_string()],
+                })
+                .expect("user model catalog payload"),
+                next_cursor: None,
+            }),
             id if id == THREADS_VIEW.id => {
                 let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params).expect("thread list params");
@@ -2187,6 +2199,7 @@ fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
             provider_id: provider_id.to_string(),
             model: Some("model-a".to_string()),
         }),
+        user_model_policy: None,
     }
 }
 
@@ -2261,7 +2274,7 @@ async fn delete_thread_path_dispatches_through_service() {
 }
 
 #[tokio::test]
-async fn send_message_path_overrides_body_thread_id() {
+async fn session_channel_message_path_overrides_body_extension_id() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2270,10 +2283,10 @@ async fn send_message_path_overrides_body_thread_id() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-from-path/messages")
+                .uri("/api/webchat/v2/channels/ext-from-path/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"client_action_id":"act-1","thread_id":"thread-from-body","content":"hi"}"#,
+                    r#"{"client_action_id":"act-1","extension_id":"ext-from-body","thread_id":"thread-1","content":"hi"}"#,
                 ))
                 .expect("request"),
         )
@@ -2284,9 +2297,14 @@ async fn send_message_path_overrides_body_thread_id() {
     let calls = services.submit_turn_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].thread_id.as_deref(),
-        Some("thread-from-path"),
+        calls[0].extension_id.as_deref(),
+        Some("ext-from-path"),
         "path segment must win over body field"
+    );
+    assert_eq!(
+        calls[0].thread_id.as_deref(),
+        Some("thread-1"),
+        "the caller-owned thread travels in the body"
     );
 }
 
@@ -2298,7 +2316,7 @@ async fn send_message_path_overrides_body_thread_id() {
 // Fresh-path variant: run metadata is Some — wire must include active_run_id, status,
 // event_cursor fields so the client can poll the blocking run.
 #[tokio::test]
-async fn send_message_rejected_busy_wire_shape() {
+async fn session_channel_message_rejected_busy_wire_shape() {
     let services = Arc::new(StubServices::default());
     services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
         thread_id: ThreadId::new("thread-alpha").expect("thread id"),
@@ -2314,9 +2332,11 @@ async fn send_message_rejected_busy_wire_shape() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"content":"hello"}"#))
+                .body(Body::from(
+                    r#"{"thread_id":"thread-alpha","content":"hello"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -2387,7 +2407,7 @@ async fn set_auto_activate_learned_invokes_capability_with_enabled_flag() {
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
 // event_cursor so the client receives no fabricated run reference it cannot query.
 #[tokio::test]
-async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
+async fn session_channel_message_rejected_busy_replay_wire_shape_omits_run_fields() {
     let services = Arc::new(StubServices::default());
     services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
         thread_id: ThreadId::new("thread-alpha").expect("thread id"),
@@ -2403,9 +2423,11 @@ async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"content":"hello"}"#))
+                .body(Body::from(
+                    r#"{"thread_id":"thread-alpha","content":"hello"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -6496,6 +6518,111 @@ async fn get_extension_setup_rejects_malformed_package_id_with_400() {
 }
 
 #[tokio::test]
+async fn user_model_routes_expose_only_the_safe_catalog_and_replace_policy() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/models")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = read_json(get_response).await;
+    assert_eq!(
+        get_body,
+        serde_json::json!({
+            "selection_enabled": true,
+            "workspace_default": "model-a",
+            "models": ["model-a", "model-b"]
+        })
+    );
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let put_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/llm/model-policy")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"workspace_default":"model-b","allowed_models":["model-a","model-b"]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(put_response.status(), StatusCode::OK);
+    let put_body = read_json(put_response).await;
+    assert_eq!(
+        put_body["models"],
+        serde_json::json!(["model-a", "model-b"])
+    );
+
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert_eq!(
+        view_ids,
+        vec![
+            USER_MODEL_CATALOG_VIEW.id.to_string(),
+            USER_MODEL_CATALOG_VIEW.id.to_string()
+        ]
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "workspace_default": "model-b",
+            "allowed_models": ["model-a", "model-b"]
+        })
+    );
+}
+
+#[tokio::test]
+async fn user_model_catalog_does_not_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/models")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services.view_queries.lock().expect("lock").as_slice()[0].view_id,
+        USER_MODEL_CATALOG_VIEW.id
+    );
+}
+
+#[tokio::test]
 async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
@@ -6672,6 +6799,11 @@ async fn llm_provider_routes_require_operator_capability() {
     let nearai_wallet_body = r#"{"account_id":"alice.near","public_key":"ed25519:test","signature":"AA==","message":"login","recipient":"near.ai","nonce":[]}"#;
     let cases = [
         ("GET", "/api/webchat/v2/llm/providers", None),
+        (
+            "PUT",
+            "/api/webchat/v2/llm/model-policy",
+            Some(r#"{"workspace_default":"model-a","allowed_models":["model-a"]}"#),
+        ),
         ("POST", "/api/webchat/v2/llm/providers", Some(upsert_body)),
         ("POST", "/api/webchat/v2/llm/providers/acme/delete", None),
         ("POST", "/api/webchat/v2/llm/active", Some(active_body)),
@@ -7040,6 +7172,14 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
         StatusCode::TOO_MANY_REQUESTS,
         "third concurrent open from same caller must be rejected"
     );
+    assert_eq!(
+        third
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1"),
+        "capacity rejection must tell the stream client when it may retry"
+    );
     let body = read_json(third).await;
     assert_eq!(body["error"], "rate_limited");
     assert_eq!(body["kind"], "busy");
@@ -7171,6 +7311,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                     id: "message-1".to_string(),
                     run_id: None,
                     body: "projection body".to_string(),
+                    finalized: false,
                 }],
             )
             .expect("projection state"),

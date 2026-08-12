@@ -2372,22 +2372,21 @@ async fn execute_status_command_reflects_owned_thread_and_hides_foreign_thread_e
 
 // ── Web-push enrollment + notification-channel wire (browser channel) ──────
 
-/// The full web-push channel over the PRODUCTION composition: manifest
-/// bundle, deployment binding, `assemble_web_push` (store install + VAPID
-/// seeding + manifest-derived host allowlist), the product surface wiring,
-/// and the real WebUI routes.
-fn web_push_build_extras(
+/// The full web-app channel over the PRODUCTION composition: manifest
+/// bundle, deployment binding, generic first-party initialization (VAPID
+/// seeding + public bootstrap), manifest-derived host allowlist, the product
+/// surface wiring, and the real WebUI routes.
+fn web_app_build_extras(
     input: ironclaw_composition::RebornHostBindings,
-    slot: &ironclaw_web_push::WebPushRuntimeSlot,
 ) -> ironclaw_composition::RebornHostBindings {
     let mut bundles = ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
     bundles.push(ironclaw_extension_host::FirstPartyPackageBundle {
-        id: ironclaw_web_push::WEB_PUSH_EXTENSION_ID.to_string(),
+        id: ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
         display_name: "Browser notifications".to_string(),
-        manifest_toml: ironclaw_web_push_extension::MANIFEST.to_string(),
+        manifest_toml: ironclaw_web_app_extension::MANIFEST.to_string(),
         assets: vec![ironclaw_extension_host::FirstPartyPackageAsset {
             path: "manifest.toml".to_string(),
-            bytes: ironclaw_web_push_extension::MANIFEST.as_bytes().to_vec(),
+            bytes: ironclaw_web_app_extension::MANIFEST.as_bytes().to_vec(),
         }],
         onboarding: None,
         oauth_setup: None,
@@ -2398,19 +2397,23 @@ fn web_push_build_extras(
         .with_first_party_bundles(bundles)
         .with_channel_extension_bindings(vec![ironclaw_composition::ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted(
-                ironclaw_web_push::WEB_PUSH_EXTENSION_ID.to_string(),
+                ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
             ),
-            adapter: Arc::new(ironclaw_web_push_extension::WebPushChannelAdapter::new(
-                slot.clone(),
-            )),
+            surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_delivery(Arc::new(
+                    ironclaw_web_app_extension::WebAppChannelAdapter::new(),
+                )),
             preference_target_codec: Some(Arc::new(
-                ironclaw_web_push_extension::WebPushPreferenceTargetCodec,
+                ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
             )),
             outbound_target_provider: Some(Arc::new(
-                ironclaw_web_push_extension::WebPushOutboundTargetProvider::new(),
+                ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
             )),
+            first_party_initializer: Some(
+                reborn_support::harness::options::test_web_app_channel_initializer(),
+            ),
+            registration_document_path: Some("/web-push/subscriptions.json".to_string()),
         }])
-        .with_web_push_runtime_slot(slot.clone())
 }
 
 /// A browser-shaped subscription body: a REAL P-256 point (any valid point —
@@ -2418,7 +2421,7 @@ fn web_push_build_extras(
 /// secret.
 fn browser_subscription_body(endpoint: &str) -> Value {
     use base64::Engine as _;
-    let point = ironclaw_web_push::generate_vapid_key_material("mailto:browser@example.com")
+    let point = ironclaw_web_app::generate_vapid_key_material("mailto:browser@example.com")
         .expect("generate a valid P-256 point")
         .public_key_b64url;
     serde_json::json!({
@@ -2432,7 +2435,7 @@ fn browser_subscription_body(endpoint: &str) -> Value {
 }
 
 #[tokio::test]
-async fn web_push_enrollment_and_notification_channel_round_trip_through_production_facade() {
+async fn browser_channel_notification_setup_round_trip_through_production_facade() {
     use base64::Engine as _;
 
     let root = tempdir().expect("runtime storage tempdir");
@@ -2440,8 +2443,7 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     let tenant_id = TenantId::new("webui-webpush-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-webpush-agent").expect("agent id");
     let user_id = UserId::new("webui-webpush-user").expect("user id");
-    let slot = ironclaw_web_push::WebPushRuntimeSlot::new();
-    let input = web_push_build_extras(
+    let input = web_app_build_extras(
         ironclaw_composition::local_filesystem_build_input(user_id.as_str(), storage_root.clone())
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
@@ -2449,7 +2451,6 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             )),
-        &slot,
     );
     let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_build_input(input)
@@ -2465,10 +2466,6 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     )
     .await
     .expect("production Reborn runtime builds");
-    assert!(
-        slot.is_installed(),
-        "composition must install the web-push runtime into the binary's slot"
-    );
     let webui = runtime
         .product_surface(None)
         .expect("production product surface builds");
@@ -2481,36 +2478,45 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     let router = || mount_webui_v2_router(Arc::clone(&webui), caller.clone());
     const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/test-token-1";
 
-    // Status before any enrollment: a well-formed advertised VAPID key
-    // (seeded by composition on first boot), zero browsers.
-    let (status, body) = get_json(router(), "/api/webchat/v2/web-push/status").await;
+    // Status before any enrollment, through the GENERIC per-channel
+    // notification-setup surface: the channel declares it requires setup, is
+    // not yet enabled, and its channel-opaque detail advertises a well-formed
+    // VAPID key (seeded by composition on first boot) with zero browsers.
+    let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    let vapid_public_key = body["vapid_public_key"]
+    assert_eq!(body["extension_id"], "web-app", "{body}");
+    assert_eq!(body["requires_setup"], true, "{body}");
+    assert_eq!(body["enabled"], false, "{body}");
+    let vapid_public_key = body["detail"]["bootstrap"]["vapid_public_key"]
         .as_str()
-        .expect("status carries the vapid key")
+        .expect("status detail carries the vapid key")
         .to_string();
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(&vapid_public_key)
         .expect("vapid key is base64url");
     assert_eq!(decoded.len(), 65, "uncompressed P-256 point");
     assert_eq!(decoded[0], 0x04, "uncompressed point marker");
-    assert_eq!(body["subscription_count"], 0, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
 
     // The catalog offers the browser channel beside the vendor channels.
     let (status, body) = get_json(router(), "/api/webchat/v2/outbound/targets").await;
     assert_eq!(status, StatusCode::OK, "targets response: {body}");
     let targets = body["targets"].as_array().expect("targets array");
-    let web_push_target = targets
+    // The catalog target id deliberately keeps its pre-rename `web-push`
+    // bytes (a persisted per-user preference identity) while the CHANNEL is
+    // `web-app` — pinning both here is what proves stored selections survive
+    // the rename.
+    let web_app_target = targets
         .iter()
         .find(|entry| entry["target"]["target_id"] == "web-push")
-        .unwrap_or_else(|| panic!("web-push target missing from the catalog: {body}"));
-    assert_eq!(web_push_target["target"]["channel"], "web-push", "{body}");
+        .unwrap_or_else(|| panic!("web-app target missing from the catalog: {body}"));
+    assert_eq!(web_app_target["target"]["channel"], "web-app", "{body}");
     assert_eq!(
-        web_push_target["target"]["display_name"], "Web app",
+        web_app_target["target"]["display_name"], "Web app",
         "{body}"
     );
 
-    // web-push is host infrastructure, not a browse-and-install extension: it
+    // web-app is host infrastructure, not a browse-and-install extension: it
     // must NOT appear in the install catalog (registry or installed lists),
     // even though it stays a selectable outbound notification target (above).
     let (status, body) = get_json(router(), "/api/webchat/v2/extensions/registry").await;
@@ -2520,8 +2526,8 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
             .as_array()
             .expect("registry entries array")
             .iter()
-            .any(|entry| entry["package_ref"]["id"] == "web-push"),
-        "web-push must be hidden from the install registry: {body}"
+            .any(|entry| entry["package_ref"]["id"] == "web-app"),
+        "web-app must be hidden from the install registry: {body}"
     );
     let (status, body) = get_json(router(), "/api/webchat/v2/extensions").await;
     assert_eq!(status, StatusCode::OK, "extensions response: {body}");
@@ -2530,49 +2536,51 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
             .as_array()
             .expect("installed extensions array")
             .iter()
-            .any(|entry| entry["package_ref"]["id"] == "web-push"),
-        "web-push must be hidden from the installed extensions list: {body}"
+            .any(|entry| entry["package_ref"]["id"] == "web-app"),
+        "web-app must be hidden from the installed extensions list: {body}"
     );
 
-    // Enroll → enrolled; identical repeat → refreshed.
-    let subscription = browser_subscription_body(ENDPOINT);
+    // Enroll, then repeat the same endpoint. The host-owned generic store
+    // refreshes in place, so the registration count remains one.
+    let subscription = serde_json::json!({ "payload": browser_subscription_body(ENDPOINT) });
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions",
+        "/api/webchat/v2/channels/web-app/notifications/enable",
         subscription.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "subscribe response: {body}");
-    assert_eq!(body["outcome"], "enrolled", "{body}");
+    assert_eq!(status, StatusCode::OK, "enable response: {body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions",
+        "/api/webchat/v2/channels/web-app/notifications/enable",
         subscription,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "re-subscribe response: {body}");
-    assert_eq!(body["outcome"], "refreshed", "{body}");
+    assert_eq!(status, StatusCode::OK, "re-enable response: {body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
 
-    // Status redacts the endpoint capability URL to its push-service host.
-    let (status, body) = get_json(router(), "/api/webchat/v2/web-push/status").await;
+    // Status returns only host-minted registration identities and timestamps;
+    // the endpoint capability URL never crosses the product boundary.
+    let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    assert_eq!(body["subscription_count"], 1, "{body}");
-    assert_eq!(
-        body["subscriptions"][0]["endpoint_host"], "fcm.googleapis.com",
-        "{body}"
-    );
-    // The endpoint is redacted to its host, but a 64-char hex digest is
-    // published so the browser can correlate its own subscription with this
-    // account without the URL ever leaving the backend.
-    let digest = body["subscriptions"][0]["endpoint_digest"]
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+    let registration_id = body["detail"]["registrations"][0]["registration_id"]
         .as_str()
-        .expect("endpoint_digest present");
-    assert_eq!(digest.len(), 64, "SHA-256 hex digest: {body}");
-    assert!(
-        digest
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-        "digest must be lowercase hex: {body}"
+        .expect("host-minted registration id is present");
+    uuid::Uuid::parse_str(registration_id)
+        .unwrap_or_else(|error| panic!("registration id must be a UUID ({error}): {body}"));
+    // The digest is the browser's only correlation key: lowercase hex SHA-256
+    // of the endpoint, matching device-push.ts::endpointDigestHex exactly.
+    // Regression: project() omitted it, so every enrolled browser derived
+    // "enrolled by another account" and the panel offered no unenroll.
+    assert_eq!(
+        body["detail"]["registrations"][0]["endpoint_digest"],
+        ironclaw_common::hashing::sha256_hex(ENDPOINT.as_bytes()),
+        "{body}"
     );
     assert!(
         !body.to_string().contains(ENDPOINT),
@@ -2582,8 +2590,8 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     // An endpoint on a host the manifest never declared fails closed.
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions",
-        browser_subscription_body("https://evil.example.com/x"),
+        "/api/webchat/v2/channels/web-app/notifications/enable",
+        serde_json::json!({ "payload": browser_subscription_body("https://evil.example.com/x") }),
     )
     .await;
     assert_eq!(
@@ -2609,15 +2617,30 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     // Unenroll; the browser disappears from the caller's status.
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions/remove",
-        serde_json::json!({"endpoint": ENDPOINT}),
+        "/api/webchat/v2/channels/web-app/notifications/disable",
+        serde_json::json!({ "payload": { "endpoint": ENDPOINT } }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "remove response: {body}");
-    assert_eq!(body["removed"], true, "{body}");
-    let (status, body) = get_json(router(), "/api/webchat/v2/web-push/status").await;
+    assert_eq!(status, StatusCode::OK, "disable response: {body}");
+    assert_eq!(body["enabled"], false, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
+    let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    assert_eq!(body["subscription_count"], 0, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
+
+    // The generic surface fails closed on a channel that is not active in
+    // this deployment: unknown extension ids are a 404, never an empty
+    // fabricated status.
+    let (status, body) = get_json(
+        router(),
+        "/api/webchat/v2/channels/no-such-channel/notifications",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown channel must fail closed: {body}"
+    );
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");

@@ -71,15 +71,48 @@ async fn fetch_attachment_looks_up_then_downloads_through_restricted_egress() {
         ScriptedEgress::response(200, b"hello".to_vec()),
     ]);
 
-    let fetched = TelegramChannelAdapter::default()
-        .fetch_attachment(&attachment(Some(5)), &egress)
+    let config = [(
+        TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+        "ironclaw_test_bot".to_string(),
+    )];
+    let outcome = TelegramChannelAdapter::default()
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &config,
+                body: br#"{
+                    "update_id": 500,
+                    "message": {
+                        "message_id": 50,
+                        "date": 1710000000,
+                        "from": {"id": 1001, "is_bot": false, "first_name": "Alice"},
+                        "chat": {"id": 555, "type": "private"},
+                        "document": {
+                            "file_id": "vendor-file-id",
+                            "file_name": "original.txt",
+                            "mime_type": "text/plain",
+                            "file_size": 5
+                        }
+                    }
+                }"#,
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            &egress,
+        )
         .await
-        .expect("attachment fetch succeeds");
+        .expect("attachment fetch succeeds during receive");
+    let InboundOutcome::Messages(messages) = outcome else {
+        panic!("expected complete message");
+    };
+    let fetched = &messages[0].attachments[0];
 
-    assert_eq!(fetched.id, "descriptor-file-id");
+    assert_eq!(fetched.id, "vendor-file-id");
     assert_eq!(fetched.mime_type, "text/plain");
     assert_eq!(fetched.filename.as_deref(), Some("original.txt"));
     assert_eq!(fetched.bytes, b"hello");
+    assert!(messages[0].conversation_context.is_none());
 
     let requests = egress.requests.lock().expect("requests lock");
     assert_eq!(requests.len(), 2);
@@ -113,8 +146,7 @@ async fn fetch_attachment_downloads_when_optional_size_metadata_is_absent() {
         ScriptedEgress::response(200, b"hello".to_vec()),
     ]);
 
-    let fetched = TelegramChannelAdapter::default()
-        .fetch_attachment(&attachment(None), &egress)
+    let fetched = crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
         .await
         .expect("bounded download succeeds without optional size hints");
 
@@ -134,8 +166,7 @@ async fn fetch_attachment_rejects_missing_and_malformed_provider_paths() {
         br#"{"ok":true,"result":{"file_path":"documents//x"}}"#.as_slice(),
     ] {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::response(200, body.to_vec())]);
-        let error = TelegramChannelAdapter::default()
-            .fetch_attachment(&attachment(None), &egress)
+        let error = crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
             .await
             .expect_err("unsafe provider path must fail closed");
         assert!(matches!(
@@ -171,8 +202,7 @@ async fn fetch_attachment_classifies_provider_and_restricted_egress_errors() {
     ];
     for (response, expected_retryable) in cases {
         let egress = ScriptedEgress::new(vec![response]);
-        let error = TelegramChannelAdapter::default()
-            .fetch_attachment(&attachment(None), &egress)
+        let error = crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
             .await
             .expect_err("provider failure must be classified");
         assert!(matches!(
@@ -187,8 +217,7 @@ async fn fetch_attachment_classifies_provider_and_restricted_egress_errors() {
 async fn fetch_attachment_rejects_declared_provider_and_actual_oversize_or_truncation() {
     let too_large = ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 + 1;
     let egress = ScriptedEgress::new(Vec::new());
-    let error = TelegramChannelAdapter::default()
-        .fetch_attachment(&attachment(Some(too_large)), &egress)
+    let error = crate::attachment_transfer::fetch_attachment(&attachment(Some(too_large)), &egress)
         .await
         .expect_err("descriptor oversize is rejected before egress");
     assert!(matches!(
@@ -206,8 +235,7 @@ async fn fetch_attachment_rejects_declared_provider_and_actual_oversize_or_trunc
             .into_bytes(),
     )]);
     assert!(
-        TelegramChannelAdapter::default()
-            .fetch_attachment(&attachment(None), &egress)
+        crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
             .await
             .is_err()
     );
@@ -221,8 +249,7 @@ async fn fetch_attachment_rejects_declared_provider_and_actual_oversize_or_trunc
         ScriptedEgress::response(200, b"four".to_vec()),
     ]);
     assert!(
-        TelegramChannelAdapter::default()
-            .fetch_attachment(&attachment(None), &egress)
+        crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
             .await
             .is_err()
     );
@@ -240,8 +267,7 @@ async fn fetch_attachment_rejects_declared_provider_and_actual_oversize_or_trunc
         ScriptedEgress::response(200, actual_oversize),
     ]);
     assert!(
-        TelegramChannelAdapter::default()
-            .fetch_attachment(&attachment(None), &egress)
+        crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
             .await
             .is_err()
     );
@@ -256,8 +282,7 @@ async fn fetch_attachment_treats_response_limit_overrun_as_permanent() {
         ),
         Err(RestrictedEgressError::ResponseTooLarge),
     ]);
-    let error = TelegramChannelAdapter::default()
-        .fetch_attachment(&attachment(None), &egress)
+    let error = crate::attachment_transfer::fetch_attachment(&attachment(None), &egress)
         .await
         .expect_err("host response cap must fail closed");
     assert!(matches!(

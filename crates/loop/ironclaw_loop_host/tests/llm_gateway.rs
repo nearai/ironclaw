@@ -165,6 +165,222 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages[1].content, "hello model");
 }
 
+#[tokio::test]
+async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.messages[0].content = "system password: letmein".to_string();
+    request.messages[1].content =
+        "user api key = abcdef from /Users/alice/.config/provider".to_string();
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::Assistant,
+        content: "assistant password was hunter2".to_string(),
+        content_ref: LoopMessageRef::new("msg:assistant-secret").unwrap(),
+        tool_result_provider_call: None,
+        tool_result_content: None,
+        image_parts: Vec::new(),
+    });
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: (serde_json::json!({
+            "content": "     1│ {\n     2│   \"marker\": \"attachment-context\",\n     3│   \"password\": \"swordfish\"\n     4│ }",
+            "total_lines": 4,
+            "lines_shown": 4,
+            "truncated": false,
+            "path": "attachments/attachment.json",
+        }))
+        .to_string(),
+        content_ref: LoopMessageRef::new("msg:tool-secret").unwrap(),
+        tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
+            provider_id: STATIC_PROVIDER_ID.to_string(),
+            provider_model_id: "host-selected-model".to_string(),
+            provider_turn_id: "turn_secret".to_string(),
+            provider_call_id: "call_secret".to_string(),
+            provider_tool_name: provider_name("demo__secret"),
+            capability_id: CapabilityId::new("demo.secret").unwrap(),
+            arguments: serde_json::json!({
+                "credential": {
+                    "type": "basic",
+                    "description": "prod",
+                    "value": "replayed-credential-secret"
+                },
+                "refresh_token": 123456,
+                "secret": true,
+                "message": "hello"
+            }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+        tool_result_content: Some(HostManagedToolResultContent::Resolved {
+            safe_summary: ToolResultSafeSummary::new("tool failed").unwrap(),
+        }),
+        image_parts: Vec::new(),
+    });
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::json!({
+            "exit_code": 0,
+            "output": concat!(
+                r#"0000000   {  \n   "   p   a   s   s   w   o   r   d   "   :   "   c   h   a   r  \n"#,
+                "\n",
+                r#"0000040   a   c   t   e   r   -   d   u   m   p   -   s   e   c   r   e   t   "  \n"#,
+                "\n0000100\n",
+            ),
+            "success": true,
+        })
+        .to_string(),
+        content_ref: LoopMessageRef::new("msg:tool-character-dump-secret").unwrap(),
+        tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
+            provider_id: STATIC_PROVIDER_ID.to_string(),
+            provider_model_id: "host-selected-model".to_string(),
+            provider_turn_id: "turn_character_dump_secret".to_string(),
+            provider_call_id: "call_character_dump_secret".to_string(),
+            provider_tool_name: provider_name("demo__character_dump_secret"),
+            capability_id: CapabilityId::new("demo.character_dump_secret").unwrap(),
+            arguments: serde_json::json!({"message": "hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+        tool_result_content: Some(HostManagedToolResultContent::Resolved {
+            safe_summary: ToolResultSafeSummary::new("tool completed").unwrap(),
+        }),
+        image_parts: Vec::new(),
+    });
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    let provider_text = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in [
+        "letmein",
+        "abcdef",
+        "hunter2",
+        "swordfish",
+        "character-dump-secret",
+    ] {
+        assert!(!provider_text.contains(secret), "provider saw {secret:?}");
+    }
+    assert!(provider_text.contains("attachment-context"));
+    assert!(!provider_text.contains("/Users/alice"));
+    assert!(provider_text.contains("[REDACTED_HOST_PATH]"));
+    assert_eq!(provider_text.matches("[REDACTED_SECRET]").count(), 5);
+    let replayed_arguments = requests[0]
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .find(|call| call.id == "call_secret")
+        .map(|call| &call.arguments)
+        .expect("provider request retains the replayed tool call");
+    assert!(
+        !replayed_arguments
+            .to_string()
+            .contains("replayed-credential-secret")
+    );
+    assert_eq!(
+        replayed_arguments["credential"]["value"],
+        "[REDACTED_SECRET]"
+    );
+    assert!(replayed_arguments["refresh_token"].is_number());
+    assert_eq!(replayed_arguments["refresh_token"], 0);
+    assert!(replayed_arguments["secret"].is_boolean());
+    assert_eq!(replayed_arguments["secret"], false);
+    assert_eq!(replayed_arguments["message"], "hello");
+}
+
+#[tokio::test]
+async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply("done"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut capability_port = GatewayCapabilityPort::with_tool_surface();
+    capability_port.definitions[0].description = "Use password: letmein".to_string();
+    capability_port.definitions[0].parameters["properties"]["message"]["default"] =
+        serde_json::json!("api key = abcdef");
+    capability_port.definitions[0].parameters["properties"]["password: hunter2"] =
+        serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["properties"]["password"] = serde_json::json!({
+        "type": "string",
+        "default": "weak schema default secret",
+        "anyOf": [
+            {"type": "string", "const": "nested weak schema secret"}
+        ],
+    });
+    capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_firstsecretvalue123"] =
+        serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["properties"]["Authorization: Bearer ghp_secondsecretvalue456"] =
+        serde_json::json!({"type": "string"});
+    capability_port.definitions[0].parameters["required"] = serde_json::json!([
+        "Authorization: Bearer ghp_firstsecretvalue123",
+        "Authorization: Bearer ghp_secondsecretvalue456"
+    ]);
+
+    gateway
+        .stream_model_with_capabilities(
+            model_request(interactive_model()),
+            Arc::new(capability_port),
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    let tool = &requests[0].tools[0];
+    assert!(!tool.description.contains("letmein"));
+    assert!(tool.description.contains("[REDACTED_SECRET]"));
+    let schema = tool.parameters.to_string();
+    for secret in [
+        "abcdef",
+        "hunter2",
+        "weak schema default secret",
+        "nested weak schema secret",
+        "ghp_firstsecretvalue123",
+        "ghp_secondsecretvalue456",
+    ] {
+        assert!(!schema.contains(secret), "provider schema saw {secret:?}");
+    }
+    assert!(schema.contains("[REDACTED_SECRET]"));
+    let properties = tool.parameters["properties"]
+        .as_object()
+        .expect("tool properties remain an object");
+    assert_eq!(properties.len(), 5, "redacted keys must not overwrite");
+    assert_eq!(
+        properties["password"]["default"], "[REDACTED_SECRET]",
+        "a weak schema default under a sensitive property must be redacted"
+    );
+    assert_eq!(
+        properties["password"]["anyOf"][0]["const"], "[REDACTED_SECRET]",
+        "nested literals under a sensitive schema property must be redacted"
+    );
+    let redacted_required = tool.parameters["required"]
+        .as_array()
+        .expect("required remains an array");
+    assert_eq!(redacted_required.len(), 2);
+    for required in redacted_required {
+        let required = required.as_str().expect("required entries are strings");
+        assert!(
+            properties.contains_key(required),
+            "required reference {required:?} must follow its renamed property"
+        );
+    }
+}
+
 #[traced_test]
 #[tokio::test]
 async fn gateway_records_prompt_cache_break_within_a_run() {
@@ -182,7 +398,8 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
 
-    let request = model_request(interactive_model());
+    let mut request = model_request(interactive_model());
+    request.messages[0].content = "system password: first-cache-secret".to_string();
     let run_id = request.run_id;
     gateway.stream_model(request).await.unwrap();
     assert!(
@@ -193,6 +410,7 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
 
     let mut request = model_request(interactive_model());
     request.run_id = run_id;
+    request.messages[0].content = "system password: second-cache-secret".to_string();
     gateway.stream_model(request).await.unwrap();
     assert!(
         !logs_contain("prompt cache break detected"),
@@ -201,10 +419,15 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
 
     let mut request = model_request(interactive_model());
     request.run_id = run_id;
+    request.messages[0].content = "system password: third-cache-secret".to_string();
     gateway.stream_model(request).await.unwrap();
     assert!(
         logs_contain("prompt cache break detected"),
         "a 190K -> 50K cache_read collapse in the same run must record a break"
+    );
+    assert!(
+        logs_contain("system_prompt_changed=false"),
+        "requests differing only in a redacted secret must share the cache signature"
     );
     logs_assert(|lines: &[&str]| {
         // Break telemetry must stay off the REPL-visible warn level: it is
@@ -1619,6 +1842,39 @@ async fn gateway_repairs_malformed_provider_tool_arguments_before_registration()
         repair_tool_result.content.contains(parse_error),
         "repair prompt must carry the parse failure without executing the call"
     );
+}
+
+#[tokio::test]
+async fn gateway_redacts_secret_echoed_into_provider_tool_repair_prompt() {
+    let parse_error = concat!(
+        "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3\n",
+        "password was hunter2"
+    );
+    let provider = malformed_args_repair_provider(parse_error, "Finished after safe repair.");
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    gateway
+        .stream_model_with_capabilities(
+            model_request(interactive_model()),
+            Arc::new(GatewayCapabilityPort::with_tool_surface()),
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    let repair_messages = repair_request_messages(&requests);
+    let provider_text = repair_messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!provider_text.contains("hunter2"));
+    assert!(provider_text.contains("password was [REDACTED_SECRET]"));
 }
 
 #[tokio::test]

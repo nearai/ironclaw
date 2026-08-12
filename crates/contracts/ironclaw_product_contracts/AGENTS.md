@@ -15,9 +15,12 @@ neutral across vendor, runtime, storage, and deployment; two or more consumers
 need it without importing an owner; it carries no execution, persistence,
 policy engine, or workflow.
 
-Today that is **thirty-one** shipped modules (plus the dev-only
+Today that is **thirty-four** shipped modules (plus the dev-only
 `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`;
-`src/lib.rs` is the source of truth for the list). ✎ *Corrected 2026-08-05:
+`src/lib.rs` is the source of truth for the list). ✎ *Re-measured 2026-08-10
+by the unified-channel-model train: `web_app` was replaced by
+`notification_setup`, and `session_ingress` joined — counted on `src/lib.rs`,
+thirty-four `pub mod` lines minus the gated `test_support`.* ✎ *Corrected 2026-08-05:
 this read "twenty-six", which was already wrong before `project_service` was
 added — counted on `src/lib.rs`, thirty modules shipped and the table below
 documented twenty-six. The four the table has never carried are
@@ -54,7 +57,8 @@ asserted.*
 | `operator_secrets` | The operator control plane's secret-**value** port (`OperatorSecretValueStore`) and its opaque error. Implemented by `ironclaw_composition` — assembly is the only layer that may name both this port and `ironclaw_secrets` (PROPOSAL §8.2's product row). **Deliberately not a re-export of `SecretStorePort`:** no `ResourceScope` argument (the implementor fixes the operator scope), no lease/consume protocol, and an error carrying only a `&'static str` classification. Widening it back toward the substrate's shape undoes what CHECKLIST WS3 bought. |
 | `operator_service` | The deployment-operator control plane's three ports — `OperatorStatusService`, `OperatorLogsService`, `OperatorServiceLifecycleService` — their wire DTOs, and the log-context bound (`normalize_operator_log_context_value`). Implemented by `ironclaw_operator` except readiness status, which is composition's. Product keeps the `Unsupported*`/`Static*` doubles, the frozen view descriptors, and the operator *command-plane* envelope that wraps these DTOs. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
-| `web_push` | The web-push enrollment operation descriptors: `WEB_PUSH_STATUS_VIEW` and the `web_push.subscribe` / `web_push.unsubscribe` command descriptors (+ ids). Descriptors only — enrollment behavior, storage, and VAPID custody stay in `ironclaw_assistant` / `ironclaw_web_push` / composition. |
+| `notification_setup` | The generic per-channel notification-setup operation descriptors (§7b of the unified channel model): `NOTIFICATION_SETUP_STATUS_VIEW` and the `notification_setup.enable` / `notification_setup.disable` command descriptors (+ ids), all parameterized by `extension_id` with channel-opaque payload/detail documents. Descriptors only — dispatch to the channel's adapter stays in `ironclaw_assistant`; enrollment behavior and storage stay behind the adapter. |
+| `session_ingress` | `SessionChannelDirectory` — the port telling the session-inbound lane whether an extension is the deployment's authenticated-session channel. Implemented by `ironclaw_extension_host` over the deployment channel registry. |
 | `shared_admission` | Shared-conversation admission: `SharedConversationAdmission` + `ProductConversationRouteKey` and its request. Fail-closed connected-channel gating, implemented by `ironclaw_extension_host` over `[channel.config]`. |
 
 ## What must never be here

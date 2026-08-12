@@ -334,6 +334,7 @@ mod tests {
                 provider_id: "openai".to_string(),
                 model: Some("gpt-4o".to_string()),
             }),
+            user_model_policy: None,
         };
 
         let entries = model_entries_from_snapshot(&snapshot);
@@ -350,6 +351,7 @@ mod tests {
         let snapshot = LlmConfigSnapshot {
             providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
             active: None,
+            user_model_policy: None,
         };
 
         let entries = model_entries_from_snapshot(&snapshot);

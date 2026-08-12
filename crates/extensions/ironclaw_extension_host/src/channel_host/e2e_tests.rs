@@ -565,6 +565,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(IngressReplyContextSource::new(Arc::clone(
             &ingress.reply_context,
         ))),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 2,
             backoff: Duration::ZERO,
@@ -842,7 +843,13 @@ async fn slack_test_extension_host_with_manifest_commands(
         fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
             Ok(ExtensionBindings {
                 tools: Some(Arc::new(FakeToolAdapter)),
-                channel: Some(Arc::new(ironclaw_slack_extension::SlackChannelAdapter)),
+                channel: {
+                    let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+                    ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                        .with_ingress(adapter.clone())
+                        .with_reply(adapter.clone())
+                        .with_delivery(adapter)
+                },
             })
         }
     }
@@ -1273,6 +1280,7 @@ async fn background_run_notifier_fixture(
             Arc::new(driver_egress.clone()),
         )),
         Arc::new(NoReplyContext),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 2,
             backoff: Duration::ZERO,
@@ -4730,6 +4738,7 @@ async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_
         accepted_message_ref: AcceptedMessageRef::new("msg:auth-fanout-resolve")
             .expect("accepted message ref"), // safety: static test ref is valid.
         submitted_run_id: blocked_run_id,
+        submission: None,
     };
     let auth_envelope = auth_resolution_allowed_envelope("callback:test-fanout");
     observer.observe_ack(auth_envelope, auth_ack).await;

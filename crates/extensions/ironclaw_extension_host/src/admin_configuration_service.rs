@@ -137,6 +137,9 @@ where
     ) -> Result<Vec<AdminConfigurationGroupState>, AdminConfigurationServiceError> {
         let mut groups = Vec::with_capacity(self.descriptors.len());
         for (group_id, descriptor) in &self.descriptors {
+            if descriptor.fields.iter().all(|field| field.host_managed) {
+                continue;
+            }
             let record = self
                 .store
                 .get(scope, group_id)
@@ -158,6 +161,9 @@ where
             .descriptors
             .get(group_id)
             .ok_or(AdminConfigurationServiceError::UnknownGroup)?;
+        if descriptor.fields.iter().all(|field| field.host_managed) {
+            return Err(AdminConfigurationServiceError::UnknownGroup);
+        }
         let record = self
             .store
             .get(scope, group_id)
@@ -180,12 +186,15 @@ where
             .descriptors
             .get(group_id)
             .ok_or(AdminConfigurationServiceError::UnknownGroup)?;
+        if descriptor.fields.iter().all(|field| field.host_managed) {
+            return Err(AdminConfigurationServiceError::UnknownGroup);
+        }
         let field = descriptor
             .fields
             .iter()
             .find(|field| &field.handle == handle)
             .ok_or(AdminConfigurationServiceError::UnknownField)?;
-        if field.secret {
+        if field.host_managed || field.secret {
             return Err(AdminConfigurationServiceError::UnknownField);
         }
         let record = self
@@ -219,7 +228,7 @@ where
             .iter()
             .find(|field| &field.handle == handle)
             .ok_or(AdminConfigurationServiceError::UnknownField)?;
-        if !field.secret {
+        if field.host_managed || !field.secret {
             return Err(AdminConfigurationServiceError::UnknownField);
         }
         let record = self
@@ -264,6 +273,9 @@ where
             .descriptors
             .get(group_id)
             .ok_or(AdminConfigurationServiceError::UnknownGroup)?;
+        if descriptor.fields.iter().all(|field| field.host_managed) {
+            return Err(AdminConfigurationServiceError::UnknownGroup);
+        }
         let previous = self
             .store
             .get(scope, group_id)
@@ -293,6 +305,9 @@ where
         let mut effective = BTreeMap::new();
         let mut staged_handles = Vec::new();
         for field in &descriptor.fields {
+            if field.host_managed {
+                continue;
+            }
             let submitted_value = validated.get(&field.handle);
             if field.secret {
                 let exposed = submitted_value.map(ExposeSecret::expose_secret);
@@ -418,6 +433,7 @@ fn validate_submitted(
     let declared = descriptor
         .fields
         .iter()
+        .filter(|field| !field.host_managed)
         .map(|field| &field.handle)
         .collect::<BTreeSet<_>>();
     let mut validated = BTreeMap::new();
@@ -441,7 +457,7 @@ fn validate_submitted(
         }
     }
     for field in &descriptor.fields {
-        if !field.required {
+        if field.host_managed || !field.required {
             continue;
         }
         let present = match validated.get(&field.handle) {
@@ -470,6 +486,9 @@ fn request_digest(
     hash_part(&mut hasher, descriptor.group_id.as_str().as_bytes());
     hash_part(&mut hasher, &expected_revision.to_be_bytes());
     for field in &descriptor.fields {
+        if field.host_managed {
+            continue;
+        }
         hash_part(&mut hasher, field.handle.as_str().as_bytes());
         let value = submitted.get(&field.handle);
         if field.secret {
@@ -530,6 +549,7 @@ fn render_group(
     let fields = descriptor
         .fields
         .iter()
+        .filter(|field| !field.host_managed)
         .map(|field| {
             let stored = commit.and_then(|commit| commit.values.get(&field.handle));
             let (provided, value) = match stored {

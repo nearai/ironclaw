@@ -1584,7 +1584,10 @@ fn binding_request_from_envelope(envelope: &ProductInboundEnvelope) -> ResolveBi
         external_conversation_ref: envelope.external_conversation_ref().clone(),
         external_event_id: envelope.external_event_id().clone(),
         route_kind: route_kind_for_envelope(envelope),
-        auth_claim: envelope.auth_claim().clone(),
+        auth_claim: envelope
+            .require_verified_auth_claim()
+            .expect("parity harness envelopes carry verified webhook evidence")
+            .clone(),
     }
 }
 

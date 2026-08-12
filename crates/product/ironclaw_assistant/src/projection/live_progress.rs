@@ -429,6 +429,7 @@ pub(super) fn product_items_for_live_update(
                     id: id.clone(),
                     run_id: Some(*run_id),
                     body: body.clone(),
+                    finalized: false,
                 })
             }
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {

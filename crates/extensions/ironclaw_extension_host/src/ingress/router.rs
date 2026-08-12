@@ -7,8 +7,9 @@
 //! durable staging before 2xx, then one leased background worker admits the
 //! merged message after the provider-selected quiet window (checklist ING-8).
 
+use futures::FutureExt as _;
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,11 +17,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel::{ChannelIngressDescriptor, ChannelIngressMethod};
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, InboundBatchFragment, InboundOutcome, VerifiedInbound,
 };
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::{ChannelIngress, NormalizedInboundMessage};
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+};
 use ironclaw_extension_registry::ResolvedExtensionManifest;
 use ironclaw_host_api::ids::SecretHandle;
 use sha2::{Digest, Sha256};
@@ -82,14 +85,6 @@ pub struct InboundAdmission {
     pub extension_id: String,
     pub installation_id: String,
     pub message: NormalizedInboundMessage,
-    /// The exact adapter that parsed this request. Host-only and transient:
-    /// admission keeps this `Arc` across replay/policy so an activation swap
-    /// cannot fetch attachment bytes through a different generation.
-    pub channel_adapter: Arc<dyn ChannelAdapter>,
-    /// Manifest-restricted egress built from the same resolved ingress
-    /// binding as `channel_adapter`. `None` means the host has no channel
-    /// transport; attachment-bearing admission then fails closed.
-    pub channel_egress: Option<Arc<dyn RestrictedEgress>>,
 }
 
 /// The durable admission outcome. Both variants mean the event is durably
@@ -315,18 +310,16 @@ impl ExtensionIngressRouter {
             return IngressResponse::error(404, "unknown_route");
         };
 
-        // 2. Method / body-limit / rate-limit — before any verification or
-        //    adapter work.
+        // 2. Method / body-limit — before any verification or adapter work.
+        //    The installation-scoped limiter runs only after verification;
+        //    otherwise unauthenticated traffic could drain a real vendor's
+        //    shared bucket. The public transport keeps its own pre-auth cap.
         if !method_allowed(&request.method, ingress) {
             return IngressResponse::error(405, "method_not_allowed");
         }
         if request.body.len() as u64 > ingress.body_limit_bytes {
             return IngressResponse::error(413, "payload_too_large");
         }
-        if !self.rate.try_admit(&request.extension_id) {
-            return IngressResponse::error(429, "capacity");
-        }
-
         // 3. Deadline around verification + adapter + durable admission.
         let deadline = self.config.request_deadline;
         match tokio::time::timeout(
@@ -396,6 +389,15 @@ impl ExtensionIngressRouter {
         };
         drop(candidates); // secrets leave scope before any adapter work
 
+        // Charge only authenticated vendor traffic, keyed by the verified
+        // installation rather than the public extension route. A forged
+        // request may spend verification work, but cannot deny the genuine
+        // installation its bounded admission capacity.
+        let rate_key = format!("{}:{}", binding.extension_id(), verified.installation_id);
+        if !self.rate.try_admit(&rate_key) {
+            return IngressResponse::error(429, "capacity");
+        }
+
         // 5. Resolve only manifest-declared non-secret configuration for the
         //    installation selected by successful verification.
         let non_secret_config = match self
@@ -431,6 +433,7 @@ impl ExtensionIngressRouter {
             })
             .map(|(name, value)| (name.clone(), String::from_utf8_lossy(value).into_owned()))
             .collect();
+        let channel_egress = self.channel_egress(binding, &verified.installation_id);
         let outcome = {
             let can_reply_in_threads = binding
                 .resolved()
@@ -445,12 +448,30 @@ impl ExtensionIngressRouter {
                 headers: &forwarded_headers,
                 can_reply_in_threads,
             };
-            match catch_unwind(AssertUnwindSafe(|| channel.inbound(inbound))) {
+            // `receive` is async now, so panic isolation wraps the FUTURE
+            // rather than the call: a panic inside an awaited adapter parse
+            // must still be a 503 for this request and never unwind the
+            // ingress task. `AssertUnwindSafe` is sound here for the same
+            // reason it was before — the adapter holds no host state that a
+            // partial parse could leave observably broken.
+            match AssertUnwindSafe(channel.receive(inbound, channel_egress.as_ref()))
+                .catch_unwind()
+                .await
+            {
                 Ok(Ok(outcome)) => outcome,
                 Ok(Err(ChannelError::Configuration { .. })) => {
                     tracing::debug!(
                         extension_id = %binding.extension_id(),
                         "channel adapter host configuration is unavailable"
+                    );
+                    return IngressResponse::error(503, "temporarily_unavailable");
+                }
+                Ok(Err(ChannelError::AttachmentTransfer {
+                    retryable: true, ..
+                })) => {
+                    tracing::debug!(
+                        extension_id = %binding.extension_id(),
+                        "channel adapter attachment transfer is temporarily unavailable"
                     );
                     return IngressResponse::error(503, "temporarily_unavailable");
                 }
@@ -491,13 +512,10 @@ impl ExtensionIngressRouter {
                 }
             }
             InboundOutcome::Messages(messages) => {
-                let channel_egress = self.channel_egress(binding, &verified.installation_id);
                 admit_messages(
                     &self.deps,
                     binding.extension_id(),
                     &verified.installation_id,
-                    channel,
-                    channel_egress,
                     messages,
                 )
                 .await
@@ -514,14 +532,11 @@ impl ExtensionIngressRouter {
                         return IngressResponse::error(503, "temporarily_unavailable");
                     }
                 };
-                let channel_egress = self.channel_egress(binding, &verified.installation_id);
                 self.batch_processor
                     .stage_and_schedule(
                         binding.extension_id(),
                         &verified.installation_id,
                         binding_fingerprint,
-                        channel,
-                        channel_egress,
                         *fragment,
                     )
                     .await
@@ -533,8 +548,10 @@ impl ExtensionIngressRouter {
         &self,
         binding: &ResolvedIngressBinding,
         installation_id: &str,
-    ) -> Option<Arc<dyn RestrictedEgress>> {
-        let transport = self.deps.channel_egress_transport.as_ref()?;
+    ) -> Arc<dyn RestrictedEgress> {
+        let Some(transport) = self.deps.channel_egress_transport.as_ref() else {
+            return Arc::new(UnavailableRestrictedEgress);
+        };
         let declared = binding
             .resolved()
             .channel
@@ -547,12 +564,26 @@ impl ExtensionIngressRouter {
                     .collect()
             })
             .unwrap_or_default();
-        Some(Arc::new(PolicyEnforcedChannelEgress::new(
+        Arc::new(PolicyEnforcedChannelEgress::new(
             binding.extension_id(),
             installation_id,
             declared,
             Arc::clone(transport),
-        )))
+        ))
+    }
+}
+
+struct UnavailableRestrictedEgress;
+
+#[async_trait]
+impl RestrictedEgress for UnavailableRestrictedEgress {
+    async fn send(
+        &self,
+        _request: RestrictedEgressRequest,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        Err(RestrictedEgressError::Transport {
+            reason: "channel egress transport is unavailable".to_string(),
+        })
     }
 }
 
@@ -560,8 +591,6 @@ async fn admit_messages(
     deps: &ExtensionIngressRouterDeps,
     extension_id: &str,
     installation_id: &str,
-    channel_adapter: Arc<dyn ChannelAdapter>,
-    channel_egress: Option<Arc<dyn RestrictedEgress>>,
     messages: Vec<NormalizedInboundMessage>,
 ) -> IngressResponse {
     if messages.is_empty() {
@@ -602,8 +631,6 @@ async fn admit_messages(
                 extension_id: extension_id.to_string(),
                 installation_id: installation_id.to_string(),
                 message,
-                channel_adapter: Arc::clone(&channel_adapter),
-                channel_egress: channel_egress.clone(),
             })
             .await
         {
@@ -638,16 +665,12 @@ struct InboundBatchProcessor {
     admission_deadline: Duration,
 }
 
-type ResolvedBatchBinding = (Arc<dyn ChannelAdapter>, Option<Arc<dyn RestrictedEgress>>);
-
 impl InboundBatchProcessor {
     async fn stage_and_schedule(
         &self,
         extension_id: &str,
         installation_id: &str,
         binding_fingerprint: String,
-        channel_adapter: Arc<dyn ChannelAdapter>,
-        channel_egress: Option<Arc<dyn RestrictedEgress>>,
         fragment: InboundBatchFragment,
     ) -> IngressResponse {
         if let Err(error) = fragment.validate() {
@@ -670,7 +693,7 @@ impl InboundBatchProcessor {
         };
         match self.deps.inbound_batches.stage(request).await {
             Ok(InboundBatchStageOutcome::Pending(schedule)) => {
-                self.spawn_schedule(schedule, channel_adapter, channel_egress);
+                self.spawn_schedule(schedule);
                 // The fragment itself is now durable. Providers that serialize
                 // a logical batch may send the next webhook immediately.
                 IngressResponse::ok()
@@ -698,26 +721,14 @@ impl InboundBatchProcessor {
         }
     }
 
-    fn spawn_schedule(
-        &self,
-        schedule: InboundBatchSchedule,
-        channel_adapter: Arc<dyn ChannelAdapter>,
-        channel_egress: Option<Arc<dyn RestrictedEgress>>,
-    ) {
+    fn spawn_schedule(&self, schedule: InboundBatchSchedule) {
         let processor = self.clone();
         tokio::spawn(async move {
-            processor
-                .process_schedule(schedule, channel_adapter, channel_egress)
-                .await;
+            processor.process_schedule(schedule).await;
         });
     }
 
-    async fn process_schedule(
-        &self,
-        mut schedule: InboundBatchSchedule,
-        channel_adapter: Arc<dyn ChannelAdapter>,
-        channel_egress: Option<Arc<dyn RestrictedEgress>>,
-    ) {
+    async fn process_schedule(&self, mut schedule: InboundBatchSchedule) {
         let mut retry_attempt = 0u32;
         loop {
             tokio::time::sleep(delay_until(schedule.due_at)).await;
@@ -746,8 +757,6 @@ impl InboundBatchProcessor {
                         &self.deps,
                         &claim.schedule.key.extension_id,
                         &claim.schedule.key.installation_id,
-                        Arc::clone(&channel_adapter),
-                        channel_egress.clone(),
                         vec![message],
                     ),
                 )
@@ -851,76 +860,32 @@ impl InboundBatchProcessor {
             }
         };
         for schedule in schedules {
-            let Some((channel_adapter, channel_egress)) = self.resolve_recovery_binding(&schedule)
-            else {
+            if !self.recovery_binding_matches(&schedule) {
                 tracing::debug!(
                     extension_id = %schedule.key.extension_id,
                     "inbound batch recovery binding is unavailable or changed"
                 );
                 continue;
-            };
-            self.spawn_schedule(schedule, channel_adapter, channel_egress);
+            }
+            self.spawn_schedule(schedule);
         }
     }
 
-    fn resolve_recovery_binding(
-        &self,
-        schedule: &InboundBatchSchedule,
-    ) -> Option<ResolvedBatchBinding> {
+    fn recovery_binding_matches(&self, schedule: &InboundBatchSchedule) -> bool {
         if let Some(binding) = self
             .deployment_channels
             .extension(&schedule.key.extension_id)
         {
-            let fingerprint =
-                resolved_binding_fingerprint("deployment", binding.resolved.as_ref()).ok()?;
-            if fingerprint != schedule.binding_fingerprint {
-                return None;
-            }
-            let egress = self.channel_egress_for_resolved(
-                &schedule.key.extension_id,
-                &schedule.key.installation_id,
-                binding.resolved.as_ref(),
-            );
-            return Some((Arc::clone(&binding.adapter), egress));
+            return resolved_binding_fingerprint("deployment", binding.resolved.as_ref())
+                .is_ok_and(|fingerprint| fingerprint == schedule.binding_fingerprint)
+                && binding.surfaces.ingress.is_some();
         }
-        let active = self.watch.current().extension(&schedule.key.extension_id)?;
-        let fingerprint = resolved_binding_fingerprint("active", active.resolved.as_ref()).ok()?;
-        if fingerprint != schedule.binding_fingerprint {
-            return None;
-        }
-        let adapter = active.channel.clone()?;
-        let egress = self.channel_egress_for_resolved(
-            &schedule.key.extension_id,
-            &schedule.key.installation_id,
-            active.resolved.as_ref(),
-        );
-        Some((adapter, egress))
-    }
-
-    fn channel_egress_for_resolved(
-        &self,
-        extension_id: &str,
-        installation_id: &str,
-        resolved: &ResolvedExtensionManifest,
-    ) -> Option<Arc<dyn RestrictedEgress>> {
-        let transport = self.deps.channel_egress_transport.as_ref()?;
-        let declared = resolved
-            .channel
-            .as_ref()
-            .map(|channel| {
-                channel
-                    .egress
-                    .iter()
-                    .map(DeclaredChannelEgress::from_descriptor)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(Arc::new(PolicyEnforcedChannelEgress::new(
-            extension_id,
-            installation_id,
-            declared,
-            Arc::clone(transport),
-        )))
+        let Some(active) = self.watch.current().extension(&schedule.key.extension_id) else {
+            return false;
+        };
+        resolved_binding_fingerprint("active", active.resolved.as_ref())
+            .is_ok_and(|fingerprint| fingerprint == schedule.binding_fingerprint)
+            && active.channel.ingress.is_some()
     }
 }
 
@@ -1031,10 +996,10 @@ impl ResolvedIngressBinding {
         }
     }
 
-    fn adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
+    fn adapter(&self) -> Option<Arc<dyn ChannelIngress>> {
         match self {
-            Self::Deployment(binding) => Some(Arc::clone(&binding.adapter)),
-            Self::Active(active) => active.channel.clone(),
+            Self::Deployment(binding) => binding.surfaces.ingress.clone(),
+            Self::Active(active) => active.channel.ingress.clone(),
         }
     }
 
@@ -1056,8 +1021,7 @@ fn method_allowed(method: &str, ingress: &ChannelIngressDescriptor) -> bool {
     }
 }
 
-/// Token-bucket rate limiter keyed by extension id (pre-verification, the
-/// installation is not yet resolved; one installation per extension today).
+/// Token-bucket rate limiter keyed by verified extension installation.
 struct RateLimiter {
     config: IngressRateLimitConfig,
     buckets: Mutex<HashMap<String, Bucket>>,
