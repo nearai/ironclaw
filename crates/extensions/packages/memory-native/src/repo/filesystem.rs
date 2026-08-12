@@ -932,10 +932,19 @@ where
             .await?;
 
         let full_text_results = if request.full_text() {
-            let filter = Filter::Fts {
+            // #7185: memory recall is conversational — the query is a whole
+            // user sentence, and requiring EVERY content term (`Filter::Fts`)
+            // means a paraphrased question almost never matches the stored
+            // wording. `Filter::FtsRanked` matches on any content term and
+            // orders by backend relevance (bm25 / ts_rank), which is what the
+            // rank-then-fuse step below already assumes it is being handed.
+            let filter = Filter::FtsRanked {
                 key: Self::index_key(fs_keys::CONTENT),
                 query: request.query().to_string(),
+                limit: request.pre_fusion_limit().min(Page::MAX_LIMIT as usize) as u32,
             };
+            // `FtsRanked` overrides `Page::limit` (it is a top-k operation);
+            // the bounded page still satisfies the API.
             let page = Page::new(
                 0,
                 request.pre_fusion_limit().min(Page::MAX_LIMIT as usize) as u32,

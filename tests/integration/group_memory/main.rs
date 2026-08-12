@@ -21,6 +21,7 @@ mod scenario_disabled_binding_offers_no_memory_tools;
 mod scenario_lifecycle_gates_host_memory_calls;
 mod scenario_memory_search_finds_seeded;
 mod scenario_memory_tree_reflects_structure;
+mod scenario_paraphrased_prompt_recall_libsql;
 mod scenario_proactive_prompt_recall_libsql;
 mod scenario_write_then_read_cross_thread;
 
@@ -87,6 +88,15 @@ async fn memory_group_e2e() {
     report.record(
         "always_on_memory_recall_libsql",
         scenario_always_on_memory_recall_libsql::run().await,
+    );
+
+    // Scenario 8 (#7185): ranked-OR retrieval. A fact saved as one sentence is
+    // recalled by a differently-worded question sharing only some of its
+    // content words — the case every-term (AND) matching silently missed. Own
+    // group, same libSQL reason as scenario 6.
+    report.record(
+        "paraphrased_prompt_recall_libsql",
+        scenario_paraphrased_prompt_recall_libsql::run().await,
     );
 
     report.assert_all_passed();
