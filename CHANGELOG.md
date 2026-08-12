@@ -9,24 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `telegram_allowed_channels` in the Telegram extension's deployment
-  configuration: group/supergroup chats are served only when listed there
-  (fail-closed), with each participant running as themselves once paired.
-  Previously any group the bot was added to ran as the deployment operator.
+- **Slack channel context.** Pinging the bot at the top level of a channel
+  gives the run recent channel history as context (last 30 messages); pinging
+  inside a thread gives it that whole thread (up to 100 replies). Context is
+  fetched host-side with the bot token (`channels:history` scope; missing
+  scopes degrade to no context), and is framed to the model as untrusted
+  quoted channel content, never as instructions. Telegram has no equivalent —
+  the Bot API cannot read history — so Telegram context is the conversation
+  the bot has itself processed.
+- `can_reply_in_threads` channel presentation flag declaring each channel's
+  reply placement: Slack (`true`) replies in a thread rooted on the pinged
+  message; Telegram (`false`) replies as an anchored quote of it.
 
 ### Changed
 
-- **Shared channels: a run acts as the user who invoked it.** A shared channel
-  conversation now binds one thread per participant, and the bot answers each
-  participant as themselves — the configured shared-subject user is retired.
-  Unpaired participants never run as the operator: the bot stays silent toward
-  them in the channel until they pair (install the extension from Extensions
-  and complete its connect flow; DMs still offer the connect prompt). Existing
-  shared-channel threads are retained on disk but stop receiving new messages;
-  each participant's next message starts a fresh thread they own. Shared
-  channels are no longer offered as per-user notification delivery targets (DM
-  targets are unchanged), and previously stored shared-channel notification
-  preferences fail closed at resolution.
+- **Add the bot to a channel and it just works.** Shared-conversation
+  admission is presence-based: any Slack channel or Telegram group the bot
+  has been added to is served, with no allowlist and nothing to configure
+  (the `slack_allowed_channels` / `telegram_allowed_channels` settings are
+  gone). Channels whose actor identity is not per-user still never serve
+  shared conversations.
+- **Shared conversations are genuinely shared — and every run still acts as
+  its invoker.** A Slack thread (each top-level ping roots its own) or a
+  Telegram group/topic is ONE continuous conversation that every paired
+  participant shares: anyone can follow up on what someone else started.
+  Each message still runs as the person who sent it — their identity,
+  memory, settings, and approval gates — never as a configured subject or
+  the operator (that mechanism is retired). Pre-existing shared threads
+  simply resume. Shared channels are no longer offered as per-user
+  notification delivery targets (DM targets are unchanged), and previously
+  stored shared-channel notification preferences fail closed at resolution.
+- **Unpaired users get pointed the right way, in place.** An unpaired user
+  who pings the bot in a shared conversation gets the connect notice as a
+  reply anchored on their own message (threaded in Slack, quoted in
+  Telegram), throttled per conversation — instead of silence or running as
+  someone else. DMs keep their existing connect prompt.
 - **Every parked gate is announced, on both delivery lanes.** Gate prompts are
   keyed by their gate ref in the live conversation lane and the background
   automation lane alike, so a run that parks on several approval/auth gates
@@ -37,11 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- The `slack_shared_subject_user_id` and `slack_subject_routes` Slack
-  admin-configuration fields. Shared-channel admission is the
-  `slack_allowed_channels` field (a JSON array of channel ids): channels
-  previously admitted only through subject routes must be re-admitted by
-  listing them there. Legacy saved subject-route values are inert.
+- All shared-channel admin-configuration fields: the `slack_shared_subject_user_id`
+  and `slack_subject_routes` subject fields AND the `slack_allowed_channels` /
+  `telegram_allowed_channels` allowlists. Shared-channel admission is now
+  presence-based — there is nothing to configure, and adding the bot to a
+  channel is what admits it (see "Changed" above). Saved values for any of
+  these retired handles are inert, and new saves fail closed as unknown fields.
 
 ## [1.1.0-rc.1] - 2026-08-03
 

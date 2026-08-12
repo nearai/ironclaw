@@ -602,6 +602,7 @@ async fn build_runtime_with_slack_delivery(
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
+        outbound_target_provider: None,
     }]);
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {

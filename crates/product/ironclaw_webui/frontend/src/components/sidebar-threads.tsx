@@ -2,6 +2,7 @@ import { NavLink } from "react-router";
 import React from "react";
 import { Icon } from "../design-system/icons";
 import { ConfirmDialog } from "../design-system/confirm-dialog";
+import { MarqueeText } from "./marquee-text";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
 import { deleteThreadErrorMessage } from "../lib/thread-errors";
@@ -141,9 +142,9 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         title={timeTitle || undefined}
       >
         <div className="flex w-full items-center gap-1.5">
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug">
+          <MarqueeText className="flex-1 text-[13px] font-medium leading-snug">
             {title}
-          </span>
+          </MarqueeText>
           {presentation &&
           (<span
             aria-label={presentationLabel}

@@ -2073,6 +2073,7 @@ fn notification_channels_response() -> RebornNotificationChannelsResponse {
                         final_replies: true,
                         gate_prompts: true,
                         auth_prompts: true,
+                        notifications: true,
                     },
                 }),
             },
@@ -2094,6 +2095,7 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
                     final_replies: true,
                     gate_prompts: true,
                     auth_prompts: true,
+                    notifications: true,
                 },
             },
             RebornOutboundDeliveryTargetOption {
@@ -2108,6 +2110,7 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
                     final_replies: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    notifications: false,
                 },
             },
         ],
@@ -7036,6 +7039,14 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
         third.status(),
         StatusCode::TOO_MANY_REQUESTS,
         "third concurrent open from same caller must be rejected"
+    );
+    assert_eq!(
+        third
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1"),
+        "capacity rejection must tell the stream client when it may retry"
     );
     let body = read_json(third).await;
     assert_eq!(body["error"], "rate_limited");

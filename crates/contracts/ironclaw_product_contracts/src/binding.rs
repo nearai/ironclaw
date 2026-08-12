@@ -22,6 +22,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterId, VerifiedAuthClaim,
 };
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, SourceBindingRef};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProductOperationFailure;
@@ -49,6 +50,15 @@ pub struct ResolvedBinding {
     /// user-scoped must be completed before entering `InboundTurnService`.
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+    /// Per-event source and reply-target binding refs, carried verbatim from
+    /// the conversation resolution. Shared (channel) routes resolve each
+    /// inbound event onto its OWN ephemeral thread with its own refs; carrying
+    /// them here keeps the accepted message and the submitted run anchored to
+    /// that per-event thread instead of a per-conversation ref pinned to the
+    /// first event's thread. Direct (DM) routes carry their persistent
+    /// per-user thread's refs.
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 /// Request to resolve external adapter refs into canonical Reborn bindings.
@@ -236,7 +246,9 @@ mod tests {
             "subject_user_id": "user:legacy-subject",
             "thread_id": "thread:legacy",
             "agent_id": "agent:legacy",
-            "project_id": "project:legacy"
+            "project_id": "project:legacy",
+            "source_binding_ref": "source:legacy",
+            "reply_target_binding_ref": "reply:legacy"
         }))
         .expect("legacy binding should deserialize");
 

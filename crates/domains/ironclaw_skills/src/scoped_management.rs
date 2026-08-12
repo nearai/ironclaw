@@ -10,10 +10,10 @@ use ironclaw_host_api::{
 };
 
 use crate::{
-    SkillContentRequest, SkillContentResult, SkillInstallRequest, SkillInstallResult,
-    SkillInstallSource, SkillManagementContext, SkillManagementError, SkillRemoveRequest,
-    SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills,
+    SkillContentRequest, SkillContentResult, SkillInstallFile, SkillInstallRequest,
+    SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
+    SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary,
+    SkillUpdateRequest, SkillUpdateResult, install_skill, list_skills,
     management::{
         SKILL_FILE_NAME, SkillBundleSnapshot, USER_SKILLS_ROOT, capture_skill_bundle,
         restore_skill_bundle,
@@ -196,6 +196,7 @@ impl ScopedSkillManagementPort {
         scope: ResourceScope,
         name: Option<&str>,
         content: &str,
+        files: &[SkillInstallFile<'_>],
         source_url: &str,
     ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
         let context = self.context_for_scope(scope)?;
@@ -204,7 +205,7 @@ impl ScopedSkillManagementPort {
             SkillInstallRequest {
                 name,
                 content,
-                files: &[],
+                files,
                 source: SkillInstallSource::InstalledUrl,
                 source_url: Some(source_url),
             },
@@ -322,6 +323,7 @@ mod tests {
             scope.clone(),
             None,
             content,
+            &[],
             "https://hub.example/scoped-snapshot/SKILL.md",
         )
         .await
@@ -376,5 +378,56 @@ mod tests {
                 .expect("list remains readable")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn install_from_url_rejects_file_directory_collisions_without_creating_state() {
+        let owner = UserId::new("bundle-collision-owner").expect("owner id");
+        let port =
+            build_scoped_skill_management_port(owner.clone(), Arc::new(InMemoryBackend::new()));
+        let scope =
+            ResourceScope::local_default(owner, InvocationId::new()).expect("resource scope");
+        let content =
+            "---\nname: bundle-collision\ndescription: invalid bundle fixture\n---\n# Fixture\n";
+
+        for files in [
+            vec![SkillInstallFile {
+                relative_path: "SKILL.md/helper",
+                contents: b"reserved descendant",
+            }],
+            vec![
+                SkillInstallFile {
+                    relative_path: "scripts",
+                    contents: b"file",
+                },
+                SkillInstallFile {
+                    relative_path: "scripts/run.py",
+                    contents: b"descendant",
+                },
+            ],
+        ] {
+            let error = port
+                .install_from_url_for_scope(
+                    scope.clone(),
+                    None,
+                    content,
+                    &files,
+                    "https://hub.example/bundle-collision/SKILL.md",
+                )
+                .await
+                .expect_err("file/directory collisions must fail before installation");
+            assert!(matches!(
+                error,
+                ScopedSkillManagementError::Skill(ref source)
+                    if source.kind() == crate::SkillManagementErrorKind::InvalidInput
+            ));
+            assert!(
+                port.list_for_scope(scope.clone())
+                    .await
+                    .expect("list remains readable")
+                    .is_empty(),
+                "rejected bundles must not create partial skill state"
+            );
+        }
     }
 }

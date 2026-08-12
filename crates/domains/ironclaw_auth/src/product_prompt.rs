@@ -201,11 +201,12 @@ pub async fn auth_prompt_view_for_blocked_auth(
         body,
         credential_requirements,
     } = request;
-    // Explicit turn owners represent shared/team subjects; actor fallback keeps
-    // the existing personal/WebUI behavior for legacy scopes.
-    let owner_user_id = scope
-        .explicit_owner_user_id()
-        .unwrap_or(fallback_owner_user_id);
+    // Actor-first: `fallback_owner_user_id` is the acting user (the run's
+    // actor) the caller supplies. A shared thread is owned by its first
+    // binder, so keying the auth flow by the scope owner would create it for
+    // the wrong user; a joiner's run must own the flow backing its own
+    // blocked capability. Matches the auth-flow resolve and cancel sides.
+    let owner_user_id = fallback_owner_user_id;
     let challenge = match auth_challenges {
         Some(provider) => provider
             .challenge_for_gate(

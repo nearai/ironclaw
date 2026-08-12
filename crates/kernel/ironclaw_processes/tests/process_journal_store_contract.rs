@@ -21,9 +21,9 @@ use ironclaw_processes::{
     OpenProcessDependencyRequest, ProcessCheckpointId, ProcessCheckpointPayload,
     ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
     ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
-    ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
+    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
@@ -473,6 +473,7 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
                 .expect("bounded payload"),
             created_at: Utc::now(),
             link_to_process: true,
+            kind: None,
             metadata: json!({"schema": "agent-loop-v1"}),
         })
         .await
@@ -724,6 +725,7 @@ async fn explicit_legacy_materialized_state_imports_before_row_native_commands()
         status: ProcessLifecycleStatus::Queued,
         suspension: None,
         checkpoint_ref: None,
+        checkpoint_kind: None,
         input_ref: None,
         failure: None,
         journal_cursor: cursor,
@@ -1531,6 +1533,7 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
             .expect("bounded payload"),
         created_at: Utc::now(),
         link_to_process: true,
+        kind: None,
         metadata: json!({"schema": "agent-loop-v1"}),
     };
 
@@ -1556,6 +1559,7 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
                 .expect("bounded payload"),
             created_at: Utc::now(),
             link_to_process: false,
+            kind: None,
             metadata: json!({"kind": "final"}),
         })
         .await
@@ -3065,7 +3069,6 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             scope_match: None,
             owner_user_id: Some(owner),
             gate_ref: Some(gate_ref.clone()),
-            owner_match: Some(ProcessGateOwnerMatch::Explicit),
             include_historical: false,
         })
         .await
@@ -3092,13 +3095,39 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             scope_match: Some(ProcessGateScopeMatch::Owner),
             owner_user_id: gates[0].owner_user_id.clone(),
             gate_ref: None,
-            owner_match: Some(ProcessGateOwnerMatch::Explicit),
             include_historical: false,
         })
         .await
         .expect("query gates across the explicit owner's projects");
     assert_eq!(owner_gates.len(), 1);
     assert_eq!(owner_gates[0].process_id, process_id);
+
+    // Owner-isolation guard (sabotage test for the retired `ProcessGateOwnerMatch`
+    // and its `ProcessGateScopeMatch::Owner` successor): the same-tenant owner
+    // broadening MUST still confine to the requesting user. A query rooted at an
+    // UNRELATED owner returns nothing even with the `owner_user_id` filter left
+    // open — so a future edit that drops the `scope.user_id` equality check on the
+    // `Owner` branch fails HERE instead of leaking another user's authorization
+    // gates.
+    let mut unrelated_owner_scope = scope.clone();
+    unrelated_owner_scope.user_id = UserId::new("user-unrelated-owner").expect("user");
+    unrelated_owner_scope.project_id = None;
+    unrelated_owner_scope.thread_id = None;
+    let unrelated_gates = store
+        .query_process_gates(ProcessGateQuery {
+            scope: unrelated_owner_scope,
+            gate_kind: ProcessSuspensionKind::Authorization,
+            scope_match: Some(ProcessGateScopeMatch::Owner),
+            owner_user_id: None,
+            gate_ref: None,
+            include_historical: false,
+        })
+        .await
+        .expect("query gates for an unrelated owner");
+    assert!(
+        unrelated_gates.is_empty(),
+        "owner-scope gate queries must not leak across owners: {unrelated_gates:?}"
+    );
 
     let snapshot = store
         .get_process_snapshot(GetProcessSnapshotRequest {
@@ -3295,6 +3324,124 @@ async fn expired_leases_cancel_requested_work_and_requeue_safe_crashes() {
     assert_eq!(cancelled.status, ProcessLifecycleStatus::Cancelled);
     assert!(requeued.lease.is_none());
     assert!(cancelled.lease.is_none());
+}
+
+/// A run parked at a checkpoint that replays no side effect is recoverable
+/// work, not a dead run — but only once the lease has been expired long enough
+/// that a still-live worker would have renewed it. The recorded checkpoint kind
+/// is what makes that judgement possible, so it has to survive a store reopen.
+#[tokio::test]
+async fn expired_before_model_checkpoint_is_requeued_after_the_grace_window() {
+    const LEASE_TTL: Duration = Duration::from_secs(60);
+    let filesystem = in_memory_backed_processes_filesystem();
+    let mut store =
+        ProcessJournalStore::new(Arc::clone(&filesystem)).with_lease_duration(LEASE_TTL);
+    let scope = scope();
+    let process_id = ProcessId::new();
+    submit_internal_process(&store, &scope, process_id).await;
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("grace-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ProcessKind::Internal),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim process")
+        .pop()
+        .expect("claimed process");
+    let expires_at = claim
+        .state
+        .lease
+        .as_ref()
+        .and_then(|lease| lease.lease_expires_at)
+        .expect("claimed process carries a lease expiry");
+    store
+        .record_process_checkpoint(RecordProcessCheckpointRequest {
+            checkpoint_id: ProcessCheckpointId::from_trusted("grace-checkpoint"),
+            process_id,
+            scope: scope.clone(),
+            state_ref: ProcessCheckpointRef::from_trusted("grace-state"),
+            payload: ProcessCheckpointPayload::new(b"state".to_vec()).expect("checkpoint payload"),
+            created_at: Utc::now(),
+            link_to_process: true,
+            kind: Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("record before-model checkpoint");
+
+    // Reopen: the kind must come back from durable state, not process memory.
+    drop(store);
+    store = ProcessJournalStore::new(Arc::clone(&filesystem)).with_lease_duration(LEASE_TTL);
+    let reopened = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("load reopened process");
+    assert_eq!(
+        reopened.checkpoint_kind,
+        Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
+        "the recorded checkpoint kind must survive a store reopen"
+    );
+
+    // Strictly past expiry — the sweep does select this process as expired — but
+    // well inside the grace window: a worker starved of heartbeats may still be
+    // running, so the grace hold must leave the process alone. `now` sits past
+    // `expires_at` (not on the boundary), so this asserts the grace-window hold
+    // itself, not the inclusive-vs-strict expiry comparison.
+    let held = store
+        .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+            now: expires_at + chrono::Duration::seconds(1),
+            scope_filter: Some(scope.clone()),
+            process_kind_filter: Some(ProcessKind::Internal),
+        })
+        .await
+        .expect("sweep inside the grace window");
+    assert!(
+        held.recovered.is_empty(),
+        "a checkpointed process inside the grace window must not be recovered"
+    );
+    let still_running = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("in-grace snapshot");
+    assert_eq!(still_running.status, ProcessLifecycleStatus::Running);
+    assert!(still_running.lease.is_some());
+    assert!(still_running.failure.is_none());
+
+    // A full lease TTL later, the worker is not coming back: requeue for resume.
+    let recovered = store
+        .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+            now: expires_at + chrono::Duration::from_std(LEASE_TTL).expect("grace window"),
+            scope_filter: Some(scope.clone()),
+            process_kind_filter: Some(ProcessKind::Internal),
+        })
+        .await
+        .expect("sweep past the grace window");
+    assert_eq!(recovered.recovered.len(), 1);
+    let requeued = store
+        .get_process_snapshot(GetProcessSnapshotRequest { scope, process_id })
+        .await
+        .expect("requeued snapshot");
+    assert_eq!(requeued.status, ProcessLifecycleStatus::Queued);
+    assert!(requeued.failure.is_none());
+    assert!(requeued.lease.is_none());
+    assert_eq!(
+        requeued.checkpoint_ref.as_ref().map(|r| r.as_str()),
+        Some("grace-checkpoint"),
+        "the resume point must survive requeue — it is what the runner resumes from"
+    );
+    assert_eq!(
+        requeued.crash_reclaim_count, 1,
+        "checkpointed requeue shares the bounded crash-reclaim budget"
+    );
 }
 
 #[tokio::test]

@@ -1867,6 +1867,108 @@ async fn filesystem_preview_append_retries_converge_on_one_message() {
 }
 
 #[tokio::test]
+async fn filesystem_context_limit_counts_only_model_visible_messages() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-visible-window", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-visible-window");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-visible-window").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("original task"),
+        })
+        .await
+        .unwrap();
+
+    // Capability previews are durable transcript rows but are never model
+    // context. The limit therefore applies after removing them, just as it
+    // does in the in-memory implementation.
+    for index in 0..70 {
+        service
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-visible-window".into(),
+                preview: preview_envelope(InvocationId::new()),
+            })
+            .await
+            .unwrap();
+        service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-visible-window".into(),
+                result_ref: format!("result:visible-window-{index}"),
+                safe_summary: ToolResultSafeSummary::new(format!("result {index}")).unwrap(),
+                provider_call: Some(provider_call_reference(&format!("call-{index}"))),
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 128,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 71);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+    assert_eq!(context.messages[0].content, "original task");
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::CapabilityDisplayPreview)
+    );
+    assert!(context.recent_window_truncation.is_none());
+
+    let truncated = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        truncated
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![139, 141]
+    );
+    let boundary = truncated
+        .recent_window_truncation
+        .expect("omitted visible messages must produce an exact watermark");
+    assert_eq!(boundary.omitted_through_sequence, 137);
+    assert_eq!(
+        boundary.omitted_through_kind,
+        MessageKind::ToolResultReference
+    );
+}
+
+#[tokio::test]
 async fn filesystem_transactional_accept_concurrent_duplicate_replays_existing_message() {
     let backend = Arc::new(TransactionalRaceBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-accept-race", "alice");
@@ -5130,13 +5232,34 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
         .await
         .unwrap();
 
-    // Summary spans [1..3] covering the Draft at seq 2.  Must be suppressed.
+    // Push the Draft outside the first durable page selected for a 16-message
+    // context window. The summary still intersects that recent page, so a
+    // backend that validates summaries only against the first raw tail would
+    // incorrectly surface it.
+    for sequence in 4..=20 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(format!("filler {sequence}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Summary spans [1..4] covering the Draft at seq 2. Its terminal sequence
+    // is present in the first durable page, but its start and the Draft are
+    // not; pagination must continue far enough to validate the complete range.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
-            end_sequence: 3,
+            end_sequence: 4,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
@@ -5155,11 +5278,22 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
 
     assert_eq!(
         context.messages.len(),
-        2,
+        16,
         "summary must be suppressed for draft-spanning range"
     );
-    assert_eq!(context.messages[0].content, "first");
-    assert_eq!(context.messages[1].content, "third");
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Summary)
+    );
+    assert_eq!(context.messages[0].content, "filler 5");
+    assert_eq!(context.messages[15].content, "filler 20");
+    let truncation = context
+        .recent_window_truncation
+        .expect("the omitted fourth user message is the exact truncation boundary");
+    assert_eq!(truncation.omitted_through_sequence, 4);
+    assert_eq!(truncation.omitted_through_kind, MessageKind::User);
 }
 
 // Real thread store backend that fails only the summary-artifact write, so all

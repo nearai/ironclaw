@@ -24,7 +24,7 @@ use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, ProductTriggerReason, VerifiedInbound,
+    PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -38,7 +38,7 @@ use ironclaw_host_api::product_adapter::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    SanitizedFailure, SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
@@ -85,12 +85,24 @@ use ironclaw_turns::{
 struct ScriptedRunState {
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
+    failure: Option<SanitizedFailure>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
         gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
+        failure: None,
+    }
+}
+
+/// Scripted terminal state carrying a sanitized failure category so tests can
+/// assert the per-category summary reaches the channel instead of silence.
+fn scripted_failed_state(status: TurnStatus, category: &str) -> ScriptedRunState {
+    ScriptedRunState {
+        status,
+        gate_ref: None,
+        failure: Some(SanitizedFailure::new(category.to_string()).expect("valid failure category")),
     }
 }
 
@@ -99,6 +111,11 @@ struct ScriptedTurnCoordinator {
     clamp_at_last: bool,
     calls: Mutex<usize>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
+    /// Optional late transition: from call `flip.0` on, `flip.1` is returned
+    /// instead of the scripted sequence — used to race a terminal state in
+    /// after the wait backstop has already fired. One tuple keeps the flip
+    /// point and target from being configured independently.
+    flip: Option<(usize, ScriptedRunState)>,
 }
 
 impl ScriptedTurnCoordinator {
@@ -109,6 +126,23 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            flip: None,
+        }
+    }
+
+    /// `initial` until call `flip_after` (exclusive), then `terminal` — for
+    /// racing a terminal state in after the wait backstop.
+    fn with_late_terminal(
+        initial: ScriptedRunState,
+        terminal: ScriptedRunState,
+        flip_after: usize,
+    ) -> Self {
+        Self {
+            states: vec![initial],
+            clamp_at_last: true,
+            calls: Mutex::new(0),
+            cancel_calls: Mutex::new(Vec::new()),
+            flip: Some((flip_after, terminal)),
         }
     }
 
@@ -149,13 +183,19 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         let mut calls = self.calls.lock().expect("calls");
-        let idx = if self.clamp_at_last {
-            (*calls).min(self.states.len() - 1)
-        } else {
-            *calls % self.states.len()
-        };
+        let call = *calls;
         *calls += 1;
-        let scripted = self.states[idx].clone();
+        let scripted = match self.flip {
+            Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
+            _ => {
+                let idx = if self.clamp_at_last {
+                    call.min(self.states.len() - 1)
+                } else {
+                    call % self.states.len()
+                };
+                self.states[idx].clone()
+            }
+        };
         Ok(TurnRunState {
             scope: request.scope.clone(),
             actor: None,
@@ -176,7 +216,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             gate_ref: scripted.gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: scripted.failure,
             event_cursor: EventCursor(1),
             product_context: None,
             resume_disposition: None,
@@ -259,6 +299,24 @@ impl RecordingChannelAdapter {
                     OutboundPart::Retract { vendor_message_ref } => {
                         Some(vendor_message_ref.clone())
                     }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// The ordered run-lifecycle reactions the adapter was asked to apply, as
+    /// `(target_ref, reaction, action)`.
+    fn reactions(&self) -> Vec<(String, RunReaction, ReactionAction)> {
+        self.envelopes()
+            .iter()
+            .flat_map(|envelope| {
+                envelope.parts.iter().filter_map(|part| match part {
+                    OutboundPart::React {
+                        vendor_message_ref,
+                        reaction,
+                        action,
+                    } => Some((vendor_message_ref.clone(), *reaction, *action)),
                     _ => None,
                 })
             })
@@ -489,6 +547,11 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
     }
 }
 
+// Note: the `RecordingAuthPromptSource` / `RecordingAuthFlowCanceller` seams
+// retired with the ephemeral-per-ping remodel (#7377) — they existed only to
+// observe which user the auth flow was keyed by when owner != actor, a shape
+// that no longer exists (owner == actor universally).
+
 /// One entry in the scripted notification catalog: an opaque catalog id, the
 /// vendor binding ref it resolves to, the conversation that ref decodes back
 /// to, and whether the catalog entry is a personal DM.
@@ -645,6 +708,7 @@ impl OutboundDeliveryTargetProvider for StaticTargetCatalog {
                     progress: false,
                     gate_prompts: true,
                     auth_prompts: true,
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 destination: ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"),
@@ -677,6 +741,8 @@ fn binding() -> ironclaw_product_contracts::binding::ResolvedBinding {
         thread_id: ThreadId::new("thread-a").expect("thread"),
         agent_id: Some(agent()),
         project_id: None,
+        source_binding_ref: SourceBindingRef::new("source:thread-a").expect("source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:thread-a").expect("reply ref"),
     }
 }
 
@@ -821,6 +887,8 @@ fn build_harness_with_commands(
             max_wait,
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         commands,
         prefix,
@@ -835,6 +903,38 @@ fn build_harness_with_settings(
     settings: RunDeliverySettings,
     commands: &[&str],
     prefix: Option<&str>,
+) -> Harness {
+    build_harness_with_gate_ports(
+        states,
+        bind_fails,
+        settings,
+        commands,
+        prefix,
+        binding(),
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
+        None,
+    )
+}
+
+/// The parameterized core behind every `build_harness*` wrapper: an explicit
+/// resolved binding plus injectable auth gate ports (so a test can observe
+/// exactly which user the observer keys the auth flow by — always the actor
+/// now that ephemeral-per-ping makes owner == actor).
+// arch-exempt: too_many_args, no RunDeliveryHarnessConfig bundle for gate-port test inputs, plan #7397
+#[allow(clippy::too_many_arguments)]
+fn build_harness_with_gate_ports(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    settings: RunDeliverySettings,
+    commands: &[&str],
+    prefix: Option<&str>,
+    resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
+    auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -856,7 +956,7 @@ fn build_harness_with_settings(
     ));
     let services = RunDeliveryServices {
         binding_service: Arc::new(StaticBindingService {
-            binding: binding(),
+            binding: resolved_binding,
             fail: bind_fails,
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
@@ -872,12 +972,8 @@ fn build_harness_with_settings(
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: auth_url.map(|url| {
-            Arc::new(OAuthPromptSource {
-                authorization_url: Some(url.to_string()),
-            }) as Arc<dyn BlockedAuthPromptSource>
-        }),
-        auth_flow_cancel: None,
+        blocked_auth_prompts,
+        auth_flow_cancel,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
     let observer = Arc::new(
@@ -1295,13 +1391,13 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         .await;
 
     let texts = harness.adapter.texts();
-    assert_eq!(
-        texts,
-        vec![
-            "Ironclaw is thinking...".to_string(),
-            "done thinking".to_string()
-        ]
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert!(
+        !texts[0].is_empty() && texts[0] != "done thinking",
+        "a distinct working indicator precedes the final reply, got {:?}",
+        texts[0]
     );
+    assert_eq!(texts[1], "done thinking");
     // The working indicator's vendor ref came back through the coordinator
     // outcome and was retracted after the final reply (Cleanup intent).
     let retracted = harness.adapter.retracted_refs();
@@ -1320,9 +1416,260 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
     );
 }
 
+/// A run whose triggering message has a vendor ref is marked 👀 while working
+/// and swapped to ✅ when it completes, so a busy channel shows at a glance
+/// which ping is being handled.
+#[tokio::test]
+async fn observer_reacts_eyes_while_working_then_check_when_done() {
+    let harness = build_harness(
+        vec![
+            // guard, then Running (posts indicator + 👀), then Completed (✅).
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "done thinking").await;
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-react",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.reactions(),
+        vec![
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Add
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Remove
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Done,
+                ReactionAction::Add
+            ),
+        ],
+        "the triggering message is 👀 while working and ✅ when done"
+    );
+}
+
+/// A run that reaches a terminal *failed* state no longer goes silent: the
+/// working indicator is retracted and replaced with a failure notice, and the
+/// triggering message is marked ❌.
+#[tokio::test]
+async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction() {
+    let harness = build_harness(
+        vec![
+            // guard, then Running (indicator + 👀), then a hard failure.
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Failed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    // A failed run has no finalized assistant message.
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-fail",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    // Working indicator, then a distinct, non-empty failure notice — not silence.
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then failure notice");
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[0],
+        "the failure notice is distinct from the working indicator, got {:?}",
+        texts[1]
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        1,
+        "the stuck working indicator is retracted"
+    );
+    // 👀 → ❌ on the triggering message.
+    assert_eq!(
+        harness.adapter.reactions(),
+        vec![
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Add
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Working,
+                ReactionAction::Remove
+            ),
+            (
+                "ts-source".to_string(),
+                RunReaction::Failed,
+                ReactionAction::Add
+            ),
+        ],
+        "a failed run swaps 👀 for ❌"
+    );
+}
+
+/// The full lifecycle: 👀 working → ⚠️ when parked on an approval → 👀 again on
+/// resume → ✅ when it finishes.
+#[tokio::test]
+async fn observer_marks_needs_input_while_blocked_then_swaps_back_and_completes() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None), // guard
+            scripted_state(TurnStatus::Running, None), // working + 👀
+            scripted_state(TurnStatus::BlockedApproval, Some("gate-1")), // ⚠️ + prompt
+            scripted_state(TurnStatus::Running, None), // resume → 👀
+            scripted_state(TurnStatus::Completed, None), // ✅
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "approved and done").await;
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-needs-input",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let w = RunReaction::Working;
+    let ni = RunReaction::NeedsInput;
+    let add = ReactionAction::Add;
+    let rm = ReactionAction::Remove;
+    assert_eq!(
+        harness.adapter.reactions(),
+        vec![
+            ("ts-source".to_string(), w, add), // 👀 working
+            ("ts-source".to_string(), w, rm),  // → ⚠️
+            ("ts-source".to_string(), ni, add),
+            ("ts-source".to_string(), ni, rm), // resume → 👀
+            ("ts-source".to_string(), w, add),
+            ("ts-source".to_string(), w, rm), // → ✅
+            ("ts-source".to_string(), RunReaction::Done, add),
+        ],
+        "reaction tracks working → needs-input → working → done"
+    );
+}
+
+/// A long-running run refreshes its working indicator in place with escalating
+/// "still working" nudges (retract + repost) rather than a single stale line.
+#[tokio::test(start_paused = true)]
+async fn observer_refreshes_working_indicator_with_escalating_nudges_on_a_long_run() {
+    let settings = RunDeliverySettings {
+        poll_interval: Duration::from_millis(1),
+        first_nudge_after: Duration::from_millis(1),
+        renudge_interval: Duration::from_millis(1),
+        max_wait: Duration::from_secs(60),
+        ..RunDeliverySettings::default()
+    };
+    // guard + several Running polls (nudge on each) + Completed.
+    let mut states = vec![scripted_state(TurnStatus::Running, None)];
+    states.extend(std::iter::repeat_with(|| scripted_state(TurnStatus::Running, None)).take(5));
+    states.push(scripted_state(TurnStatus::Completed, None));
+    let harness = build_harness_with_settings(states, false, None, settings, &["status"], None);
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "slow done").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-nudge"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert!(
+        texts.len() >= 3,
+        "initial working notice + at least one nudge + final reply, got {texts:?}"
+    );
+    assert_eq!(
+        texts.last().map(String::as_str),
+        Some("slow done"),
+        "the final reply is delivered last"
+    );
+    let (notices, reply) = texts.split_at(texts.len() - 1);
+    assert!(
+        notices.iter().all(|t| !t.is_empty()),
+        "every working/nudge notice is non-empty, got {notices:?}"
+    );
+    assert_eq!(reply, ["slow done".to_string()]);
+    // Each nudge refreshes in place (retracts the prior indicator); the final
+    // reply retracts the last one.
+    assert!(
+        harness.adapter.retracted_refs().len() >= 2,
+        "nudges refresh the indicator in place, got {:?}",
+        harness.adapter.retracted_refs()
+    );
+    // The escalated nudges are worded differently from the initial "on it" line.
+    let distinct: std::collections::HashSet<&str> = notices.iter().map(String::as_str).collect();
+    assert!(
+        distinct.len() >= 2,
+        "the nudge copy escalates from the initial line, got {distinct:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cutoff() {
-    let settings = RunDeliverySettings::default();
+    // Disable the "still working" nudges so this longevity test asserts exactly
+    // the working indicator + final reply, not the nudge cadence.
+    let settings = RunDeliverySettings {
+        first_nudge_after: Duration::from_secs(3600),
+        renudge_interval: Duration::from_secs(3600),
+        ..RunDeliverySettings::default()
+    };
     assert!(
         settings.max_wait > Duration::from_secs(2 * 60),
         "the live channel watcher must outlive a healthy run that exceeds the old two-minute cutoff"
@@ -1352,13 +1699,14 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
         tokio::time::Instant::now().duration_since(started) > Duration::from_secs(2 * 60),
         "the scripted run must cross the previous delivery deadline"
     );
-    assert_eq!(
-        harness.adapter.texts(),
-        vec![
-            "Ironclaw is thinking...".to_string(),
-            "slow run finished".to_string()
-        ]
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert!(
+        !texts[0].is_empty() && texts[0] != "slow run finished",
+        "a distinct working indicator precedes the final reply, got {:?}",
+        texts[0]
     );
+    assert_eq!(texts[1], "slow run finished");
     assert_eq!(harness.adapter.retracted_refs().len(), 1);
 }
 
@@ -1391,7 +1739,11 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
     let texts = harness.adapter.texts();
     assert_eq!(texts.len(), 3, "auth prompt + working + final reply");
     assert!(texts[0].contains("Authentication required"));
-    assert_eq!(texts[1], "Ironclaw is thinking...");
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[0] && texts[1] != texts[2],
+        "a distinct working indicator sits between the auth prompt and the reply, got {:?}",
+        texts[1]
+    );
     assert_eq!(texts[2], "authenticated and finished");
     assert_eq!(
         harness.adapter.retracted_refs(),
@@ -1737,12 +2089,13 @@ async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_rout
 }
 
 #[tokio::test]
-async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
-    // The shared-origin leg below is ALSO the run-acts-as-invoker silence
-    // contract: an unpaired participant in an admitted shared channel gets no
-    // reply and no pairing prompt in the channel (a one-person nudge must
-    // never land in a shared room; pairing happens via Extensions, and DMs
-    // still nudge) — the operator docs and CHANGELOG document this silence.
+async fn observer_connect_nudge_reaches_unbound_senders_in_direct_and_shared_chats() {
+    // Pin changed with the presence-admission UX (#7377): an unpaired sender
+    // gets the connect nudge WHEREVER they ping. In a shared conversation it
+    // is delivered into that conversation as a reply anchored on their own
+    // message (the envelope's message-scoped ref carries the anchor — Slack
+    // threads on the ping, Telegram quotes it; anchoring is asserted at the
+    // vendor wire in the channel e2e suites), throttled per conversation.
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],
         true,
@@ -1754,15 +2107,59 @@ async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
         "unbound",
     ));
 
-    // Shared-channel origin: no nudge.
+    // Shared-channel origin (its own conversation, distinct from the direct
+    // legs below): the nudge posts into the shared conversation.
     harness
         .observer
         .observe_ack(
-            user_message_envelope(ProductTriggerReason::BotMention, "evt-shared"),
+            user_message_envelope_for_conversation(
+                ProductTriggerReason::BotMention,
+                "evt-shared",
+                "conv-shared",
+            ),
             rejected.clone(),
         )
         .await;
-    assert!(harness.adapter.texts().is_empty(), "no nudge into shared");
+    assert_eq!(
+        harness.adapter.texts(),
+        vec![harness.connection_notices.connect_required.clone()],
+        "an unpaired shared-channel sender is nudged, not ignored"
+    );
+    // …and INTO that shared conversation, not the sender's DM or the fallback
+    // notice conversation: the captured outbound envelope must target the
+    // fingerprint of the conversation the ping arrived in. A nudge routed to
+    // any per-user fallback would carry a different fingerprint and fail here
+    // (#7377 — the shared nudge is a public reply where the user asked).
+    let shared_conversation =
+        ExternalConversationRef::new(Some("space-1"), "conv-shared", None, None)
+            .expect("shared conversation ref");
+    let shared_nudges = harness.adapter.envelopes();
+    assert_eq!(shared_nudges.len(), 1, "exactly the shared nudge so far");
+    assert_eq!(
+        shared_nudges[0]
+            .target
+            .conversation
+            .conversation_fingerprint(),
+        shared_conversation.conversation_fingerprint(),
+        "the shared nudge must land in the shared conversation itself"
+    );
+    // A repeat in the same shared conversation stays throttled.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope_for_conversation(
+                ProductTriggerReason::BotMention,
+                "evt-shared-2",
+                "conv-shared",
+            ),
+            rejected.clone(),
+        )
+        .await;
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "shared-conversation nudges are throttled per conversation"
+    );
 
     // 1:1 direct chat origin: nudge posted under the fallback notice scope.
     harness
@@ -1794,21 +2191,60 @@ async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
         .await;
     let texts = harness.adapter.texts();
     assert_eq!(
-        texts,
-        vec![
-            harness.connection_notices.connect_required.clone(),
-            harness.connection_notices.connect_required.clone(),
-        ]
+        texts.len(),
+        3,
+        "one nudge per distinct conversation (shared + two direct): {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text == &harness.connection_notices.connect_required),
+        "every nudge is the fixed host-authored connect notice"
     );
     let attempts = harness
         .store
         .list_delivery_attempts(fallback_scope())
         .await
         .expect("attempts");
-    assert_eq!(attempts.len(), 2, "one nudge attempt per conversation");
+    assert_eq!(attempts.len(), 3, "one nudge attempt per conversation");
     assert_eq!(
         attempts[0].candidate.kind,
         ironclaw_outbound::OutboundPushKind::DeliveryStatus
+    );
+}
+
+/// The nudge fires only for messages that ADDRESS the bot. A shared channel
+/// forwards ordinary chatter, and a `ReplyToBot` in a thread the bot was
+/// never bound to also rejects `BindingRequired` — nudging it would post a
+/// "connect" notice into a human-to-human conversation nobody pointed at the
+/// bot. Regression for that misfire (an unbound thread reply must stay
+/// silent even though its rejection kind matches).
+#[tokio::test]
+async fn observer_connect_nudge_stays_silent_for_unaddressed_shared_messages() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    // A reply inside an unbound thread — BindingRequired, but nobody
+    // addressed the bot: no nudge.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::ReplyToBot, "evt-unbound-thread"),
+            rejected,
+        )
+        .await;
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "an unaddressed unbound-thread reply must not draw a public connect notice: {:?}",
+        harness.adapter.texts()
     );
 }
 
@@ -2099,6 +2535,12 @@ async fn observer_non_oauth_auth_block_cancels_run_and_posts_unavailable_notice(
     assert!(texts[0].contains("Ironclaw web app"), "{}", texts[0]);
 }
 
+// Note: `shared_join_binding` and the `*_belongs_to_the_joiner` auth-flow pins
+// retired with the ephemeral-per-ping remodel (#7377). Their whole point was
+// owner != actor (a canonical thread owned by its first binder while the run
+// ACTS as a later joiner); ephemeral-per-ping makes owner == actor, so that
+// binding shape no longer exists.
+
 // ── Triggered rows ─────────────────────────────────────────────────────────
 
 fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDeliveryRequest {
@@ -2132,6 +2574,24 @@ fn build_triggered_harness(
 ) -> TriggeredHarness {
     let initially_active = catalog.clone();
     build_triggered_harness_with_initial_codecs(states, auth_url, catalog, initially_active)
+}
+
+/// [`build_triggered_harness`] with a prebuilt turn coordinator, for tests
+/// that script a late state transition.
+fn build_triggered_harness_with_turns(
+    turns: Arc<ScriptedTurnCoordinator>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+) -> TriggeredHarness {
+    let initially_active = catalog.clone();
+    build_triggered_harness_with_turns_catalog(
+        turns,
+        auth_url,
+        catalog,
+        initially_active,
+        None,
+        None,
+    )
 }
 
 /// [`build_triggered_harness`] with the ACTIVE codec set narrower than the
@@ -2172,13 +2632,32 @@ fn build_triggered_harness_with_catalog(
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
     delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> TriggeredHarness {
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
+    build_triggered_harness_with_turns_catalog(
+        turns,
+        auth_url,
+        catalog,
+        initially_active,
+        communication_preferences,
+        delivery_targets,
+    )
+}
+
+/// [`build_triggered_harness_with_catalog`] with a prebuilt turn coordinator.
+fn build_triggered_harness_with_turns_catalog(
+    turns: Arc<ScriptedTurnCoordinator>,
+    auth_url: Option<&str>,
+    catalog: Vec<TestNotificationTarget>,
+    initially_active: Vec<TestNotificationTarget>,
+    communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
+    delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let delivery_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
@@ -2227,6 +2706,8 @@ fn build_triggered_harness_with_catalog(
             max_wait: Duration::from_millis(60),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         Arc::clone(&codecs)
@@ -2740,14 +3221,315 @@ async fn triggered_failure_notifies_all_targets() {
     let texts = harness.adapter.texts();
     assert_eq!(texts.len(), 2, "one failure notice per target: {texts:?}");
     assert!(
-        texts.iter().all(|text| text.contains("routine run failed")),
-        "{texts:?}"
+        texts
+            .iter()
+            .all(|text| text.contains("The run failed before producing a reply")),
+        "generic failure summary reaches every channel: {texts:?}"
     );
     assert!(
         texts
             .iter()
             .all(|text| text.contains("From a triggered event: “watch the deploys”.")),
         "the failure notice names the routine: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_failed_run_with_failure_category_delivers_category_summary() {
+    // A scheduled run that died with a sanitized failure category delivers
+    // the per-category summary so the creator sees *why* it died, not
+    // silence (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(TurnStatus::Failed, "model_error")],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "one per-category notice per target: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("The run failed while calling the model")),
+        "per-category failure summary reaches every channel: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event: “watch the deploys”.")),
+        "the notice names the routine: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_recovery_required_run_delivers_failure_summary() {
+    // A run that ended `RecoveryRequired` is a terminal failure: the creator
+    // gets the same per-category treatment as `Failed` (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(
+            TurnStatus::RecoveryRequired,
+            "model_error",
+        )],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("The run failed while calling the model"),
+        "recovery-required carries the per-category summary: {}",
+        texts[0]
+    );
+    assert!(texts[0].contains("From a triggered event:"));
+}
+
+#[tokio::test]
+async fn triggered_cancelled_run_delivers_cancellation_notice() {
+    // A scheduled run the host cancelled (auth-auto-deny, policy,
+    // supersession, or an operator action) gets the fixed cancellation
+    // notice — a cancel is not a failure (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Cancelled, None)],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "one cancellation notice per target: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("canceled before it could finish")),
+        "cancellation notice reaches every channel: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event:")),
+        "the notice names the routine: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_cancelled_run_with_failure_category_still_delivers_cancellation_notice() {
+    // Cancelled runs never carry a failure category in the real system, and
+    // a failure summary would mislabel a host/operator cancel as a failed
+    // run — the fixed cancellation notice always wins for `Cancelled`.
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(TurnStatus::Cancelled, "model_error")],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice wins over the failure category: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("The run failed while calling the model"),
+        "no failure summary for a cancelled run: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_that_times_out_before_actionable_delivers_timeout_notice() {
+    // A run that never reaches an actionable state before `max_wait` used to
+    // only log a warn and record `Failed` — hiding the hang from the creator.
+    // It now delivers the timeout notice as a terminal reply (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 2, "one timeout notice per target: {texts:?}");
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("taking longer than expected")),
+        "timeout notice text present: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.contains("From a triggered event:")),
+        "triggered footer present: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn triggered_timeout_notice_without_channels_records_no_default_configured() {
+    // With no notification channels configured the notifier records
+    // `NoDefaultConfigured` and sends nothing — the web app is the whole
+    // surface.
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        Vec::new(),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "timeout notice cannot be delivered without a target"
+    );
+}
+
+#[tokio::test]
+async fn triggered_timeout_notice_delivery_failure_records_failed() {
+    // The timeout arm maps a transport-level delivery failure to `Failed`:
+    // the notice was attempted but the channel rejected it, so the run is
+    // recorded as failed rather than silently delivered.
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted failure".to_string(),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "timeout notice attempted once");
+    assert!(
+        texts[0].contains("taking longer than expected"),
+        "timeout notice text present: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellation_notice() {
+    // Regression guard: a run still in flight at the wait backstop but which
+    // crosses into a terminal state during the bounded race-grace window
+    // must receive the correct terminal notice — the timeout arm used to
+    // exit the watcher and lose the terminal copy.
+    //
+    // Deterministic grace-path entry: the wait loop polls at 1ms intervals
+    // doubling to a 5s cap against a 60ms max_wait, so the wait backstop
+    // fires after at most ~8 `get_run_state` calls — far below the flip at
+    // call 30. The scripted Cancelled state is therefore never observable
+    // inside the wait loop; only the grace window (60ms, 1ms polls) reaches
+    // call 30 and observes the terminal state.
+    let harness = build_triggered_harness_with_turns(
+        Arc::new(ScriptedTurnCoordinator::with_late_terminal(
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Cancelled, None),
+            30,
+        )),
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one terminal notice delivered");
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice wins over the timeout copy: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("taking longer than expected"),
+        "no timeout copy for a run that reached terminal: {}",
+        texts[0]
+    );
+    assert_eq!(
+        harness.turns.cancel_call_count(),
+        0,
+        "grace loop observed the terminal state without issuing a cancellation"
     );
 }
 

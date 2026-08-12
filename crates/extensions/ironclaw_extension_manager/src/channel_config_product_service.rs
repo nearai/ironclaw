@@ -314,12 +314,6 @@ mod tests {
                     secret: false,
                     provided: false,
                 },
-                ChannelConfigField {
-                    name: "telegram_allowed_channels".to_string(),
-                    label: "Allowed group chats (JSON array of Telegram chat IDs)".to_string(),
-                    secret: false,
-                    provided: false,
-                },
             ],
             "the handle becomes `name`, and label/secret/provided cross unchanged"
         );
@@ -605,5 +599,39 @@ mod tests {
             service
         }
         let _ = coerce;
+    }
+
+    /// Added with the run-acts-as-invoker ruling (#7377): reply placement in
+    /// a shared conversation is a MANIFEST contract
+    /// (`[channel.presentation].can_reply_in_threads`), not adapter folklore
+    /// — Slack threads its replies on the pinged message (`thread_ts`),
+    /// Telegram anchors an inline reply in the flat chat/topic
+    /// (`reply_to_message_id`). Pin the SHIPPED pair through the same v3
+    /// resolution production uses, so a manifest edit that silently flips a
+    /// channel's placement fails here first.
+    #[test]
+    fn shipped_channel_manifests_pin_their_reply_placement() {
+        for (id, replies_in_threads) in [("slack", true), ("telegram", false)] {
+            let manifest = shipped_manifest(id);
+            let record = ExtensionManifestRecord::from_toml(
+                &manifest,
+                ironclaw_extension_registry::ManifestSource::HostBundled,
+                &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
+                None,
+                &ironclaw_extension_registry::default_host_api_contract_registry()
+                    .expect("contracts"),
+                None,
+            )
+            .expect("shipped manifest resolves");
+            let channel = record
+                .resolved()
+                .channel
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id} ships a [channel] surface"));
+            assert_eq!(
+                channel.presentation.can_reply_in_threads, replies_in_threads,
+                "{id}'s manifest-declared reply placement changed"
+            );
+        }
     }
 }

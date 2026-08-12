@@ -372,6 +372,7 @@ test("locale packs include client-generated chat failure copy", () => {
     "chat.failure.request",
     "chat.failure.requestDetail",
     "chat.failure.runCategory",
+    "chat.failure.noProgress",
     "chat.failure.recoveryRequired",
     "chat.failure.run",
     "chat.failure.streamRetryable",

@@ -236,6 +236,14 @@ mod tests {
         assert!(!renderer.contains("codeEl.style.whiteSpace"));
 
         let styles = source_text("styles/app.css");
+        let markdown_styles = styles
+            .split_once("/* ── Markdown body ")
+            .and_then(|(_, markdown_and_rest)| {
+                markdown_and_rest
+                    .split_once("/* ── Mobile responsive overrides ")
+                    .map(|(markdown, _)| markdown)
+            })
+            .expect("app.css keeps bounded Markdown styles");
         assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;"));
         assert!(styles.contains("overflow-wrap: anywhere;"));
         assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
@@ -246,10 +254,10 @@ mod tests {
         assert!(styles.contains("overflow-wrap: normal;\n  word-break: normal;"));
         assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
         assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
-        assert!(!styles.contains("word-break: break-word"));
-        assert!(!styles.contains("white-space: pre-wrap"));
-        assert!(!styles.contains("word-break: break-all"));
-        assert!(!styles.contains("width: max-content"));
+        assert!(!markdown_styles.contains("word-break: break-word"));
+        assert!(!markdown_styles.contains("white-space: pre-wrap"));
+        assert!(!markdown_styles.contains("word-break: break-all"));
+        assert!(!markdown_styles.contains("width: max-content"));
         assert!(styles.contains("--v2-chat-readable-max-width:"));
         assert!(styles.contains(".v2-chat-readable-width {\n  max-width: 100%;\n}"));
         assert!(styles.contains("@media (min-width: 640px) {"));
@@ -507,7 +515,7 @@ mod tests {
             source_text("pages/automations/components/notification-channels-panel.tsx");
         assert!(channels_panel.contains(r#"type="checkbox""#));
         assert!(channels_panel.contains("saveNotificationChannels"));
-        assert!(channels_panel.contains("automations.notificationChannels.webOnlyHelper"));
+        assert!(channels_panel.contains("automations.notificationChannels.noSelectionHelper"));
         // Badge label must branch on row status — an unavailable (stored but
         // no-longer-resolving) channel must not display the "ready" label.
         assert!(

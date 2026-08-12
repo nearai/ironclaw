@@ -487,6 +487,38 @@ async fn drain_queued(
             Ok(claims) => {
                 for (claimed, permit) in claims.into_iter().zip(permits) {
                     let process_id = claimed.state.process_id;
+                    if active.contains_key(&process_id) {
+                        // Lease recovery requeued a process whose previous
+                        // executor is still running (a worker parked mid-work
+                        // when its lease lapsed). Starting a replacement now
+                        // would run two executors for the same process — the
+                        // stale one could still dispatch capability side
+                        // effects after reclaim. Release the claim we just
+                        // took (relinquish keeps the reclaim budget intact) and
+                        // let the stale task's heartbeats fail against the
+                        // requeued process. The drain loop must stop here: the
+                        // relinquish re-queues the process, so a further claim
+                        // would return it again and spin forever instead of
+                        // letting the loop observe the stale task's exit. The
+                        // next drain tick claims it once the task has
+                        // terminated.
+                        debug!(
+                            %process_id,
+                            "deferring reclaimed process: prior executor still running"
+                        );
+                        if let Err(error) = context
+                            .runtime
+                            .relinquish_process(ProcessLeaseRequest {
+                                process_id,
+                                worker_id: claimed.worker_id,
+                                lease_token: claimed.lease_token,
+                            })
+                            .await
+                        {
+                            debug!(%error, %process_id, "deferred claim relinquish failed");
+                        }
+                        return false;
+                    }
                     active.insert(
                         process_id,
                         ClaimedIdentity {
@@ -570,6 +602,16 @@ fn spawn_executor(
                             HeartbeatOutcome::Failed | HeartbeatOutcome::TimedOut => {
                                 consecutive_failures = consecutive_failures.saturating_add(1);
                             }
+                            HeartbeatOutcome::LeaseLost => {
+                                // The journal no longer recognizes this
+                                // worker's claim (the process was recovered,
+                                // requeued, or cancelled underneath us). The
+                                // run is not ours anymore: stop executing
+                                // immediately instead of working — and
+                                // potentially dispatching capability side
+                                // effects — until the failure budget runs out.
+                                break Some(executor.heartbeat_failure());
+                            }
                         }
                         if consecutive_failures >= config.max_consecutive_heartbeat_failures() {
                             break Some(executor.heartbeat_failure());
@@ -622,6 +664,7 @@ impl InFlightHeartbeat {
             });
             match tokio::time::timeout(timeout_after, heartbeat).await {
                 Ok(Ok(_)) => HeartbeatOutcome::Succeeded,
+                Ok(Err(error)) if definitive_lease_loss(&error) => HeartbeatOutcome::LeaseLost,
                 Ok(Err(_)) => HeartbeatOutcome::Failed,
                 Err(_) => HeartbeatOutcome::TimedOut,
             }
@@ -646,10 +689,28 @@ enum HeartbeatOutcome {
     Succeeded,
     Failed,
     TimedOut,
+    /// The journal definitively rejected the heartbeat because this worker no
+    /// longer owns the process (lease gone, status no longer Running) — not
+    /// because the store is slow. Unlike a transient failure, this never
+    /// resolves by retrying.
+    LeaseLost,
 }
 
 fn heartbeat_outcome(result: Result<HeartbeatOutcome, tokio::task::JoinError>) -> HeartbeatOutcome {
     result.unwrap_or(HeartbeatOutcome::Failed)
+}
+
+/// Whether a rejected heartbeat means this worker lost the process for good,
+/// rather than the store being temporarily unavailable. An `InvalidLease`
+/// heartbeat means the claim is gone; an `InvalidTransition` heartbeat means
+/// the process is no longer `Running` (recovered, requeued, suspended, or
+/// cancelled). Both are definitive: retrying cannot succeed.
+fn definitive_lease_loss(error: &ProcessJournalStoreError) -> bool {
+    matches!(
+        error,
+        ProcessJournalStoreError::InvalidLease { .. }
+            | ProcessJournalStoreError::InvalidTransition { .. }
+    )
 }
 
 async fn record_failure(
@@ -767,7 +828,7 @@ fn schedule_retry(command_tx: mpsc::Sender<SupervisorCommand>, delay: Duration) 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
     use crate::{
@@ -786,6 +847,11 @@ mod tests {
         None,
         Error,
         Pending,
+        /// The store is briefly slower than the heartbeat interval — the shape a
+        /// contended connection pool produces — and then healthy again. Each slow
+        /// heartbeat still commits, but the supervisor's per-heartbeat timeout
+        /// fires first, so it counts against the failure budget.
+        SlowThenHealthy,
     }
 
     struct FaultRuntime {
@@ -796,6 +862,8 @@ mod tests {
         fail_errors_remaining: AtomicUsize,
         fail_attempts: AtomicUsize,
         relinquishes: AtomicUsize,
+        slow_heartbeats_remaining: AtomicUsize,
+        heartbeat_delay: Duration,
     }
 
     impl FaultRuntime {
@@ -812,7 +880,15 @@ mod tests {
                 fail_errors_remaining: AtomicUsize::new(fail_errors),
                 fail_attempts: AtomicUsize::new(0),
                 relinquishes: AtomicUsize::new(0),
+                slow_heartbeats_remaining: AtomicUsize::new(0),
+                heartbeat_delay: Duration::ZERO,
             }
+        }
+
+        fn with_slow_heartbeats(mut self, count: usize, delay: Duration) -> Self {
+            self.slow_heartbeats_remaining = AtomicUsize::new(count);
+            self.heartbeat_delay = delay;
+            self
         }
 
         fn with_claim_errors(mut self, errors: usize) -> Self {
@@ -863,6 +939,18 @@ mod tests {
                 HeartbeatFault::None => self.inner.heartbeat_process(request).await,
                 HeartbeatFault::Error => Err(Self::injected_error()),
                 HeartbeatFault::Pending => std::future::pending().await,
+                HeartbeatFault::SlowThenHealthy => {
+                    if self
+                        .slow_heartbeats_remaining
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            remaining.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
+                        tokio::time::sleep(self.heartbeat_delay).await;
+                    }
+                    self.inner.heartbeat_process(request).await
+                }
             }
         }
 
@@ -939,6 +1027,33 @@ mod tests {
             &self,
             claimed: ClaimedProcess,
         ) -> Result<(), ProcessExecutorFailure> {
+            self.runtime
+                .complete_process(ProcessStateTransitionRequest {
+                    lease: ProcessLeaseRequest {
+                        process_id: claimed.state.process_id,
+                        worker_id: claimed.worker_id,
+                        lease_token: claimed.lease_token,
+                    },
+                    metadata: None,
+                })
+                .await
+                .map_err(|_| ProcessExecutorFailure::new("completion_failed"))?;
+            Ok(())
+        }
+    }
+
+    struct SlowCompletingExecutor {
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
+        work: Duration,
+    }
+
+    #[async_trait]
+    impl JournalProcessExecutor for SlowCompletingExecutor {
+        async fn execute_claimed_process(
+            &self,
+            claimed: ClaimedProcess,
+        ) -> Result<(), ProcessExecutorFailure> {
+            tokio::time::sleep(self.work).await;
             self.runtime
                 .complete_process(ProcessStateTransitionRequest {
                     lease: ProcessLeaseRequest {
@@ -1312,6 +1427,175 @@ mod tests {
         );
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         handle.shutdown().await;
+    }
+
+    /// First attempt parks forever; later attempts complete the process. Tracks
+    /// executor overlap so the fence test can prove the replacement never runs
+    /// while the stale attempt is alive.
+    struct FirstRunParkingExecutor {
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
+        executions: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        abandoned: Arc<Notify>,
+        running: Arc<AtomicBool>,
+        overlap: Arc<AtomicBool>,
+    }
+
+    struct RunningGuard(Arc<AtomicBool>);
+
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl JournalProcessExecutor for FirstRunParkingExecutor {
+        async fn execute_claimed_process(
+            &self,
+            claimed: ClaimedProcess,
+        ) -> Result<(), ProcessExecutorFailure> {
+            let attempt = self.executions.fetch_add(1, Ordering::SeqCst);
+            let _guard = RunningGuard(Arc::clone(&self.running));
+            if self.running.swap(true, Ordering::SeqCst) {
+                self.overlap.store(true, Ordering::SeqCst);
+            }
+            self.started.notify_one();
+            if attempt == 0 {
+                struct AbandonedGuard(Arc<Notify>);
+                impl Drop for AbandonedGuard {
+                    fn drop(&mut self) {
+                        self.0.notify_one();
+                    }
+                }
+                let _abandoned = AbandonedGuard(Arc::clone(&self.abandoned));
+                std::future::pending::<()>().await;
+            }
+            self.runtime
+                .complete_process(ProcessStateTransitionRequest {
+                    lease: ProcessLeaseRequest {
+                        process_id: claimed.state.process_id,
+                        worker_id: claimed.worker_id,
+                        lease_token: claimed.lease_token,
+                    },
+                    metadata: None,
+                })
+                .await
+                .map_err(|_| ProcessExecutorFailure::new("completion_failed"))?;
+            Ok(())
+        }
+    }
+
+    /// Lease recovery requeues a run whose executor is still parked. The
+    /// supervisor must not start the replacement while the stale executor is
+    /// alive — it could still dispatch capability side effects after reclaim —
+    /// so the claim is deferred until the stale attempt's lease-lost heartbeat
+    /// cancels it, and only then does the replacement run.
+    #[tokio::test]
+    async fn reclaimed_process_waits_for_its_stale_executor_before_restarting() {
+        let store = Arc::new(
+            crate::ProcessJournalStore::new(in_memory_backed_processes_filesystem())
+                .with_lease_duration(Duration::from_millis(200)),
+        );
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let abandoned = Arc::new(Notify::new());
+        let running = Arc::new(AtomicBool::new(false));
+        let overlap = Arc::new(AtomicBool::new(false));
+        let executor = Arc::new(FirstRunParkingExecutor {
+            runtime: Arc::clone(&runtime),
+            executions: Arc::clone(&executions),
+            started: Arc::clone(&started),
+            abandoned: Arc::clone(&abandoned),
+            running: Arc::clone(&running),
+            overlap: Arc::clone(&overlap),
+        });
+        let handle = ProcessSupervisor::new(
+            runtime,
+            executor,
+            ProcessKind::Internal,
+            fast_config()
+                .with_lease_recovery_interval(Duration::from_millis(5))
+                .with_heartbeat_interval(Duration::from_millis(400)),
+        )
+        .start();
+
+        // The first claim parks the executor. No heartbeat fires before the
+        // 200ms lease lapses, so recovery requeues the process underneath it.
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first execution starts");
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        // The stale attempt must be cancelled (its heartbeat is definitively
+        // rejected against the requeued process) before anything else runs.
+        tokio::time::timeout(Duration::from_secs(2), abandoned.notified())
+            .await
+            .expect("stale attempt is cancelled by the lease-lost heartbeat");
+        assert!(
+            !overlap.load(Ordering::SeqCst),
+            "the replacement executor must never run while the stale attempt is alive"
+        );
+
+        // The replacement then claims and completes the run.
+        let snapshot = wait_for_status(&store, process_id, ProcessLifecycleStatus::Completed).await;
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Completed);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            2,
+            "exactly the stale attempt and one replacement may execute"
+        );
+        handle.shutdown().await;
+    }
+
+    /// A stretch of heartbeats slower than the interval is what a contended
+    /// connection pool looks like from inside a healthy run. The failure budget
+    /// is what decides whether that run finishes or is abandoned mid-work, so
+    /// both sides of the boundary are pinned here.
+    #[tokio::test]
+    async fn a_run_survives_slow_heartbeats_within_its_failure_budget() {
+        let slow_heartbeats = 5;
+        for (budget, expected) in [
+            (slow_heartbeats + 3, ProcessLifecycleStatus::Completed),
+            (2, ProcessLifecycleStatus::Failed),
+        ] {
+            let store = Arc::new(crate::ProcessJournalStore::new(
+                in_memory_backed_processes_filesystem(),
+            ));
+            let process_id = submit(&store, ProcessKind::Internal).await;
+            let faults = Arc::new(
+                FaultRuntime::new(Arc::clone(&store), HeartbeatFault::SlowThenHealthy, 0)
+                    .with_slow_heartbeats(slow_heartbeats, Duration::from_millis(50)),
+            );
+            let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+                faults.clone();
+            let handle = ProcessSupervisor::new(
+                Arc::clone(&runtime),
+                Arc::new(SlowCompletingExecutor {
+                    runtime,
+                    work: Duration::from_millis(400),
+                }),
+                ProcessKind::Internal,
+                fast_config()
+                    .with_heartbeat_interval(Duration::from_millis(5))
+                    .with_max_consecutive_heartbeat_failures(budget),
+            )
+            .start();
+
+            let snapshot = wait_for_status(&store, process_id, expected).await;
+            assert_eq!(snapshot.status, expected, "budget {budget}");
+            if expected == ProcessLifecycleStatus::Failed {
+                assert_eq!(
+                    snapshot.failure.as_ref().map(SanitizedFailure::category),
+                    Some("process_heartbeat_failed"),
+                    "a spent budget abandons the run for heartbeat failure, budget {budget}"
+                );
+            }
+            handle.shutdown().await;
+        }
     }
 
     #[tokio::test]

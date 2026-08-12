@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAdapter, ChannelAttachmentRef, ChannelContext, ChannelError, DeliveryReport,
-    InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
+    InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
+    RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
@@ -313,6 +314,45 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         break 'parts;
                     }
                 }
+                OutboundPart::React {
+                    vendor_message_ref,
+                    reaction,
+                    action,
+                } => {
+                    let outcome = match vendor_message_ref.parse::<i64>() {
+                        Ok(message_id) => {
+                            // `setMessageReaction` REPLACES the bot's reactions
+                            // on the message, so an add sets the single emoji and
+                            // a remove sets the empty set.
+                            let reaction_field = match action {
+                                ReactionAction::Add => serde_json::json!([{
+                                    "type": "emoji",
+                                    "emoji": telegram_reaction_emoji(*reaction),
+                                }]),
+                                ReactionAction::Remove => serde_json::json!([]),
+                            };
+                            set_telegram_reaction(
+                                egress,
+                                serde_json::json!({
+                                    "chat_id": chat_id,
+                                    "message_id": message_id,
+                                    "reaction": reaction_field,
+                                }),
+                            )
+                            .await
+                        }
+                        Err(_) => PartDeliveryOutcome::Permanent {
+                            reason: format!(
+                                "reaction target `{vendor_message_ref}` is not a telegram message id"
+                            ),
+                        },
+                    };
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
             }
         }
         Ok(DeliveryReport { parts })
@@ -340,6 +380,59 @@ async fn send_telegram_message(
         Err(error) => return telegram_outcome_for_egress_error(&error),
     };
     telegram_message_response_outcome("sendMessage", response.status, &response.body)
+}
+
+/// Telegram allowed-reaction emoji for a neutral run reaction. `setMessageReaction`
+/// accepts only a fixed allowlist, so the Slack ✅/⚠️/❌ map to the nearest
+/// allowed Telegram reactions (👌 / 🤔 / 👎).
+fn telegram_reaction_emoji(reaction: RunReaction) -> &'static str {
+    match reaction {
+        RunReaction::Working => "👀",
+        RunReaction::Done => "👌",
+        RunReaction::NeedsInput => "🤔",
+        RunReaction::Failed => "👎",
+    }
+}
+
+/// Set (or clear) the bot's reaction on a message. Best-effort: a failed
+/// reaction never fails the run.
+async fn set_telegram_reaction(
+    egress: &dyn RestrictedEgress,
+    body: serde_json::Value,
+) -> PartDeliveryOutcome {
+    let response = match egress
+        .send(bot_api_request("setMessageReaction", body))
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return telegram_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return telegram_outcome_for_status(
+            response.status,
+            format!("telegram bot api returned status {}", response.status),
+        );
+    }
+    let parsed: TelegramDeleteMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("setMessageReaction response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    let description = parsed
+        .description
+        .unwrap_or_else(|| "unknown_error".to_string());
+    telegram_outcome_for_status(
+        parsed.error_code.unwrap_or(400),
+        format!("telegram rejected setMessageReaction ({description})"),
+    )
 }
 
 pub(super) fn telegram_message_response_outcome(

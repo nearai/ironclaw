@@ -128,6 +128,7 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             config: &config,
             body: &message_inbound.body,
             headers: &message_inbound.headers,
+            can_reply_in_threads: true,
         })
         .expect("conformance: the vendor-valid message fixture must parse"); // safety: test-support conformance failure should fail the caller's test.
     let InboundOutcome::Messages(messages) = outcome else {
@@ -159,6 +160,7 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             config: &config,
             body: garbage,
             headers: &[],
+            can_reply_in_threads: true,
         }) {
             Ok(InboundOutcome::Respond(response)) => response
                 .validate()
@@ -191,6 +193,7 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
                 config: &config,
                 body: &challenge.body,
                 headers: &challenge.headers,
+                can_reply_in_threads: true,
             })
             .expect("conformance: the challenge fixture must parse"); // safety: test-support conformance failure should fail the caller's test.
         let InboundOutcome::Respond(response) = outcome else {

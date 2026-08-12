@@ -2,7 +2,9 @@
 //! layer over `RecordingRuntimeHttpEgress`, letting a multi-step tool-HTTP flow
 //! script a different body per request. First-match-wins scripted list, falling
 //! back to the FIFO queue then the default body. A match can also script a
-//! non-2xx status (`.with_status`, still Completed) or a runtime egress error
+//! non-2xx status (`.with_status`; 4xx/5xx classify as a model-visible Failed
+//! `operation_failed` outcome carrying the sanitized response as diagnostic
+//! context, other statuses stay Completed) or a runtime egress error
 //! (`egress_error`, mapping to Failed/Denied — see [`ScriptedHttpOutcome`]).
 //!
 //! `Recording*` structs are deliberately concrete, not generic, ahead of need.

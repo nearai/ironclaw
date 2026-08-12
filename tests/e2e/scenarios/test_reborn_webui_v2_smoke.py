@@ -2682,10 +2682,11 @@ async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
 async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     reborn_v2_page, reborn_v2_server
 ):
-    """The browser logs route scopes, paginates, retries, and preserves older entries."""
+    """The logs UI filters with SelectMenu while preserving scope and pagination."""
     requested_queries: list[dict[str, list[str]]] = []
     pagination_cursors: list[str] = []
     logs_requested = asyncio.Event()
+    filtered_logs_requested = asyncio.Event()
     polled_after_pagination = asyncio.Event()
     pagination_attempts = 0
     pagination_loaded = False
@@ -2696,6 +2697,10 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
         query = parse_qs(parsed.query)
         requested_queries.append(query)
         logs_requested.set()
+        if query.get("level") == ["warn"] and query.get("target") == [
+            "ironclaw::ui"
+        ]:
+            filtered_logs_requested.set()
         cursor = query.get("cursor", [None])[0]
         if cursor == "older-page-1":
             pagination_cursors.append(cursor)
@@ -2815,6 +2820,27 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     await expect(
         reborn_v2_page.locator(SEL_V2["logs_scope_chip"].format(key="run_id"))
     ).to_contain_text("run-ui")
+
+    level_filter = reborn_v2_page.locator(SEL_V2["logs_level_filter"])
+    level_trigger = level_filter.get_by_role("button")
+    await expect(level_trigger).to_have_attribute("aria-haspopup", "listbox")
+    await expect(level_filter.locator("select")).to_have_count(0)
+    await reborn_v2_page.locator(SEL_V2["logs_target_filter"]).fill("ironclaw::ui")
+    await level_trigger.click()
+    await expect(reborn_v2_page.get_by_role("listbox")).to_be_visible()
+    await reborn_v2_page.get_by_role("option", name="WARN", exact=True).click()
+    await asyncio.wait_for(filtered_logs_requested.wait(), timeout=10)
+    await expect(level_trigger).to_contain_text("WARN")
+    filtered_query = next(
+        query
+        for query in reversed(requested_queries)
+        if query.get("level") == ["warn"]
+        and query.get("target") == ["ironclaw::ui"]
+    )
+    assert filtered_query.get("thread_id") == ["thread-ui"], filtered_query
+    assert filtered_query.get("run_id") == ["run-ui"], filtered_query
+    assert filtered_query.get("tool_call_id") == ["tool-call-ui"], filtered_query
+    assert filtered_query.get("source") == ["slack"], filtered_query
 
     entry = reborn_v2_page.locator(SEL_V2["logs_entry"]).first
     await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
