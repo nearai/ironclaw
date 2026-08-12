@@ -106,3 +106,38 @@ Expected: only the composite action, its contract tests, and these internal desi
 Commit message: `ci: tolerate sccache install outages`
 
 PR title: `ci: tolerate sccache install outages`
+
+### Task 4: Classify the shared action in the Reborn PR planner
+
+**Files:**
+- Modify: `scripts/ci/reborn_pr_test_plan.py`
+- Modify: `scripts/ci/test_reborn_pr_test_plan.py`
+
+**Interfaces:**
+- Consumes: changed path `.github/actions/setup-sccache-dist/**`.
+- Produces: an exhaustive Reborn test plan for the shared action while other unmapped local actions remain fail-closed.
+
+- [ ] **Step 1: Add a regression test that reproduces the PR failure**
+
+Assert that the sccache action selects `mode=full` and that an unrelated local action still raises `unmapped test or CI path`.
+
+- [ ] **Step 2: Run the focused test to verify RED**
+
+Run: `python3 -m unittest scripts.ci.test_reborn_pr_test_plan.RebornPrTestPlanTests.test_shared_sccache_action_widens_to_exhaustive_plan`
+
+Expected: FAIL with `unmapped test or CI path: .github/actions/setup-sccache-dist/action.yml`.
+
+- [ ] **Step 3: Add the minimal path classification**
+
+Recognize only `.github/actions/setup-sccache-dist/**`, finish validating the rest of the changed paths, and then return the exhaustive plan.
+
+- [ ] **Step 4: Run the planner and workflow-contract suites**
+
+Run:
+
+```bash
+python3 scripts/ci/test_reborn_pr_test_plan.py
+python3 scripts/ci/test_ws12_workflow_contracts.py
+```
+
+Expected: both suites pass.

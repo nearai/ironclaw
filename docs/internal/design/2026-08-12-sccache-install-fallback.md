@@ -14,8 +14,8 @@ When installation fails, emit a warning, skip all cache configuration, do not se
 
 ## Verification
 
-Extend the existing CI workflow-contract validator and sabotage tests to pin three properties: the installer is best-effort, configuration requires a successful installer outcome, and a failed installer produces a local-compilation warning. Run the focused workflow-contract tests, the checked-in workflow validator, `actionlint` when available, and the docs publication-boundary check.
+Extend the existing CI workflow-contract validator and sabotage tests to pin three properties: the installer is best-effort, configuration requires a successful installer outcome, and a failed installer produces a local-compilation warning. Because every Reborn test job consumes the shared action, map its directory to the exhaustive Reborn PR test plan and retain fail-closed handling for other unmapped local actions. Run the affected-area planner tests, focused workflow-contract tests, the checked-in workflow validator, `actionlint` when available, and the docs publication-boundary check.
 
 ## Compatibility and rollback
 
-Successful cache setup is unchanged. The failure path is slower because it compiles locally, but it no longer turns an optional cache outage into a false test failure. Rollback is a one-commit revert of the composite-action and contract changes.
+Successful cache setup is unchanged. The failure path is slower because it compiles locally, but it no longer turns an optional cache outage into a false test failure. Pull requests that change this shared action run the exhaustive Reborn plan, increasing CI cost only for this rare CI-infrastructure change class. Rollback is a revert of the composite-action, workflow-contract, and affected-area planner changes.

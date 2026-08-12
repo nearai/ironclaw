@@ -947,6 +947,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 [".config/nextest.toml", "scripts/some-undecided-helper.sh"],
             )
 
+    def test_shared_sccache_action_widens_to_exhaustive_plan(self) -> None:
+        """The shared sccache action is executed by every Reborn test lane."""
+        plan = self.plan(
+            "pull_request", [".github/actions/setup-sccache-dist/action.yml"]
+        )
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("shared sccache action changed", plan["reasons"][0])
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [
+                    ".github/actions/setup-sccache-dist/action.yml",
+                    ".github/actions/some-undecided-action/action.yml",
+                ],
+            )
+
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
 
