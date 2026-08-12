@@ -154,13 +154,8 @@ impl DefaultExecutorPipeline {
                         ModelStep::Exit(exit) => return Ok(exit),
                     };
 
-                    // Capture provider-reported usage before the `match` consumes
-                    // `model_response`. Only assistant-reply turns feed the
-                    // diminishing-returns window (#3841 follow-up F1): a
-                    // capability-batch turn produces tool calls, not output
-                    // tokens, and would otherwise look like four "no progress"
-                    // turns in a row. `None` is "unknown" and must NOT count as
-                    // a zero-output turn against the detector.
+                    // Capture provider-reported usage before the `match`
+                    // consumes `model_response`.
                     let response_usage = model_response.usage;
                     // Accumulate the run's cumulative usage for EVERY model
                     // response, before branching on its output. A capability
@@ -187,7 +182,6 @@ impl DefaultExecutorPipeline {
                                         AssistantReplyInput {
                                             state: *state,
                                             reply,
-                                            usage: response_usage,
                                         },
                                     ),
                                 )?,
