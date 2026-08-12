@@ -25,7 +25,6 @@ registerPack("pt-BR", {
   "nav.workspace": "Workspace",
   "nav.projects": "Projetos",
   "nav.jobs": "Trabalhos",
-  "nav.routines": "Rotinas",
   "nav.automations": "Automações",
   "nav.missions": "Missões",
   "nav.extensions": "Extensões",
@@ -842,11 +841,6 @@ registerPack("pt-BR", {
   "automations.runs.running": "Em execução: {count}",
   "automations.runs.unknown": "Desconhecido: {count}",
   "automations.runs.showingOf": "Mostrando {shown} de {total} execuções recentes",
-
-  // Routines page
-  "routines.explorer": "Tarefas",
-  "routines.title": "Rotinas",
-  "routines.description": "Pesquise rotinas salvas, inspecione a agenda ou o gatilho e execute ou pause sem sair do v2.",
 
   // Extensions page
   "ext.installed": "Instaladas",

@@ -25,7 +25,6 @@ registerPack("en", {
   "nav.workspace": "Workspace",
   "nav.projects": "Projects",
   "nav.jobs": "Jobs",
-  "nav.routines": "Routines",
   "nav.automations": "Automations",
   "nav.missions": "Missions",
   "nav.extensions": "Extensions",
@@ -928,12 +927,6 @@ registerPack("en", {
   "automations.detail.thread": "thread",
   "automations.detail.run": "run",
   "automations.detail.noThread": "No thread attached",
-
-  // Routines page
-  "routines.explorer": "Tasks",
-  "routines.title": "Routines",
-  "routines.description":
-    "Search saved routines, inspect their schedule or trigger, and run or pause them without leaving v2.",
 
   // Extensions page
   "ext.installed": "Installed",

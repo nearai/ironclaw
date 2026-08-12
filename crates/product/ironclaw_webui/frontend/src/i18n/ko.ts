@@ -25,7 +25,6 @@ registerPack("ko", {
   "nav.workspace": "워크스페이스",
   "nav.projects": "프로젝트",
   "nav.jobs": "작업",
-  "nav.routines": "루틴",
   "nav.automations": "자동화",
   "nav.missions": "미션",
   "nav.extensions": "확장",
@@ -842,11 +841,6 @@ registerPack("ko", {
   "automations.runs.running": "실행 중: {count}건",
   "automations.runs.unknown": "알 수 없음: {count}건",
   "automations.runs.showingOf": "최근 실행 {total}건 중 {shown}건 표시",
-
-  // Routines page
-  "routines.explorer": "작업",
-  "routines.title": "루틴",
-  "routines.description": "저장된 루틴을 검색하고 일정 또는 트리거를 확인한 뒤 v2를 떠나지 않고 실행하거나 일시 중지합니다.",
 
   // Extensions page
   "ext.installed": "설치됨",

@@ -25,7 +25,6 @@ registerPack("es", {
   "nav.workspace": "Workspace",
   "nav.projects": "Proyectos",
   "nav.jobs": "Trabajos",
-  "nav.routines": "Rutinas",
   "nav.automations": "Automatizaciones",
   "nav.missions": "Misiones",
   "nav.extensions": "Extensiones",
@@ -842,11 +841,6 @@ registerPack("es", {
   "automations.runs.running": "En ejecución: {count}",
   "automations.runs.unknown": "Desconocido: {count}",
   "automations.runs.showingOf": "Mostrando {shown} de {total} ejecuciones recientes",
-
-  // Routines page
-  "routines.explorer": "Tareas",
-  "routines.title": "Rutinas",
-  "routines.description": "Busca rutinas guardadas, inspecciona su programacion o disparador y ejecutalas o pausales sin salir de v2.",
 
   // Extensions page
   "ext.installed": "Instaladas",

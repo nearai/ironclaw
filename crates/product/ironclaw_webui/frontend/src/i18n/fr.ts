@@ -25,7 +25,6 @@ registerPack("fr", {
   "nav.workspace": "Espace de travail",
   "nav.projects": "Projets",
   "nav.jobs": "Tâches",
-  "nav.routines": "Routines",
   "nav.automations": "Automatisations",
   "nav.missions": "Missions",
   "nav.extensions": "Extensions",
@@ -842,11 +841,6 @@ registerPack("fr", {
   "automations.runs.running": "En cours : {count}",
   "automations.runs.unknown": "Inconnu : {count}",
   "automations.runs.showingOf": "Affichage de {shown} sur {total} exécutions récentes",
-
-  // Routines page
-  "routines.explorer": "Taches",
-  "routines.title": "Routines",
-  "routines.description": "Rechercher les routines enregistrees, inspecter leur planification ou leur declencheur, puis les lancer ou les mettre en pause sans quitter v2.",
 
   // Extensions page
   "ext.installed": "Installées",

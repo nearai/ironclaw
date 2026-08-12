@@ -25,7 +25,6 @@ registerPack("hi", {
   "nav.workspace": "वर्कस्पेस",
   "nav.projects": "प्रोजेक्ट्स",
   "nav.jobs": "जॉब्स",
-  "nav.routines": "रूटीन",
   "nav.automations": "ऑटोमेशन",
   "nav.missions": "मिशन",
   "nav.extensions": "एक्सटेंशन्स",
@@ -842,11 +841,6 @@ registerPack("hi", {
   "automations.runs.running": "चल रहे: {count}",
   "automations.runs.unknown": "अज्ञात: {count}",
   "automations.runs.showingOf": "{total} हाल के रन में से {shown} दिखाए जा रहे हैं",
-
-  // Routines page
-  "routines.explorer": "कार्य",
-  "routines.title": "रूटीन",
-  "routines.description": "सहेजे गए रूटीन खोजें, उनका शेड्यूल या ट्रिगर देखें, और v2 छोड़े बिना उन्हें चलाएं या रोकें.",
 
   // Extensions page
   "ext.installed": "इंस्टॉल",

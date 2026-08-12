@@ -25,7 +25,6 @@ registerPack("zh-CN", {
   "nav.workspace": "工作区",
   "nav.projects": "项目",
   "nav.jobs": "任务",
-  "nav.routines": "例程",
   "nav.automations": "自动化",
   "nav.missions": "目标",
   "nav.extensions": "扩展",
@@ -841,11 +840,6 @@ registerPack("zh-CN", {
   "automations.runs.running": "运行中：{count} 次",
   "automations.runs.unknown": "未知：{count} 次",
   "automations.runs.showingOf": "正在显示最近 {total} 次运行中的 {shown} 次",
-
-  // Routines page
-  "routines.explorer": "任务",
-  "routines.title": "例程",
-  "routines.description": "搜索已保存的例程，检查其计划或触发器，并在不离开 v2 的情况下运行或暂停。",
 
   // Extensions page
   "ext.installed": "已安装",

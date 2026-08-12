@@ -25,7 +25,6 @@ registerPack("uk", {
   "nav.workspace": "Робочий простір",
   "nav.projects": "Проєкти",
   "nav.jobs": "Завдання",
-  "nav.routines": "Рутини",
   "nav.automations": "Автоматизація",
   "nav.missions": "Місії",
   "nav.extensions": "Розширення",
@@ -842,11 +841,6 @@ registerPack("uk", {
   "automations.runs.running": "Виконується: {count}",
   "automations.runs.unknown": "Невідомо: {count}",
   "automations.runs.showingOf": "Показано {shown} з {total} останніх запусків",
-
-  // Routines page
-  "routines.explorer": "Завдання",
-  "routines.title": "Рутини",
-  "routines.description": "Шукайте збережені рутини, переглядайте їхній розклад або тригер і запускайте чи призупиняйте їх, не виходячи з v2.",
 
   // Extensions page
   "ext.installed": "Встановлено",

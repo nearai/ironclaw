@@ -25,7 +25,6 @@ registerPack("ja", {
   "nav.workspace": "ワークスペース",
   "nav.projects": "プロジェクト",
   "nav.jobs": "ジョブ",
-  "nav.routines": "ルーチン",
   "nav.automations": "自動化",
   "nav.missions": "ミッション",
   "nav.extensions": "拡張",
@@ -842,11 +841,6 @@ registerPack("ja", {
   "automations.runs.running": "実行中: {count} 件",
   "automations.runs.unknown": "不明: {count} 件",
   "automations.runs.showingOf": "直近の実行 {total} 件のうち {shown} 件を表示",
-
-  // Routines page
-  "routines.explorer": "タスク",
-  "routines.title": "ルーチン",
-  "routines.description": "保存済みルーチンを検索し、スケジュールやトリガーを確認して、v2 を離れずに実行または一時停止できます。",
 
   // Extensions page
   "ext.installed": "インストール済み",

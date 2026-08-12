@@ -25,7 +25,6 @@ registerPack("ar", {
   "nav.workspace": "مساحة العمل",
   "nav.projects": "المشاريع",
   "nav.jobs": "المهام",
-  "nav.routines": "الروتينات",
   "nav.automations": "عمليات التشغيل الآلي",
   "nav.missions": "المهام الدورية",
   "nav.extensions": "الملحقات",
@@ -842,11 +841,6 @@ registerPack("ar", {
   "automations.runs.running": "قيد التشغيل: {count}",
   "automations.runs.unknown": "غير معروفة: {count}",
   "automations.runs.showingOf": "عرض {shown} من {total} عمليات تشغيل حديثة",
-
-  // Routines page
-  "routines.explorer": "المهام",
-  "routines.title": "الروتينات",
-  "routines.description": "ابحث في الروتينات المحفوظة، وافحص جدولها أو المشغل، وشغلها أو أوقفها مؤقتًا دون مغادرة v2.",
 
   // Extensions page
   "ext.installed": "مثبت",

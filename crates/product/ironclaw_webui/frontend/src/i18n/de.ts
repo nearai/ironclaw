@@ -25,7 +25,6 @@ registerPack("de", {
   "nav.workspace": "Arbeitsbereich",
   "nav.projects": "Projekte",
   "nav.jobs": "Jobs",
-  "nav.routines": "Routinen",
   "nav.automations": "Automatisierungen",
   "nav.missions": "Missionen",
   "nav.extensions": "Erweiterungen",
@@ -842,11 +841,6 @@ registerPack("de", {
   "automations.runs.running": "Laufend: {count}",
   "automations.runs.unknown": "Unbekannt: {count}",
   "automations.runs.showingOf": "{shown} von {total} letzten Ausführungen werden angezeigt",
-
-  // Routines page
-  "routines.explorer": "Aufgaben",
-  "routines.title": "Routinen",
-  "routines.description": "Gespeicherte Routinen suchen, Zeitplan oder Ausloeser pruefen und sie ausfuehren oder pausieren, ohne v2 zu verlassen.",
 
   // Extensions page
   "ext.installed": "Installiert",
