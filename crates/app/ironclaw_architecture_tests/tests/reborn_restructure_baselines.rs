@@ -141,7 +141,14 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// manifest ceiling (41_810, seeded from the merge-queue commit where
 /// concurrent mainline growth adds ~79 LOC on top of this tree) stays within
 /// the nudge window of this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_731;
+/// ✎ Re-ratcheted 41_731 → 41_533 on 2026-08-12 for #7185: the memory-save
+/// guidance and its content pins moved out of composition into the
+/// memory-native package that owns them, and the prompt tests split out of the
+/// production file. This record moves with the manifest ceiling in the same
+/// commit — the gate's NUDGE fired, so the eviction is locked in rather than
+/// banked as headroom. Measured on this branch's merged tree with
+/// `bash scripts/ci/check-composition-budget.sh`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_533;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

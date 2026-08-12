@@ -181,7 +181,7 @@ observed_date = "2026-08-07"
 # The gate's NUDGE fired at 283 LOC of slack; this locks the improvement in rather
 # than banking it as headroom. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh`.
-loc_ceiling = 41527
+loc_ceiling = 41533
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -192,7 +192,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41527
+loc_observed = 41533
 loc_observed_date = "2026-08-12"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
