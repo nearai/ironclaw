@@ -16,7 +16,7 @@
 //! [`From<ProductOperationFailure>`] below is total and 1:1, so a port failure
 //! reaching product through `?` keeps its exact discriminant.
 //!
-//! See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
+//! See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
 //! ownership decision and the alternatives it beat.
 
 use ironclaw_host_api::error::HostApiError;

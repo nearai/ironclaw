@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # frontend diffs stop routing to the Code Style lane, and the planner reports
 # "no Reborn test surface changed" for a WebUI change — silently, since
 # nothing else covers that lane. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
 

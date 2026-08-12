@@ -167,10 +167,10 @@ were chartered.
 
 ## Sources
 
-- Family spec: [`docs/reborn/target-architecture/families/domains.md`](../../docs/reborn/target-architecture/families/domains.md)
+- Family spec: [`docs/internal/reborn/target-architecture/families/domains.md`](../../docs/internal/reborn/target-architecture/families/domains.md)
   (design record; where it and the tree disagree, the code and its gates win —
   see each crate's README for measured deltas).
-- PROPOSAL entries: `docs/reborn/target-architecture/PROPOSAL.md` §6.4.1–§6.4.15
+- PROPOSAL entries: `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.4.1–§6.4.15
   (§5 tree, §8 layer matrix, §12.13 D-P/D-Q for the projects gating fold).
 - Persistence rule: [`.claude/rules/database.md`](../../.claude/rules/database.md).
-- Conventions this file follows: [`docs/reborn/guidance-conventions.md`](../../docs/reborn/guidance-conventions.md).
+- Conventions this file follows: [`docs/internal/reborn/guidance-conventions.md`](../../docs/internal/reborn/guidance-conventions.md).

@@ -79,7 +79,7 @@
 > `rg -n "fn webui_v2_app" crates/`.
 
 It is the native host-owned surface that enters `ProductSurface` directly
-(`docs/reborn/how-to-port-channel-to-reborn.md`, "Native host surface").
+(`docs/internal/reborn/how-to-port-channel-to-reborn.md`, "Native host surface").
 
 ### Surface
 
@@ -379,7 +379,7 @@ rows are inventoried here, not implemented in the current PR.
 
 ### What this composition deliberately does NOT do
 
-Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
+Per Path A in `docs/internal/reborn/how-to-port-channel-to-reborn.md`:
 
 - No `ProductAdapter` wrapper around browser sessions.
 - No fake `ExternalActorRef` / `ProtocolAuthEvidence` /

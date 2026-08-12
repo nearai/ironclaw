@@ -38,7 +38,7 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (
 # scripts/ci/lib/crate_tree.py) to its sibling `packages/` directory — the same
 # anchor scripts/build-wasm-extensions.sh and scripts/live-canary/scrub-artifacts.sh
 # use — rather than a literal `crates/extensions/packages/slack` path. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[2] / "scripts" / "ci" / "lib")
 )

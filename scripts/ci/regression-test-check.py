@@ -15,7 +15,7 @@ from pathlib import Path
 # once crates move into family directories (`crates/<family>/ironclaw_*`,
 # PROPOSAL §5): every high-risk path stopped matching, the gate reported "no
 # high-risk files changed", and the regression-test requirement relaxed
-# silently. See docs/reborn/target-architecture/CHECKLIST.md WS10 and #6963.
+# silently. See docs/internal/reborn/target-architecture/CHECKLIST.md WS10 and #6963.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 try:
     from crate_tree import CrateTreeError, crate_directory  # noqa: E402

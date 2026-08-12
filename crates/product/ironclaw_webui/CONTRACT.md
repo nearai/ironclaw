@@ -30,7 +30,7 @@ Composition deliberately stops at the
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
+The "Native host surface" rules of `docs/internal/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
 `ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
 direct `ironclaw_assistant` dependency (see `Cargo.toml`), but as of the WS5

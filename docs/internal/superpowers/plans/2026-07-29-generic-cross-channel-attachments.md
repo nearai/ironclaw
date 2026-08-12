@@ -390,7 +390,7 @@ git commit -m "feat(product): deliver finalized attachment refs"
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`
 - Modify: `crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs`
 - Modify: `docs/channels/slack.mdx`
-- Modify: `docs/reborn/setup-slack-for-reborn-binary.md`
+- Modify: `docs/internal/reborn/setup-slack-for-reborn-binary.md`
 
 ### Contract
 
@@ -421,7 +421,7 @@ cargo test -p ironclaw_composition slack --all-features
 - [x] Run targeted clippy and commit:
 
 ```bash
-git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
+git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/internal/reborn/setup-slack-for-reborn-binary.md
 git commit -m "feat(slack): fetch inbound attachments"
 ```
 
@@ -437,7 +437,7 @@ git commit -m "feat(slack): fetch inbound attachments"
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`
 - Modify: `crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs`
 - Modify: `docs/channels/slack.mdx`
-- Modify: `docs/reborn/setup-slack-for-reborn-binary.md`
+- Modify: `docs/internal/reborn/setup-slack-for-reborn-binary.md`
 
 ### Contract
 
@@ -469,7 +469,7 @@ cargo test -p ironclaw_assistant outbound_delivery --all-features
 - [x] Run targeted clippy and commit:
 
 ```bash
-git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
+git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/internal/reborn/setup-slack-for-reborn-binary.md
 git commit -m "feat(slack): upload outbound attachments"
 ```
 

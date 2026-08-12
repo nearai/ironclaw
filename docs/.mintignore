@@ -16,14 +16,11 @@ drafts/
 # and can still be indexed. This file is the only thing that stops Mintlify from
 # processing and serving a page.
 #
-# THE RULE: all new internal material goes under internal/. This list is frozen
+# THE RULE: all internal material goes under internal/. This list is frozen
 # — scripts/ci/docs_publication_boundary.py (Code Style workflow) rejects any
-# entry added to it. reborn/ is the one remaining legacy location: its path is
-# load-bearing (architecture tests read contract files from it, and the
-# reborn-e2e scope filters match it), so it moves into internal/ only when
-# those consumers move with it. Entries may be removed as that happens, never
-# added. The same check requires every .md/.mdx under docs/ to be in docs.json
-# navigation, matched here, or carrying `hidden: true` frontmatter marking a
-# deliberately unlisted public page.
+# entry added to it; entries may only ever be removed. (reborn/, the last
+# legacy location, was consolidated into internal/reborn/ together with its
+# load-bearing consumers.) The same check requires every .md/.mdx under docs/
+# to be in docs.json navigation, matched here, or carrying `hidden: true`
+# frontmatter marking a deliberately unlisted public page.
 internal/
-reborn/

@@ -9,9 +9,9 @@ and admission test: [`../AGENTS.md`](../AGENTS.md).
 - Read `README.md` for what the crate is; read `Cargo.toml` for the real
   dependency and feature shape.
 - Contract docs that outrank intuition before changing behavior:
-  `docs/reborn/contracts/host-api.md`,
-  `docs/reborn/contracts/kernel-boundary.md`,
-  `docs/reborn/contracts/capability-access.md`.
+  `docs/internal/reborn/contracts/host-api.md`,
+  `docs/internal/reborn/contracts/kernel-boundary.md`,
+  `docs/internal/reborn/contracts/capability-access.md`.
 - If the contract and code disagree, stop and treat the task as a
   contract-change request instead of silently changing ownership.
 

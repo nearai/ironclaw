@@ -108,7 +108,7 @@ UNCONDITIONAL_SKIP = re.compile(
 # pull_request/merge_group. Both are path filters, so neither can assert
 # anything about itself — a filter that matches nothing skips every job and the
 # roll-up reports success. That is the WS10 failure mode
-# (docs/reborn/target-architecture/CHECKLIST.md), and it arrives silently the
+# (docs/internal/reborn/target-architecture/CHECKLIST.md), and it arrives silently the
 # day crates move into family directories.
 #
 # So the pin lives here: extract the `changes`-job regex from the workflow text
@@ -129,7 +129,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     # every one of these.
     ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
-    ("docs/reborn/target-architecture/CHECKLIST.md", True),
+    ("docs/internal/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
     ("Cargo.toml", True),
     # Still out of scope: the filter must stay a filter.
@@ -1207,7 +1207,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             ".claude/skills/reborn-feature/SKILL.md",
             "AGENTS.md",
             "CLAUDE.md",
-            "docs/reborn/guidance-conventions.md",
+            "docs/internal/reborn/guidance-conventions.md",
         ),
         out_of_scope=(
             # Crate-tier guidance rides `has_code`'s `crates/` prefix; this

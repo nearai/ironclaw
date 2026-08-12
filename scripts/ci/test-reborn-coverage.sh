@@ -287,7 +287,7 @@ assert_contains "M2: merge reports missing input file" "${CAP_ERR}" "input lcov 
 # This used to write an empty tracefile and exit 0. That outcome is
 # indistinguishable from "the crate tree moved and every SF: record now falls
 # outside the filter", which is how coverage goes dark while CI stays green
-# (docs/reborn/target-architecture/CHECKLIST.md WS10). Nothing legitimate
+# (docs/internal/reborn/target-architecture/CHECKLIST.md WS10). Nothing legitimate
 # produces it: the lanes instrument the whole workspace build.
 cat > "${fixtures_dir}/m3_no_match.lcov" <<'EOF'
 SF:/work/ironclaw/src/other.rs

@@ -1606,7 +1606,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
-                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                docs = self.plan("pull_request", ["docs/internal/reborn/README.md"])
                 self.assertEqual(plan["mode"], "none")
                 self.assertEqual(plan, docs)
 
@@ -1630,7 +1630,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
-                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                docs = self.plan("pull_request", ["docs/internal/reborn/README.md"])
                 self.assertEqual(plan["mode"], "none")
                 self.assertEqual(plan, docs)
 
@@ -1649,7 +1649,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         on the family-level guidance files, which the restructure edits in the
         same PR as the crates they describe.
         """
-        docs = self.plan("pull_request", ["docs/reborn/README.md"])
+        docs = self.plan("pull_request", ["docs/internal/reborn/README.md"])
         for path in ("crates/AGENTS.md", "crates/README.md", "crates/Architecture.md"):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])

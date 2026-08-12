@@ -75,5 +75,5 @@ cargo test -p ironclaw_architecture_tests
   `CLAUDE.md` points here).
 - Family boundary and the one-way pipeline rule: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.3.1;
-  `docs/reborn/target-architecture/families/events.md`; frozen contract
-  `docs/reborn/contracts/events.md`.
+  `docs/internal/reborn/target-architecture/families/events.md`; frozen contract
+  `docs/internal/reborn/contracts/events.md`.

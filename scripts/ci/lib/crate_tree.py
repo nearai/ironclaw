@@ -4,7 +4,7 @@
 CI gates that key off the literal `crates/ironclaw_*` shape all share one
 failure mode: when the target-architecture restructure moves crates into
 family directories (`crates/<family>/ironclaw_*`, see
-docs/reborn/target-architecture/PROPOSAL.md §5), the pattern stops matching,
+docs/internal/reborn/target-architecture/PROPOSAL.md §5), the pattern stops matching,
 the gate scans nothing, and it reports success. Coverage goes dark, a scope
 classifier buckets everything as out-of-scope, a metric prints 0% — all green.
 
@@ -135,7 +135,7 @@ def crate_directories(repo_root: str | pathlib.Path = ".") -> list[str]:
             f"no {CRATES_ROOT_NAME}/ directory under {root!s} — crate discovery cannot "
             "run. Every path-keyed CI gate resolves its scope through this "
             "inventory; refusing rather than scanning nothing is deliberate "
-            "(docs/reborn/target-architecture/CHECKLIST.md WS10)."
+            "(docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
         )
 
     manifests = []
@@ -167,7 +167,7 @@ def crate_directories(repo_root: str | pathlib.Path = ".") -> list[str]:
             f"{crates_root!s} (floor is {MIN_CRATE_DIRECTORIES}). Either the crate tree "
             "moved out from under this gate or the repository root is wrong. Failing "
             "closed: a gate that scans nothing must never report success "
-            "(docs/reborn/target-architecture/CHECKLIST.md WS10)."
+            "(docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
         )
 
     return sorted(crate_dirs)
@@ -208,7 +208,7 @@ def owning_crate_directory(
     `crates/` at all). Callers that classify production sources must treat the
     first case as an error rather than as "not production" — that fall-through
     is the WS10 silent-dark failure mode
-    (docs/reborn/target-architecture/CHECKLIST.md) — *unless*
+    (docs/internal/reborn/target-architecture/CHECKLIST.md) — *unless*
     `nested_workspace_root()` claims the path, which is the sanctioned
     "excluded by construction" answer.
     """

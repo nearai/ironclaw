@@ -20,7 +20,7 @@ const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
 const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
 /// How external conversations map to IronClaw conversations
-/// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
+/// (`docs/internal/reborn/extension-runtime/overview.md` §3). The host WebUI's
 /// internal channel uses the same enum, so the workflow reasons about every
 /// channel one way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

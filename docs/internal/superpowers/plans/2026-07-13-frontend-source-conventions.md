@@ -130,7 +130,7 @@ Run `cargo test -p ironclaw_webui_v2 --features webui-v2-beta`. Expected: all cr
 
 - [ ] **Step 3: Audit the diff and forbidden patterns**
 
-Run `git diff --check`, inspect `git diff --stat` and `git diff`, confirm no JavaScript-family source modules remain, and confirm unrelated `.agents/` and `docs/reborn/memory-rd/` files are unstaged.
+Run `git diff --check`, inspect `git diff --stat` and `git diff`, confirm no JavaScript-family source modules remain, and confirm unrelated `.agents/` and `docs/internal/reborn/memory-rd/` files are unstaged.
 
 - [ ] **Step 4: Commit and publish**
 
