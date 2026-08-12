@@ -52,6 +52,11 @@ pub struct AdminConfigurationField {
     pub secret: bool,
     #[serde(default)]
     pub required: bool,
+    /// Operator-facing help text rendered under the form input: what the
+    /// value is, where it comes from, and any format the vendor requires.
+    /// Empty when the manifest declares none.
+    #[serde(default)]
+    pub description: String,
 }
 
 /// One reusable operator form. Equal group ids must carry equal descriptors.

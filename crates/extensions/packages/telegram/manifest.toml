@@ -16,12 +16,12 @@ service = "telegram.extension/v1"
 [admin_configuration]
 group_id = "extension.telegram"
 display_name = "Telegram deployment configuration"
-description = "Deployment credentials and public account metadata for the Telegram channel."
+description = "Deployment credentials for the Telegram channel. Telegram delivers updates by webhook, so the instance must be reachable over public HTTPS with a valid certificate — a local installation needs a tunnel (such as ngrok or Cloudflare Tunnel) in front of it."
 fields = [
-  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true },
-  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
-  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
-  { handle = "bot_username", label = "Bot username", secret = false, required = true },
+  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by BotFather when you create the bot (/newbot)." },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true, description = "A random string you invent (1–256 letters, digits, '_' or '-'). IronClaw registers it with Telegram and uses it to verify every incoming update." },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true, description = "The full public address Telegram delivers to: https://<your-host>/webhooks/extensions/telegram/updates. For a local installation, use your tunnel's hostname." },
+  { handle = "bot_username", label = "Bot username", secret = false, required = true, description = "Your bot's username without the leading @ (5–32 characters, ending in 'bot'). Used for the pairing link and group mentions." },
 ]
 # Shared-conversation admission is presence-based (run-acts-as-invoker):
 # any group/supergroup the bot has been added to is served — the update

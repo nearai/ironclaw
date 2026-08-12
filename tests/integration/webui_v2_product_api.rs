@@ -1177,6 +1177,19 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
             "secret fields must never expose a value: {secret_field}"
         );
     }
+    let telegram_fields = groups
+        .iter()
+        .find(|group| group["group_id"] == "extension.telegram")
+        .and_then(|group| group["fields"].as_array())
+        .expect("telegram group lists fields");
+    for field in telegram_fields {
+        assert!(
+            field["description"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "each telegram field carries manifest-declared help text on the wire: {field}"
+        );
+    }
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");

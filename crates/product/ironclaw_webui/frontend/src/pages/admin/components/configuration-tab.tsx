@@ -145,6 +145,9 @@ export function ConfigurationGroup({ group, state }) {
                     setValues((current) => ({ ...current, [field.handle]: value }));
                   }}
                 />
+                {field.description && (
+                  <p className="mt-1 text-[11px] text-iron-400">{field.description}</p>
+                )}
                 {hint && <p className="mt-1 text-[11px] text-iron-400">{hint}</p>}
               </div>
             );

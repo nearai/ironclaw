@@ -35,6 +35,10 @@ pub struct RebornAdminConfigurationGroup {
 pub struct RebornAdminConfigurationField {
     pub handle: String,
     pub label: String,
+    /// Manifest-declared operator help text rendered under the form input;
+    /// empty when none was declared.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     pub secret: bool,
     pub required: bool,
     pub provided: bool,

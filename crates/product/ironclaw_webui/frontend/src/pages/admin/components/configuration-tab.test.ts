@@ -170,6 +170,7 @@ test("configuration group renders generic operator fields and no lifecycle actio
         {
           handle: "fixture_secret",
           label: "Client secret",
+          description: "Issued in the fixture console under App credentials.",
           secret: true,
           required: true,
           provided: true,
@@ -196,6 +197,7 @@ test("configuration group renders generic operator fields and no lifecycle actio
 
   assert.match(html, /Fixture credentials/);
   assert.match(html, /Client secret/);
+  assert.match(html, /Issued in the fixture console under App credentials\./);
   assert.match(html, /Configured\. Leave blank to keep/);
   assert.match(html, /value="fixture-bot"/);
   assert.doesNotMatch(html, /Set automatically by the provider/);
