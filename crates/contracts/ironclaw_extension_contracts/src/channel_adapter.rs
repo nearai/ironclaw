@@ -359,6 +359,41 @@ pub enum OutboundPart {
     Retract {
         vendor_message_ref: String,
     },
+    /// Add or remove a run-lifecycle reaction on an existing vendor message —
+    /// typically the inbound message that triggered the run, so a channel with
+    /// several runs in flight shows which message each one is working on.
+    /// `vendor_message_ref` is the target message's vendor id (a source
+    /// message's `reply_target_message_id`, or a bot message ref). Each adapter
+    /// maps the neutral [`RunReaction`] to a vendor-safe emoji — a raw emoji
+    /// would be unsafe because some vendors' reaction APIs only accept a fixed
+    /// emoji allowlist. Best-effort: a failed reaction never fails the run.
+    React {
+        vendor_message_ref: String,
+        reaction: RunReaction,
+        action: ReactionAction,
+    },
+}
+
+/// A neutral run-lifecycle reaction. The adapter owns the vendor emoji so the
+/// mapping stays inside each vendor's allowed-reaction set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunReaction {
+    /// The run is actively working on the message (👀).
+    Working,
+    /// The run finished successfully (✅ / vendor equivalent).
+    Done,
+    /// The run is parked waiting on the user — an approval or auth prompt
+    /// (⚠️ / vendor equivalent).
+    NeedsInput,
+    /// The run failed or timed out (❌ / vendor equivalent).
+    Failed,
+}
+
+/// Whether a [`OutboundPart::React`] adds or clears a reaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactionAction {
+    Add,
+    Remove,
 }
 
 /// Structured per-attempt delivery report. The adapter cannot mark anything

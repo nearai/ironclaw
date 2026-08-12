@@ -615,6 +615,14 @@ mod tests {
     async fn handler_serves_write_then_search_over_the_request_filesystem() {
         let handler = handler();
         let filesystem = Arc::new(InMemoryBackend::new());
+        const QUERY: &str = "handler marker heron";
+        const RESULT_BOUND: usize = 8 * 1024;
+        let position = RESULT_BOUND + 512;
+        let oversized = format!(
+            "{} {QUERY} {}",
+            "a".repeat(position),
+            "a".repeat(RESULT_BOUND),
+        );
 
         let write = handler
             .dispatch(memory_request_over(
@@ -622,7 +630,7 @@ mod tests {
                 MEMORY_WRITE_CAPABILITY_ID,
                 json!({
                     "target": "notes/alpha.md",
-                    "content": "handler marker heron",
+                    "content": oversized,
                     "append": false
                 }),
             ))
@@ -634,7 +642,7 @@ mod tests {
             .dispatch(memory_request_over(
                 filesystem,
                 MEMORY_SEARCH_CAPABILITY_ID,
-                json!({"query": "heron", "limit": 3}),
+                json!({"query": QUERY, "limit": 3}),
             ))
             .await
             .expect("search dispatches through the handler");
@@ -644,6 +652,11 @@ mod tests {
         );
         assert_eq!(search.output["external_services_searched"], false);
         assert_eq!(search.output["result_count"], 1);
+        let result_content = search.output["results"][0]["content"]
+            .as_str()
+            .expect("search result includes content");
+        assert!(result_content.len() <= RESULT_BOUND);
+        assert!(result_content.contains(QUERY));
     }
 
     /// An id the bound manifest never declared is refused even if something
