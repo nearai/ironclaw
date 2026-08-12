@@ -14,7 +14,9 @@ publish = false
 layer = "loops"
 
 [features]
-test-support = []
+# Dev-only seam: downstream harnesses use `tokio::sync::Notify` to drive
+# cancellation deterministically.
+test-support = ["tokio/sync"]
 
 [dependencies]
 async-trait = "0.1"

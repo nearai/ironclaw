@@ -47,9 +47,11 @@ use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, G
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
+#[cfg(test)]
+use loop_exit::reply_trailed_off;
 use loop_exit::{
     COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
-    reply_trailed_off,
+    reply_completion_signals, scheduled_trigger_run,
 };
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_failure_category,

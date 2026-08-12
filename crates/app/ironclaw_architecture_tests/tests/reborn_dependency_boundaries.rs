@@ -682,7 +682,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // nested and line-numbered JSON before marker masking can destroy the
         // key/value relationship; `main` adds the bounded context-window
         // watermark DTO. Count read from this test's own failure message.
-        ("ironclaw_host_api", 19_063),
+        // 19_063 -> 19_086 (#7525, merged after #7509): add the typed
+        // `UnattendedQuestionEndingResponse` invalid-output reason and its
+        // sanitized user-facing summary. Classification and recovery remain
+        // in ironclaw_agent_loop; this crate owns only shared failure
+        // vocabulary. Count read from this test's own failure message.
+        ("ironclaw_host_api", 19_086),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
