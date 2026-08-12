@@ -1048,31 +1048,10 @@ registerPack("de", {
   "pairing.connect": "Verbinden",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Dashboard",
   "admin.tab.users": "Benutzer",
   "admin.tab.configuration": "Konfiguration",
-  "admin.tab.usage": "Nutzung",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "Systemübersicht",
-  "admin.dashboard.uptime": "Betriebszeit: {value}",
-  "admin.dashboard.totalUsers": "Benutzer gesamt",
-  "admin.dashboard.activeUsers": "Aktive Benutzer",
-  "admin.dashboard.suspended": "Suspendiert",
-  "admin.dashboard.admins": "Admins",
-  "admin.dashboard.usage30d": "Nutzung 30 Tage",
-  "admin.dashboard.totalJobs": "Jobs gesamt",
-  "admin.dashboard.activeJobs": "Aktive Jobs",
-  "admin.dashboard.llmCalls": "LLM‑Calls",
-  "admin.dashboard.totalCost": "Gesamtkosten",
-  "admin.dashboard.recentUsers": "Letzte Benutzer",
-  "admin.dashboard.viewAll": "Alle anzeigen",
-  "admin.dashboard.noUsers": "Noch keine Benutzer.",
-  "admin.dashboard.name": "Name",
-  "admin.dashboard.role": "Rolle",
-  "admin.dashboard.status": "Status",
-  "admin.dashboard.jobs": "Jobs",
-  "admin.dashboard.lastActive": "Zuletzt aktiv",
 
   // Admin — relative time
   "admin.relative.never": "Nie",
@@ -1140,8 +1119,6 @@ registerPack("de", {
   "admin.user.roleManagement": "Rollenverwaltung",
   "admin.user.currentRole": "Aktuelle Rolle",
   "admin.user.saveRole": "Rolle speichern",
-  "admin.user.usage30Days": "Nutzung (letzte 30 Tage)",
-  "admin.user.noUsage": "Keine Nutzungsdaten.",
   "admin.threadScraping.title": "Thread-Scraping",
   "admin.threadScraping.description": "Redigierte Thread- und Ausführungsartefakte zur Fehlerbehebung und Optimierung sammeln.",
   "admin.threadScraping.empty": "Keine Threads zum Scraping verfügbar.",
@@ -1171,20 +1148,6 @@ registerPack("de", {
   "admin.user.secrets.deleting": "Wird gelöscht…",
 
   // Admin — usage tab
-  "admin.usage.overview": "Nutzungsübersicht",
-  "admin.usage.noData": "Keine Nutzungsdaten für diesen Zeitraum.",
-  "admin.usage.totalCalls": "Calls gesamt",
-  "admin.usage.inputTokens": "Input‑Tokens",
-  "admin.usage.outputTokens": "Output‑Tokens",
-  "admin.usage.totalCost": "Gesamtkosten",
-  "admin.usage.perUser": "Pro Benutzer",
-  "admin.usage.perModel": "Pro Modell",
-  "admin.usage.user": "Benutzer",
-  "admin.usage.model": "Modell",
-  "admin.usage.calls": "Aufrufe",
-  "admin.usage.input": "Eingabe",
-  "admin.usage.output": "Ausgabe",
-  "admin.usage.cost": "Kosten",
 
   // Logs page
   "logs.levelAll": "Alle Stufen",

@@ -1048,31 +1048,10 @@ registerPack("ja", {
   "pairing.connect": "接続",
 
   // Admin — tabs
-  "admin.tab.dashboard": "ダッシュボード",
   "admin.tab.users": "ユーザー",
   "admin.tab.configuration": "設定",
-  "admin.tab.usage": "使用量",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "システム概要",
-  "admin.dashboard.uptime": "稼働時間: {value}",
-  "admin.dashboard.totalUsers": "総ユーザー数",
-  "admin.dashboard.activeUsers": "アクティブユーザー",
-  "admin.dashboard.suspended": "停止",
-  "admin.dashboard.admins": "管理者",
-  "admin.dashboard.usage30d": "30日使用量",
-  "admin.dashboard.totalJobs": "総ジョブ数",
-  "admin.dashboard.activeJobs": "実行中ジョブ",
-  "admin.dashboard.llmCalls": "LLM 呼び出し",
-  "admin.dashboard.totalCost": "総コスト",
-  "admin.dashboard.recentUsers": "最近のユーザー",
-  "admin.dashboard.viewAll": "すべて表示",
-  "admin.dashboard.noUsers": "まだユーザーがいません。",
-  "admin.dashboard.name": "名前",
-  "admin.dashboard.role": "ロール",
-  "admin.dashboard.status": "状態",
-  "admin.dashboard.jobs": "ジョブ",
-  "admin.dashboard.lastActive": "最終アクティブ",
 
   // Admin — relative time
   "admin.relative.never": "なし",
@@ -1140,8 +1119,6 @@ registerPack("ja", {
   "admin.user.roleManagement": "ロール管理",
   "admin.user.currentRole": "現在のロール",
   "admin.user.saveRole": "ロールを保存",
-  "admin.user.usage30Days": "使用量（過去30日）",
-  "admin.user.noUsage": "使用量データがありません。",
   "admin.threadScraping.title": "スレッドの収集",
   "admin.threadScraping.description": "デバッグと最適化のために、編集済みのスレッドおよび実行アーティファクトを収集します。",
   "admin.threadScraping.empty": "収集できるスレッドがありません。",
@@ -1171,20 +1148,6 @@ registerPack("ja", {
   "admin.user.secrets.deleting": "削除中…",
 
   // Admin — usage tab
-  "admin.usage.overview": "使用量概要",
-  "admin.usage.noData": "この期間の使用量データがありません。",
-  "admin.usage.totalCalls": "総呼び出し数",
-  "admin.usage.inputTokens": "入力トークン",
-  "admin.usage.outputTokens": "出力トークン",
-  "admin.usage.totalCost": "総コスト",
-  "admin.usage.perUser": "ユーザー別",
-  "admin.usage.perModel": "モデル別",
-  "admin.usage.user": "ユーザー",
-  "admin.usage.model": "モデル",
-  "admin.usage.calls": "呼び出し",
-  "admin.usage.input": "入力",
-  "admin.usage.output": "出力",
-  "admin.usage.cost": "コスト",
 
   // Logs page
   "logs.levelAll": "すべてのレベル",

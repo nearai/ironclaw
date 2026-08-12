@@ -66,9 +66,7 @@ export const EXTENSIONS_SUB_ROUTES = [
   { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
 ];
 
-// Only the Users tab ships in this admin port. The dashboard and usage tabs
-// are usage/analytics surfaces, deliberately out of scope here (their
-// components remain in the tree but are not routed).
+// Only supported Admin surfaces are registered here.
 export const ADMIN_SUB_ROUTES = [
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
   { id: "configuration", labelKey: "admin.tab.configuration", icon: "tool" },

@@ -1048,31 +1048,10 @@ registerPack("ko", {
   "pairing.connect": "연결",
 
   // Admin — tabs
-  "admin.tab.dashboard": "대시보드",
   "admin.tab.users": "사용자",
   "admin.tab.configuration": "구성",
-  "admin.tab.usage": "사용량",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "시스템 개요",
-  "admin.dashboard.uptime": "업타임: {value}",
-  "admin.dashboard.totalUsers": "전체 사용자",
-  "admin.dashboard.activeUsers": "활성 사용자",
-  "admin.dashboard.suspended": "정지됨",
-  "admin.dashboard.admins": "관리자",
-  "admin.dashboard.usage30d": "30일 사용량",
-  "admin.dashboard.totalJobs": "전체 작업",
-  "admin.dashboard.activeJobs": "진행 중 작업",
-  "admin.dashboard.llmCalls": "LLM 호출",
-  "admin.dashboard.totalCost": "총 비용",
-  "admin.dashboard.recentUsers": "최근 사용자",
-  "admin.dashboard.viewAll": "모두 보기",
-  "admin.dashboard.noUsers": "아직 사용자가 없습니다.",
-  "admin.dashboard.name": "이름",
-  "admin.dashboard.role": "역할",
-  "admin.dashboard.status": "상태",
-  "admin.dashboard.jobs": "작업",
-  "admin.dashboard.lastActive": "마지막 활동",
 
   // Admin — relative time
   "admin.relative.never": "없음",
@@ -1140,8 +1119,6 @@ registerPack("ko", {
   "admin.user.roleManagement": "역할 관리",
   "admin.user.currentRole": "현재 역할",
   "admin.user.saveRole": "역할 저장",
-  "admin.user.usage30Days": "사용량(최근 30일)",
-  "admin.user.noUsage": "사용량 데이터 없음.",
   "admin.threadScraping.title": "스레드 스크래핑",
   "admin.threadScraping.description": "디버깅 및 최적화를 위해 민감한 내용이 삭제된(비식별화된) 스레드 및 실행 아티팩트를 수집합니다.",
   "admin.threadScraping.empty": "스크래핑할 수 있는 스레드가 없습니다.",
@@ -1171,20 +1148,6 @@ registerPack("ko", {
   "admin.user.secrets.deleting": "삭제 중…",
 
   // Admin — usage tab
-  "admin.usage.overview": "사용량 개요",
-  "admin.usage.noData": "이 기간에 대한 사용량 데이터가 없습니다.",
-  "admin.usage.totalCalls": "총 호출",
-  "admin.usage.inputTokens": "입력 토큰",
-  "admin.usage.outputTokens": "출력 토큰",
-  "admin.usage.totalCost": "총 비용",
-  "admin.usage.perUser": "사용자별",
-  "admin.usage.perModel": "모델별",
-  "admin.usage.user": "사용자",
-  "admin.usage.model": "모델",
-  "admin.usage.calls": "호출",
-  "admin.usage.input": "입력",
-  "admin.usage.output": "출력",
-  "admin.usage.cost": "비용",
 
   // Logs page
   "logs.levelAll": "모든 수준",

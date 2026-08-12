@@ -1047,31 +1047,10 @@ registerPack("zh-CN", {
   "pairing.connect": "点击通过去连接验证并校验这种配对工作",
 
   // Admin — tabs
-  "admin.tab.dashboard": "仪表盘",
   "admin.tab.users": "用户",
   "admin.tab.configuration": "配置",
-  "admin.tab.usage": "用量",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "系统概览",
-  "admin.dashboard.uptime": "运行时间：{value}",
-  "admin.dashboard.totalUsers": "用户总数",
-  "admin.dashboard.activeUsers": "活跃用户",
-  "admin.dashboard.suspended": "已停用",
-  "admin.dashboard.admins": "管理员",
-  "admin.dashboard.usage30d": "30 天用量",
-  "admin.dashboard.totalJobs": "任务总数",
-  "admin.dashboard.activeJobs": "进行中任务",
-  "admin.dashboard.llmCalls": "LLM 调用",
-  "admin.dashboard.totalCost": "总成本",
-  "admin.dashboard.recentUsers": "最近用户",
-  "admin.dashboard.viewAll": "查看全部",
-  "admin.dashboard.noUsers": "暂无用户。",
-  "admin.dashboard.name": "名称",
-  "admin.dashboard.role": "角色",
-  "admin.dashboard.status": "状态",
-  "admin.dashboard.jobs": "任务",
-  "admin.dashboard.lastActive": "最后活跃",
 
   // Admin — relative time
   "admin.relative.never": "从未",
@@ -1139,8 +1118,6 @@ registerPack("zh-CN", {
   "admin.user.roleManagement": "角色管理",
   "admin.user.currentRole": "当前角色",
   "admin.user.saveRole": "保存角色",
-  "admin.user.usage30Days": "用量（最近 30 天）",
-  "admin.user.noUsage": "暂无用量数据。",
   "admin.threadScraping.title": "线程抓取",
   "admin.threadScraping.description": "收集已脱敏（隐藏敏感内容）的线程和运行产物，用于调试和优化。",
   "admin.threadScraping.empty": "没有可用于抓取的线程。",
@@ -1170,20 +1147,6 @@ registerPack("zh-CN", {
   "admin.user.secrets.deleting": "正在删除…",
 
   // Admin — usage tab
-  "admin.usage.overview": "用量概览",
-  "admin.usage.noData": "该周期暂无用量数据。",
-  "admin.usage.totalCalls": "调用总数",
-  "admin.usage.inputTokens": "输入令牌",
-  "admin.usage.outputTokens": "输出令牌",
-  "admin.usage.totalCost": "总成本",
-  "admin.usage.perUser": "按用户拆分",
-  "admin.usage.perModel": "按模型拆分",
-  "admin.usage.user": "用户",
-  "admin.usage.model": "模型",
-  "admin.usage.calls": "调用",
-  "admin.usage.input": "输入",
-  "admin.usage.output": "输出",
-  "admin.usage.cost": "成本",
 
   // Logs page
   "logs.levelAll": "所有级别",

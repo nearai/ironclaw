@@ -1048,31 +1048,10 @@ registerPack("ar", {
   "pairing.connect": "اتصال",
 
   // Admin — tabs
-  "admin.tab.dashboard": "لوحة التحكم",
   "admin.tab.users": "المستخدمون",
   "admin.tab.configuration": "الإعدادات",
-  "admin.tab.usage": "الاستخدام",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "نظرة عامة على النظام",
-  "admin.dashboard.uptime": "مدة التشغيل: {value}",
-  "admin.dashboard.totalUsers": "إجمالي المستخدمين",
-  "admin.dashboard.activeUsers": "مستخدمون نشطون",
-  "admin.dashboard.suspended": "موقوفون",
-  "admin.dashboard.admins": "المسؤولون",
-  "admin.dashboard.usage30d": "استخدام 30 يومًا",
-  "admin.dashboard.totalJobs": "إجمالي المهام",
-  "admin.dashboard.activeJobs": "مهام نشطة",
-  "admin.dashboard.llmCalls": "استدعاءات LLM",
-  "admin.dashboard.totalCost": "إجمالي التكلفة",
-  "admin.dashboard.recentUsers": "مستخدمون حديثون",
-  "admin.dashboard.viewAll": "عرض الكل",
-  "admin.dashboard.noUsers": "لا يوجد مستخدمون بعد.",
-  "admin.dashboard.name": "الاسم",
-  "admin.dashboard.role": "الدور",
-  "admin.dashboard.status": "الحالة",
-  "admin.dashboard.jobs": "المهام",
-  "admin.dashboard.lastActive": "آخر نشاط",
 
   // Admin — relative time
   "admin.relative.never": "أبدًا",
@@ -1140,8 +1119,6 @@ registerPack("ar", {
   "admin.user.roleManagement": "إدارة الأدوار",
   "admin.user.currentRole": "الدور الحالي",
   "admin.user.saveRole": "حفظ الدور",
-  "admin.user.usage30Days": "الاستخدام (آخر 30 يومًا)",
-  "admin.user.noUsage": "لا توجد بيانات استخدام.",
   "admin.threadScraping.title": "استخراج سلاسل المحادثات",
   "admin.threadScraping.description": "اجمع عناصر سلاسل المحادثات وعمليات التشغيل المنقحة لأغراض تصحيح الأخطاء والتحسين.",
   "admin.threadScraping.empty": "لا توجد سلاسل محادثات متاحة للاستخراج.",
@@ -1171,20 +1148,6 @@ registerPack("ar", {
   "admin.user.secrets.deleting": "جارٍ الحذف…",
 
   // Admin — usage tab
-  "admin.usage.overview": "نظرة عامة على الاستخدام",
-  "admin.usage.noData": "لا توجد بيانات استخدام لهذه الفترة.",
-  "admin.usage.totalCalls": "إجمالي الاستدعاءات",
-  "admin.usage.inputTokens": "رموز الإدخال",
-  "admin.usage.outputTokens": "رموز الإخراج",
-  "admin.usage.totalCost": "إجمالي التكلفة",
-  "admin.usage.perUser": "حسب المستخدم",
-  "admin.usage.perModel": "حسب النموذج",
-  "admin.usage.user": "المستخدم",
-  "admin.usage.model": "النموذج",
-  "admin.usage.calls": "الاستدعاءات",
-  "admin.usage.input": "الإدخال",
-  "admin.usage.output": "الإخراج",
-  "admin.usage.cost": "التكلفة",
 
   // Logs page
   "logs.levelAll": "كل المستويات",

@@ -1048,31 +1048,10 @@ registerPack("hi", {
   "pairing.connect": "कनेक्ट",
 
   // Admin — tabs
-  "admin.tab.dashboard": "डैशबोर्ड",
   "admin.tab.users": "उपयोगकर्ता",
   "admin.tab.configuration": "कॉन्फ़िगरेशन",
-  "admin.tab.usage": "उपयोग",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "सिस्टम अवलोकन",
-  "admin.dashboard.uptime": "अपटाइम: {value}",
-  "admin.dashboard.totalUsers": "कुल उपयोगकर्ता",
-  "admin.dashboard.activeUsers": "सक्रिय उपयोगकर्ता",
-  "admin.dashboard.suspended": "निलंबित",
-  "admin.dashboard.admins": "व्यवस्थापक",
-  "admin.dashboard.usage30d": "30-दिन का उपयोग",
-  "admin.dashboard.totalJobs": "कुल नौकरियां",
-  "admin.dashboard.activeJobs": "सक्रिय नौकरियां",
-  "admin.dashboard.llmCalls": "एलएलएम कॉल",
-  "admin.dashboard.totalCost": "कुल लागत",
-  "admin.dashboard.recentUsers": "हाल के उपयोगकर्ता",
-  "admin.dashboard.viewAll": "सभी देखें",
-  "admin.dashboard.noUsers": "अभी तक कोई उपयोगकर्ता नहीं।",
-  "admin.dashboard.name": "नाम",
-  "admin.dashboard.role": "भूमिका",
-  "admin.dashboard.status": "स्थिति",
-  "admin.dashboard.jobs": "नौकरियाँ",
-  "admin.dashboard.lastActive": "अंतिम सक्रिय",
 
   // Admin — relative time
   "admin.relative.never": "कभी नहीं",
@@ -1140,8 +1119,6 @@ registerPack("hi", {
   "admin.user.roleManagement": "भूमिका प्रबंधन",
   "admin.user.currentRole": "वर्तमान भूमिका",
   "admin.user.saveRole": "भूमिका सहेजें",
-  "admin.user.usage30Days": "उपयोग (पिछले 30 दिन)",
-  "admin.user.noUsage": "कोई उपयोग डेटा नहीं।",
   "admin.threadScraping.title": "थ्रेड स्क्रैपिंग",
   "admin.threadScraping.description": "डिबगिंग और अनुकूलन के लिए संपादित थ्रेड और रन आर्टिफैक्ट एकत्र करें।",
   "admin.threadScraping.empty": "स्क्रैप करने के लिए कोई थ्रेड उपलब्ध नहीं है।",
@@ -1171,20 +1148,6 @@ registerPack("hi", {
   "admin.user.secrets.deleting": "हटाया जा रहा है…",
 
   // Admin — usage tab
-  "admin.usage.overview": "उपयोग अवलोकन",
-  "admin.usage.noData": "इस अवधि के लिए कोई उपयोग डेटा नहीं।",
-  "admin.usage.totalCalls": "कुल कॉल",
-  "admin.usage.inputTokens": "इनपुट टोकन",
-  "admin.usage.outputTokens": "आउटपुट टोकन",
-  "admin.usage.totalCost": "कुल लागत",
-  "admin.usage.perUser": "प्रति-उपयोगकर्ता ब्रेकडाउन",
-  "admin.usage.perModel": "प्रति-मॉडल ब्रेकडाउन",
-  "admin.usage.user": "उपयोगकर्ता",
-  "admin.usage.model": "मॉडल",
-  "admin.usage.calls": "कॉल",
-  "admin.usage.input": "इनपुट",
-  "admin.usage.output": "आउटपुट",
-  "admin.usage.cost": "लागत",
 
   // Logs page
   "logs.levelAll": "सभी स्तर",

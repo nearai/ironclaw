@@ -1048,31 +1048,10 @@ registerPack("uk", {
   "pairing.connect": "Підключитися",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Панель",
   "admin.tab.users": "Користувачі",
   "admin.tab.configuration": "Конфігурація",
-  "admin.tab.usage": "Використання",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "Огляд системи",
-  "admin.dashboard.uptime": "Час роботи: {value}",
-  "admin.dashboard.totalUsers": "Усього користувачів",
-  "admin.dashboard.activeUsers": "Активні користувачі",
-  "admin.dashboard.suspended": "Призупинені",
-  "admin.dashboard.admins": "Адміни",
-  "admin.dashboard.usage30d": "Використання за 30 днів",
-  "admin.dashboard.totalJobs": "Усього завдань",
-  "admin.dashboard.activeJobs": "Активні завдання",
-  "admin.dashboard.llmCalls": "Виклики LLM",
-  "admin.dashboard.totalCost": "Загальна вартість",
-  "admin.dashboard.recentUsers": "Нещодавні користувачі",
-  "admin.dashboard.viewAll": "Показати всі",
-  "admin.dashboard.noUsers": "Поки що немає користувачів.",
-  "admin.dashboard.name": "Ім’я",
-  "admin.dashboard.role": "Роль",
-  "admin.dashboard.status": "Статус",
-  "admin.dashboard.jobs": "Завдання",
-  "admin.dashboard.lastActive": "Остання активність",
 
   // Admin — relative time
   "admin.relative.never": "Ніколи",
@@ -1140,8 +1119,6 @@ registerPack("uk", {
   "admin.user.roleManagement": "Керування ролями",
   "admin.user.currentRole": "Поточна роль",
   "admin.user.saveRole": "Зберегти роль",
-  "admin.user.usage30Days": "Використання (останні 30 днів)",
-  "admin.user.noUsage": "Немає даних використання.",
   "admin.threadScraping.title": "Збір даних ниток",
   "admin.threadScraping.description": "Збирайте артефакти ниток і запусків із видаленими (прихованими) конфіденційними даними для налагодження та оптимізації.",
   "admin.threadScraping.empty": "Немає ниток, доступних для збору.",
@@ -1171,20 +1148,6 @@ registerPack("uk", {
   "admin.user.secrets.deleting": "Видалення…",
 
   // Admin — usage tab
-  "admin.usage.overview": "Огляд використання",
-  "admin.usage.noData": "Немає даних використання для цього періоду.",
-  "admin.usage.totalCalls": "Усього викликів",
-  "admin.usage.inputTokens": "Вхідні токени",
-  "admin.usage.outputTokens": "Вихідні токени",
-  "admin.usage.totalCost": "Загальна вартість",
-  "admin.usage.perUser": "Розподіл по користувачах",
-  "admin.usage.perModel": "Розподіл по моделях",
-  "admin.usage.user": "Користувач",
-  "admin.usage.model": "Модель",
-  "admin.usage.calls": "Виклики",
-  "admin.usage.input": "Вхід",
-  "admin.usage.output": "Вихід",
-  "admin.usage.cost": "Вартість",
 
   // Logs page
   "logs.levelAll": "Усі рівні",

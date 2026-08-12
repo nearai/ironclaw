@@ -1,8 +1,20 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../../test-support/vm-module-harness";
+
+test("admin production code does not expose placeholder usage analytics", () => {
+  const apiSource = readFileSync(new URL("./lib/admin-api.ts", import.meta.url), "utf8");
+  const userDetailSource = readFileSync(
+    new URL("./components/user-detail.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(apiSource, /fetchUsageSummary|fetchUsage/);
+  assert.doesNotMatch(userDetailSource, /useUsage|admin\.usage\./);
+});
 
 function visit(node, fn) {
   if (Array.isArray(node)) {

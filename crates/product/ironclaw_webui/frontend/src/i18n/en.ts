@@ -1149,31 +1149,10 @@ registerPack("en", {
   "pairing.connect": "Connect",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Dashboard",
   "admin.tab.users": "Users",
   "admin.tab.configuration": "Configuration",
-  "admin.tab.usage": "Usage",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "System overview",
-  "admin.dashboard.uptime": "Uptime: {value}",
-  "admin.dashboard.totalUsers": "Total users",
-  "admin.dashboard.activeUsers": "Active users",
-  "admin.dashboard.suspended": "Suspended",
-  "admin.dashboard.admins": "Admins",
-  "admin.dashboard.usage30d": "30-day usage",
-  "admin.dashboard.totalJobs": "Total jobs",
-  "admin.dashboard.activeJobs": "Active jobs",
-  "admin.dashboard.llmCalls": "LLM calls",
-  "admin.dashboard.totalCost": "Total cost",
-  "admin.dashboard.recentUsers": "Recent users",
-  "admin.dashboard.viewAll": "View all",
-  "admin.dashboard.noUsers": "No users yet.",
-  "admin.dashboard.name": "Name",
-  "admin.dashboard.role": "Role",
-  "admin.dashboard.status": "Status",
-  "admin.dashboard.jobs": "Jobs",
-  "admin.dashboard.lastActive": "Last active",
 
   // Admin — relative time
   "admin.relative.never": "Never",
@@ -1246,8 +1225,6 @@ registerPack("en", {
   "admin.user.roleManagement": "Role management",
   "admin.user.currentRole": "Current role",
   "admin.user.saveRole": "Save role",
-  "admin.user.usage30Days": "Usage (last 30 days)",
-  "admin.user.noUsage": "No usage data.",
   "admin.threadScraping.title": "Thread scraping",
   "admin.threadScraping.description": "Collect redacted thread and run artifacts for debugging and optimization.",
   "admin.threadScraping.empty": "No threads available for scraping.",
@@ -1277,20 +1254,6 @@ registerPack("en", {
   "admin.user.secrets.deleting": "Deleting…",
 
   // Admin — usage tab
-  "admin.usage.overview": "Usage overview",
-  "admin.usage.noData": "No usage data for this period.",
-  "admin.usage.totalCalls": "Total calls",
-  "admin.usage.inputTokens": "Input tokens",
-  "admin.usage.outputTokens": "Output tokens",
-  "admin.usage.totalCost": "Total cost",
-  "admin.usage.perUser": "Per-user breakdown",
-  "admin.usage.perModel": "Per-model breakdown",
-  "admin.usage.user": "User",
-  "admin.usage.model": "Model",
-  "admin.usage.calls": "Calls",
-  "admin.usage.input": "Input",
-  "admin.usage.output": "Output",
-  "admin.usage.cost": "Cost",
 
   // Logs page
   "logs.levelAll": "All levels",

@@ -1048,31 +1048,10 @@ registerPack("es", {
   "pairing.connect": "Conectar",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Panel de control",
   "admin.tab.users": "Usuarios",
   "admin.tab.configuration": "Configuración",
-  "admin.tab.usage": "Uso",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "Resumen del sistema",
-  "admin.dashboard.uptime": "Tiempo activo: {value}",
-  "admin.dashboard.totalUsers": "Usuarios totales",
-  "admin.dashboard.activeUsers": "Usuarios activos",
-  "admin.dashboard.suspended": "Suspendidos",
-  "admin.dashboard.admins": "Administradores",
-  "admin.dashboard.usage30d": "Uso 30 días",
-  "admin.dashboard.totalJobs": "Trabajos totales",
-  "admin.dashboard.activeJobs": "Trabajos activos",
-  "admin.dashboard.llmCalls": "Llamadas LLM",
-  "admin.dashboard.totalCost": "Coste total",
-  "admin.dashboard.recentUsers": "Usuarios recientes",
-  "admin.dashboard.viewAll": "Ver todo",
-  "admin.dashboard.noUsers": "Aún no hay usuarios.",
-  "admin.dashboard.name": "Nombre",
-  "admin.dashboard.role": "Rol",
-  "admin.dashboard.status": "Estado",
-  "admin.dashboard.jobs": "Trabajos",
-  "admin.dashboard.lastActive": "Última actividad",
 
   // Admin — relative time
   "admin.relative.never": "Nunca",
@@ -1141,8 +1120,6 @@ registerPack("es", {
   "admin.user.roleManagement": "Gestión de roles",
   "admin.user.currentRole": "Rol actual",
   "admin.user.saveRole": "Guardar rol",
-  "admin.user.usage30Days": "Uso (últimos 30 días)",
-  "admin.user.noUsage": "Sin datos de uso.",
   "admin.threadScraping.title": "Recopilación de hilos",
   "admin.threadScraping.description": "Recopila artefactos redactados de hilos y ejecuciones para depuración y optimización.",
   "admin.threadScraping.empty": "No hay hilos disponibles para recopilar.",
@@ -1172,20 +1149,6 @@ registerPack("es", {
   "admin.user.secrets.deleting": "Eliminando…",
 
   // Admin — usage tab
-  "admin.usage.overview": "Resumen de uso",
-  "admin.usage.noData": "No hay datos de uso para este período.",
-  "admin.usage.totalCalls": "Llamadas totales",
-  "admin.usage.inputTokens": "Tokens de entrada",
-  "admin.usage.outputTokens": "Tokens de salida",
-  "admin.usage.totalCost": "Coste total",
-  "admin.usage.perUser": "Por usuario",
-  "admin.usage.perModel": "Por modelo",
-  "admin.usage.user": "Usuario",
-  "admin.usage.model": "Modelo",
-  "admin.usage.calls": "Llamadas",
-  "admin.usage.input": "Entrada",
-  "admin.usage.output": "Salida",
-  "admin.usage.cost": "Coste",
 
   // Logs page
   "logs.levelAll": "Todos los niveles",

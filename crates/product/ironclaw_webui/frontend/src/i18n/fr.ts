@@ -1048,31 +1048,10 @@ registerPack("fr", {
   "pairing.connect": "Connectez-vous",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Tableau de bord",
   "admin.tab.users": "Utilisateurs",
   "admin.tab.configuration": "Configuration",
-  "admin.tab.usage": "Utilisation",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "Aperçu du système",
-  "admin.dashboard.uptime": "Uptime : {value}",
-  "admin.dashboard.totalUsers": "Utilisateurs totaux",
-  "admin.dashboard.activeUsers": "Utilisateurs actifs",
-  "admin.dashboard.suspended": "Suspendus",
-  "admin.dashboard.admins": "Administrateurs",
-  "admin.dashboard.usage30d": "Usage sur 30 jours",
-  "admin.dashboard.totalJobs": "Jobs totaux",
-  "admin.dashboard.activeJobs": "Jobs actifs",
-  "admin.dashboard.llmCalls": "Appels LLM",
-  "admin.dashboard.totalCost": "Coût total",
-  "admin.dashboard.recentUsers": "Utilisateurs récents",
-  "admin.dashboard.viewAll": "Voir tout",
-  "admin.dashboard.noUsers": "Aucun utilisateur pour le moment.",
-  "admin.dashboard.name": "Nom",
-  "admin.dashboard.role": "Rôle",
-  "admin.dashboard.status": "Statut",
-  "admin.dashboard.jobs": "Emplois",
-  "admin.dashboard.lastActive": "Dernière activité",
 
   // Admin — relative time
   "admin.relative.never": "Jamais",
@@ -1140,8 +1119,6 @@ registerPack("fr", {
   "admin.user.roleManagement": "Gestion des rôles",
   "admin.user.currentRole": "Rôle actuel",
   "admin.user.saveRole": "Enregistrer le rôle",
-  "admin.user.usage30Days": "Usage (30 derniers jours)",
-  "admin.user.noUsage": "Aucune donnée d’usage.",
   "admin.threadScraping.title": "Extraction de conversations",
   "admin.threadScraping.description": "Collectez des artefacts expurgés de conversations et d'exécutions pour le débogage et l'optimisation.",
   "admin.threadScraping.empty": "Aucune conversation disponible à extraire.",
@@ -1171,20 +1148,6 @@ registerPack("fr", {
   "admin.user.secrets.deleting": "Suppression…",
 
   // Admin — usage tab
-  "admin.usage.overview": "Aperçu d’usage",
-  "admin.usage.noData": "Aucune donnée d’usage pour cette période.",
-  "admin.usage.totalCalls": "Appels totaux",
-  "admin.usage.inputTokens": "Tokens d’entrée",
-  "admin.usage.outputTokens": "Tokens de sortie",
-  "admin.usage.totalCost": "Coût total",
-  "admin.usage.perUser": "Par utilisateur",
-  "admin.usage.perModel": "Par modèle",
-  "admin.usage.user": "Utilisateur",
-  "admin.usage.model": "Modèle",
-  "admin.usage.calls": "Appels",
-  "admin.usage.input": "Entrée",
-  "admin.usage.output": "Sortie",
-  "admin.usage.cost": "Coût",
 
   // Logs page
   "logs.levelAll": "Tous les niveaux",

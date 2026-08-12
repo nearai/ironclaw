@@ -1048,31 +1048,10 @@ registerPack("pt-BR", {
   "pairing.connect": "Conectar",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Painel",
   "admin.tab.users": "Usuários",
   "admin.tab.configuration": "Configuração",
-  "admin.tab.usage": "Uso",
 
   // Admin — dashboard
-  "admin.dashboard.systemOverview": "Visão geral do sistema",
-  "admin.dashboard.uptime": "Tempo de atividade: {value}",
-  "admin.dashboard.totalUsers": "Total de usuários",
-  "admin.dashboard.activeUsers": "Usuários ativos",
-  "admin.dashboard.suspended": "Suspensos",
-  "admin.dashboard.admins": "Administradores",
-  "admin.dashboard.usage30d": "Uso em 30 dias",
-  "admin.dashboard.totalJobs": "Total de jobs",
-  "admin.dashboard.activeJobs": "Jobs ativos",
-  "admin.dashboard.llmCalls": "Chamadas de LLM",
-  "admin.dashboard.totalCost": "Custo total",
-  "admin.dashboard.recentUsers": "Usuários recentes",
-  "admin.dashboard.viewAll": "Ver todos",
-  "admin.dashboard.noUsers": "Ainda não há usuários.",
-  "admin.dashboard.name": "Nome",
-  "admin.dashboard.role": "Função",
-  "admin.dashboard.status": "Status",
-  "admin.dashboard.jobs": "Trabalhos",
-  "admin.dashboard.lastActive": "Última atividade",
 
   // Admin — relative time
   "admin.relative.never": "Nunca",
@@ -1140,8 +1119,6 @@ registerPack("pt-BR", {
   "admin.user.roleManagement": "Gerenciamento de função",
   "admin.user.currentRole": "Função atual",
   "admin.user.saveRole": "Salvar função",
-  "admin.user.usage30Days": "Uso (últimos 30 dias)",
-  "admin.user.noUsage": "Sem dados de uso.",
   "admin.threadScraping.title": "Extração de conversas",
   "admin.threadScraping.description": "Colete artefatos de conversas e execuções com conteúdo confidencial removido (ocultado) para depuração e otimização.",
   "admin.threadScraping.empty": "Nenhuma conversa disponível para extração.",
@@ -1171,20 +1148,6 @@ registerPack("pt-BR", {
   "admin.user.secrets.deleting": "Excluindo…",
 
   // Admin — usage tab
-  "admin.usage.overview": "Visão geral de uso",
-  "admin.usage.noData": "Sem dados de uso para este período.",
-  "admin.usage.totalCalls": "Chamadas totais",
-  "admin.usage.inputTokens": "Tokens de entrada",
-  "admin.usage.outputTokens": "Tokens de saída",
-  "admin.usage.totalCost": "Custo total",
-  "admin.usage.perUser": "Por usuário",
-  "admin.usage.perModel": "Por modelo",
-  "admin.usage.user": "Usuário",
-  "admin.usage.model": "Modelo",
-  "admin.usage.calls": "Chamadas",
-  "admin.usage.input": "Entrada",
-  "admin.usage.output": "Saída",
-  "admin.usage.cost": "Custo",
 
   // Logs page
   "logs.levelAll": "Todos os niveis",
