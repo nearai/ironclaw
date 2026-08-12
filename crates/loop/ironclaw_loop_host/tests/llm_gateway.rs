@@ -908,56 +908,6 @@ async fn gateway_allows_unadvertised_tool_call_when_capability_port_resolves_it(
 }
 
 #[tokio::test]
-async fn gateway_suppresses_tool_calls_when_user_names_unavailable_capability() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_shell".to_string(),
-        name: "builtin_shell".to_string(),
-        arguments: serde_json::json!({
-            "command": "echo \"disabled-test\"",
-            "workdir": "/workspace"
-        }),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
-    let gateway = LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        provider.clone(),
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    );
-    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
-    let mut request = model_request(interactive_model());
-    request.messages[1].content = "Use builtin.echo to print:\ndisabled-test".to_string();
-
-    let response = gateway
-        .stream_model_with_capabilities(request, capabilities.clone())
-        .await
-        .unwrap();
-
-    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
-    assert!(
-        capabilities.registered.lock().unwrap().is_empty(),
-        "suppressed substitute tool call must not be registered as a capability activity"
-    );
-    let ParentLoopOutput::AssistantReply(reply) = response.output else {
-        panic!("expected assistant reply");
-    };
-    assert!(
-        reply.content.contains("unavailable or disabled"),
-        "expected unavailable capability reply, got {:?}",
-        reply.content
-    );
-    assert!(
-        reply
-            .content
-            .contains("will not route it through another tool"),
-        "expected no-workaround reply, got {:?}",
-        reply.content
-    );
-}
-
-#[tokio::test]
 async fn gateway_allows_policy_filtered_discovery_for_named_deferred_capability() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_search".to_string(),
@@ -1038,7 +988,7 @@ async fn gateway_allows_prerequisite_and_discovery_for_named_deferred_capability
 }
 
 #[tokio::test]
-async fn gateway_suppresses_substitute_when_later_named_capability_is_unavailable() {
+async fn gateway_allows_valid_call_when_user_also_names_unavailable_capability() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_substitute".to_string(),
         name: "demo__echo".to_string(),
@@ -1063,11 +1013,12 @@ async fn gateway_suppresses_substitute_when_later_named_capability_is_unavailabl
         .await
         .unwrap();
 
-    assert!(capabilities.registered.lock().unwrap().is_empty());
-    let ParentLoopOutput::AssistantReply(reply) = response.output else {
-        panic!("expected unavailable capability reply");
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected valid capability call");
     };
-    assert!(reply.content.contains("unavailable or disabled"));
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].capability_id.as_str(), "demo.echo");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1146,84 +1097,6 @@ async fn gateway_allows_describe_and_wrapped_exact_deferred_capability() {
     };
     assert_eq!(calls.len(), 2);
     assert_eq!(capabilities.registered.lock().unwrap().len(), 2);
-}
-
-#[tokio::test]
-async fn gateway_suppresses_wrapped_unrelated_deferred_capability() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_wrapped".to_string(),
-        name: "tool_call".to_string(),
-        arguments: serde_json::json!({
-            "name": "demo__other",
-            "arguments": "{}",
-        }),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
-    let gateway = LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        provider,
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    );
-    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
-    let mut request = model_request(interactive_model());
-    request.messages[1].content = "Use the demo.hidden capability.".to_string();
-
-    let response = gateway
-        .stream_model_with_capabilities(request, capabilities.clone())
-        .await
-        .unwrap();
-
-    assert!(capabilities.registered.lock().unwrap().is_empty());
-    assert!(matches!(
-        response.output,
-        ParentLoopOutput::AssistantReply(_)
-    ));
-}
-
-#[tokio::test]
-async fn gateway_suppresses_tool_calls_when_user_names_unavailable_hidden_namespace_capability() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_shell".to_string(),
-        name: "builtin_shell".to_string(),
-        arguments: serde_json::json!({
-            "command": "echo \"gmail workaround\"",
-            "workdir": "/workspace"
-        }),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
-    let gateway = LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        provider.clone(),
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    );
-    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
-    let mut request = model_request(interactive_model());
-    request.messages[1].content = "Use gmail.send to email the report".to_string();
-
-    let response = gateway
-        .stream_model_with_capabilities(request, capabilities.clone())
-        .await
-        .unwrap();
-
-    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
-    assert!(
-        capabilities.registered.lock().unwrap().is_empty(),
-        "suppressed substitute tool call must not be registered as a capability activity"
-    );
-    let ParentLoopOutput::AssistantReply(reply) = response.output else {
-        panic!("expected assistant reply");
-    };
-    assert!(
-        reply.content.contains("unavailable or disabled"),
-        "expected unavailable capability reply, got {:?}",
-        reply.content
-    );
 }
 
 #[tokio::test]
@@ -1448,40 +1321,82 @@ async fn gateway_preserves_structured_tool_calls_when_content_has_legacy_marker(
 }
 
 #[tokio::test]
-async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
-        ToolCall {
-            id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
-            arguments: serde_json::json!({"message":"one"}),
+async fn gateway_repairs_unknown_provider_tool_call_before_registration() {
+    let provider = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        ToolCompletionResponse {
+            content: None,
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "demo__echo".to_string(),
+                    arguments: serde_json::json!({"message":"one"}),
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "hidden__tool".to_string(),
+                    arguments: serde_json::json!({"message":"two"}),
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                },
+            ],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
+            reasoning_details: None,
         },
-        ToolCall {
-            id: "call_2".to_string(),
-            name: "hidden__tool".to_string(),
-            arguments: serde_json::json!({"message":"two"}),
+        ToolCompletionResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_retry".to_string(),
+                name: "demo__echo".to_string(),
+                arguments: serde_json::json!({"message":"recovered"}),
+                reasoning: None,
+                signature: None,
+                arguments_parse_error: None,
+            }],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
+            reasoning_details: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
-        provider,
+        provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
     let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
 
-    let error = gateway
+    let response = gateway
         .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
-    assert!(capabilities.registered.lock().unwrap().is_empty());
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected repaired capability call");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].capability_id.as_str(), "demo.echo");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+    let requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == Role::Tool
+            && message
+                .content
+                .contains("outside the advertised capability surface")
+    }));
 }
 
 #[tokio::test]
