@@ -81,9 +81,7 @@ fn slack_error_to_standard_code(code: &str) -> &'static str {
         }
         // The recipient exists and is reachable in principle, but Slack will
         // not open free-form messaging to them.
-        "cannot_dm_bot" | "user_disabled" | "user_not_visible" => {
-            "messaging.cannot_message_user"
-        }
+        "cannot_dm_bot" | "user_disabled" | "user_not_visible" => "messaging.cannot_message_user",
         // `invalid_name` is Slack rejecting an emoji token it cannot render
         // (unknown short name, or a unicode character where a name belongs).
         "invalid_name" | "invalid_name_specials" | "no_item_specified" => {
@@ -157,6 +155,17 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The pagination cursor of a Slack list-shaped response. Slack signals
+/// "no more pages" with an EMPTY `response_metadata.next_cursor`, so an
+/// empty cursor becomes `None` here — every paging operation shares this
+/// one reading of that contract.
+fn next_cursor_from_response(parsed: &serde_json::Value) -> Option<String> {
+    parsed["response_metadata"]["next_cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| cursor.to_string())
 }
 
 /// One Slack API failure, before taxonomy mapping. Kept distinct from the
@@ -690,11 +699,7 @@ pub fn list_conversations(
         }
     }
 
-    // Slack signals "no more pages" with an empty next_cursor.
-    let next_cursor = parsed["response_metadata"]["next_cursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| cursor.to_string());
+    let next_cursor = next_cursor_from_response(&parsed);
 
     Ok(ListConversationsResult {
         conversations,
@@ -812,11 +817,7 @@ fn enriched_history_result(
     let mut messages = history_messages_from_response(conversation, parsed);
     enrich_messages(&mut messages);
 
-    // Slack signals "no more pages" with an empty next_cursor.
-    let next_cursor = parsed["response_metadata"]["next_cursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| cursor.to_string());
+    let next_cursor = next_cursor_from_response(parsed);
 
     ConversationHistoryResult {
         messages,
@@ -1287,8 +1288,13 @@ fn remove_one_reaction(message_ref: &MessageRefInput, name: &str) -> Result<(), 
 /// someone else's reaction is the failure this guards against.
 fn own_reaction_names(message_ref: &MessageRefInput) -> Result<Vec<String>, String> {
     let (current_user_id, _team_id) = auth_test()?;
+    // `full=true` is load-bearing: without it Slack truncates each
+    // reaction's `users` array on popular messages, and a truncated list
+    // that omits the connected account would make the ownership filter
+    // below silently skip a reaction that IS ours — a false "all removed"
+    // success.
     let url = format!(
-        "reactions.get?channel={}&timestamp={}",
+        "reactions.get?channel={}&timestamp={}&full=true",
         url_encode(&message_ref.conversation),
         url_encode(&message_ref.message_id)
     );
@@ -1373,6 +1379,14 @@ pub fn remove_reaction(
 /// Slack returns the existing DM when one is already open, so this is safe to
 /// call repeatedly and never creates a duplicate conversation.
 pub fn open_dm(user_ref: &str) -> Result<OpenDmResult, String> {
+    // Slack's `users` field takes a comma-separated LIST: two ids would
+    // silently open a multi-person group DM while every contract layer
+    // promises the 1:1 DM with one person. Requiring a single well-formed
+    // user id here (commas and lowercase both fail the check) keeps that
+    // promise instead of delegating it to the model's good behavior.
+    if !is_slack_user_id(user_ref) {
+        return Err(structured_error("messaging.unknown_user", "input"));
+    }
     let payload = serde_json::to_string(&serde_json::json!({ "users": user_ref }))
         .map_err(|e| e.to_string())?;
 
@@ -1428,9 +1442,19 @@ pub fn get_message(message_ref: &MessageRefInput) -> Result<GetMessageResult, St
         // that is this ref not resolving, which the taxonomy already calls
         // `unknown_message` — fall through to the shared miss below rather
         // than surfacing it as a distinct failure.
+        //
+        // `oldest=latest=ts&inclusive=true` pinches the range to exactly the
+        // target timestamp, so the page holds the target (plus at most the
+        // quirk where Slack prepends the thread parent to a first page) no
+        // matter how deep in the thread it sits and regardless of the
+        // endpoint's sort order — where a bare `limit=N` page starts at one
+        // end of the thread and misses anything past N. `limit=5` is quirk
+        // headroom, not a scan.
         let replies_url = format!(
-            "conversations.replies?channel={}&ts={}&limit=999",
+            "conversations.replies?channel={}&ts={}&oldest={}&latest={}&inclusive=true&limit=5",
             url_encode(conversation),
+            url_encode(target_ts),
+            url_encode(target_ts),
             url_encode(target_ts)
         );
         match slack_api_call_raw("GET", &replies_url, None) {
@@ -1447,15 +1471,22 @@ pub fn get_message(message_ref: &MessageRefInput) -> Result<GetMessageResult, St
     let mut messages = vec![message];
     enrich_messages(&mut messages);
     let Some(message) = messages.pop() else {
-        return Err(structured_taxonomy_error("message_enrichment_dropped_message"));
+        return Err(structured_taxonomy_error(
+            "message_enrichment_dropped_message",
+        ));
     };
 
     Ok(GetMessageResult { message })
 }
 
-/// One `users.list` page is scanned per `resolve_user` call. Slack's
-/// recommended page size; the canonical `limit` bounds MATCHES returned, not
-/// directory entries read, so the two are deliberately separate numbers.
+/// The largest `users.list` page one `resolve_user` call scans, and the
+/// default when the caller names no `limit` (Slack's recommended page size).
+///
+/// The requested page size and the match cap are deliberately the SAME
+/// number: Slack cursors resume at page granularity only, so a call that
+/// stopped collecting matches mid-page would return a `next_cursor` that
+/// skips the rest of that page — matches the caller can never reach. Scanning
+/// exactly `limit` entries per call keeps every cursor loss-free.
 const RESOLVE_USER_SCAN_PAGE: u32 = 200;
 
 /// One `users.list` member as a canonical person, when it is an eligible
@@ -1511,26 +1542,40 @@ fn member_ids_from_response(parsed: &serde_json::Value) -> Vec<String> {
 /// locally against display name, real name, and handle. `next_cursor` walks
 /// the directory onward, so a caller that has not found their person yet
 /// keeps paging. Deactivated accounts and bots are skipped.
+///
+/// The scanned page IS `limit` entries long (see [`RESOLVE_USER_SCAN_PAGE`]):
+/// every entry fetched is scanned before the cursor is reported, so
+/// `next_cursor` never points past a match this call withheld.
 pub fn resolve_user(
     query: &str,
     limit: Option<u32>,
     cursor: Option<&str>,
 ) -> Result<ResolveUserResult, String> {
-    let limit = limit.unwrap_or(20).clamp(1, 200) as usize;
+    let limit = limit
+        .unwrap_or(RESOLVE_USER_SCAN_PAGE)
+        .clamp(1, RESOLVE_USER_SCAN_PAGE);
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Err(structured_error("messaging.unsupported_content", "input"));
     }
 
-    let mut url = format!("users.list?limit={RESOLVE_USER_SCAN_PAGE}");
+    let mut url = format!("users.list?limit={limit}");
     if let Some(cursor) = cursor {
         url.push_str(&format!("&cursor={}", url_encode(cursor)));
     }
     let parsed = slack_api_call("GET", &url, None)?;
 
     let mut matches = Vec::new();
-    for member in parsed["members"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
-        if matches.len() >= limit {
+    for member in parsed["members"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        // With page == limit this cap can only trigger if Slack overshoots
+        // the requested page size; it preserves the "at most `limit`
+        // matches" contract without ever stopping mid-scan on a well-formed
+        // page.
+        if matches.len() >= limit as usize {
             break;
         }
         if let Some(person) = matching_person_from_member(member, &needle) {
@@ -1538,11 +1583,7 @@ pub fn resolve_user(
         }
     }
 
-    // Slack signals "no more pages" with an empty next_cursor.
-    let next_cursor = parsed["response_metadata"]["next_cursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| cursor.to_string());
+    let next_cursor = next_cursor_from_response(&parsed);
 
     Ok(ResolveUserResult {
         matches,
@@ -1590,11 +1631,7 @@ pub fn list_members(
         })
         .collect();
 
-    // Slack signals "no more pages" with an empty next_cursor.
-    let next_cursor = parsed["response_metadata"]["next_cursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| cursor.to_string());
+    let next_cursor = next_cursor_from_response(&parsed);
 
     Ok(ListMembersResult {
         members,
@@ -1841,7 +1878,12 @@ mod tests {
         };
         let none = serde_json::json!({});
 
-        for needle in ["alice", "ALICE".to_lowercase().as_str(), "q. example", "ahandle"] {
+        for needle in [
+            "alice",
+            "ALICE".to_lowercase().as_str(),
+            "q. example",
+            "ahandle",
+        ] {
             assert!(
                 matching_person_from_member(&member(none.clone()), needle).is_some(),
                 "{needle} should match"

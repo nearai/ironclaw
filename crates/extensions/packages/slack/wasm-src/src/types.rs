@@ -217,7 +217,9 @@ pub enum SlackUserAction {
     ResolveUser {
         /// Text matched against display name, real name, and handle.
         query: String,
-        /// Maximum matches to return (default: 20, max: 200).
+        /// Maximum matches to return AND the number of directory entries
+        /// scanned this call (default and max: 200, one full page) — the two
+        /// are the same number so `next_cursor` never skips a withheld match.
         #[serde(default)]
         limit: Option<u32>,
         /// Opaque pagination cursor from a previous call's `next_cursor`.
@@ -503,9 +505,8 @@ mod tests {
         ] {
             // `text`/`emoji` are supplied so only the ref is under test; the
             // ops that ignore the extra key still deserialize.
-            let with_ref = format!(
-                r#"{{"action":"{op}","message_ref":{REF},"text":"x","emoji":"thumbsup"}}"#
-            );
+            let with_ref =
+                format!(r#"{{"action":"{op}","message_ref":{REF},"text":"x","emoji":"thumbsup"}}"#);
             assert!(action(&with_ref).is_ok(), "{op} must accept a full ref");
 
             let missing = format!(r#"{{"action":"{op}","text":"x","emoji":"thumbsup"}}"#);
@@ -525,20 +526,22 @@ mod tests {
     fn reaction_ops_differ_on_whether_emoji_is_required() {
         // add_reaction names the emoji it applies; remove_reaction may omit
         // it to mean "every reaction I added" (canonical schema §4.1).
-        assert!(action(&format!(r#"{{"action":"add_reaction","message_ref":{REF}}}"#)).is_err());
-        assert!(
-            action(&format!(
-                r#"{{"action":"add_reaction","message_ref":{REF},"emoji":"thumbsup"}}"#
-            ))
-            .is_ok()
-        );
-        assert!(action(&format!(r#"{{"action":"remove_reaction","message_ref":{REF}}}"#)).is_ok());
-        assert!(
-            action(&format!(
-                r#"{{"action":"remove_reaction","message_ref":{REF},"emoji":"thumbsup"}}"#
-            ))
-            .is_ok()
-        );
+        assert!(action(&format!(
+            r#"{{"action":"add_reaction","message_ref":{REF}}}"#
+        ))
+        .is_err());
+        assert!(action(&format!(
+            r#"{{"action":"add_reaction","message_ref":{REF},"emoji":"thumbsup"}}"#
+        ))
+        .is_ok());
+        assert!(action(&format!(
+            r#"{{"action":"remove_reaction","message_ref":{REF}}}"#
+        ))
+        .is_ok());
+        assert!(action(&format!(
+            r#"{{"action":"remove_reaction","message_ref":{REF},"emoji":"thumbsup"}}"#
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -675,7 +678,10 @@ mod tests {
             next_cursor: Some("dXNlcjpVMDYxTkZUVDI=".to_string()),
         });
         assert_eq!(listed["members"], expected);
-        assert_eq!(listed["next_cursor"], serde_json::json!("dXNlcjpVMDYxTkZUVDI="));
+        assert_eq!(
+            listed["next_cursor"],
+            serde_json::json!("dXNlcjpVMDYxTkZUVDI=")
+        );
     }
 
     /// `get_message` wraps the shared message shape under a `message` key

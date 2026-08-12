@@ -177,18 +177,12 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackUserAction::AddReaction {
-            message_ref,
-            emoji,
-        } => {
+        SlackUserAction::AddReaction { message_ref, emoji } => {
             let result = api::add_reaction(&message_ref, &emoji)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackUserAction::RemoveReaction {
-            message_ref,
-            emoji,
-        } => {
+        SlackUserAction::RemoveReaction { message_ref, emoji } => {
             let result = api::remove_reaction(&message_ref, emoji.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }

@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v3"
 id = "slack"
 name = "Slack"
 version = "0.1.0"
-description = "Slack: DM the assistant via the Slack Events API channel (workspace bot), and act as you via your own user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you."
+description = "Slack: DM the assistant via the Slack Events API channel (workspace bot), and act as you via your own user token (xoxp-): search and read all your messages, post, edit, delete, and react as you, open DMs, and look up people in your workspace."
 trust = "first_party_requested"
 
 [runtime]
@@ -41,14 +41,21 @@ fields = [
 # scope-upgrade re-consent flow — tracked separately.
 #
 # The union grew when the remaining eight core standard ops landed:
-# reactions:read, reactions:write, and im:write are the new members. There is
-# no scope-upgrade re-consent flow today, so an account connected before that
-# change holds a token without them, and Slack answers those three tools with
-# missing_scope — which slack_error_to_standard_code maps to
-# messaging.permission_denied, a model-visible denial, NOT an AuthRequired
-# re-auth gate (a restart would request the same manifest scopes and change
-# nothing). Widening an existing grant means disconnecting and reconnecting
-# Slack; every other tool keeps working untouched in the meantime.
+# reactions:read, reactions:write, and im:write are the new members. An
+# account connected before that change holds a token without them, and the
+# HOST's credential staging — not Slack — is what answers those three tools:
+# runtime account selection requires the stored grant to carry each tool's
+# scopes (`runtime_selection_still_enforces_provider_scope_gate` in
+# ironclaw_auth), so the pre-widening account resolves to the AuthRequired
+# re-auth gate. Reconnecting through that gate requests THIS manifest's
+# widened union and updates the same account in place (OAuth binding
+# deliberately skips the scope gate), after which all sixteen tools work.
+# Slack's own missing_scope answer still exists for server-side drift on an
+# account that PASSED staging (a scope revoked after connect); the guest maps
+# that to messaging.permission_denied — a model-visible denial, not a re-auth
+# loop, because re-running OAuth would re-request exactly what the account
+# already claims to hold. Every pre-widening READ tool keeps working
+# untouched in the meantime.
 
 # ---- tool surfaces ---------------------------------------------------------
 
@@ -238,10 +245,13 @@ default_permission = "ask"
 visibility = "model"
 prompt_doc_ref = "prompts/slack/add_reaction.md"
 
+# reactions:write only — this tool calls reactions.add and nothing else. Its
+# sibling remove_reaction additionally reads (reactions.get) to find the
+# connected account's own reactions, so reactions:read belongs there alone.
 [[tools.credentials]]
 handle = "slack_user_token"
 vendor = "slack"
-scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "reactions:read", "reactions:write"]
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "reactions:write"]
 audience = { scheme = "https", host = "slack.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
@@ -300,7 +310,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 standard_op = "resolve_user"
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.resolve_user"
-description = "Slack notes: Slack has no server-side people search, so this scans one page of the workspace directory per call and matches your query against display name, real name, and handle. Follow next_cursor to keep scanning when the person you want has not appeared yet. Deactivated accounts and bots are skipped."
+description = "Slack notes: Slack has no server-side people search, so this scans up to limit directory entries per call (default and max 200) and matches your query against display name, real name, and handle. Follow next_cursor to keep scanning when the person you want has not appeared yet. Deactivated accounts and bots are skipped."
 effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
