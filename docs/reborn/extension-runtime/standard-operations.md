@@ -310,7 +310,7 @@ of the channel these codes actually ride:
   `StructuredWasmGuestErrorKind` — not the spec's illustrative class-column
   labels verbatim). There is no separate "detail" slot alongside `code`. The
   Slack WASM module (`slack_error_to_standard_code` in
-  `assets/slack/wasm-src/src/api.rs`) therefore puts the **canonical**
+  `crates/extensions/packages/slack/wasm-src/src/api.rs`) therefore puts the **canonical**
   `messaging.*` string into `code` and never the raw Slack error — the raw
   vendor code is consumed by the mapping function but does not cross the
   guest→host boundary on this channel at all.

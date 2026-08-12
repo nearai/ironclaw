@@ -329,10 +329,12 @@ routing, tool execution, and provider mutation together.
 The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
 Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
 GraphQL review threads, and seeded Actions workflows used by the provider
-contract catalog. All 123 shipped static provider capabilities are classified
-and named in the inventory, and `github.handle_webhook`, `nearai.web_search`,
-`web-access.get_content`, and `web-access.search` use Reborn integration tests
-at their actual local-WASM or hosted-MCP seams. The inventory records the exact
+contract catalog. Every shipped static provider capability is classified and
+named in the inventory (the generated product-surface report carries the
+current count — 131 as of the Slack standard-op completion), and
+`github.handle_webhook`, `nearai.web_search`, `web-access.get_content`, and
+`web-access.search` use Reborn integration tests at their actual local-WASM
+or hosted-MCP seams. The inventory records the exact
 Cargo target, source, and test for those non-Emulate cases and fails if that
 evidence stops being executable. Manual QA rows that mention Telegram or
 Twitter/X remain model-replay-only unless paired with their own provider
