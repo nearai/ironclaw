@@ -33,7 +33,7 @@
 #   # A crate may not appear here AND as a whole-crate `coverage-exemptions.toml`
 #   # entry (conflict — the script rejects this at parse time).
 #   [[crate]]
-#   name = "ironclaw_reborn_composition"
+#   name = "ironclaw_composition"
 #   floor_percent = 38.0             # optional
 #   floor_covered_lines = 4200       # optional — immune to denominator growth
 #   tolerance_percent = 0.5          # optional, overrides [global].tolerance_percent
@@ -85,7 +85,7 @@ captured_date = "2026-08-04"
 captured_from = "4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf"
 
 [[crate]]
-name = "ironclaw_runner"
+name = "ironclaw_turn_runner"
 # WS3 runner sheds moved the model-gateway cluster (model_gateway,
 # model_routes, the driver-host port adapters) and the whole progressive
 # tool-disclosure cluster to `ironclaw_loop_host` — ~10.5k source lines out of
@@ -126,14 +126,14 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 [[crate]]
 name = "ironclaw_loop_host"
 # Added by the WS3 runner sheds so the ~10.5k lines that left
-# `ironclaw_runner` (above) keep a ratchet instead of falling out of per-crate
+# `ironclaw_turn_runner` (above) keep a ratchet instead of falling out of per-crate
 # enforcement entirely — the gap the WS1.2 `ironclaw_turns` split left open for
 # `ironclaw_loop_contracts`, not repeated here.
 #
 # CAPTURED from the same merged artifact as the entry above (merge_group run
 # 30855460733): 24,598 / 27,063 = 90.89%. `floor_percent` is RAISED to the
 # observed value rather than inherited from the source crate — an earlier draft
-# carried 85.55 across from `ironclaw_runner`, which would have left the
+# carried 85.55 across from `ironclaw_turn_runner`, which would have left the
 # absorbed code 5.34pp of unratcheted slack on arrival, i.e. room to lose ~1.4k
 # covered lines silently. The destination is floored at what it actually
 # measures, on arrival, in the same PR.
@@ -243,7 +243,7 @@ rationale = "Scheduling, deterministic fire identity, and durable fire settlemen
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
-name = "ironclaw_product"
+name = "ironclaw_assistant"
 floor_percent = 86.94
 floor_covered_lines = 21367
 captured_total_lines = 24576
@@ -253,11 +253,15 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_outbound"
-floor_percent = 93.49
-floor_covered_lines = 4105
-captured_total_lines = 4391
-captured_date = "2026-07-30"
-rationale = "Outbound scope authorization and delivery metadata must not cross actors."
+# RECAPTURED 2026-08-10 after #7157 deleted the stored delivery-heuristic and
+# result-handoff paths. Covered/total moved 4105/4391 -> 3519/3761 while the
+# ratio rose 93.49% -> 93.57%, so the absolute floor stopped describing the
+# crate without a coverage regression.
+floor_percent = 93.57
+floor_covered_lines = 3519
+captured_total_lines = 3761
+captured_date = "2026-08-10"
+rationale = "Outbound scope authorization and delivery metadata must not cross actors. Recaptured after #7157 deleted obsolete stored delivery-heuristic and result-handoff paths while measured coverage rose."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -291,7 +295,7 @@ name = "ironclaw_extension_host"
 # entry did.
 #
 # Two units are in play and an earlier draft of this comment conflated them, so
-# both are stated. SOURCE lines: `crates/ironclaw_extension_host/src` fell
+# both are stated. SOURCE lines: `crates/extensions/ironclaw_extension_host/src` fell
 # 57,464 -> 47,794 across 92 -> 75 files (-9,670; `git diff --stat` over that
 # path reports 9,683 deletions / 13 insertions), and the new crate ships 9,979
 # across 19 files — the +309 is its `lib.rs`, `ironhub/mod.rs`, and module
@@ -339,11 +343,38 @@ name = "ironclaw_extension_host"
 # lane produces a coverage verdict (#7036), so these numbers could not be read
 # off this PR's own run; **the next dispatch should recapture this entry and
 # replace this block with a real capture.**
-floor_percent = 87.97
-floor_covered_lines = 21580
-captured_total_lines = 24529
-captured_date = "2026-08-04"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out, then again on the WS2 closeout as the source side of the NEAR AI embed move; adjusted (not recaptured) for the retired-identity branch deletion in #7143 — see the block above."
+#
+# RECAPTURED 2026-08-07 from run 31208592262 (the `df90072c4e` main-push run,
+# read off this gate's own ratchet output — the same aggregation that enforces
+# this file), discharging the instruction directly above. Two things moved
+# since the 8/04 adjustment:
+#
+# 1. The denominator fell 24,529 -> 24,415 (-114): code left the crate in the
+#    post-8/04 moves, the "source side of a move" shape this entry's own WS2
+#    block documents as the recapture trigger. Covered fell 21,580 -> 21,515
+#    with it while the RATIO — the invariant that survives a move — ROSE
+#    87.98% -> 88.12%. This is a floor that stopped describing its crate, not
+#    a coverage regression.
+# 2. The same commit measured DIFFERENTLY across lanes: the merge-queue run at
+#    18:37Z (green) put covered lines at or above 21,560 while the push run at
+#    18:47Z and its retry both measured 21,515 — a >=45-line same-commit
+#    spread, exactly the "DA: hit counts flipping across the lane+bucket split
+#    under timing" wobble the [global] tolerance comment calls PROVISIONAL.
+#    The default 20-line tolerance sits under this crate's measured wobble, so
+#    it reds on noise; `tolerance_lines` is raised to 60, sized to the
+#    observed spread with the same headroom ratio the 0.5pp percent tolerance
+#    carries. The percent floor (tolerance 0.5pp) stays the tight guard.
+#
+# RECAPTURED 2026-08-10 after #7377 removed shared-route subject binding from
+# this crate under the run-as-invoker model. Covered/total moved
+# 21515/24415 -> 21347/24278; the 0.19pp ratio movement remains inside the
+# measured 0.5pp tolerance, while the absolute numerator alone became stale.
+floor_percent = 87.93
+floor_covered_lines = 21347
+tolerance_lines = 60
+captured_total_lines = 24278
+captured_date = "2026-08-10"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split, subsequent source-side moves, and #7377's shared-route subject-binding removal; tolerance_lines remains sized to measured same-commit cross-lane wobble."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -365,7 +396,7 @@ rationale = "The extension-management product face: lifecycle capabilities and c
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
-name = "ironclaw_events"
+name = "ironclaw_event_log"
 floor_percent = 80.55
 floor_covered_lines = 1197
 captured_total_lines = 1486
@@ -383,12 +414,71 @@ rationale = "Secret and path redaction prevent unsafe model, user, and log outpu
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
+name = "ironclaw_sandbox"
+floor_percent = 87.09
+floor_covered_lines = 3185
+captured_total_lines = 3657
+captured_date = "2026-08-03"
+rationale = "The sandboxed-process lane created by the WS3 merge (#7065) of ironclaw_process_sandbox + host_runtime::sandbox_process + ironclaw_scripts. Floored on arrival so the merge is not a net loss of ratchet coverage: neither merged crate was floored before, and the sandbox_process half was only protected as part of host_runtime's floor, which this PR necessarily lowers in line count. Guards plan validation, the credential firewall, the network allowlist, and the sandbox CA."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
 name = "ironclaw_host_runtime"
-floor_percent = 88.23
-floor_covered_lines = 20538
-captured_total_lines = 23277
-captured_date = "2026-07-30"
-rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution."
+# Re-captured for TWO composed WS3 moves. This entry is the reason the wave's
+# slices were consolidated rather than landed serially: they both rewrite it
+# from the same 2026-07-30 base (88.23 / 20538 / 23277), and neither branch's
+# stored triple is correct once the other lands.
+#
+#   * sandbox-lane merge (#7065): `sandbox_process/**` left for
+#     `ironclaw_sandbox`.            denominator -2010, covered -1684
+#   * first-party-tool move (#7080): the skill-install executor left for
+#     `ironclaw_extension_support`.  denominator  -153, covered   -53
+#
+# The two moves are disjoint (different source trees, different destinations),
+# so they compose: 23277-2010-153 = 21114 total, 20538-1684-53 = 18801 covered.
+#
+# ⚠ Watch `floor_covered_lines` SEPARATELY from the percentage. #7080's dispatch
+# run showed the failure mode this file exists to catch: the percentage went UP
+# (88.23 -> 88.59) while the absolute count went DOWN through the effective
+# floor (20538 -> 20485 against 20518). A percentage-only floor passes that.
+#
+# Measured, not estimated — the ratchet does not run on `pull_request`
+# (`scripts/ci/reborn_pr_test_plan.py:21`, issue #7036), so the numbers below
+# come from a full-plan `workflow_dispatch` run on the consolidated head; the
+# per-branch runs (30861453332 for #7065's lane, 30858257594 for #7080's) each
+# measured only their own half and are superseded here.
+#
+# ⚠ Both destination crates ARE floored, and that is new. #7080 was authored
+# when `crates/extensions/**` was invisible to the aggregator (#7083), so it
+# recorded that its destination "cannot be floored". #7094 fixed #7083 and
+# floored `ironclaw_extension_support` in the same change — from a measurement
+# taken BEFORE #7080's executor lines arrive there. So that entry is a
+# recapture obligation of this PR too, not just `ironclaw_host_runtime`'s:
+# it gains well-covered lines, which lifts `floor_covered_lines` safely but
+# moves `floor_percent` in whichever direction the incoming lines' own
+# coverage dictates. Measured on the consolidated head rather than reasoned
+# about. #7065's destination (`ironclaw_sandbox`) sits directly under
+# `crates/` and was floored on arrival by that slice.
+#
+# The `[global]` entry is left exactly as #7094 recaptured it: both WS3 moves
+# are crate-to-crate within the set the fixed aggregator can see, so lines
+# leave one visible denominator and enter another and the global pair is
+# unchanged by construction.
+# MEASURED, replacing the composed estimate. The arithmetic above predicted
+# 89.05% (18801 / 21114) by adding the two slices' recorded deltas. Dispatch run
+# 30907774036 at 4512e03e28f1df15b419d2e36f9f38f8f55d62fd measured
+# 88.63% (17562 / 19814) — the real denominator is 1300 lines BELOW the
+# composition. The estimate was wrong because both slices measured their delta
+# under the pre-#7083 aggregator, which could not see `crates/extensions/**` at
+# all; lines leaving host_runtime for extension_support simply vanished from
+# the tree it could measure, so neither branch's recorded delta describes the
+# post-#7094 world. This is the reason the file demands a measurement rather
+# than a reconciliation.
+floor_percent = 88.63
+floor_covered_lines = 17562
+captured_total_lines = 19814
+captured_date = "2026-08-04"
+rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution. Re-captured once for two composed WS3 moves (#7065 sandbox_process/** -> ironclaw_sandbox, #7080 skill-install executor -> ironclaw_extension_support). Both are code moves, not coverage regressions: the percentage floor RISES 88.23 -> 89.05 and only the absolute count falls, because those lines are no longer in this crate. #7065's lines are floored in their new home (see the ironclaw_sandbox entry); #7080's cannot be floored until #7083 is fixed."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 # ---------------------------------------------------------------------------
@@ -415,11 +505,64 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 # contributes no instrumented lines and a floor would enforce nothing. Give it
 # one when a lane builds it.
 
+# ⚠ RECAPTURED 2026-08-04 by the WS3/WS4 consolidation, and the percentage
+# FALLS 82.64 -> 75.31. Flagged rather than quietly written: a 7.33pp floor drop
+# deserves an owner's eye.
+#
+# Measured on dispatch run 30907774036 at 4512e03e28f1df15b419d2e36f9f38f8f55d62fd:
+# observed 75.31% (7142 / 9484) against a floor captured by #7094 at
+# 82.64% (6826 / 8260) — a denominator that grew +1224 lines (+14.82%).
+#
+# Why this is composition rather than lost tests, stated as the evidence and not
+# as a conclusion: `floor_covered_lines` RISES 6826 -> 7142 (+316), so the crate
+# is protected in absolute terms by MORE lines than before, and #7080's
+# un-masking accounting showed 1398 -> 1398 tests with zero names lost (the two
+# deltas were the same two tests renamed by module path). The ratio falls
+# because the arriving skill-install executor carries a lower coverage profile
+# than this crate's existing average, and because #7094's floor was captured
+# before any of it arrived. Same shape as #7094's own ironclaw_turn_runner recapture
+# (85.55 -> 82.53), which set the precedent of taking the honest measured number
+# over the flattering one.
+#
+# The follow-up this earns, recorded rather than performed: raise the executor's
+# own coverage in its new home. Lowering a floor is the correct bookkeeping for a
+# move, but it is not a substitute for that work.
+#
+# ✅ INDEPENDENTLY VERIFIED 2026-08-04 (second pass, not inherited). The claim
+# above was recorded but explicitly left unverified, so it was re-derived from
+# scratch between the two capture refs — `f946a93fae` (#7094's 82.64% capture)
+# and `939af4847d` (this recapture). Four measurements, all agreeing:
+#
+#   1. Test names lost in this crate:      0   (158 -> 160 test fns; the 2 new
+#      names are the arriving executor's own: `code_artifact_hosts_cover_
+#      release_and_raw_downloads_only`, `fetch_url_response_maps_panicking_
+#      runtime_egress_to_backend_failure`).
+#   2. Test names lost WORKSPACE-WIDE:     0   (13836 -> 13843 test fns,
+#      13752 -> 13759 unique; 7 gained, none lost). This is the check that
+#      distinguishes a relocation from a deletion: host_runtime's roster drops
+#      156 names over this range, but every one of them reappears in another
+#      crate, so nothing was deleted anywhere in the tree.
+#   3. What actually arrived: exactly four files, 1367 source lines, all of them
+#      the family-1 skill-install executor — `src/skills/url_install.rs` (340)
+#      plus `url_install/{github.rs (715), zip_bundle.rs (180), bundle.rs (132)}`.
+#      No pre-existing file left the crate.
+#   4. The arithmetic closes exactly. Holding the pre-existing crate at its old
+#      6826/8260 and appending the arriving block reproduces the new number to
+#      the decimal: (6826+316)/(8260+1224) = 75.31%. The arriving block's own
+#      coverage is 316/1224 = 25.82%. Because the identity closes with the
+#      pre-existing numerator held CONSTANT, the pre-existing code lost zero
+#      covered lines — the entire 7.33pp fall is the low-coverage arrival
+#      diluting the ratio.
+#
+# Conclusion: composition, not lost tests — confirmed, not assumed. The 25.82%
+# arrival is what earns the follow-up recorded above; it is a real coverage gap
+# in the executor, but it is a gap that moved in with the code, not one this
+# recapture created.
 [[crate]]
 name = "ironclaw_extension_support"
-floor_percent = 82.64
-floor_covered_lines = 6826
-captured_total_lines = 8260
+floor_percent = 75.31
+floor_covered_lines = 7142
+captured_total_lines = 9484
 captured_date = "2026-08-04"
 rationale = "The package inventory and the shared native tool executors: what every first-party package ships as, and the code that runs its tools."
 issue = "https://github.com/nearai/ironclaw/issues/7083"

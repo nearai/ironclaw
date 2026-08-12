@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation contract
 **Date:** 2026-04-24
-**Depends on:** `docs/reborn/contracts/host-api.md`, `crates/ironclaw_host_api`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `crates/contracts/ironclaw_host_api`
 
 ---
 
@@ -425,6 +425,17 @@ the path it was issued on.
 **Declaration never backfills.** Projection is write-maintained: rows already
 present when a spec is declared are not projected. Populating them is explicit
 migration work.
+
+**Full-text queries are plain user text.** `Filter::Fts` never accepts native
+backend query syntax. Punctuation separates terms, common English function
+words do not become required matches, and reserved words such as `AND`, `OR`,
+and `NOT` are not operators. The dropped function words mirror PostgreSQL's
+fixed `english` stop list, so the in-memory, libSQL, and PostgreSQL backends
+agree on which words become required terms; stemming is backend-specific
+(PostgreSQL stems via its `english` configuration, FTS5 matches literal
+terms). Backends translate those shared semantics into their native query
+language. A query with no searchable terms is a successful empty result, not
+a backend or input failure.
 
 **Projection machinery is static and versioned.** Each SQL backend installs one
 generation of projection triggers for the whole database (currently `v3`), not

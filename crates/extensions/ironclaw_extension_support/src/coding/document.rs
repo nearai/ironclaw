@@ -39,8 +39,9 @@ use super::{
         ReadRepresentation, SharedCodingEditLocks, SharedCodingReadStates, content_fingerprint,
         read_scope_key,
     },
+    types::ResolvedPath,
 };
-use ironclaw_filesystem::{FileType, FilesystemOperation};
+use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, FilesystemOperation};
 
 /// Ceiling on a document read/edit, matching the OOXML package budget in
 /// `ironclaw_documents`.
@@ -57,6 +58,34 @@ fn document_error(
         "{operation} failed for {}: {error}",
         safe_summary_path(scoped_path)
     ))
+}
+
+async fn create_new_output(
+    request: &CodingCapabilityRequest<'_>,
+    operation: &str,
+    target: &ResolvedPath,
+    bytes: &[u8],
+) -> Result<(), CodingCapabilityError> {
+    match request
+        .filesystem
+        .put(
+            &target.virtual_path,
+            Entry::bytes(bytes.to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(FilesystemError::VersionMismatch { .. }) => Err(operation_error_with_summary(format!(
+            "{operation} will not overwrite {}: choose a path that does not exist yet",
+            safe_summary_path(target.scoped_path.as_str())
+        ))),
+        Err(error) => Err(filesystem_error_with_summary(
+            operation,
+            target.scoped_path.as_str(),
+            error,
+        )),
+    }
 }
 
 /// Render a document's structure as the JSON `read_file` returns for OOXML.
@@ -172,13 +201,7 @@ pub(super) async fn document_edit(
     let edited = apply_typed_edits(format, &bytes, edits)
         .map_err(|error| document_error("document_edit", source.scoped_path.as_str(), error))?;
 
-    request
-        .filesystem
-        .write_file(&target.virtual_path, &edited)
-        .await
-        .map_err(|error| {
-            filesystem_error_with_summary("document_edit", target.scoped_path.as_str(), error)
-        })?;
+    create_new_output(request, "document_edit", &target, &edited).await?;
     // Record the NEW file's structured fingerprint so a follow-up edit can
     // chain off it without a redundant read, exactly as write_file does.
     read_states.record(
@@ -258,19 +281,6 @@ pub(super) async fn html_to_pdf_capability(
         .lock_edit(scope.edit_lock_key(), target.virtual_path.as_str())
         .await;
 
-    // Fail closed on an existing target rather than overwrite. A rendered PDF
-    // is a derived artifact; silently replacing a PDF the user uploaded is the
-    // same class of loss the binary-write guard exists to prevent, and the
-    // caller can always name a fresh path.
-    if let Ok(stat) = request.filesystem.stat(&target.virtual_path).await
-        && stat.file_type == FileType::File
-    {
-        return Err(operation_error_with_summary(format!(
-            "html_to_pdf will not overwrite {}: choose a path that does not exist yet",
-            safe_summary_path(target.scoped_path.as_str())
-        )));
-    }
-
     let title = request
         .input
         .get("title")
@@ -285,13 +295,9 @@ pub(super) async fn html_to_pdf_capability(
     )
     .map_err(|error| document_error("html_to_pdf", target.scoped_path.as_str(), error))?;
 
-    request
-        .filesystem
-        .write_file(&target.virtual_path, &pdf)
-        .await
-        .map_err(|error| {
-            filesystem_error_with_summary("html_to_pdf", target.scoped_path.as_str(), error)
-        })?;
+    // The atomic absent precondition closes the stat/write race and makes any
+    // filesystem failure fail closed rather than silently overwriting.
+    create_new_output(request, "html_to_pdf", &target, &pdf).await?;
 
     Ok(CodingCapabilityOutput::new(json!({
         "path": target.scoped_path.as_str(),

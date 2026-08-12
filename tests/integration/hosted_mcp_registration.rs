@@ -14,6 +14,9 @@ use hosted_mcp_registration_server::{
     HostedMcpAuthPolicy, HostedMcpRegistrationNetworkEgress, HostedMcpRegistrationServer,
     HostedMcpTool, ScriptedMetadataResponse,
 };
+use ironclaw_assistant::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+};
 use ironclaw_auth::{
     AdmissionClientProfile, AuthContinuationRef, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
@@ -37,7 +40,7 @@ use ironclaw_extension_manager::lifecycle_test_support::{
     lifecycle_product_context, rebuild_lifecycle_test_services_with_auth_provider,
     webui_gate_resource_scope_for_owner,
 };
-use ironclaw_extensions::{ExtensionInstallationStorePort, ExtensionManifestRecord};
+use ironclaw_extension_registry::{ExtensionInstallationStorePort, ExtensionManifestRecord};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -45,9 +48,6 @@ use ironclaw_host_api::{
     mount::MountView,
     runtime::{RuntimeKind, TrustClass},
     scope::Principal,
-};
-use ironclaw_product::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
 use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
@@ -2803,6 +2803,6 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
 // regression test. The deterministic replacement — which pauses `register`
 // mid-flight via a controllable installation-store double to force the
 // actual AB-BA contention — lives at the crate tier:
-// `crates/ironclaw_extension_host/src/product_lifecycle.rs`'s
+// `crates/extensions/ironclaw_extension_host/src/product_lifecycle.rs`'s
 // `concurrent_register_and_import_bundle_do_not_deadlock` test, which can
 // construct `ExtensionLifecycleManager` directly with that double.

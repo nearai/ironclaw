@@ -47,7 +47,8 @@ schemas/memory/document-write.output.v1.json
   `ironclaw_host_runtime::memory_profiles` with repo conformance tests.
 - **Host ports**: `host.storage.sql_transaction.first_party` and
   `host.events.audit` are registered in
-  `ironclaw_host_runtime::default_host_port_catalog()`.
+  `ironclaw_host_api::host_port::default_host_port_catalog()` (moved down from
+  `ironclaw_host_runtime` in WS3 row 3, PROPOSAL §6.5.9).
 - **Native v2 manifest (live)**: `ironclaw.memory` (HostBundled,
   `first_party` runtime) is parsed from its bundled TOML and registered on the
   **always-on first-party lane** (like the builtin toolset), not the
@@ -88,7 +89,7 @@ schemas/memory/document-write.output.v1.json
   threaded into the memory handler in place of a raw `RootFilesystem`. Gated
   behind non-default `memory-native-*` features (the reborn composition crates
   cannot depend on the root `ironclaw` crate where the Postgres/libSQL backends
-  live). See `docs/adr/0002-native-memory-uses-host-storage-ports.md`.
+  live). See `docs/internal/adr/0002-native-memory-uses-host-storage-ports.md`.
 - **Default flip** — blocked until `/memory` data + API compatibility is decided
   and tested across caller boundaries (filesystem-mount, gateway/API,
   prompt-write-safety). Legacy `memory_documents` migration stays deferred.

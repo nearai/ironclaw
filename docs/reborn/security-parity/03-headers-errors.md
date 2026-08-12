@@ -8,7 +8,7 @@ sanitized-auth/validation-error slice; see `01-auth.md` and
   `platform/router.rs` (header layers), with auth-error text in
   `platform/auth.rs`.
 - **v2** applies headers via outer `SetResponseHeaderLayer`s in
-  `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs`; errors are
+  `crates/app/ironclaw_composition/src/webui/webui_serve.rs`; errors are
   sanitized at the `WebuiAuthenticator` boundary (auth), the
   `WebUiV2HttpError` type (`ironclaw_webui/src/error.rs`), and the
   axum `Json` extractor (validation).
@@ -34,7 +34,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 ## Test coverage
 
 **This PR** —
-`crates/ironclaw_webui/tests/headers_errors_contract.rs`:
+`crates/product/ironclaw_webui/tests/headers_errors_contract.rs`:
 
 - `static_security_headers_present_on_error_response` — an
   unauthenticated 401 still carries `nosniff`, `DENY`, CSP, and
@@ -59,7 +59,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 
 **Already locked (cross-referenced, not duplicated)** —
 
-- `ironclaw_reborn_composition/tests/webui_v2_serve.rs::v2_response_carries_static_security_headers`
+- `ironclaw_composition/tests/webui_v2_serve.rs::v2_response_carries_static_security_headers`
   — header presence on a 200 (rows 1, 2, 3a).
 - `ironclaw_webui/src/static_assets/router.rs::tests`:
   `standalone_spa_shell_carries_matching_csp_nonce` (the document nonce

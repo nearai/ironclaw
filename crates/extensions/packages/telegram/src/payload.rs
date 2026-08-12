@@ -10,7 +10,7 @@
 //! `from` we can't actor-ref) return `ParsedProductInbound { payload:
 //! ProductInboundPayload::NoOp, .. }` with synthetic external refs for
 //! the slots we genuinely have no source for. This matches the
-//! `ironclaw_product` contract that says NoOps must be a
+//! `ironclaw_assistant` contract that says NoOps must be a
 //! parsed inbound with the explicit `NoOp` payload variant, NOT an
 //! out-of-band `None` path.
 
@@ -579,7 +579,7 @@ fn build_payload(
     // messages that also contained a `/command`.
     if let Some((command, arguments)) = extract_first_bot_command(&message, policy) {
         // Route through `InboundCommandPayload::new` so the shared
-        // `ironclaw_product` validation fires on the
+        // `ironclaw_assistant` validation fires on the
         // untrusted Telegram text: command-token shape and byte limit,
         // arguments byte limit, control-character rejection. A struct
         // literal here would bypass those checks and let oversized or

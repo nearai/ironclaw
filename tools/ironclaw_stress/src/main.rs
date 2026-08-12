@@ -12,6 +12,7 @@ mod ramp;
 mod redaction;
 mod report;
 mod resource_ops;
+mod scripted;
 mod secret_ops;
 mod suite;
 mod summary;
@@ -225,6 +226,26 @@ pub(crate) struct Args {
     /// Concurrent setup creates for API scenario user threads.
     #[arg(long, default_value_t = 16)]
     pub(crate) api_setup_concurrency: usize,
+
+    /// Scripted tool-call workload for api-user-capacity: each operation is
+    /// driven through a configured builtin/memory tool sequence and verified
+    /// by its read-back verdict (issue #7360 Phase 1).
+    #[arg(long, value_enum)]
+    pub(crate) api_scripted_tool: Option<scripted::ScriptKey>,
+
+    /// Document sizes in bytes to cycle through for scripted operations.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "4096,32768,131072,1048576"
+    )]
+    pub(crate) api_scripted_doc_sizes: Vec<usize>,
+
+    /// Concurrent scripted writers sharing the first user's thread so they
+    /// contend on the same durable document. 0 disables hot-writer
+    /// contention.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_hot_writers: usize,
 
     /// Threads created per API user during setup. Values above 1 exercise
     /// listing/read paths against large sidebars; sends still target each
@@ -1109,6 +1130,41 @@ fn validate_args(args: &Args) -> Result<(), String> {
         );
     }
     api_capacity::validate_read_mix(&args.api_read_mix)?;
+    if let Some(key) = &args.api_scripted_tool {
+        if !args.scenario.is_api_capacity() {
+            return Err("--api-scripted-tool requires --scenario api-user-capacity".to_string());
+        }
+        if *key == scripted::ScriptKey::WriteFileRoundtrip && args.api_hot_writers > 0 {
+            return Err(
+                "--api-hot-writers requires a memory script (memory_roundtrip, memory_grow, \
+                 or memory_mixed); write_file_roundtrip targets a per-operation path and \
+                 cannot exercise shared-document contention"
+                    .to_string(),
+            );
+        }
+        if args.mock_llm_bind.is_none() {
+            return Err("--api-scripted-tool requires --mock-llm-bind".to_string());
+        }
+        if !args.api_wait_for_assistant {
+            return Err("--api-scripted-tool requires --api-wait-for-assistant".to_string());
+        }
+        if args.api_scripted_doc_sizes.is_empty() {
+            return Err("--api-scripted-doc-sizes must not be empty".to_string());
+        }
+        for size in &args.api_scripted_doc_sizes {
+            if *size < scripted::MIN_SCRIPTED_DOC_SIZE_BYTES
+                || *size > scripted::MAX_SCRIPTED_DOC_SIZE_BYTES
+            {
+                return Err(format!(
+                    "--api-scripted-doc-sizes values must be between {} and {} bytes",
+                    scripted::MIN_SCRIPTED_DOC_SIZE_BYTES,
+                    scripted::MAX_SCRIPTED_DOC_SIZE_BYTES
+                ));
+            }
+        }
+    } else if args.api_hot_writers > 0 {
+        return Err("--api-hot-writers requires --api-scripted-tool".to_string());
+    }
     if !(0.0..=1.0).contains(&args.mock_llm_failure_rate) {
         return Err("--mock-llm-failure-rate must be between 0.0 and 1.0".to_string());
     }

@@ -214,6 +214,12 @@ owned evidence and a green portable smoke must not be read as proof of them.
 
 ## Deep tier (nightly)
 
+`codebase-graph-refresh.yml` runs at 02:30 UTC, regenerates the committed
+`.codebase-memory/graph.db.zst` bootstrap snapshot from the default branch with
+a checksum-pinned `codebase-memory-mcp`, and opens or updates a normal review
+PR through the repository GitHub App. It never pushes generated state directly
+to `main`; required checks and human approval remain in the path.
+
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
 `reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
@@ -231,9 +237,8 @@ The same deep reuse raises all existing property-test generators from 256 to
 hermetic journey/provider-fault inventory. `ironclaw-stress.yml` adds a
 15-minute libSQL user-session soak alongside its libSQL ramps and
 shipping-profile Postgres API capacity lane. `live-canary.yml` keeps the
-three-hour Reborn WebUI cadence and runs the broader credentialed provider
-matrix weekly. Workflow-contract sabotage tests fail if any of these schedules,
-guards, merge/main triggers, or release gates disappear.
+three-hour Reborn WebUI cadence. Workflow-contract sabotage tests fail if any
+of these schedules, guards, merge/main triggers, or release gates disappear.
 
 The Reborn E2E job also publishes `product-surface-coverage-<sha>`. Its JSON and
 Markdown files join the shipped capability denominator with typed contract,
@@ -271,7 +276,8 @@ the configuration:
 ### Nightly alerting
 
 One path only: `nightly-watchdog.yml` (08:00 UTC) checks the latest scheduled
-run of each nightly — Nightly Deep CI, Reborn Playwright, IronClaw Stress. A
+run of each nightly — Codebase Graph Refresh, Nightly Deep CI, Reborn
+Playwright, IronClaw Stress. A
 run that is missing, stale (>26h: the cron didn't fire),
 or concluded anything but success posts a failure line (workflow, conclusion,
 failed job names, run link) to the Slack channel behind
@@ -336,7 +342,7 @@ points, including their existing optional DIND dispatch. The manual
   (feature-gated cfg errors).
 - **Benchmark compilation** (`cargo bench --no-run`) runs on push and nightly
   only, and the clippy lanes do not pass `--benches`. Bench targets exist only
-  in `crates/ironclaw_safety` today.
+  in `crates/substrates/ironclaw_safety` today.
 - **Replay Snapshot Gate** runs on push + via the nightly legacy suite; it
   covers the retiring v1 engine.
 - **The legacy v1 suites are deliberately invoked nowhere** — v1 (`src/`) is

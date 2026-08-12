@@ -9,10 +9,32 @@ ARTIFACT_DIR="${1:-${RUN_DIR:-artifacts/live-canary}}"
 STRICT_ARTIFACT_SCRUB="${STRICT_ARTIFACT_SCRUB:-false}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
-FIRST_PARTY_EXTENSIONS_ROOT="${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT:-${REPO_ROOT}/crates/extensions/packages}"
 NEARAI_MANIFEST_TEMPLATE="${REPO_ROOT}/scripts/live-canary/fixtures/nearai-runtime-manifest.toml"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
 BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
+
+# The default first-party extensions root hops from the ironclaw_extension_support
+# crate (found by NAME through the shared inventory, scripts/ci/lib/crate_tree.py)
+# to its sibling `packages/` directory — the same anchor
+# scripts/build-wasm-extensions.sh uses — instead of a literal
+# `crates/extensions/packages` path, so the target-architecture family move
+# (PROPOSAL §5) cannot leave this pointed at a directory that no longer exists
+# (docs/reborn/target-architecture/CHECKLIST.md WS10). The env override still
+# bypasses discovery entirely, unchanged.
+resolve_default_first_party_extensions_root() {
+  local support_dir
+  if ! support_dir=$("${REPO_ROOT}/scripts/ci/crate-dir.sh" ironclaw_extension_support "${REPO_ROOT}"); then
+    echo "scrub-artifacts: cannot resolve the ironclaw_extension_support crate, so the default first-party extensions root is unknown. Set LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT explicitly, or repoint this script if the crate moved." >&2
+    exit 1
+  fi
+  printf '%s/packages\n' "$(dirname "${support_dir}")"
+}
+
+if [[ -n "${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT:-}" ]]; then
+  FIRST_PARTY_EXTENSIONS_ROOT="${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT}"
+else
+  FIRST_PARTY_EXTENSIONS_ROOT="$(resolve_default_first_party_extensions_root)"
+fi
 
 if [[ ! -d "${ARTIFACT_DIR}" ]]; then
   echo "Artifact directory does not exist: ${ARTIFACT_DIR}" >&2
@@ -189,7 +211,12 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
 fi
 
 patterns=(
-  'bearer[[:space:]]+[A-Za-z0-9._~+/=-]+'
+  # 16+ token-alphabet chars only: model-visible tool descriptions say things
+  # like "bearer for a static API token or PAT sent as a Bearer token", and
+  # tool_search output lands in traces — prose after "bearer" must not trip
+  # the guardrail, while real bearer credentials (JWTs, xoxb-, ya29., ghp_…)
+  # are all far longer than any English word that can follow "bearer".
+  'bearer[[:space:]]+[A-Za-z0-9._~+/=-]{16,}'
   'api[_-]?key[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'access[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'refresh[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
@@ -217,7 +244,7 @@ trap 'rm -f "${tmp_matches}" "${tmp_files}"' EXIT
 
 redact_matches() {
   sed -E \
-    -e 's/(bearer[[:space:]]+)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]{16,}/\1<REDACTED>/Ig' \
     -e 's/gh[pousr]_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_TOKEN>/g' \
     -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_PAT>/g' \
     -e 's/ya29\.[A-Za-z0-9._-]{20,}/<REDACTED_GOOGLE_TOKEN>/g' \

@@ -14,8 +14,9 @@ The guide is grounded in the current GitHub, GSuite, and Notion implementations:
 
 - GitHub: bundled WASM capability provider under
   `crates/extensions/packages/github/`.
-- GSuite: bundled WASM capability providers for Gmail, Calendar, Docs, Drive,
-  Sheets, and Slides.
+- GSuite: bundled WASM capability providers for Docs, Drive, Sheets, and
+  Slides; Gmail and Calendar are bundled `first_party` runtimes sharing the
+  same `google` vendor.
 - Notion: bundled hosted HTTP MCP capability provider under
   `crates/extensions/packages/notion-mcp/`, with product
   auth / OAuth DCR wiring in Reborn composition.
@@ -24,13 +25,15 @@ The guide is grounded in the current GitHub, GSuite, and Notion implementations:
 
 A Reborn tool extension is complete only when all of the following are true:
 
-1. The extension package has a `schema_version = "reborn.extension_manifest.v2"`
+1. The extension package has a `schema_version = "reborn.extension_manifest.v3"`
    manifest and every model-visible capability has schema, output schema, and
    prompt assets.
-2. The manifest declares the correct runtime lane: `wasm`, `mcp`, or `script`.
-3. The manifest exposes tools through `ironclaw.capability_provider/v1` via the
-   registry extension manifest path. Do not add or copy top-level
-   `[[capabilities]]` declarations.
+2. The manifest declares exactly one implementation: `[runtime]` with
+   `kind = "wasm"` or `kind = "first_party"`, or a `[mcp]` section for
+   hosted-MCP extensions.
+3. The manifest exposes tools as `[[tools]]` entries, each carrying an
+   `origin_gate_matrix`. Do not use the legacy `[[host_api]]` /
+   `[capability_provider.tools]` or top-level `[[capabilities]]` shapes.
 4. The runtime code does not read raw secrets, create its own HTTP client for
    external provider calls, bypass approvals, or dispatch directly into the
    agent loop.
@@ -46,7 +49,7 @@ Use this mental model before touching files:
 ```text
 Extension package
   -> lifecycle/discovery materializes it into the extension registry
-  -> ironclaw_extensions parses manifest v2 host APIs and projects descriptors
+  -> ironclaw_extension_registry parses the v3 manifest and projects descriptors
   -> ironclaw_host_runtime publishes hot model-facing schemas/prompts
   -> model selects a visible capability
   -> ironclaw_capabilities performs authorization, approvals, obligations, run state
@@ -59,7 +62,7 @@ Extension package
 Important ownership rule:
 
 ```text
-ironclaw_extensions knows what can run.
+ironclaw_extension_registry knows what can run.
 runtime crates know how to run it.
 authorization/approvals decide whether it may run.
 host runtime/composition wires the concrete services.
@@ -73,10 +76,13 @@ Pick one lane first. Do not blend lanes to make a tool work.
 
 | Lane | Use when | Current examples | Main files |
 | --- | --- | --- | --- |
-| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
-| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_reborn_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
-| Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
-| Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_scripts` runtime path plus manifest runtime `script` |
+| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Google Drive, Google Docs, Google Sheets, Google Slides (Gmail and Google Calendar are `first_party` runtimes, not WASM) | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
+| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `crates/extensions/packages/<id>-mcp/manifest.toml`, schemas/prompts, `crates/extensions/ironclaw_extension_host/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
+| Channel surface (formerly "product adapter") | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram channel surfaces, not the main focus of this guide | the package's `[channel]` manifest section + its `ChannelAdapter` (`crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`); worked examples `crates/extensions/packages/{slack,telegram}`; see the `reborn-extension-surfaces` skill |
+
+There is no `script` runtime kind in v3 manifests. Process/CLI work goes
+through the built-in process sandbox capability
+(`system.process_sandbox.run`), not an extension runtime lane.
 
 For a new provider API like Linear, Jira, or a small internal SaaS API, start
 with WASM unless you have a concrete reason not to.
@@ -92,20 +98,24 @@ Usually touch:
 - `crates/extensions/packages/<extension>/manifest.toml`
 - `crates/extensions/packages/<extension>/schemas/<extension>/*.json`
 - `crates/extensions/packages/<extension>/prompts/<extension>/*.md`
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` only when adding
-  a host-bundled available extension to the built-in install catalog.
+- when adding a host-bundled extension to the built-in install catalog: a
+  package module `crates/extensions/ironclaw_extension_support/src/packages/<extension>.rs`
+  plus its row in `PACKAGES` in `.../src/packages/mod.rs`. Do not register
+  assets in composition; the old `available_extensions.rs` home (now
+  `crates/extensions/ironclaw_extension_host/src/available_extensions.rs`) is
+  being dissolved.
 
 Do not touch for ordinary tools:
 
-- `crates/ironclaw_extensions/src/v2.rs`, unless changing the manifest contract
-  itself.
-- `crates/ironclaw_host_api/src/*`, unless adding a new shared host API type.
-- `crates/ironclaw_capabilities`, unless changing authorization/approval
+- `crates/extensions/ironclaw_extension_registry/src/v3.rs` (or the legacy
+  `src/v2.rs`), unless changing the manifest contract itself.
+- `crates/contracts/ironclaw_host_api/src/*`, unless adding a new shared host API type.
+- `crates/kernel/ironclaw_capabilities`, unless changing authorization/approval
   orchestration for all capabilities.
-- `crates/ironclaw_approvals`, unless changing approval lease semantics.
-- `crates/ironclaw_secrets`, unless changing low-level secret storage/lease
+- `crates/kernel/ironclaw_approvals`, unless changing approval lease semantics.
+- `crates/substrates/ironclaw_secrets`, unless changing low-level secret storage/lease
   semantics.
-- `crates/ironclaw_network`, unless changing global network policy/HTTP egress
+- `crates/substrates/ironclaw_network`, unless changing global network policy/HTTP egress
   semantics.
 - agent loop crates for tool-specific routing. Tool selection must come from the
   published capability surface, not hardcoded model-routing logic.
@@ -117,14 +127,14 @@ Usually touch:
 - `crates/extensions/packages/<extension>/wasm-src/`
 - `crates/extensions/packages/<extension>/wasm/<tool>.wasm`
 - the extension manifest, schemas, and prompts.
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` to package
-  the manifest, schemas, prompts, and WASM bytes if host-bundled.
+- the package module in `crates/extensions/ironclaw_extension_support/src/packages/`
+  to embed the manifest, schemas, prompts, and WASM bytes if host-bundled.
 
 Use as references:
 
 - `crates/extensions/packages/github/wasm-src/src/lib.rs`
 - `crates/extensions/packages/github/wasm-src/src/request.rs`
-- `crates/ironclaw_host_runtime/src/wasm_credentials.rs`
+- `crates/kernel/ironclaw_host_runtime/src/wasm_credentials.rs`
 
 Do not add a direct `reqwest`/HTTP client inside the WASM tool. Use the WIT host
 HTTP import (`near::agent::host::http_request`) so Reborn can enforce egress,
@@ -137,17 +147,17 @@ Usually touch:
 - `crates/extensions/packages/<provider>-mcp/manifest.toml`
 - `schemas/<provider>/...`
 - `prompts/<provider>/...`
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` if
-  host-bundled.
+- the package module in `crates/extensions/ironclaw_extension_support/src/packages/`
+  if host-bundled.
 
 Use as references:
 
 - `crates/extensions/packages/notion-mcp/manifest.toml`
-- `crates/ironclaw_reborn_composition/src/mcp.rs`
-- `crates/ironclaw_auth/src/engine/`
-- composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`
+- `crates/extensions/ironclaw_extension_host/src/mcp.rs`
+- `crates/domains/ironclaw_auth/src/engine/`
+- composition provider wiring in `crates/app/ironclaw_composition/src/factory.rs`
 
-Only touch `crates/ironclaw_reborn_composition/src/mcp.rs` if the hosted MCP
+Only touch `crates/extensions/ironclaw_extension_host/src/mcp.rs` if the hosted MCP
 runtime policy needs a new generic rule. Notion already demonstrates the common
 shape: HTTPS-only endpoint, exact host/path match, no URL credentials, no query,
 no fragment, host-mediated egress, staged product-auth token.
@@ -156,15 +166,15 @@ no fragment, host-mediated egress, staged product-auth token.
 
 Usually touch only when adding a new product-auth provider:
 
-- `crates/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
+- `crates/domains/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
   must be shared and durable.
-- `crates/ironclaw_auth/src/engine/` for generic recipe-driven OAuth/API-key
+- `crates/domains/ironclaw_auth/src/engine/` for generic recipe-driven OAuth/API-key
   exchange behavior.
 - `crates/extensions/packages/<extension>/manifest.toml`
   for bundled first-party provider recipe data.
-- `crates/ironclaw_reborn_composition/src/factory.rs` for composition-time
+- `crates/app/ironclaw_composition/src/factory.rs` for composition-time
   provider recipe wiring.
-- `crates/ironclaw_webui/src/product_auth/` only for product auth HTTP
+- `crates/product/ironclaw_webui/src/product_auth/` only for product auth HTTP
   setup/callback route surfaces.
 
 Do not create extension-local OAuth maps or store OAuth tokens in runtime code.
@@ -175,25 +185,23 @@ Credential accounts and secrets belong to `ironclaw_auth` /
 
 For a normal extension, do not touch these:
 
-- `src/agent/*` or Reborn loop strategy code to special-case your tool.
-- `crates/ironclaw_llm/*` to teach the model your tool name.
-- `crates/ironclaw_engine/*` V1 runtime paths.
-- `src/tools/*` V1 tools.
-- `crates/ironclaw_host_api` for one provider's fields.
-- `crates/ironclaw_extensions/src/v2.rs` to allow a one-off manifest shortcut.
-- `crates/ironclaw_network` to allow one provider host.
-- `crates/ironclaw_secrets` to fetch one provider token.
-- `crates/ironclaw_approvals` to make one write operation easier.
+- Reborn loop strategy code (`crates/loop/`) to special-case your tool.
+- `crates/domains/ironclaw_llm/*` to teach the model your tool name.
+- `crates/contracts/ironclaw_host_api` for one provider's fields.
+- `crates/extensions/ironclaw_extension_registry/src/v2.rs` to allow a one-off manifest shortcut.
+- `crates/substrates/ironclaw_network` to allow one provider host.
+- `crates/substrates/ironclaw_secrets` to fetch one provider token.
+- `crates/kernel/ironclaw_approvals` to make one write operation easier.
 
 If your implementation appears to require one of these, stop and identify the
 missing Reborn contract or composition seam first.
 
-## Manifest v2 structure
+## Manifest v3 structure
 
 All Reborn packages use:
 
 ```toml
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "example"
 name = "Example"
 version = "0.1.0"
@@ -213,63 +221,120 @@ Extension IDs and capability IDs are authority-bearing:
 - Registry extensions cannot claim effective first-party/system authority.
   Host composition decides effective trust.
 
-### All tool extensions: use `host_api`
+### All tool extensions: use `[[tools]]`
 
-Publish model-visible tools via the capability-provider host API:
+Publish each model-visible tool as a `[[tools]]` entry with its credentials
+as `[[tools.credentials]]` blocks and an `[auth.<vendor>]` recipe for every
+referenced credential vendor:
 
 ```toml
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
-
-[capability_provider.tools]
-
-[[capability_provider.tools.capabilities]]
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "example.search"
 description = "Search Example records."
-effects = ["dispatch_capability", "network", "use_secret"]
-default_permission = "ask"
+effects = ["network", "use_secret"]
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/example/search.input.v1.json"
 output_schema_ref = "schemas/example/search.output.v1.json"
 prompt_doc_ref = "prompts/example/search.md"
-required_host_ports = ["host.runtime.http_egress"]
-runtime_credentials = [
-  { handle = "example_runtime_token", source = { type = "product_auth_account", provider = "example", setup = { kind = "oauth", scopes = ["records.read"] } }, provider_scopes = ["records.read"], audience = { scheme = "https", host_pattern = "api.example.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+
+[[tools.credentials]]
+handle = "example_runtime_token"
+vendor = "example"
+scopes = ["records.read"]
+audience = { scheme = "https", host = "api.example.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.example]
+method = "oauth2_code"
+display_name = "Example account"
+authorization_endpoint = "https://example.com/oauth/authorize"
+token_endpoint = "https://example.com/oauth/token"
+scopes = ["records.read"]
+
+[auth.example.token_response]
+access_token = "/access_token"
 ```
 
-Do not use top-level `[[capabilities]]` for Reborn tool work. If a current
-bundled manifest still has that shape, do not treat that file shape as a
-reference. Treat it as migration debt and move it to `[[host_api]]` plus
-`[capability_provider.tools]` when touching that extension.
+`token_response` is required for `oauth2_code` recipes — it maps JSON
+pointers in the provider's token response (at minimum `access_token`; add
+`refresh_token` / `expires_in` for expiring tokens, as Notion does).
+
+Host ports are derived from effects in v3 — do not declare
+`required_host_ports`. The derived entries are validation vocabulary checked
+against the host's `HostPortCatalog` allowlist; concrete host-port adapters
+are constructed by host-runtime services only after authorization and
+obligation preparation, never from the manifest. The worked `oauth2_code`
+examples (token-response captures, identity maps) are
+`crates/extensions/packages/slack/manifest.toml` and
+`crates/extensions/packages/notion-mcp/manifest.toml`; the worked `api_key`
+example (form fields plus a validation probe) is in
+`crates/extensions/packages/github/manifest.toml`.
+
+Do not use the legacy `[[host_api]]` / `[capability_provider.tools]` shape or
+top-level `[[capabilities]]` for new work. The registry still parses
+already-installed v2 manifests for compatibility, but authoring is v3-only;
+port a v2 file to `[[tools]]` when touching that extension.
+
+### Origin gate matrix
+
+Every `[[tools]]` entry (and the `[mcp]` section) declares an
+`origin_gate_matrix`: the per-origin approval-gate policy for who may invoke
+the capability. Origins are `loop_run` (the model during an agent run),
+`product` (a direct user gesture in the product), and `automation` (triggers,
+cron, background jobs). Policies, from `OriginGatePolicy` in
+`crates/contracts/ironclaw_host_api/src/capability.rs`:
+
+- `forbidden` — the origin may not invoke the capability at all. This is the
+  default for every omitted origin, so a tool without a matrix cannot be
+  invoked from any origin.
+- `ask_always` — every invocation gates; persistent grants are never honored.
+- `gated_unless_granted` — gates unless a scoped persistent/policy grant
+  covers it. The normal choice for provider tools invoked by the model.
+- `consent_sufficient` — the origin's own gesture is the consent evidence
+  (`product` only; never valid for `loop_run` or `automation`).
+- `ungated` — no approval gate. For `loop_run` this requires a reviewed
+  allowlist entry (`UNGATED_LOOP_RUN_CAPABILITIES`); additions are a security
+  review, not a manifest edit.
+
+The field is structurally optional in the parser, but shipped packages are
+required to declare a `loop_run` policy on every capability by the
+architecture ratchet
+(`crates/app/ironclaw_architecture_tests/tests/reborn_origin_gate_matrix_ratchet.rs`).
+The common provider-tool shape is
+`{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }`.
 
 ### Capability fields
 
-Required per model-visible capability:
+Required per model-visible `[[tools]]` entry:
 
+- `origin_gate_matrix`: per-origin gate policy (previous section).
 - `id`: stable `<extension>.<name>` capability ID.
 - `description`: short, model-facing description.
 - `effects`: accurate effects. Include `external_write` for provider writes,
   mutations, sends, deletes, comments, or workflow dispatches.
 - `default_permission`: use `ask` for writes and high-risk reads; use `allow`
   only for low-risk read capabilities that policy deliberately permits.
-- `visibility`: usually `model`.
+- `visibility`: usually `model` (the default).
 - `input_schema_ref`: relative path to JSON schema.
 - `output_schema_ref`: relative path to JSON schema.
 - `prompt_doc_ref`: relative path to concise operation guidance.
-- `required_host_ports`: include `host.runtime.http_egress` when the runtime
-  must make host-mediated HTTP calls.
-- `runtime_credentials`: declare every credential the runtime may receive.
+- `[[tools.credentials]]`: declare every credential the runtime may receive.
+
+Optional bounds: `network_targets`, `max_egress_bytes`, `resource_profile`.
 
 Validation catches common mistakes:
 
-- `runtime_credentials` without `use_secret` is rejected. This includes
+- Credentials without `use_secret` in `effects` are rejected. This includes
   product-auth account credentials: product auth selects/refreshes the account,
   but runtime dispatch still uses a host-staged access-secret handle.
+- A credential `vendor` with no matching `[auth.<vendor>]` recipe is rejected,
+  and an `[auth.<vendor>]` recipe no credential references is rejected.
+- Credential audiences must be HTTPS with a literal host — wildcards are
+  rejected in v3.
 - Duplicate effects and duplicate credential handles are rejected.
-- Unknown host ports are rejected.
-- Credential audiences must be declared as HTTPS.
+- Unknown fields anywhere in the manifest are rejected.
 - Schema and prompt refs must be relative package paths, not absolute paths,
   URLs, backslash paths, or paths with `..`.
 
@@ -279,8 +344,7 @@ Use effects as authorization inputs, not as documentation.
 
 Common mapping:
 
-- Read-only API call with credentials: `["dispatch_capability", "network",
-  "use_secret"]`.
+- Read-only API call with credentials: `["network", "use_secret"]`.
 - Provider write: add `"external_write"`.
 - Local filesystem read/write: use `read_filesystem`, `write_filesystem`,
   `delete_filesystem` as appropriate.
@@ -342,17 +406,17 @@ Do not:
 Network policy belongs in host/runtime planning:
 
 - WASM credential injection is derived from manifest descriptors in
-  `crates/ironclaw_host_runtime/src/wasm_credentials.rs`.
+  `crates/kernel/ironclaw_host_runtime/src/wasm_credentials.rs`.
 - Hosted MCP policy is planned in
-  `crates/ironclaw_reborn_composition/src/mcp.rs`.
+  `crates/extensions/ironclaw_extension_host/src/mcp.rs`.
 - GSuite WASM tools should declare narrow credential audiences and use host
   HTTP egress for Google API hosts.
 - Shared HTTP enforcement and redaction live in
-  `crates/ironclaw_host_runtime/src/egress/` and `crates/ironclaw_network`.
+  `crates/kernel/ironclaw_host_runtime/src/egress/` and `crates/substrates/ironclaw_network`.
 
 Provider requests should set ordinary provider headers like `Accept`,
 `Content-Type`, API version, and User-Agent in runtime code. Credential headers
-must come from `runtime_credentials` and host egress injection.
+must come from `[[tools.credentials]]` and host egress injection.
 
 ## Secrets and runtime credentials
 
@@ -360,36 +424,38 @@ Secrets are opaque handles in manifests and host API types. Runtime code should
 never see raw token material except as already-injected HTTP request data inside
 the host egress boundary.
 
-Use `runtime_credentials` for every credential. Product auth is the preferred
-source for provider accounts, but it is still represented as a runtime
-credential because host egress injects the selected account's access-secret
-handle at dispatch time:
+Declare a `[[tools.credentials]]` block for every credential a tool may
+receive. The credential's `vendor` names the credential authority; the
+matching `[auth.<vendor>]` recipe in the same manifest defines how accounts
+are set up (OAuth or API key). Host egress injects the selected account's
+access-secret handle at dispatch time:
 
 ```toml
-runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
 ```
 
 Important fields:
 
 - `handle`: extension/runtime-local credential handle. Keep it stable.
-- `source`: omit or use `{ type = "secret_handle" }` only for manual direct
-  secret-handle credentials. Prefer `{ type = "product_auth_account", ... }`
-  for OAuth/account-backed integrations.
-- `source.provider`: provider account namespace, for example `github`,
-  `google`, or `notion`.
-- `source.setup`: `manual_token` or `oauth` with scopes.
-- `provider_scopes`: scopes required for this capability. Use this for account
-  selection and scope mismatch checks.
-- `audience`: exact HTTPS provider host pattern the credential may be sent to.
-- `target`: header/query/path-placeholder injection target. Header is preferred.
+- `vendor`: credential-authority namespace, for example `github`, `google`,
+  or `notion`. Several extensions may share one vendor (gmail, drive, and
+  calendar all use `google`). This is not the extension id.
+- `scopes`: scopes required for this capability. Used for account selection
+  and scope mismatch checks.
+- `audience`: exact HTTPS provider host (literal, no wildcards) the credential
+  may be sent to. Optional `port`.
+- `injection`: header/query/path-placeholder injection target. Header is
+  preferred.
 - `required`: defaults to `true`.
 
 Credential flow:
 
 ```text
-manifest runtime_credentials
+manifest [[tools.credentials]]
   -> authorization obligation for use_secret
   -> product-auth account selection or secret lease
   -> RuntimeSecretInjectionStore staging
@@ -415,14 +481,15 @@ For a new OAuth provider:
 
 1. Add provider ID and shared scope vocabulary only if it must be shared across
    crates.
-2. Add bundled first-party provider recipe data in
-   `crates/extensions/packages/<extension>/manifest.toml`,
-   keep `ironclaw_auth/src/engine/` generic, and wire the recipe resolver through
-   composition provider wiring.
+2. Add the `[auth.<vendor>]` recipe in
+   `crates/extensions/packages/<extension>/manifest.toml` (`method =
+   "oauth2_code"` or `"api_key"`), and keep `ironclaw_auth/src/engine/`
+   generic — the host engine runs the recipe; there is no per-vendor auth
+   code.
 3. Wire OAuth start/callback through product-auth services, not an
    extension-local map.
 4. Store access/refresh material as credential-account secret handles.
-5. Declare per-capability scopes in `runtime_credentials`.
+5. Declare per-capability scopes on each `[[tools.credentials]]` block.
 6. Ensure auth-required dispatch errors map to structured product-auth
    requirements instead of leaking provider or backend details.
 
@@ -431,12 +498,12 @@ failure and not a model-visible token prompt.
 
 ## WASM implementation pattern
 
-WASM tools implement `wit/tool.wit`:
+WASM tools implement `crates/lanes/ironclaw_wasm/wit/tool.wit`:
 
 ```rust
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../../wit/tool.wit",
+    path: "../../../../ironclaw_wasm/wit/tool.wit",
 });
 
 struct ExampleTool;
@@ -490,14 +557,29 @@ GitHub is the strongest current reference for this lane:
 
 ## Hosted MCP implementation pattern
 
-Hosted MCP packages declare runtime:
+A hosted-MCP extension declares a top-level `[mcp]` section **instead of**
+`[runtime]` — the two are mutually exclusive:
 
 ```toml
-[runtime]
-kind = "mcp"
-transport = "http"
-url = "https://mcp.notion.com/mcp"
+[mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+server = "https://mcp.notion.com/mcp"
+namespace = "notion"
+max_tools = 256
+default_permission = "ask"
+effects = ["network", "use_secret", "external_write"]
+
+[[mcp.credentials]]
+handle = "mcp_notion_access_token"
+vendor = "notion"
+scopes = []
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
 ```
+
+`namespace` must equal the extension id, and `max_tools` must be at least 1.
+Tools are discovered from the server's live catalog; a package may
+additionally pin static `[[tools]]` entries beside `[mcp]` that a successful
+discovery replaces (worked example: `crates/extensions/packages/nearai-mcp/manifest.toml`).
 
 For host-bundled hosted HTTP MCP, Reborn composition:
 
@@ -505,41 +587,49 @@ For host-bundled hosted HTTP MCP, Reborn composition:
 - rejects userinfo, query strings, fragments, wrong scheme, wrong host, and
   wrong path;
 - derives a locked network policy from the manifest endpoint;
-- projects `runtime_credentials` to staged credential injections when the
+- projects `[[mcp.credentials]]` to staged credential injections when the
   capability and endpoint audience match;
 - uses `RuntimeHttpEgress` instead of ambient MCP HTTP clients.
 
-Notion is the reference. Its manifest declares each MCP tool as a capability,
-with per-tool schemas and prompts, and a product-auth `notion` credential for
-`mcp.notion.com`.
+Notion is the reference (`crates/extensions/packages/notion-mcp/manifest.toml`):
+one `[mcp]` section, an `[auth.notion]` OAuth recipe, and a bearer credential
+for `mcp.notion.com`.
 
 Do not make a hosted MCP runtime call directly from an extension lifecycle or
 agent-loop path. Let the MCP runtime and host egress planner own it.
 
 ## Packaging host-bundled extensions
 
-Host-bundled extension packages are included in:
+Every host-bundled integration is a self-contained package directory
+`crates/extensions/packages/<extension>/` (manifest + schemas + prompts + any
+WASM) beside one package module
+`crates/extensions/ironclaw_extension_support/src/packages/<extension>.rs`.
 
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs`
+The package module:
 
-That file:
-
-- includes manifest strings and WASM bytes;
-- includes schema and prompt assets;
-- builds `AvailableExtensionPackage`s;
+- embeds the manifest, schema, prompt, and WASM assets via `include_str!` /
+  `include_bytes!`;
 - defines lifecycle summaries and onboarding text;
-- materializes assets into `/system/extensions/<extension_id>/...`.
+- is collected through its row in `PACKAGES` in
+  `crates/extensions/ironclaw_extension_support/src/packages/mod.rs`.
+
+Composition consumes packages as opaque bundles and never names one; the
+binary alone links the concrete channel-adapter crates (slack, telegram) and
+builds their binding table.
+Do not register package assets in composition — the old
+`available_extensions.rs` home is being dissolved.
 
 When adding a host-bundled package:
 
 1. Add manifest/assets under
    `crates/extensions/packages/<extension>/`.
-2. Add `include_str!` / `include_bytes!` entries in `available_extensions.rs`.
-3. Add a package constructor like `github_package()` or `notion_mcp_package()`.
-4. Add assets for every `input_schema_ref`, `output_schema_ref`, and
+2. Add the package module in
+   `crates/extensions/ironclaw_extension_support/src/packages/<extension>.rs`
+   and its row in `PACKAGES` in `.../src/packages/mod.rs`.
+3. Add assets for every `input_schema_ref`, `output_schema_ref`, and
    `prompt_doc_ref`.
-5. Add onboarding only if setup is needed.
-6. Add tests that every manifest asset ref is packaged.
+4. Add onboarding only if setup is needed.
+5. Add tests that every manifest asset ref is packaged.
 
 For non-bundled registry packages, do not add them to this host-bundled catalog.
 They should be discovered from `/system/extensions/<id>/` through the same
@@ -549,7 +639,7 @@ manifest host API path.
 
 Hot model-facing publication happens in:
 
-- `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+- `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs`
 
 It resolves input schema refs, output schema refs, and optional prompt docs
 under the extension root. It does not grant authority and does not execute
@@ -603,20 +693,23 @@ Minimum tests for a Reborn tool:
 
 ### Manifest and packaging
 
-- manifest parses as `reborn.extension_manifest.v2`;
+- manifest parses as `reborn.extension_manifest.v3`;
 - capability IDs use the extension prefix;
+- every capability declares an `origin_gate_matrix` with a `loop_run` policy;
 - every capability has matching schema and prompt assets;
-- credential capabilities include `use_secret`;
+- credential capabilities include `use_secret` and every credential vendor has
+  an `[auth.<vendor>]` recipe;
 - write capabilities include `external_write` and default to `ask`;
 - bundled package assets include every manifest ref;
-- extension manifests use `[[host_api]]` / `[capability_provider.tools]`, never
-  top-level `[[capabilities]]`.
+- extension manifests use `[[tools]]` entries, never the legacy
+  `[[host_api]]` / `[capability_provider.tools]` or top-level
+  `[[capabilities]]` shapes.
 
 Useful existing test areas:
 
-- `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` tests
-- `crates/ironclaw_host_runtime/src/capability_catalog.rs` tests
+- `crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`
+- `crates/app/ironclaw_architecture_tests/tests/reborn_origin_gate_matrix_ratchet.rs`
+- `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs` tests
 
 ### Runtime behavior
 
@@ -665,9 +758,10 @@ Before opening a PR, verify:
 ## Concrete examples to copy
 
 Copy these runtime, credential, and security patterns, not legacy manifest
-shape. If one of these manifests still uses top-level `[[capabilities]]`, port
-the semantics into the registry `[[host_api]]` / `[capability_provider.tools]`
-shape before extending it.
+shape. If a manifest you encounter still uses the legacy v2 shapes
+(`[[host_api]]` / `[capability_provider.tools]` or top-level
+`[[capabilities]]`), port the semantics into v3 `[[tools]]` entries before
+extending it.
 
 - GitHub WASM operation dispatch:
   `crates/extensions/packages/github/wasm-src/src/lib.rs`
@@ -677,27 +771,31 @@ shape before extending it.
   `crates/extensions/packages/github/manifest.toml`
 - Google Drive WASM OAuth scopes by operation:
   `crates/extensions/packages/google-drive/manifest.toml`
-- Gmail and Google Calendar follow the bundled WASM GSuite manifest and runtime
-  shape.
+- Gmail and Google Calendar are bundled `first_party` runtimes sharing the
+  `google` vendor — a reference for the first-party lane, not for WASM.
 - Notion hosted MCP credential/effect semantics:
   `crates/extensions/packages/notion-mcp/manifest.toml`
 - Hosted MCP egress planner:
-  `crates/ironclaw_reborn_composition/src/mcp.rs`
+  `crates/extensions/ironclaw_extension_host/src/mcp.rs`
 - Notion OAuth provider wiring:
-  `crates/ironclaw_reborn_composition/src/factory.rs`
+  `crates/app/ironclaw_composition/src/factory.rs`
 - Hot capability catalog:
-  `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+  `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs`
 - Host HTTP egress service:
-  `crates/ironclaw_host_runtime/src/egress/`
-- Manifest v2 contract:
-  `crates/ironclaw_extensions/src/v2.rs`
+  `crates/kernel/ironclaw_host_runtime/src/egress/`
+- Manifest v3 contract (v2 remains the legacy/resolved model):
+  `crates/extensions/ironclaw_extension_registry/src/v3.rs`
 
 ## Quick implementation checklist
 
-1. Pick lane: WASM, hosted MCP, script, or product adapter.
-2. Create package assets under `assets/<extension>/`.
-3. Write manifest v2 with the capability-provider host API and make it flow
-   through extension registry discovery/publication.
+1. Pick the implementation: WASM (`[runtime] kind = "wasm"`), hosted MCP
+   (`[mcp]`), or a channel surface (`[channel]`).
+2. Create the package directory `crates/extensions/packages/<extension>/`
+   with `manifest.toml`, `schemas/`, `prompts/`, and any `wasm/` module.
+3. Write a `reborn.extension_manifest.v3` manifest with `[[tools]]` entries
+   (each with an `origin_gate_matrix`), `[[tools.credentials]]`, and an
+   `[auth.<vendor>]` recipe per credential vendor, and make it flow through
+   extension registry discovery/publication.
 4. Add schemas and prompt docs for every model-visible capability.
 5. Implement runtime code using host services only.
 6. Declare credentials with narrow HTTPS audiences and provider scopes.
@@ -705,3 +803,4 @@ shape before extending it.
 8. Add manifest, packaging, runtime, auth/approval, and integration tests.
 9. Run targeted tests.
 10. Check docs/specs and `FEATURE_PARITY.md` for behavior-status updates.
+11. When your tool is packaged and tested, submit it to IronHub so other agents can discover and install it. See [Contributing](/hub/contributing).

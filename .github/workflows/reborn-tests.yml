@@ -50,7 +50,7 @@ concurrency:
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
-  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
+  # crates/substrates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -95,6 +95,7 @@ jobs:
       integration_lanes: ${{ steps.plan.outputs.integration_lanes }}
       run_coverage: ${{ steps.plan.outputs.run_coverage }}
       run_qa_replay: ${{ steps.plan.outputs.run_qa_replay }}
+      run_sandbox_docker: ${{ steps.plan.outputs.run_sandbox_docker }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -122,6 +123,7 @@ jobs:
           fi
 
           python3 scripts/ci/test_reborn_pr_test_plan.py
+          python3 scripts/ci/test_pre_commit_staged_paths.py
           scripts/ci/discover-reborn-package-crates.sh \
             > "${RUNNER_TEMP}/reborn-canonical-packages.json"
           plan="$(
@@ -140,6 +142,7 @@ jobs:
               and .integration_lanes == [0, 1, 2, 3, "groups"]
               and .run_group_tests == true
               and .run_qa_replay == true
+              and .run_sandbox_docker == true
               and .coverage_mode == "full"
             )
           ' <<< "${plan}" > /dev/null; then
@@ -154,6 +157,7 @@ jobs:
             echo "- Crate buckets: $(jq -r '.crate_buckets | length' <<< "${plan}")"
             echo "- Root partitions: $(jq -c '.root_partitions' <<< "${plan}")"
             echo "- Integration lanes: $(jq -c '.integration_lanes' <<< "${plan}")"
+            echo "- Sandbox Docker: $(jq -r '.run_sandbox_docker' <<< "${plan}")"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "plan_mode=$(jq -r '.mode' <<< "${plan}")" >> "$GITHUB_OUTPUT"
@@ -164,8 +168,19 @@ jobs:
           echo "run_group_tests=$(jq -r '.run_group_tests' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "run_coverage=$(jq -r '.coverage_mode == "full"' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          # Owner decision 2026-08-04 (Ben + Firat): coverage collection,
+          # the report job, the floors, and the changed-line gate all run on
+          # pushes to main ONLY. PR and merge-queue lanes run plain
+          # (uninstrumented) tests — llvm-cov overhead was a large share of
+          # the ~hour cycle — and a post-merge coverage breach lands as a red
+          # main run that main-ci-slack-alerts.yml announces, fixed forward.
+          run_coverage="$(jq -r '.coverage_mode == "full"' <<< "${plan}")"
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            run_coverage=false
+          fi
+          echo "run_coverage=${run_coverage}" >> "$GITHUB_OUTPUT"
           echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "run_sandbox_docker=$(jq -r '.run_sandbox_docker' <<< "${plan}")" >> "$GITHUB_OUTPUT"
 
           scripts/ci/check-test-suite-boundaries.sh
           scripts/ci/test-reborn-changed-coverage.sh
@@ -238,19 +253,19 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw|ironclaw_reborn_composition|ironclaw_webui)
+              ironclaw|ironclaw_composition|ironclaw_webui)
                 needs_webui_node=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw_reborn_composition|ironclaw_triggers)
+              ironclaw_composition|ironclaw_triggers)
                 needs_postgres_image=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)
+              ironclaw|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_assistant|ironclaw_turn_runner|ironclaw_composition|ironclaw_webui|ironclaw_wasm)
                 sccache_dist_enabled=false
                 ;;
             esac
@@ -274,7 +289,19 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
@@ -283,7 +310,9 @@ jobs:
       - name: Install WebUI frontend dependencies
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -350,7 +379,7 @@ jobs:
                 feature_args+=(--features "${package}/${feature}")
               done
             fi
-            if [[ "$package" == "ironclaw_reborn_composition" ]]; then
+            if [[ "$package" == "ironclaw_composition" ]]; then
               incremental_env=(env CARGO_INCREMENTAL=0)
             fi
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
@@ -587,6 +616,52 @@ jobs:
       - name: Run Reborn group tests
         run: scripts/ci/run-hermetic-deterministic-suite.sh groups
 
+  sandbox-docker-tests:
+    name: Reborn user-sandbox Docker tests
+    needs: changes
+    if: needs.changes.outputs.run_sandbox_docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ""
+      IRONCLAW_REQUIRE_DOCKER_TESTS: "1"
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: reborn-sandbox-docker-tests
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Build Python sandbox worker
+        run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
+
+      - name: Verify production local-sandbox profile wiring
+        run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
+
+      - name: Run real-Docker user sandbox contract
+        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
+
+      - name: Run full-turn sandbox shell integration
+        run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
+
   reborn-integration-coverage:
     name: Reborn integration tests (${{ matrix.lane }})
     needs: changes
@@ -656,14 +731,28 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies for coverage
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -806,9 +895,21 @@ jobs:
         run: python3 scripts/ci/test_reborn_changed_coverage.py
 
       - name: Gate changed Reborn lines and branches
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push'
+        # Owner decision 2026-08-04 (Ben + Firat, reversing the "leave CI
+        # policy as-is" note recorded on #7036): the changed-line verdict no
+        # longer blocks PRs or the merge queue. For move-heavy refactors it
+        # re-attributes relocated code as new-and-uncovered, and because this
+        # job runs last its verdict lands after the full hour of test lanes —
+        # the worst feedback shape the program has. It still RUNS on both
+        # lanes for visibility (step summary, sticky comment, and this step's
+        # red annotation), and it ENFORCES on pushes to main, where
+        # main-ci-slack-alerts.yml surfaces a breach. The aggregate and
+        # per-crate coverage floors are untouched and still gate everywhere
+        # they always did.
+        continue-on-error: ${{ github.event_name != 'push' }}
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           # `gh` resolves the base commit's merged-lcov artifact. The checkout
           # runs with persist-credentials: false, so the token is passed here
@@ -951,14 +1052,28 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies for QA replay
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
@@ -994,7 +1109,7 @@ jobs:
             scripts/ci/run-hermetic-deterministic-suite.sh \
             command \
             cargo test \
-            -p ironclaw_reborn_integration_tests \
+            -p ironclaw_integration_tests \
             --test reborn_qa_recorded_behavior \
             -- \
             --nocapture
@@ -1012,6 +1127,7 @@ jobs:
       - coverage-report
       - critical-mutation
       - qa-recorded-fixtures
+      - sandbox-docker-tests
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1045,7 +1161,8 @@ jobs:
             "${{ needs.changes.outputs.run_group_tests }}" \
             "${{ needs.changes.outputs.run_integration_tests }}" \
             "${{ needs.changes.outputs.run_coverage }}" \
-            "${{ needs.changes.outputs.run_qa_replay }}"; do
+            "${{ needs.changes.outputs.run_qa_replay }}" \
+            "${{ needs.changes.outputs.run_sandbox_docker }}"; do
             if [[ "${flag}" != "true" && "${flag}" != "false" ]]; then
               echo "Missing or invalid Reborn test plan flag: '${flag}'"
               exit 1
@@ -1058,13 +1175,22 @@ jobs:
               "${{ needs.changes.outputs.run_root_tests }}" \
               "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
-              "${{ needs.changes.outputs.run_coverage }}" \
-              "${{ needs.changes.outputs.run_qa_replay }}"; do
+              "${{ needs.changes.outputs.run_qa_replay }}" \
+              "${{ needs.changes.outputs.run_sandbox_docker }}"; do
               if [[ "${flag}" != "true" ]]; then
                 echo "Full Reborn plan omitted a required lane"
                 exit 1
               fi
             done
+            # Coverage is push-only by owner decision (2026-08-04, Ben +
+            # Firat): full-mode merge_group runs plain tests, so run_coverage
+            # must be true exactly when the event is a push and false
+            # otherwise — either mismatch is a wiring bug worth failing on.
+            expected_coverage=${{ github.event_name == 'push' }}
+            if [[ "${{ needs.changes.outputs.run_coverage }}" != "${expected_coverage}" ]]; then
+              echo "run_coverage=${{ needs.changes.outputs.run_coverage }} but expected ${expected_coverage} for ${{ github.event_name }}"
+              exit 1
+            fi
           fi
 
           check_planned_job() {
@@ -1102,6 +1228,9 @@ jobs:
           check_planned_job "qa-recorded-fixtures" \
             "${{ needs.qa-recorded-fixtures.result }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"
+          check_planned_job "sandbox-docker-tests" \
+            "${{ needs.sandbox-docker-tests.result }}" \
+            "${{ needs.changes.outputs.run_sandbox_docker }}"
 
           mutation_expected=${{ github.event_name == 'merge_group' }}
           check_planned_job "critical-mutation" \

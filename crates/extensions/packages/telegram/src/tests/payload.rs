@@ -320,7 +320,7 @@ fn command_arguments_with_control_char_rejected_via_shared_validation() {
     // Henry's review (PR #3354, 2026-05-12T18:59:39Z) — Critical:
     // `build_payload` previously constructed `InboundCommandPayload`
     // with a struct literal, bypassing `InboundCommandPayload::new`
-    // and the shared `ironclaw_product` validation
+    // and the shared `ironclaw_assistant` validation
     // (token shape, byte limits, control-char rejection). Untrusted
     // Telegram webhook text could carry control characters into
     // the trusted inbound envelope.

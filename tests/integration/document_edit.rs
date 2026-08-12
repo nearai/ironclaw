@@ -14,19 +14,18 @@
 //! the write is REFUSED with an actionable reason, and the document the user
 //! gets back is byte-identical to the one they uploaded.
 //!
-//! Two things this test deliberately does NOT assert.
+//! Two things the first refusal journey deliberately does NOT assert.
 //!
-//! 1. A successfully edited .docx coming back. There is no OOXML writer and no
-//!    binary/base64 write channel in the workspace (#6898 "Details"), so
-//!    refusing is the correct terminal behavior today. A real document
-//!    round-trip is that issue's deferred item 3; when it lands, extend here.
+//! 1. A successfully edited .docx coming back. The later journeys cover the
+//!    structured OOXML writer; this first journey isolates the permanent rule
+//!    that raw text tools still refuse binary documents.
 //! 2. The overwrite-the-uploaded-file path. A landed attachment's storage key
 //!    is minted at landing time (UTC-date + message-id partitioned), so a
 //!    static script cannot name it, and one conversation admits exactly one
 //!    harness. That path is pinned at the crate tier instead, by
 //!    `builtin_write_file_rejects_docx_after_extracted_read_without_changing_bytes`
 //!    and `builtin_write_file_rejects_extracted_read_representation_at_unlisted_extension`
-//!    in `crates/ironclaw_host_runtime/tests/first_party_builtin_tools.rs`.
+//!    in `crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs`.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -144,7 +143,7 @@ const QUARTERLY_PPTX: &[u8] = include_bytes!("../fixtures/quarterly.pptx");
 const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const PPTX_MIME: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
-/// Upload `bytes` as an attachment and return the workspace path they landed at.
+/// Upload `bytes` and return its storage key, which is the addressable workspace path.
 async fn upload_document(
     group: &RebornIntegrationGroup,
     conversation: &str,
@@ -408,4 +407,14 @@ async fn pdf_is_produced_by_authoring_html_and_rendering_it() {
     )
     .await
     .expect("rendering succeeded");
+    let pdf_path = group
+        .capability_harness()
+        .expect("document_edit_tools uses a host-runtime capability backend")
+        .workspace_file_path("report.pdf");
+    let pdf = std::fs::read(&pdf_path).expect("persisted PDF is readable");
+    assert!(pdf.starts_with(b"%PDF-"), "persisted output must be a PDF");
+    assert!(
+        pdf.len() > 100,
+        "persisted PDF must contain rendered content"
+    );
 }

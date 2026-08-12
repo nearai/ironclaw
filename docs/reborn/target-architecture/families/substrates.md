@@ -1,6 +1,6 @@
 # `crates/substrates/` — privileged mechanism substrates
 
-**Layer(s):** substrates · **Crates:** 6 — `ironclaw_filesystem`, `ironclaw_libsql_runtime`, `ironclaw_secrets`, `ironclaw_network`, `ironclaw_safety`, `ironclaw_observability` · **Security posture:** each crate is a mediated mechanism invoked on behalf of an already-decided effect; none of the six makes an authority decision itself — containment, custody, admission, policy enforcement, and detection only, fail-closed by local invariant, never by ambient trust.
+**Layer(s):** substrates · **Crates:** 7 — `ironclaw_filesystem`, `ironclaw_documents`, `ironclaw_libsql_runtime`, `ironclaw_secrets`, `ironclaw_network`, `ironclaw_safety`, `ironclaw_observability` · **Security posture:** each crate is a mediated mechanism invoked on behalf of an already-decided effect; none makes an authority decision itself — containment, custody, admission, policy enforcement, detection, and bounded document transformation only, fail-closed by local invariant, never by ambient trust.
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 

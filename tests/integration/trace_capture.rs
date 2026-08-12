@@ -5,7 +5,7 @@
 //! `build_reborn_runtime`'s recipe) into the group's ONE planned runtime with
 //! `.with_trace_capture()`, and proves the capture path end-to-end: policy
 //! read → transcript capture → redact → score → queue
-//! (`ironclaw_reborn_traces::contribution`, previously 0% on the lane).
+//! (`ironclaw_trace_commons::contribution`, previously 0% on the lane).
 //!
 //! Enrollment divergence from the plan (verified infeasible as written): a
 //! scripted `builtin.trace_commons.onboard` with `confirmed=true` can NEVER
@@ -23,7 +23,7 @@
 //! This binary owns `IRONCLAW_BASE_DIR`: trace policy/queue paths resolve
 //! through `ironclaw_common`'s process-wide `LazyLock`, so the tempdir env
 //! var is set as the FIRST action, before any read (same pattern as
-//! `crates/ironclaw_host_runtime/tests/trace_commons_dispatch_e2e.rs`).
+//! `crates/kernel/ironclaw_host_runtime/tests/trace_commons_dispatch_e2e.rs`).
 //! Keep this suite a single sequenced `#[tokio::test]`: enrollment state is
 //! process-global (per scope), so concurrent tests in this binary would race.
 
@@ -36,7 +36,7 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_reborn_traces::contribution::{
+use ironclaw_trace_commons::contribution::{
     StandingTraceContributionPolicy, queued_trace_envelope_paths_for_scope, trace_scope_key,
     write_trace_policy_for_scope,
 };
@@ -153,12 +153,7 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
         .expect("first thread builds");
     let control_scope = trace_scope_key(
         first.binding.tenant_id.as_str(),
-        first
-            .binding
-            .subject_user_id
-            .as_ref()
-            .expect("resolved binding has a subject user id")
-            .as_str(),
+        first.binding.actor_user_id.as_str(),
     );
     assert_ne!(
         control_scope, scope,

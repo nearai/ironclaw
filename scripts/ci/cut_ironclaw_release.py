@@ -21,6 +21,7 @@ VERSION_PATTERN = re.compile(
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 MAX_ANNOTATED_TAG_DEPTH = 8
+SHIPPING_PACKAGE_NAME = "ironclaw"
 
 
 class ReleaseTagError(RuntimeError):
@@ -150,9 +151,75 @@ def _checked_out_sha(candidate_root: Path) -> str:
 
 
 def _manifest_version(candidate_root: Path) -> str:
-    manifest = candidate_root / "crates/ironclaw_reborn_cli/Cargo.toml"
-    with manifest.open("rb") as manifest_file:
-        return str(tomllib.load(manifest_file)["package"]["version"])
+    # Resolve the shipping Cargo PACKAGE through Cargo's authoritative
+    # workspace membership. Directory names are not a stable release contract:
+    # supported release branches use `ironclaw_reborn_cli`, while main uses
+    # `app/ironclaw_cli` after the target-architecture move. A filesystem scan
+    # is insufficient because it can include manifests cargo-dist will ignore.
+    candidate_root = candidate_root.resolve()
+    try:
+        metadata_result = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=candidate_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise ReleaseTagError(
+            f"cannot inventory Cargo workspace in the candidate checkout: {error}"
+        ) from error
+    if metadata_result.returncode != 0:
+        raise ReleaseTagError(
+            "cannot inventory Cargo workspace in the candidate checkout: "
+            f"{metadata_result.stderr.strip()}"
+        )
+    try:
+        metadata = json.loads(metadata_result.stdout)
+        workspace_members = set(metadata["workspace_members"])
+        packages = metadata["packages"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ReleaseTagError(
+            f"cargo metadata returned an invalid workspace inventory: {error}"
+        ) from error
+    if not isinstance(packages, list):
+        raise ReleaseTagError("cargo metadata returned a non-list package inventory")
+
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for metadata_package in packages:
+        if (
+            not isinstance(metadata_package, dict)
+            or metadata_package.get("id") not in workspace_members
+        ):
+            continue
+        manifest_path = metadata_package.get("manifest_path")
+        if not isinstance(manifest_path, str):
+            raise ReleaseTagError("candidate workspace package has no manifest path")
+        manifest = Path(manifest_path)
+        try:
+            with manifest.open("rb") as manifest_file:
+                document = tomllib.load(manifest_file)
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise ReleaseTagError(
+                f"cannot read candidate manifest {manifest}: {error}"
+            ) from error
+        package = document.get("package")
+        if isinstance(package, dict) and package.get("name") == SHIPPING_PACKAGE_NAME:
+            matches.append((manifest, package))
+
+    if len(matches) != 1:
+        paths = [str(manifest.relative_to(candidate_root)) for manifest, _ in matches]
+        raise ReleaseTagError(
+            "expected exactly one candidate workspace package named "
+            f"{SHIPPING_PACKAGE_NAME!r}, "
+            f"found {len(matches)}: {paths}"
+        )
+
+    manifest, package = matches[0]
+    version = package.get("version")
+    if not isinstance(version, str):
+        raise ReleaseTagError(f"candidate package manifest {manifest} has no version")
+    return version
 
 
 def main() -> int:

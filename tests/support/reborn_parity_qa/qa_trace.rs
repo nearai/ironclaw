@@ -22,12 +22,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_assistant::RebornOutboundDeliveryTargetId;
 use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
     GOOGLE_GMAIL_READONLY_SCOPE, NewCredentialAccount, ProviderScope,
 };
+use ironclaw_composition::{
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
+    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
+};
+use ironclaw_config::{RebornConfigFile, RebornHome};
 use ironclaw_extension_support::GoogleCredentialResolver;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
@@ -50,13 +57,6 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
-use ironclaw_product::RebornOutboundDeliveryTargetId;
-use ironclaw_reborn_composition::{
-    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
-    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
-};
-use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus};
 use secrecy::{ExposeSecret, SecretString};
@@ -89,7 +89,7 @@ pub fn qa_trace_tenant_id() -> &'static str {
 }
 
 /// The model profile id the composed Reborn runtime routes turns through;
-/// must match `wrap_swappable_gateway` in `ironclaw_reborn_composition`.
+/// must match `wrap_swappable_gateway` in `ironclaw_composition`.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
 struct LiveCredentialSeed {
@@ -440,6 +440,22 @@ fn seed_static_outbound_delivery_targets(runtime: &RebornRuntime) {
             ReplyTargetBindingRef::new("reply:qa-trace:email").expect("QA email reply binding"),
         )
         .expect("seed QA email delivery target");
+    // Telegram mirrors the model-facing id convention the delivery journeys
+    // and the notification-channels fixture already use
+    // (`telegram:qa-trace-dm`), so multi-channel recording phrases can
+    // resolve a second real channel from the catalog.
+    runtime
+        .register_static_outbound_delivery_target_for_test(
+            "qa-trace-telegram",
+            RebornOutboundDeliveryTargetId::new("telegram:qa-trace-dm")
+                .expect("QA Telegram target id"),
+            "telegram",
+            "Telegram DM",
+            Some("QA trace Telegram direct message"),
+            ReplyTargetBindingRef::new("reply:qa-trace:telegram-dm")
+                .expect("QA Telegram reply binding"),
+        )
+        .expect("seed QA Telegram delivery target");
 }
 
 /// Send one phrase through a fresh conversation and wait for the terminal
@@ -736,6 +752,10 @@ fn qa_runtime_credential_binding(
 
     let granted = match fixture_name {
         "routine_crm_inbox" => &["gmail", "google-sheets"][..],
+        // `routine_meeting_prep`'s recorded trace was retired with
+        // `builtin.outbound_delivery_target_set`, but this row is retained as
+        // the multi-extension (3 grants) case for
+        // `qa_runtime_credential_binding` — see the unit test below.
         "routine_meeting_prep" => &["gmail", "google-calendar", "google-drive"][..],
         _ => &[][..],
     };
@@ -815,7 +835,7 @@ impl RebornQaCredentialSource {
         }
     }
 
-    async fn build_services(&self) -> ironclaw_reborn_composition::RebornRuntime {
+    async fn build_services(&self) -> ironclaw_composition::RebornRuntime {
         let input = local_runtime_build_input_with_options(
             RebornCompositionProfile::Standalone,
             &self.user,
@@ -1611,33 +1631,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 &["gmail"],
             );
         }
-        "routine_health_ping" => {
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.trigger_create",
-                &["*/5 * * * *", "cloud-api.near.ai/health"],
-            );
-        }
-        "routine_meeting_prep" => {
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.trigger_create",
-                &["*/30 * * * *"],
-            );
-        }
-        "routine_release_watch" => {
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.trigger_create",
-                &["*/5 * * * *", "github.com/nearai/ironclaw"],
-            );
-        }
         "routine_crm_inbox" => {
             assert_recorded_tool_call(
                 fixture_name,
@@ -1645,15 +1638,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 &trace,
                 "builtin.trigger_create",
                 &["*/30 * * * *", "near.ai", "ABC"],
-            );
-        }
-        "routine_hn_monitor" => {
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.trigger_create",
-                &["0 * * * *", "Hacker News"],
             );
         }
         "web_status_check" => {

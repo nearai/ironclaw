@@ -90,23 +90,27 @@ pad_inventory() {  # crates_dir
 make_fixture() {
     local dir="$1" comp_lines="$2" other_lines="$3"
     rm -rf "${dir}"
-    mkdir -p "${dir}/ironclaw_reborn_composition/src" "${dir}/other_crate/src"
-    write_manifest "${dir}/ironclaw_reborn_composition" ironclaw_reborn_composition
+    mkdir -p "${dir}/ironclaw_composition/src" "${dir}/other_crate/src"
+    write_manifest "${dir}/ironclaw_composition" ironclaw_composition
     write_manifest "${dir}/other_crate" other_crate
     pad_inventory "${dir}"
     # `|| true`: `yes | head` makes `yes` exit with SIGPIPE (141), which under
     # `set -e`+`pipefail` would abort the harness. The file is fully written.
-    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_reborn_composition/src/lib.rs" || true
+    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_composition/src/lib.rs" || true
     { yes 'let _ = 2;' | head -n "${other_lines}"; } > "${dir}/other_crate/src/lib.rs" || true
 }
 
 # 3000 comp / (3000+7000) = 30.00% = 3000 bp
 make_fixture "${tmp}/crates" 3000 7000
 
-budget() {  # enforce ceiling_bp tolerance_bp [arc_ceiling=0] [arc_tol=0]
+budget() {  # enforce ceiling_bp tolerance_bp [arc_ceiling=0] [arc_tol=0] [loc_ceiling] [loc_nudge_slack]
     # arc_ceiling defaults to 0: mass-focused fixtures have no Arc<dyn>, so a
     # 0 ceiling neither breaches nor emits a dispatch nudge, isolating the mass
     # metric under test. Dispatch cases pass an explicit ceiling.
+    #
+    # loc_ceiling / loc_nudge_slack default ABSURDLY HIGH for the same reason:
+    # the absolute-mass metric (#7151) must not breach or nudge in the cases
+    # that are isolating another metric. The L cases below drive it explicitly.
     cat > "${tmp}/budget.toml" <<EOF
 [gate]
 enforce = $1
@@ -116,12 +120,17 @@ observed_bp = $2
 arc_dyn_ceiling = ${4:-0}
 arc_dyn_tolerance = ${5:-0}
 arc_dyn_observed = ${4:-0}
+loc_ceiling = ${6:-1000000}
+loc_tolerance = 0
+loc_nudge_slack = ${7:-1000000}
+loc_observed = ${6:-1000000}
+loc_observed_date = "2026-08-04"
 observed_date = "2026-07-16"
 EOF
 }
 
 run_gate() {
-    COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+    COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
     CRATES_ROOT="${tmp}/crates" \
     BUDGET_FILE="${tmp}/budget.toml" \
     capture bash "${gate}"
@@ -196,7 +205,7 @@ assert_contains "C8b reports schema error not crash" "${CAP_OUT}" "ceiling_bp mu
 # C8c: test-only FILES are excluded from the metric. Add a big tests.rs to the
 # composition fixture; the observed share must stay 30.00% (3000 bp), unchanged.
 make_fixture "${tmp}/crates" 3000 7000
-printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_reborn_composition/src/tests.rs"
+printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_composition/src/tests.rs"
 budget true 3000 30; run_gate
 assert_rc       "C8c test file excluded exits 0"   0 "${CAP_RC}"
 assert_contains "C8c share ignores tests.rs"       "${CAP_OUT}" "30.00% (3000 bp)"
@@ -204,7 +213,7 @@ make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture for later cases
 
 # C9: --print never fails and reports the share.
 budget true 100 0; run_gate  # ceiling absurdly low, but --print ignores it
-COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
 CRATES_ROOT="${tmp}/crates" \
 BUDGET_FILE="${tmp}/budget.toml" \
 capture bash "${gate}" --print
@@ -215,7 +224,7 @@ assert_contains "C9 --print shows share"  "${CAP_OUT}" "composition share: 30.00
 # D. Dispatch (Arc<dyn>) sub-metric.
 # ---------------------------------------------------------------------------
 make_fixture "${tmp}/crates" 3000 7000
-comp_src="${tmp}/crates/ironclaw_reborn_composition/src"
+comp_src="${tmp}/crates/ironclaw_composition/src"
 # 10 Arc<dyn> sites in a production file.
 printf 'let x: Arc<dyn Foo> = y;\n%.0s' $(seq 1 10) > "${comp_src}/dispatch.rs"
 
@@ -261,7 +270,7 @@ rm -rf "${comp_src}/dispatch.rs" "${comp_src}/slack" "${comp_src}/extension_host
 # T. Tree-shape independence (WS10 / #6963).
 #
 # The gate used to key its numerator to the literal
-# crates/ironclaw_reborn_composition/src path and its denominator to
+# crates/ironclaw_composition/src path and its denominator to
 # crates/*/src. Under the target-architecture family move both stop matching.
 # The denominator failure is loud (the den_loc guard); the NUMERATOR failure is
 # silent — a partial move leaves the denominator healthy, so the gate reported
@@ -301,26 +310,35 @@ assert_contains "T2 nested denominator is real"    "${CAP_OUT}" "3000 LOC of 100
 rm -rf "${tmp}/partial"
 make_fixture "${tmp}/partial/crates" 3000 7000
 mkdir -p "${tmp}/partial/crates/app"
-mv "${tmp}/partial/crates/ironclaw_reborn_composition" "${tmp}/partial/crates/app/"
+mv "${tmp}/partial/crates/ironclaw_composition" "${tmp}/partial/crates/app/"
 budget true 3000 30; run_discovered "${tmp}/partial/crates"
 assert_rc       "T3 partial move exits 0"          0 "${CAP_RC}"
 assert_contains "T3 partial move keeps measuring"  "${CAP_OUT}" "30.00% (3000 bp)"
 
 # T4: NEGATIVE — the composition crate is absent (renamed). Must be a loud
 #     repoint, not a 0.00% pass.
+#
+#     The destination MUST NOT be the crate's real name. This case renames the
+#     fixture's composition crate *away* so the gate cannot find it; if both
+#     sides of the `mv` are the same name it degenerates to `mv X X`, which
+#     fails as "Invalid argument" (mv nests a directory inside itself) and the
+#     negative case never runs. That is exactly what the WS6 rename produced:
+#     the crate became `ironclaw_composition`, which was already this line's
+#     hard-coded destination. Kept deliberately synthetic so no future crate
+#     rename can collide with it again.
 rm -rf "${tmp}/renamed"
 make_fixture "${tmp}/renamed/crates" 3000 7000
-mv "${tmp}/renamed/crates/ironclaw_reborn_composition" "${tmp}/renamed/crates/ironclaw_composition"
+mv "${tmp}/renamed/crates/ironclaw_composition" "${tmp}/renamed/crates/composition_renamed_away"
 budget true 3000 30; run_discovered "${tmp}/renamed/crates"
 assert_rc       "T4 renamed crate exits 1"         1 "${CAP_RC}"
-assert_contains "T4 renamed crate names the crate" "${CAP_OUT}" "expected exactly one crate directory named 'ironclaw_reborn_composition'"
+assert_contains "T4 renamed crate names the crate" "${CAP_OUT}" "expected exactly one crate directory named 'ironclaw_composition'"
 
 # T5: NEGATIVE — an inventory below the discovery floor must refuse rather than
 #     measure a truncated tree.
 rm -rf "${tmp}/thin"
-mkdir -p "${tmp}/thin/crates/ironclaw_reborn_composition/src"
-write_manifest "${tmp}/thin/crates/ironclaw_reborn_composition" ironclaw_reborn_composition
-printf 'let _ = 1;\n' > "${tmp}/thin/crates/ironclaw_reborn_composition/src/lib.rs"
+mkdir -p "${tmp}/thin/crates/ironclaw_composition/src"
+write_manifest "${tmp}/thin/crates/ironclaw_composition" ironclaw_composition
+printf 'let _ = 1;\n' > "${tmp}/thin/crates/ironclaw_composition/src/lib.rs"
 budget true 3000 30; run_discovered "${tmp}/thin/crates"
 assert_rc       "T5 thin inventory exits 1"        1 "${CAP_RC}"
 assert_contains "T5 thin inventory refuses"        "${CAP_OUT}" "crate discovery failed"
@@ -341,7 +359,7 @@ assert_contains "T6 zero numerator refuses"        "${CAP_OUT}" "composition LOC
 # T7: NEGATIVE — CRATES_ROOT that is not a `crates` directory must be refused
 #     rather than silently discovering the wrong tree.
 budget true 3000 30
-COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
 CRATES_ROOT="${tmp}" \
 BUDGET_FILE="${tmp}/budget.toml" \
 capture bash "${gate}"
@@ -350,10 +368,128 @@ assert_contains "T7 bad CRATES_ROOT explains"      "${CAP_OUT}" "must be a direc
 
 make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture
 
+# ---------------------------------------------------------------------------
+# L. Absolute mass (production LOC) — the metric with no denominator (#7151).
+#
+# The share metric cannot see composition growing while the rest of the
+# workspace grows faster; every case here holds the share FIXED at 3000 bp
+# (well inside its ceiling) so only the absolute bound can decide the outcome.
+# ---------------------------------------------------------------------------
+make_fixture "${tmp}/crates" 3000 7000
+
+# L1: 3000 LOC against a 3000 ceiling -> inclusive pass, and the line is shown.
+budget true 3000 30 0 0 3000 0; run_gate
+assert_rc       "L1 at absolute ceiling exits 0"  0 "${CAP_RC}"
+assert_contains "L1 reports absolute mass"        "${CAP_OUT}" "[abs] composition src  : 3000 LOC"
+assert_contains "L1 reports OK"                   "${CAP_OUT}" "OK: composition within mass + dispatch budget"
+
+# L2: THE DEFECT THIS METRIC EXISTS FOR. Composition grows by 619 LOC (the real
+#     2026-08-02..04 inflow) while the workspace grows faster, so the SHARE
+#     IMPROVES — 30.00% -> 26.57%, further inside its ceiling than before — and
+#     only the absolute bound objects.
+make_fixture "${tmp}/crates" 3619 10000
+budget true 3000 30 0 0 3000 0; run_gate
+assert_rc       "L2 absolute breach exits 1"       1 "${CAP_RC}"
+assert_contains "L2 reports ABSOLUTE MASS EXCEEDED" "${CAP_OUT}" "ABSOLUTE MASS EXCEEDED"
+assert_contains "L2 names the overage"             "${CAP_OUT}" "3619 production LOC, 619 over"
+assert_contains "L2 share metric IMPROVED"         "${CAP_OUT}" "26.57% (2657 bp)"
+assert_not_contains "L2 share did NOT fire"        "${CAP_OUT}" "MASS EXCEEDED: composition is"
+
+# L3: same breach, DRY-RUN -> exit 0 with the marker.
+budget false 3000 30 0 0 3000 0; run_gate
+assert_rc       "L3 absolute breach dry-run exits 0" 0 "${CAP_RC}"
+assert_contains "L3 would-fail marker"               "${CAP_OUT}" "[dry-run, would FAIL] ABSOLUTE MASS EXCEEDED"
+
+# L4: tolerance absorbs an in-flight PR: 3619 vs ceiling 3000 + tol 619.
+cat > "${tmp}/budget.toml" <<'EOF'
+[gate]
+enforce = true
+ceiling_bp = 3000
+tolerance_bp = 30
+observed_bp = 3000
+arc_dyn_ceiling = 0
+arc_dyn_tolerance = 0
+arc_dyn_observed = 0
+loc_ceiling = 3000
+loc_tolerance = 619
+loc_nudge_slack = 1000000
+loc_observed = 3000
+loc_observed_date = "2026-08-04"
+observed_date = "2026-07-16"
+EOF
+run_gate
+assert_rc       "L4 within tolerance exits 0"      0 "${CAP_RC}"
+assert_contains "L4 reports OK"                    "${CAP_OUT}" "OK: composition within mass + dispatch budget"
+
+# L5: down-ratchet nudge after a wave evicts behavior (ceiling 4000, obs 3619).
+make_fixture "${tmp}/crates" 3619 10000
+budget true 3000 30 0 0 4000 200; run_gate
+assert_rc       "L5 under ceiling exits 0"         0 "${CAP_RC}"
+assert_contains "L5 emits re-ratchet nudge"        "${CAP_OUT}" "lower loc_ceiling to lock it in"
+
+# L6: no nudge when the slack is inside loc_nudge_slack (381 < 400).
+budget true 3000 30 0 0 4000 400; run_gate
+assert_rc          "L6 small slack exits 0"        0 "${CAP_RC}"
+assert_not_contains "L6 no absolute nudge"         "${CAP_OUT}" "lower loc_ceiling to lock it in"
+
+# L7: SCHEMA — the absolute keys are REQUIRED. Deleting them must be a loud
+#     schema error, not a silently disarmed binding metric.
+cat > "${tmp}/budget.toml" <<'EOF'
+[gate]
+enforce = true
+ceiling_bp = 3000
+tolerance_bp = 30
+arc_dyn_ceiling = 0
+arc_dyn_tolerance = 0
+EOF
+run_gate
+assert_rc       "L7 missing loc_ceiling exits 1"   1 "${CAP_RC}"
+assert_contains "L7 reports loc schema error"      "${CAP_OUT}" "loc_ceiling must be an integer"
+
+# L8: SCHEMA — loc_ceiling = 0 is a disarmed gate, not a bound.
+cat > "${tmp}/budget.toml" <<'EOF'
+[gate]
+enforce = true
+ceiling_bp = 3000
+tolerance_bp = 30
+arc_dyn_ceiling = 0
+arc_dyn_tolerance = 0
+loc_ceiling = 0
+loc_tolerance = 0
+loc_nudge_slack = 100
+EOF
+run_gate
+assert_rc       "L8 zero loc_ceiling exits 1"      1 "${CAP_RC}"
+assert_contains "L8 refuses a zero ceiling"        "${CAP_OUT}" "loc_ceiling must be greater than 0"
+
+# L9: --print reports the absolute count.
+make_fixture "${tmp}/crates" 3000 7000
+budget true 3000 30 0 0 3000 0
+COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
+CRATES_ROOT="${tmp}/crates" \
+BUDGET_FILE="${tmp}/budget.toml" \
+capture bash "${gate}" --print
+assert_rc       "L9 --print exits 0"               0 "${CAP_RC}"
+assert_contains "L9 --print shows absolute LOC"    "${CAP_OUT}" "composition absolute: 3000 LOC"
+
+# L10: test-only FILES are excluded from the absolute metric too (same
+#      numerator as the share metric — one definition, two bounds).
+printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_composition/src/tests.rs"
+budget true 3000 30 0 0 3000 0; run_gate
+assert_rc       "L10 test file excluded exits 0"   0 "${CAP_RC}"
+assert_contains "L10 absolute ignores tests.rs"    "${CAP_OUT}" "[abs] composition src  : 3000 LOC"
+make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture
+
 # C10: guard against committing a red gate — the REAL repo budget file must pass
 #      against the REAL tree right now.
 capture bash "${gate}"
 assert_rc       "C10 real tree within committed budget" 0 "${CAP_RC}"
+
+# C11: the committed budget's absolute ceiling must actually BIND — a ceiling
+#      more than loc_nudge_slack above the live count is the "17.4pp of slack"
+#      failure that made the share metric inert, reproduced on the new metric.
+capture bash "${gate}"
+assert_not_contains "C11 committed loc_ceiling is not slack" "${CAP_OUT}" "lower loc_ceiling to lock it in"
 
 echo ""
 echo "composition-budget gate tests: ${PASS} passed, ${FAIL} failed"

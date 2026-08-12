@@ -93,14 +93,18 @@ Built-in section instead.
 
 </Accordion>
 
-<Accordion title="Asking the agent to connect a channel doesn't work">
+<Accordion title="Asking the agent to connect only works after the operator step">
 
-"Connect Slack" or "set up Telegram" in chat will not get you connected. The agent can
-install and use *tool* extensions on your behalf, but the channel connection is
-deliberately kept out of the tools it can drive — connecting a channel is an operator
-action, so it stays in the web interface where you can see what you're authorizing.
+"Connect Slack" in chat does work for the *personal* half of setup: the agent installs
+and activates the extension, and if your account still needs OAuth an in-chat connection
+panel opens right there — the same OAuth flow the Channels card runs. If your account is
+already connected, the agent confirms that and continues with your request.
 
-The agent may tell you it can't help. Do it yourself using the path above.
+What the agent cannot do is the *operator* half — registering the Slack app or Telegram
+bot credentials for the whole instance. That step is deliberately kept out of the tools
+the agent can drive, so it stays in the web interface where you can see what you're
+authorizing. If chat setup dead-ends, complete the operator step using the path above
+first, then ask again.
 
 </Accordion>
 

@@ -4,7 +4,7 @@
 # tests/reborn_*.rs + tests/support/reborn_parity_qa/ (parity/QA, NOT
 # coverage-bearing) suite boundary established by the restructure that moved
 # the roadmap integration suite to tests/integration/ (see
-# docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md
+# docs/internal/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md
 # and the git history under tests/integration/).
 #
 # The direction is one-way: tests/reborn_*.rs parity/QA bins MAY reuse

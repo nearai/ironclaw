@@ -329,7 +329,7 @@ for workflow_contract in \
   ".github/workflows/reborn-tests.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1" \
   ".github/workflows/reborn-tests.yml:Install WebUI frontend dependencies for coverage" \
   ".github/workflows/reborn-tests.yml:Install WebUI frontend dependencies for QA replay" \
-  ".github/workflows/reborn-tests.yml:ironclaw|ironclaw_reborn_composition|ironclaw_webui)" \
+  ".github/workflows/reborn-tests.yml:ironclaw|ironclaw_composition|ironclaw_webui)" \
   ".github/workflows/reborn-e2e.yml:scripts/ci/run-hermetic-deterministic-suite.sh" \
   ".github/workflows/reborn-e2e.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE" \
   ".github/workflows/code_style.yml:scripts/ci/test-hermetic-test-process.sh"
@@ -392,5 +392,23 @@ do
     exit 1
   fi
 done
+
+# WS10 (docs/reborn/target-architecture/CHECKLIST.md): the WebUI frontend
+# directory the crates/prepare/frontend stages build must be resolved through
+# the shared crate inventory (scripts/ci/crate-dir.sh), never a literal
+# `crates/ironclaw_webui/frontend` path that the family move (PROPOSAL §5) can
+# leave pointed at nothing. A literal regressing back in is a silent break —
+# the suite would `cd` into a directory that used to exist and report nothing
+# wrong until the frontend build actually runs. Matched as the exact removed
+# literal (with the `/frontend` suffix), not the bare crate name, so this
+# assertion does not trip on its own explanatory prose above.
+if grep -Fq "crates/ironclaw_webui/frontend" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  echo "run-hermetic-deterministic-suite.sh regressed to a literal crates/ironclaw_webui/frontend path" >&2
+  exit 1
+fi
+if ! grep -Fq "resolve_webui_frontend_dir" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  echo "run-hermetic-deterministic-suite.sh lost its crate-inventory-resolved frontend directory helper" >&2
+  exit 1
+fi
 
 echo "hermetic test-process self-test: OK"
