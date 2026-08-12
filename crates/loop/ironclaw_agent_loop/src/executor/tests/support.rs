@@ -7,10 +7,11 @@ use std::sync::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::turn::{
-    LoopMessageRef, RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    LoopMessageRef, ProductTurnContext, RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId,
+    TurnOriginKind, TurnOwner, TurnRunId, TurnScope,
 };
 use ironclaw_host_api::{
-    ids::{CapabilityId, ProviderToolName, TenantId, ThreadId},
+    ids::{CapabilityId, ProviderToolName, TenantId, ThreadId, UserId},
     runtime::RuntimeKind,
 };
 use ironclaw_loop_contracts::{
@@ -176,6 +177,18 @@ impl MockHost {
             .resolved_run_profile
             .steering_policy
             .allow_driver_specific_nudges = true;
+        self
+    }
+
+    pub(super) fn with_scheduled_trigger_origin(mut self) -> Self {
+        self.context.product_context = Some(ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: UserId::new("user-executor").expect("valid"),
+            },
+        ));
         self
     }
 

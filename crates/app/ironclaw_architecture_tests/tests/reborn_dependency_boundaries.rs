@@ -712,7 +712,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 18_994 -> 19_003 (2026-08-11, unified channel model): +9 lines of
         // VAPID credential-target doc corrections referencing the renamed
         // `ironclaw_web_app` domain crate. Comment-adjacent churn only.
-        ("ironclaw_host_api", 19_003),
+        // 19_003 -> 19_026 (#7525, merged 2026-08-12): add the typed
+        // `UnattendedQuestionEndingResponse` invalid-output reason and its
+        // sanitized user-facing summary. Classification and recovery remain in
+        // ironclaw_agent_loop; this crate owns only shared failure vocabulary.
+        ("ironclaw_host_api", 19_026),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
