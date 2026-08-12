@@ -9,7 +9,7 @@ import {
 
 // These helpers ARE the client half of the notification-setup wire contract
 // (`RegistrationChannelNotificationSetupService::project`). Regression: the
-// hook kept reading the retired flat web-push shape (`vapid_public_key`,
+// hook kept reading the retired flat detail shape (`vapid_public_key`,
 // `subscription_count`, `subscriptions[]`) after the backend moved to
 // `{ registration_count, registrations[], bootstrap }`, which left the enroll
 // button permanently dead and misread enrolled browsers as another account's.
@@ -55,6 +55,6 @@ test("bootstrap key: read from detail.bootstrap, absent reads empty", () => {
   );
   assert.equal(vapidPublicKeyFromDetail({}), "");
   assert.equal(vapidPublicKeyFromDetail(undefined), "");
-  // The retired flat web-push spelling is dead; the client must not read it.
+  // The retired flat spelling is dead; the client must not read it.
   assert.equal(vapidPublicKeyFromDetail({ vapid_public_key: "stale" }), "");
 });
