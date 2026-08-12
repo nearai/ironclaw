@@ -19,7 +19,6 @@ export const primaryRoutes = [
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
   { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
   { id: "automations", path: "/automations", labelKey: "nav.automations" },
-  { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
   { id: "logs", path: "/logs", labelKey: "nav.logs", hidden: true },
   { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },
@@ -33,7 +32,9 @@ export const primaryRoutes = [
 export const routeSectionDefs = [
   {
     labelKey: "nav.sectionWork",
-    ids: ["chat", "workspace", "projects", "jobs", "routines", "automations", "missions"],
+    ids: primaryRoutes
+      .filter(({ id }) => !["extensions", "logs", "settings", "admin"].includes(id))
+      .map(({ id }) => id),
   },
   {
     labelKey: "nav.sectionSystem",

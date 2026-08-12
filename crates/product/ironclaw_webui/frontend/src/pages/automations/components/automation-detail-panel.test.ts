@@ -21,8 +21,8 @@ const COPY = {
   "common.cancel": "Cancel",
   "common.delete": "Delete",
   "common.save": "Save",
-  "missions.action.pause": "Pause",
-  "missions.action.resume": "Resume",
+  "automations.action.pause": "Pause",
+  "automations.action.resume": "Resume",
 };
 
 function sourceForTest() {
