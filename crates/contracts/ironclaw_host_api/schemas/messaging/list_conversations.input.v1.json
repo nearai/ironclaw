@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging list_conversations input",
+  "type": "object",
+  "properties": {
+    "kinds": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["dm", "group_dm", "channel", "other"] },
+      "description": "Restrict results to these conversation kinds. Omit to return every kind."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Maximum conversations to return. The host rejects values above 1000; adapters may clamp further to vendor maxima."
+    },
+    "cursor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque pagination cursor from a previous call's next_cursor."
+    }
+  },
+  "additionalProperties": false
+}

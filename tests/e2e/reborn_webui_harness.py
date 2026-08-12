@@ -408,10 +408,11 @@ def write_config_toml(
     mock_llm_server: str,
     profile: str = DEFAULT_PROFILE,
     model: str = DEFAULT_MODEL,
+    *,
+    seed_default_llm: bool = True,
 ) -> None:
-    """Seed a sparse Reborn config that selects the mock OpenAI-compatible LLM."""
-    path.write_text(
-        f"""api_version = "ironclaw.runtime/v1"
+    """Seed a sparse config, optionally selecting the mock LLM at boot."""
+    config = f"""api_version = "ironclaw.runtime/v1"
 
 [boot]
 profile = "{profile}"
@@ -424,15 +425,17 @@ default_agent = "reborn-v2-e2e-agent"
 [webui]
 env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
 env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+"""
+    if seed_default_llm:
+        config += f"""
 
 [llm.default]
 provider_id = "openai"
 model = "{model}"
 api_key_env = "MOCK_LLM_API_KEY"
 base_url = "{mock_llm_server}/v1"
-""",
-        encoding="utf-8",
-    )
+"""
+    path.write_text(config, encoding="utf-8")
 
 
 async def start_reborn_webui_v2_server(
@@ -445,6 +448,9 @@ async def start_reborn_webui_v2_server(
     log_prefix: str = "reborn-v2",
     extra_env: dict[str, str] | None = None,
     use_listener_as_webui_base_url: bool = False,
+    seed_default_llm: bool = True,
+    preserve_existing_config: bool = False,
+    log_paths: list[Path] | None = None,
 ) -> tuple[object, str]:
     """Start ``ironclaw serve`` and return ``(process, base_url)``."""
     configured_artifact_root = os.environ.get(
@@ -463,12 +469,15 @@ async def start_reborn_webui_v2_server(
     reborn_home.mkdir(parents=True, exist_ok=True)
     workspace_dir = home_dir / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    write_config_toml(
-        reborn_home / "config.toml",
-        mock_llm_server,
-        profile=profile,
-        model=model,
-    )
+    config_path = reborn_home / "config.toml"
+    if not preserve_existing_config or not config_path.exists():
+        write_config_toml(
+            config_path,
+            mock_llm_server,
+            profile=profile,
+            model=model,
+            seed_default_llm=seed_default_llm,
+        )
 
     proc = None
     last_stderr = ""
@@ -485,6 +494,8 @@ async def start_reborn_webui_v2_server(
             log_dir = home_dir
         stdout_path = log_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
         stderr_path = log_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
+        if log_paths is not None:
+            log_paths.extend((stdout_path, stderr_path))
 
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -493,10 +504,14 @@ async def start_reborn_webui_v2_server(
             "IRONCLAW_REBORN_PROFILE": profile,
             "IRONCLAW_REBORN_WEBUI_TOKEN": REBORN_V2_AUTH_TOKEN,
             "IRONCLAW_REBORN_WEBUI_USER_ID": USER_ID,
+            # Recorded provider fixtures assert the pre-disclosure request
+            # shape. Keep this shared deterministic harness explicit rather
+            # than inheriting the production default.
+            "REBORN_TOOL_DISCLOSURE": "off",
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
+            "RUST_LOG": "ironclaw=warn,ironclaw_turn_runner=warn",
             "RUST_BACKTRACE": "1",
         }
         if extra_env:
@@ -754,6 +769,60 @@ async def reborn_v2_restartable_server(
         await stop()
 
 
+@pytest.fixture
+async def reborn_v2_first_run_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Restartable server whose config deliberately has no active LLM."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-first-run-home")
+    provider_log_filter = (
+        "warn,"
+        "ironclaw_webui=debug,"
+        "ironclaw_composition=debug,"
+        "ironclaw_operator=debug,"
+        "ironclaw_llm=debug"
+    )
+    state = {
+        "proc": None,
+        "base_url": None,
+        "home_dir": home_dir,
+        "log_paths": [],
+        "starts": 0,
+    }
+
+    async def start() -> str:
+        state["starts"] += 1
+        proc, base_url = await start_reborn_webui_v2_server(
+            ironclaw_reborn_binary=ironclaw_reborn_binary,
+            mock_llm_server=mock_llm_server,
+            home_dir=home_dir,
+            profile=DEFAULT_PROFILE,
+            log_prefix=f"reborn-v2-first-run-{state['starts']}",
+            seed_default_llm=False,
+            preserve_existing_config=True,
+            log_paths=state["log_paths"],
+            extra_env={
+                # Reborn uses its own stderr filter; keep RUST_LOG aligned for
+                # subprocesses that use tracing's conventional environment.
+                "IRONCLAW_REBORN_LOG": provider_log_filter,
+                "RUST_LOG": provider_log_filter,
+            },
+        )
+        state["proc"] = proc
+        state["base_url"] = base_url
+        return base_url
+
+    async def stop() -> None:
+        await close_reborn_server(state["proc"])
+        state["proc"] = None
+
+    await start()
+    try:
+        yield state, start, stop
+    finally:
+        await stop()
+
+
 @pytest.fixture(scope="module")
 async def reborn_v2_loop_limited_yolo_server(
     ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
@@ -928,6 +997,184 @@ def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def install_fake_v2_event_stream(
+    page,
+    *,
+    expected_authorization: str | None = None,
+    record_request_headers: bool = True,
+) -> None:
+    """Install the fetch-based fake WebChat v2 SSE transport on ``page``.
+
+    The Reborn SPA streams through ``event-source-plus``, which is a
+    fetch/ReadableStream client — it never constructs ``window.EventSource``,
+    so the legacy ``FakeEventSource`` init scripts (which faked the native
+    EventSource API) no longer intercept anything. This fake hooks
+    ``window.fetch`` for ``*/events`` URLs and serves a scripted SSE body,
+    matching the packaged transport exactly.
+
+    Exposed test hooks (all under ``window``):
+
+    - ``__emitV2Sse(type, frame, id)`` — enqueue one SSE frame on the current
+      stream; ``id`` becomes the frame's ``id:`` line so the next reconnect
+      carries it as ``Last-Event-ID`` (the cursor contract).
+    - ``__failLatestV2Sse(readyState)`` — force a failure on the current
+      stream; ``0`` holds the next connection open (no response yet),
+      anything else closes the current stream with a TypeError (retryable)
+      or rejects a held connection with 401 (terminal).
+    - ``__v2SseHasOpenStream()`` / ``__v2SseHasHeldConnection()`` — readiness
+      probes so tests never race forced failures against the fake lifecycle.
+    - ``__v2SseUrls`` — every ``*/events`` URL the app opened, in order.
+    - ``__v2SseRequests`` — ``{url, headers}`` per opened stream (only when
+      ``record_request_headers`` is true), for reconnect assertions on the
+      ``Authorization`` and ``Last-Event-ID`` headers.
+
+    The fake enforces the current wire contract: a ``token`` query parameter
+    on the stream URL is rejected with 400 (the bearer travels in the
+    ``Authorization`` header), and a missing/mismatched ``Authorization``
+    header is rejected with 401.
+    """
+    if expected_authorization is None:
+        expected_authorization = f"Bearer {REBORN_V2_AUTH_TOKEN}"
+    script = f"""
+        (() => {{
+          const nativeFetch = window.fetch.bind(window);
+          const encoder = new TextEncoder();
+          const expectedAuthorization = {json.dumps(expected_authorization)};
+          const recordHeaders = {json.dumps(record_request_headers)};
+          let activeStream = null;
+          let holdNextConnection = false;
+
+          window.__v2SseUrls = [];
+          window.__v2SseRequests = [];
+
+          const currentStream = () => {{
+            if (!activeStream || activeStream.closed) {{
+              throw new Error("no event stream is open");
+            }}
+            return activeStream;
+          }};
+
+          window.__v2SseHasOpenStream = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.controller);
+          window.__v2SseHasHeldConnection = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.resolve);
+
+          const closeStream = (stream, error = null) => {{
+            if (!stream || stream.closed) return;
+            stream.closed = true;
+            if (stream.controller) {{
+              if (error) {{
+                stream.controller.error(error);
+              }} else {{
+                stream.controller.close();
+              }}
+            }}
+            if (activeStream === stream) activeStream = null;
+          }};
+
+          const openStreamResponse = (request, signal) => {{
+            const stream = {{ closed: false, controller: null }};
+            const body = new ReadableStream({{
+              start(controller) {{
+                stream.controller = controller;
+              }},
+              cancel() {{
+                stream.closed = true;
+                if (activeStream === stream) activeStream = null;
+              }},
+            }});
+            if (activeStream && !activeStream.closed) {{
+              closeStream(activeStream);
+            }}
+            activeStream = stream;
+            window.__v2SseUrls.push(request.url);
+            if (recordHeaders) {{
+              const headers = {{}};
+              request.headers.forEach((value, key) => {{ headers[key] = value; }});
+              window.__v2SseRequests.push({{ url: request.url, headers }});
+            }}
+            signal?.addEventListener(
+              "abort",
+              () => closeStream(stream),
+              {{ once: true }},
+            );
+            return new Response(body, {{
+              status: 200,
+              headers: {{ "content-type": "text/event-stream" }},
+            }});
+          }};
+
+          window.fetch = async (input, init = {{}}) => {{
+            const request = new Request(input, init);
+            const url = new URL(request.url, window.location.href);
+            if (!url.pathname.endsWith("/events")) {{
+              return nativeFetch(input, init);
+            }}
+            if (url.searchParams.has("token")) {{
+              return new Response("", {{ status: 400 }});
+            }}
+            if (request.headers.get("Authorization") !== expectedAuthorization) {{
+              return new Response("", {{ status: 401 }});
+            }}
+            if (!holdNextConnection) {{
+              return openStreamResponse(request, request.signal);
+            }}
+            return new Promise((resolve, reject) => {{
+              const stream = {{
+                closed: false,
+                controller: null,
+                resolve,
+                reject,
+              }};
+              activeStream = stream;
+              window.__v2SseUrls.push(request.url);
+              if (recordHeaders) {{
+                const headers = {{}};
+                request.headers.forEach((value, key) => {{ headers[key] = value; }});
+                window.__v2SseRequests.push({{ url: request.url, headers }});
+              }}
+              request.signal?.addEventListener(
+                "abort",
+                () => {{
+                  if (stream.closed) return;
+                  stream.closed = true;
+                  if (activeStream === stream) activeStream = null;
+                  reject(new DOMException("Aborted", "AbortError"));
+                }},
+                {{ once: true }},
+              );
+            }});
+          }};
+
+          window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {{
+            const stream = currentStream();
+            if (!stream.controller) throw new Error("event stream is reconnecting");
+            stream.controller.enqueue(encoder.encode(
+              `id: ${{id}}\\nevent: ${{type}}\\ndata: ${{JSON.stringify({{ type, ...frame }})}}\\n\\n`
+            ));
+          }};
+
+          window.__failLatestV2Sse = (readyState = 2) => {{
+            const stream = currentStream();
+            if (readyState === 0) {{
+              holdNextConnection = true;
+              closeStream(stream, new TypeError("event stream interrupted"));
+              return;
+            }}
+            holdNextConnection = false;
+            if (stream.resolve) {{
+              stream.closed = true;
+              if (activeStream === stream) activeStream = null;
+              stream.resolve(new Response("", {{ status: 401 }}));
+              return;
+            }}
+            closeStream(stream, new TypeError("event stream interrupted"));
+          }};
+        }})();
+        """
+    await page.add_init_script(script)
+
+
 async def fetch_extension_oauth_requirement(
     client: httpx.AsyncClient,
     base_url: str,
@@ -966,12 +1213,32 @@ async def create_thread(client: httpx.AsyncClient, base_url: str) -> str:
     return response.json()["thread"]["thread_id"]
 
 
+
+
+async def session_channel_extension_id(client: httpx.AsyncClient, base_url: str) -> str:
+    """The deployment's authenticated-session channel, from ``GET /session``.
+
+    The generic session-inbound route is keyed by this extension id; the
+    harness reads it the same way the SPA does instead of naming a channel.
+    """
+    response = await client.get(f"{base_url}/api/webchat/v2/session", timeout=15)
+    response.raise_for_status()
+    extension_id = response.json().get("session_channel_extension_id")
+    assert extension_id, "deployment advertises no session channel"
+    return extension_id
+
+
 async def _submit_message(
     client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
 ) -> dict:
+    extension_id = await session_channel_extension_id(client, base_url)
     response = await client.post(
-        f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
-        json={"client_action_id": client_action_id(), "content": content},
+        f"{base_url}/api/webchat/v2/channels/{extension_id}/messages",
+        json={
+            "client_action_id": client_action_id(),
+            "thread_id": thread_id,
+            "content": content,
+        },
         timeout=30,
     )
     assert response.status_code in (200, 202), response.text

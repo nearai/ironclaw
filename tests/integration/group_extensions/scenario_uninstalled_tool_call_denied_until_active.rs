@@ -12,6 +12,17 @@
 //! and turn 2's dispatch-time staging pass via the google account this
 //! scenario seeds under the capability dispatch scope.
 //!
+//! Turn 2 also carries the WS12 row-5 leg-3 JOIN (security audit F3): the
+//! dispatched `gmail.list_messages` must put the seeded google access token on
+//! the outbound wire — production dispatch → first-party gsuite handler →
+//! staged credential obligation → host egress chokepoint
+//! (`apply_credential_injection`) → recorded network transport — through the
+//! gmail manifest's declared recipe
+//! (`injection = { type = "header", name = "authorization", prefix = "Bearer " }`
+//! toward `gmail.googleapis.com`). Before this assertion the two halves were
+//! each tested but never joined: handler→staging at crate tier, and
+//! staging→wire only for GitHub/Slack.
+//!
 //! Runs on its OWN freshly built group with a Google OAuth backend
 //! configured, rather than the shared `g` every other scenario in this
 //! binary runs on: `g` is deliberately built WITHOUT a Google OAuth backend so
@@ -108,5 +119,22 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     caller.submit_turn("check my mail again").await?;
     caller.assert_tool_invoked("gmail.list_messages").await?;
     caller.assert_reply_contains("gmail dispatched").await?;
+
+    // The JOIN (WS12 row 5 leg 3, audit F3): the seeded google credential
+    // must land on the dispatched call's outbound HTTPS request, injected at
+    // the host egress chokepoint per the gmail manifest's declared recipe —
+    // header `authorization`, prefix `Bearer `, audience
+    // `gmail.googleapis.com`. The exact value is pinned:
+    // `seed_capability_credential_account` stores `itest-google-token`, so a
+    // pass proves the STORED material traversed store → dispatch-time staging
+    // → `apply_credential_injection` → wire, not merely that some
+    // bearer-shaped header existed.
+    caller
+        .assert_network_egress_header_contains(
+            "gmail.googleapis.com",
+            "authorization",
+            "Bearer itest-google-token",
+        )
+        .await?;
     Ok(())
 }

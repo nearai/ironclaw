@@ -1,4 +1,4 @@
-//! `ironclaw_reborn_identity` on the int-tier coverage lane (enabler (a)).
+//! `ironclaw_identity` on the int-tier coverage lane (enabler (a)).
 //!
 //! First scenario crossing an enumerated `--test` binary into the canonical
 //! identity crate: the crate's own 790-line inline suite never runs under the
@@ -10,7 +10,7 @@
 //! `RebornRuntime::open_reborn_identity_resolver`) plus the re-exported
 //! resolver vocabulary. Composition deliberately keeps the concrete
 //! `RebornIdentityStore` private ("keep lower substrate handles
-//! private"), so this suite takes no direct `ironclaw_reborn_identity`
+//! private"), so this suite takes no direct `ironclaw_identity`
 //! dependency. The factory's in-memory host filesystem replaces the plan's
 //! "tempdir" wording — same store code path, no on-disk state.
 //!
@@ -18,8 +18,8 @@
 //! round trip, not an agent turn (`RebornIntegrationHarness` models the
 //! latter).
 
-use ironclaw_reborn_composition::host_api::TenantId;
-use ironclaw_reborn_composition::{
+use ironclaw_composition::host_api::TenantId;
+use ironclaw_composition::{
     ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
     open_reborn_identity_resolver,
 };

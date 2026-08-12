@@ -37,7 +37,7 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_product::ProductInboundAck;
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_turns::{TurnRunId, TurnStatus};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -355,39 +355,50 @@ const DOUBLE_SUBMIT_INTERLEAVINGS: [DoubleSubmitInterleaving; 3] = [
     DoubleSubmitInterleaving::Simultaneous,
 ];
 
+/// Exactly one submission is admitted as a run; the other is a BUSY
+/// acknowledgement naming the winner's run. With queued-message steering
+/// wired (the production default), a message hitting the busy thread is
+/// ACCEPTED AND QUEUED for the active run — `DeferredBusy` — rather than
+/// bounced. An ordered second submit must therefore be `DeferredBusy`; only
+/// a true simultaneous race may also settle `RejectedBusy` (the loser can
+/// observe the winner mid-admission, before its run is steerable).
 fn accepted_and_busy_run(
     left: ProductInboundAck,
     right: ProductInboundAck,
     interleaving: DoubleSubmitInterleaving,
 ) -> TurnRunId {
-    match (left, right) {
+    let busy_run_id = |ack: &ProductInboundAck| match ack {
+        ProductInboundAck::DeferredBusy { active_run_id, .. } => Some(*active_run_id),
+        ProductInboundAck::RejectedBusy {
+            active_run_id: Some(active_run_id),
+            ..
+        } if matches!(interleaving, DoubleSubmitInterleaving::Simultaneous) => Some(*active_run_id),
+        _ => None,
+    };
+    match (&left, &right) {
         (
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
             },
-            ProductInboundAck::RejectedBusy {
-                active_run_id: Some(active_run_id),
-                ..
-            },
+            busy,
         )
         | (
-            ProductInboundAck::RejectedBusy {
-                active_run_id: Some(active_run_id),
-                ..
-            },
+            busy,
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
             },
-        ) => {
+        ) if busy_run_id(busy).is_some() => {
+            let active_run_id = busy_run_id(busy).expect("guard checked");
             assert_eq!(
-                active_run_id, submitted_run_id,
+                active_run_id, *submitted_run_id,
                 "{interleaving:?}: busy acknowledgement named a different active run"
             );
-            submitted_run_id
+            *submitted_run_id
         }
-        (left, right) => panic!(
-            "{interleaving:?}: expected exactly one Accepted and one \
-             RejectedBusy acknowledgement, got {left:?} and {right:?}"
+        _ => panic!(
+            "{interleaving:?}: expected exactly one Accepted and one busy \
+             (DeferredBusy; RejectedBusy only under a simultaneous race) \
+             acknowledgement, got {left:?} and {right:?}"
         ),
     }
 }
@@ -583,7 +594,7 @@ mod invariant_checker {
     }
 
     #[test]
-    #[should_panic(expected = "expected exactly one Accepted and one RejectedBusy")]
+    #[should_panic(expected = "expected exactly one Accepted and one busy")]
     fn double_submit_checker_rejects_two_accepted_runs() {
         use ironclaw_host_api::turn::AcceptedMessageRef;
 
@@ -591,6 +602,7 @@ mod invariant_checker {
             accepted_message_ref: AcceptedMessageRef::new(message)
                 .expect("sabotage message ref is valid"),
             submitted_run_id: TurnRunId::new(),
+            submission: None,
         };
         accepted_and_busy_run(
             ack("message:sabotage-a"),
@@ -780,16 +792,8 @@ async fn generated_actions_on_one_actor_never_disturb_another() {
         // Each actor's gate is scoped to its own owner, so auto-approve has to
         // be disabled per owner rather than globally — otherwise the run
         // dispatches straight through and never parks.
-        let owner_a = a
-            .binding
-            .subject_user_id
-            .as_ref()
-            .expect("actor A binding has a subject user id");
-        let owner_b = b
-            .binding
-            .subject_user_id
-            .as_ref()
-            .expect("actor B binding has a subject user id");
+        let owner_a = &a.binding.actor_user_id;
+        let owner_b = &b.binding.actor_user_id;
         assert_ne!(owner_a, owner_b, "the two actors must be distinct owners");
         group
             .disable_auto_approve_for_owner(owner_a)

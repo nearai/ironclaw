@@ -13,22 +13,25 @@ on:
       - Release-plz
     branches:
       - main
+      - gh-readonly-queue/main/**
     types:
       - completed
 
 permissions:
   actions: read
+  checks: read
   contents: read
+  pull-requests: read
 
 jobs:
   alert:
     name: Post Slack alert
     if: >-
-      github.event.workflow_run.event == 'push' &&
+      contains(fromJSON('["push","merge_group"]'), github.event.workflow_run.event) &&
       contains(fromJSON('["failure","timed_out","action_required","startup_failure"]'), github.event.workflow_run.conclusion)
     runs-on: ubuntu-latest
     steps:
-      - name: Post main CI failure to Slack
+      - name: Post CI failure to Slack
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
@@ -38,48 +41,131 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           ACTOR: ${{ github.event.workflow_run.actor.login }}
+          EVENT_NAME: ${{ github.event.workflow_run.event }}
           MAIN_CI_SLACK_WEBHOOK_URLS: ${{ secrets.MAIN_CI_SLACK_WEBHOOK_URLS }}
+          LIVE_CANARY_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           set -euo pipefail
 
+          slack_escape() {
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+          }
+
           short_sha="${HEAD_SHA:0:10}"
-          failed_jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
-            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") | "\(.name) (\(.conclusion))"] | .[0:12] | join(", ")' \
-            2>/dev/null || true)"
-          if [ -z "$failed_jobs" ]; then
+          jobs_json="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            2>/dev/null | jq '[.[].jobs[]]' || printf '[]')"
+          failed_jobs="$(jq -r '
+            [.[]
+              | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure")
+              | . as $job
+              | ([.steps[]? | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") | .name] | unique) as $steps
+              | if ($steps | length) > 0
+                then "\($job.name) (\($job.conclusion)) — \($steps | join(", "))"
+                else "\($job.name) (\($job.conclusion))"
+                end]
+            | .[0:8]
+            | join("\n• ")' <<< "$jobs_json")"
+          if [ -n "$failed_jobs" ]; then
+            failed_jobs="• ${failed_jobs}"
+          else
             failed_jobs="No failed jobs listed; inspect the workflow run for startup or workflow-level errors."
           fi
 
-          text="Main branch CI failed: ${WORKFLOW_NAME} concluded ${CONCLUSION} on ${short_sha}"
+          annotations=""
+          while IFS= read -r check_run_id; do
+            [ -n "$check_run_id" ] || continue
+            job_annotations="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/check-runs/${check_run_id}/annotations?per_page=100" \
+              --jq '.[]
+                | select(.annotation_level == "failure")
+                | ((if (.title // "") != "" then (.title + ": ") else "" end) + (.message // ""))
+                | gsub("[\\r\\n\\t]+"; " ")
+                | select(test("^Process completed with exit code [0-9]+\\.$") | not)' \
+              2>/dev/null || true)"
+            if [ -n "$job_annotations" ]; then
+              annotations="${annotations}${annotations:+$'\n'}${job_annotations}"
+            fi
+          done < <(jq -r '[.[]
+            | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure")]
+            | .[0:8][]
+            | .check_run_url
+            | split("/")[-1]' <<< "$jobs_json")
+          annotations="$(printf '%s\n' "$annotations" | awk 'NF && !seen[$0]++ && count < 8 { print; count++ }')"
+          if [ -z "$annotations" ]; then
+            annotations="Not reported by the failing checks."
+          fi
+
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            alert_title="Merge queue CI failed"
+            webhooks="${LIVE_CANARY_SLACK_WEBHOOK_URL:-}"
+            pr_number=""
+            if [[ "$HEAD_BRANCH" =~ ^gh-readonly-queue/main/pr-([0-9]+)- ]]; then
+              pr_number="${BASH_REMATCH[1]}"
+            fi
+
+            pr_display="Unknown PR (queue ref: ${HEAD_BRANCH})"
+            if [ -n "$pr_number" ]; then
+              pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" 2>/dev/null || true)"
+              if [ -n "$pr_json" ]; then
+                pr_title="$(jq -r '.title | gsub("[\\r\\n\\t]+"; " ")' <<< "$pr_json" | slack_escape)"
+                pr_url="$(jq -r '.html_url' <<< "$pr_json")"
+                pr_author="$(jq -r '.user.login' <<< "$pr_json" | slack_escape)"
+                pr_display="<${pr_url}|#${pr_number} ${pr_title}> by \`@${pr_author}\`"
+              else
+                pr_display="#${pr_number} (details unavailable)"
+              fi
+            fi
+            context_line="*PR:* ${pr_display}\n*Queue commit:* \`${short_sha}\`"
+          else
+            alert_title="Main branch CI failed"
+            webhooks="${MAIN_CI_SLACK_WEBHOOK_URLS:-}"
+            escaped_branch="$(printf '%s' "$HEAD_BRANCH" | slack_escape)"
+            context_line="*Branch:* \`${escaped_branch}\`\n*Commit:* \`${short_sha}\`"
+          fi
+
+          escaped_workflow="$(printf '%s' "$WORKFLOW_NAME" | slack_escape)"
+          escaped_conclusion="$(printf '%s' "$CONCLUSION" | slack_escape)"
+          escaped_actor="$(printf '%s' "$ACTOR" | slack_escape)"
+          escaped_failed_jobs="$(printf '%s' "$failed_jobs" | slack_escape)"
+          escaped_annotations="$(printf '%s' "$annotations" | slack_escape)"
+          escaped_failed_jobs="${escaped_failed_jobs:0:1200}"
+          escaped_annotations="${escaped_annotations:0:800}"
+
+          text="${alert_title}: ${WORKFLOW_NAME} concluded ${CONCLUSION} on ${short_sha}"
           payload="$(jq -n \
             --arg text "$text" \
-            --arg workflow "$WORKFLOW_NAME" \
-            --arg conclusion "$CONCLUSION" \
-            --arg branch "$HEAD_BRANCH" \
-            --arg sha "$short_sha" \
-            --arg actor "$ACTOR" \
-            --arg failed_jobs "$failed_jobs" \
+            --arg alert_title "$alert_title" \
+            --arg workflow "$escaped_workflow" \
+            --arg conclusion "$escaped_conclusion" \
+            --arg context_line "$context_line" \
+            --arg actor "$escaped_actor" \
+            --arg failed_jobs "$escaped_failed_jobs" \
+            --arg annotations "$escaped_annotations" \
             --arg url "$RUN_URL" \
             '{
               text: $text,
               blocks: [
                 {
                   type: "header",
-                  text: {type: "plain_text", text: "Main branch CI failed"}
+                  text: {type: "plain_text", text: $alert_title}
                 },
                 {
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: "*Workflow:* \($workflow)\n*Conclusion:* `\($conclusion)`\n*Branch:* `\($branch)`\n*Commit:* `\($sha)`\n*Actor:* `\($actor)`\n*Failed jobs:* \($failed_jobs)\n<\($url)|Open workflow run>"
+                    text: "*Workflow:* \($workflow)\n*Conclusion:* `\($conclusion)`\n\($context_line)\n*Actor:* `\($actor)`\n*Failed jobs / steps:*\n\($failed_jobs)\n*Failure annotations (when available):*\n\($annotations)\n<\($url)|Open workflow run>"
                   }
                 }
               ]
             }')"
 
-          webhooks="${MAIN_CI_SLACK_WEBHOOK_URLS:-}"
           if [ -z "$webhooks" ]; then
-            echo "::error::Set MAIN_CI_SLACK_WEBHOOK_URLS to receive main CI failure alerts."
+            if [ "$EVENT_NAME" = "merge_group" ]; then
+              echo "::error::Set SLACK_WEBHOOK_URL to receive merge-queue failure alerts in the live-canary channel."
+            else
+              echo "::error::Set MAIN_CI_SLACK_WEBHOOK_URLS to receive main CI failure alerts."
+            fi
             exit 1
           fi
 
@@ -102,4 +188,4 @@ jobs:
             exit 1
           fi
 
-          echo "Posted main CI failure alert to ${posted} Slack webhook(s)."
+          echo "Posted ${EVENT_NAME} CI failure alert to ${posted} Slack webhook(s)."

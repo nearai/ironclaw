@@ -1,0 +1,333 @@
+//! Host-port vocabulary contracts.
+//!
+//! Host ports name mediated host APIs that a capability implementation may use
+//! after authorization and obligation preparation. This module only defines the
+//! shared vocabulary and scoped view shape; concrete port implementations live in
+//! host/runtime service crates.
+
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    dotted_id::{PrefixRule, validate_dotted_id},
+    error::HostApiError,
+};
+
+/// Host-runtime mediated HTTP egress port for runtime lanes that delegate
+/// outbound HTTP through host policy, credential, and response-limit services.
+pub const HOST_RUNTIME_HTTP_EGRESS_PORT_ID: &str = "host.runtime.http_egress";
+
+/// First-party SQL/transaction storage port. HostBundled first-party only:
+/// reserved for first-party durable storage that runs through a host-scoped
+/// transaction surface rather than a raw pool handle. This is part of the future
+/// storage-port vocabulary, not a live backing today — the native memory provider
+/// is filesystem-backed and declares no host ports (see
+/// `native_memory_declares_no_host_ports`). Concrete adapters live in host/runtime
+/// service crates; this is the validation contract name only.
+pub const HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID: &str =
+    "host.storage.sql_transaction.first_party";
+
+/// Host-mediated durable audit event port. Capabilities declare it when they
+/// emit redacted significant events into the host's durable audit log.
+pub const HOST_EVENTS_AUDIT_PORT_ID: &str = "host.events.audit";
+
+fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
+    validate_dotted_id(
+        "host_port",
+        value,
+        3,
+        "must have at least host, domain, and service segments",
+        PrefixRule::Required("host."),
+    )
+}
+
+/// Stable identifier for a host-mediated API surface.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HostPortId(String);
+
+impl HostPortId {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        validate_dotted_host_port_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for HostPortId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for HostPortId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for HostPortId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One host port granted into a scoped invocation view.
+///
+/// This is intentionally a thin grant token. Future scoped or attenuated host-port
+/// grants should use a distinct wire type rather than overloading this catalog
+/// reference shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostPortGrant {
+    id: HostPortId,
+}
+
+impl HostPortGrant {
+    pub fn new(id: HostPortId) -> Self {
+        Self { id }
+    }
+
+    pub fn id(&self) -> &HostPortId {
+        &self.id
+    }
+}
+
+/// Host-defined catalog entry for one known host port.
+///
+/// A catalog entry names a contract that manifest validation may reference. It
+/// does not create, own, or dispatch a concrete host-port implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostPortCatalogEntry {
+    id: HostPortId,
+}
+
+impl HostPortCatalogEntry {
+    pub fn new(id: HostPortId) -> Self {
+        Self { id }
+    }
+
+    pub fn id(&self) -> &HostPortId {
+        &self.id
+    }
+}
+
+/// Host-defined catalog of known host-port contract names.
+///
+/// The catalog is validation vocabulary only. Runtime service crates decide how
+/// to construct concrete scoped adapters after authorization and obligation
+/// handling. Entries are kept sorted by id so equality and serialization are
+/// order-independent across construction sites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostPortCatalog {
+    entries: Vec<HostPortCatalogEntry>,
+}
+
+impl HostPortCatalog {
+    pub fn new(mut entries: Vec<HostPortCatalogEntry>) -> Result<Self, HostApiError> {
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        for window in entries.windows(2) {
+            if window[0].id == window[1].id {
+                return Err(HostApiError::invariant(format!(
+                    "duplicate host port catalog entry {}",
+                    window[0].id
+                )));
+            }
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn entries(&self) -> &[HostPortCatalogEntry] {
+        &self.entries
+    }
+
+    pub fn contains(&self, id: &HostPortId) -> bool {
+        self.entries
+            .binary_search_by(|entry| entry.id.cmp(id))
+            .is_ok()
+    }
+
+    /// Return every required port that is not present in the catalog, in input
+    /// order, with duplicates removed.
+    pub fn missing_required<'a, I>(&self, required: I) -> Vec<HostPortId>
+    where
+        I: IntoIterator<Item = &'a HostPortId>,
+    {
+        let mut seen = BTreeSet::new();
+        let mut missing: Vec<HostPortId> = Vec::new();
+        for id in required {
+            if !self.contains(id) && seen.insert(id.clone()) {
+                missing.push(id.clone());
+            }
+        }
+        missing
+    }
+
+    pub fn validate_required<'a, I>(&self, required: I) -> Result<(), HostApiError>
+    where
+        I: IntoIterator<Item = &'a HostPortId>,
+    {
+        let missing = self.missing_required(required);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let names = missing
+            .iter()
+            .map(HostPortId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(HostApiError::invariant(format!(
+            "unknown host ports {names}"
+        )))
+    }
+}
+
+impl Default for HostPortCatalog {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl<'de> Deserialize<'de> for HostPortCatalog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Helper {
+            entries: Vec<HostPortCatalogEntry>,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        HostPortCatalog::new(helper.entries).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Build the default host-port validation catalog: every port name this module
+/// defines above, in one [`HostPortCatalog`].
+///
+/// The catalog is validation vocabulary only. It does not grant authority or
+/// construct the concrete runtime HTTP egress / storage / audit adapters; those
+/// live in host/runtime service crates and are scoped into a [`HostPortView`]
+/// after authorization. Registering a port here only allows a manifest to
+/// *declare* it without failing closed on an unknown-port error — which is why
+/// the default set lives beside the names it enumerates rather than in the
+/// kernel that happened to be its first caller.
+///
+/// The memory ports (`host.storage.sql_transaction.first_party`,
+/// `host.events.audit`) are future storage/audit vocabulary for the deferred
+/// SQL-backed memory milestone (issue #3537, ADR 0002), not a live backing
+/// today: the bundled `ironclaw.memory` extension is filesystem-backed
+/// and declares no host ports (see `native_memory_declares_no_host_ports`).
+pub fn default_host_port_catalog() -> Result<HostPortCatalog, HostApiError> {
+    HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID)?),
+        HostPortCatalogEntry::new(HostPortId::new(
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+        )?),
+        HostPortCatalogEntry::new(HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID)?),
+    ])
+}
+
+/// Scoped set of host ports available to an invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostPortView {
+    grants: Vec<HostPortGrant>,
+}
+
+impl<'de> Deserialize<'de> for HostPortView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Helper {
+            grants: Vec<HostPortGrant>,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        HostPortView::new(helper.grants).map_err(serde::de::Error::custom)
+    }
+}
+
+impl HostPortView {
+    pub fn new(mut grants: Vec<HostPortGrant>) -> Result<Self, HostApiError> {
+        grants.sort_by(|a, b| a.id.cmp(&b.id));
+        for window in grants.windows(2) {
+            if window[0].id == window[1].id {
+                return Err(HostApiError::invariant(format!(
+                    "duplicate host port grant {}",
+                    window[0].id
+                )));
+            }
+        }
+        Ok(Self { grants })
+    }
+
+    pub fn empty() -> Self {
+        Self { grants: Vec::new() }
+    }
+
+    pub fn grants(&self) -> &[HostPortGrant] {
+        &self.grants
+    }
+
+    pub fn allows(&self, id: &HostPortId) -> bool {
+        self.grants
+            .binary_search_by(|grant| grant.id.cmp(id))
+            .is_ok()
+    }
+
+    pub fn allows_all<'a, I>(&self, required: I) -> bool
+    where
+        I: IntoIterator<Item = &'a HostPortId>,
+    {
+        required.into_iter().all(|id| self.allows(id))
+    }
+}
+
+impl Default for HostPortView {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_catalog_registers_egress_storage_and_audit_ports() {
+        let catalog = default_host_port_catalog().expect("default host port catalog must build");
+        for id in [
+            HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+            HOST_EVENTS_AUDIT_PORT_ID,
+        ] {
+            let port = HostPortId::new(id).expect("port id must validate");
+            assert!(catalog.contains(&port), "default catalog must contain {id}");
+        }
+    }
+}

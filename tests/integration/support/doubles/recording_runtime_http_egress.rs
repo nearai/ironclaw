@@ -1,5 +1,5 @@
 /// Test double substituting the production `RuntimeHttpEgress` impl
-/// (`HostHttpEgressService`, `crates/ironclaw_host_runtime/src/egress/mod.rs`).
+/// (`HostHttpEgressService`, `crates/kernel/ironclaw_host_runtime/src/egress/mod.rs`).
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},

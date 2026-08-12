@@ -10,26 +10,26 @@ fail() {
 }
 
 packages='[
-  "ironclaw_architecture",
+  "ironclaw_architecture_tests",
   "ironclaw_common",
   "ironclaw_extension_host",
-  "ironclaw_extensions",
+  "ironclaw_extension_manager",
+  "ironclaw_extension_registry",
   "ironclaw_future_adapter",
   "ironclaw_host_ingress",
   "ironclaw_libsql_runtime",
   "ironclaw_operator",
-  "ironclaw_reborn_traces",
+  "ironclaw_trace_commons",
   "ironclaw_slack_extension",
   "ironclaw_telegram_extension",
-  "ironclaw_telegram_v2_adapter",
   "ironclaw_triggers"
 ]'
 
 actual="$("${bucket_script}" "${packages}")"
 expected='[
-  {"name":"channel-adapters","packages":["ironclaw_host_ingress","ironclaw_slack_extension","ironclaw_telegram_extension","ironclaw_telegram_v2_adapter"]},
-  {"name":"extension-operator","packages":["ironclaw_extension_host","ironclaw_extensions","ironclaw_operator"]},
-  {"name":"architecture-misc","packages":["ironclaw_architecture","ironclaw_common","ironclaw_future_adapter","ironclaw_libsql_runtime","ironclaw_reborn_traces","ironclaw_triggers"]}
+  {"name":"channel-adapters","packages":["ironclaw_host_ingress","ironclaw_slack_extension","ironclaw_telegram_extension"]},
+  {"name":"extension-operator","packages":["ironclaw_extension_host","ironclaw_extension_manager","ironclaw_extension_registry","ironclaw_operator"]},
+  {"name":"architecture-misc","packages":["ironclaw_architecture_tests","ironclaw_common","ironclaw_future_adapter","ironclaw_libsql_runtime","ironclaw_trace_commons","ironclaw_triggers"]}
 ]'
 
 if ! jq -e --argjson expected "${expected}" '. == $expected' <<< "${actual}" >/dev/null; then

@@ -140,9 +140,9 @@ Every crate in this family executes a kernel-mediated responsibility without dec
 
 - **Purpose:** zero-cost-when-off latency-trace macros shared by every crate that wants to time an operation without adopting a tracing dependency of its own.
 - **Owns:** a small set of macros that record elapsed time and outcome against a dedicated trace target, only when that target is enabled, plus the re-exported tracing facade that makes them usable without a separate import.
-- **Never contains:** state, policy, sinks, or any utility unrelated to timing and tracing.
+- **Never contains:** state, policy, sinks, or any utility unrelated to timing and tracing. ✎ **Sharpened 2026-08-03 (WS6, PROPOSAL §12.12 D-K):** "unrelated" was doing too much work — the item this clause was written to evict, a JSON byte counter, *looked* related and was reached from two `latency.rs` modules. The test that actually discriminates: **a function that merely produces a value a trace happens to record belongs to whoever produces the thing being measured, not here.** Three of that counter's five call sites fed `ResourceUsage::set_output_bytes` — resource accounting, not a trace field.
 - **Public surface:** the macros; no traits.
-- **Depends on:** nothing internal.
+- **Depends on:** nothing internal. ✎ *2026-08-03: and exactly one external, `tracing`. `serde_json` left with the byte counter, so the dependency list is now the enforcement mechanism this family's charter says it should be — a second dependency here is the signal that whatever needs it belongs somewhere else.*
 - **Never depends on:** anything else in the workspace.
 - **Security & authority role:** none — the only crate in this family with no security-relevant surface. Its only decision is whether a trace fires, which is an observability toggle, not a privilege.
 - **Why a separate crate:** the contracts tier's admission rule — instrumentation is not boundary vocabulary, so the macros cannot live in the shared vocabulary crate without weakening its charter; a leaf of their own is the cheapest home that keeps that rule statable.

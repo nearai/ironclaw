@@ -72,7 +72,7 @@ the command output. It does not read external exports or write transcripts yet.
 Future onboarding work should extend this Reborn-owned command instead of
 adding Reborn behavior to v1 setup:
 
-1. add an interactive prompt layer under `crates/ironclaw_reborn_cli`;
+1. add an interactive prompt layer under `crates/app/ironclaw_cli`;
 2. route provider/model writes through `RebornProviderAdmin`;
 3. route product credential setup through Reborn product-auth facades;
 4. add a history-import step after Reborn home/storage initialization; and

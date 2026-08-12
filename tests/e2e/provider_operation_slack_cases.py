@@ -71,7 +71,7 @@ async def _baseline(emulate_url: str) -> None:
 
 
 async def _conversation_arguments(emulate_url: str) -> dict:
-    return {"channel": await _channel_id(emulate_url)}
+    return {"conversation": await _channel_id(emulate_url)}
 
 
 async def _thread_arguments(emulate_url: str) -> dict:
@@ -81,14 +81,14 @@ async def _thread_arguments(emulate_url: str) -> dict:
         if message["text"] == THREAD_ROOT_MARKER
     )
     return {
-        "channel": await _channel_id(emulate_url),
-        "thread_ts": root["ts"],
+        "conversation": await _channel_id(emulate_url),
+        "thread": root["ts"],
         "limit": 50,
     }
 
 
 async def _user_arguments(emulate_url: str) -> dict:
-    return {"user_id": await _user_id(emulate_url)}
+    return {"user_ref": await _user_id(emulate_url)}
 
 
 async def _search_outcome(_emulate_url: str, preview: dict) -> None:
@@ -97,7 +97,8 @@ async def _search_outcome(_emulate_url: str, preview: dict) -> None:
         match for match in output["matches"] if SEARCH_MARKER in match["text"]
     ]
     assert len(matches) == 1, output
-    assert matches[0]["user_display_name"] == "reborn-user", matches[0]
+    assert matches[0]["author"]["display_name"] == "reborn-user", matches[0]
+    assert matches[0]["is_self"] is True, matches[0]
 
 
 async def _list_conversations_outcome(
@@ -108,10 +109,11 @@ async def _list_conversations_outcome(
     matches = [
         item
         for item in output["conversations"]
-        if item["id"] == channel_id
+        if item["conversation"] == channel_id
     ]
     assert len(matches) == 1, output
-    assert matches[0]["name"] == CHANNEL_NAME, matches[0]
+    assert matches[0]["kind"] == "channel", matches[0]
+    assert matches[0]["display_name"] == CHANNEL_NAME, matches[0]
     assert matches[0]["is_member"] is True, matches[0]
 
 
@@ -120,31 +122,34 @@ async def _conversation_info_outcome(
 ) -> None:
     channel_id = await _channel_id(emulate_url)
     output = _output(preview)
-    assert output["conversation"]["id"] == channel_id, output
-    assert output["conversation"]["name"] == CHANNEL_NAME, output
-    assert output["conversation"]["is_member"] is True, output
+    assert output["conversation"] == channel_id, output
+    assert output["kind"] == "channel", output
+    assert output["display_name"] == CHANNEL_NAME, output
+    assert output["is_member"] is True, output
 
 
 async def _history_outcome(_emulate_url: str, preview: dict) -> None:
     output = _output(preview)
     by_text = {message["text"]: message for message in output["messages"]}
     assert THREAD_ROOT_MARKER in by_text, output
-    assert by_text[THREAD_ROOT_MARKER]["is_current_user"] is True, output
-    assert output["current_user_id"], output
+    assert by_text[THREAD_ROOT_MARKER]["is_self"] is True, output
 
 
 async def _thread_outcome(_emulate_url: str, preview: dict) -> None:
     output = _output(preview)
     by_text = {message["text"]: message for message in output["messages"]}
     assert {THREAD_ROOT_MARKER, THREAD_REPLY_MARKER} <= set(by_text), output
-    assert by_text[THREAD_REPLY_MARKER]["is_current_user"] is True, output
+    assert by_text[THREAD_REPLY_MARKER]["is_self"] is True, output
+    assert by_text[THREAD_REPLY_MARKER]["thread"]["thread"] == by_text[
+        THREAD_ROOT_MARKER
+    ]["message_ref"]["message_id"], output
 
 
 async def _user_outcome(emulate_url: str, preview: dict) -> None:
     output = _output(preview)
-    assert output["user"]["id"] == await _user_id(emulate_url), output
-    assert output["user"]["real_name"] == "QA Reviewer", output
-    assert output["user"]["title"] == "Release reviewer", output
+    assert output["user_ref"] == await _user_id(emulate_url), output
+    assert output["real_name"] == "QA Reviewer", output
+    assert output["title"] == "Release reviewer", output
 
 
 async def _whoami_outcome(emulate_url: str, preview: dict) -> None:
@@ -152,16 +157,14 @@ async def _whoami_outcome(emulate_url: str, preview: dict) -> None:
         identity = await slack_post(client, emulate_url, "auth.test", {})
     output = _output(preview)
     assert output == {
-        "ok": True,
-        "team_id": identity["team_id"],
-        "user_display_name": identity["user"],
-        "user_id": identity["user_id"],
+        "display_name": identity["user"],
+        "user_ref": identity["user_id"],
     }, output
 
 
 async def _send_arguments(emulate_url: str) -> dict:
     return {
-        "channel": await _channel_id(emulate_url),
+        "conversation": await _channel_id(emulate_url),
         "text": SEND_MARKER,
     }
 
@@ -184,9 +187,10 @@ async def _send_outcome(emulate_url: str, preview: dict) -> None:
     assert len(matches) == 1, matches
     output = _output(preview)
     assert output == {
-        "ok": True,
-        "channel": await _channel_id(emulate_url),
-        "ts": matches[0]["ts"],
+        "message_ref": {
+            "conversation": await _channel_id(emulate_url),
+            "message_id": matches[0]["ts"],
+        }
     }, output
 
 
@@ -262,19 +266,20 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_search_messages",
         provider_service="slack",
         capability_id="slack.search_messages",
-        arguments={"query": SEARCH_MARKER, "count": 20},
+        arguments={"query": SEARCH_MARKER, "limit": 20},
         assert_baseline=_baseline,
         assert_outcome=_search_outcome,
-        expected_request_count=2,
+        expected_request_count=3,
     ),
     ProviderOperationCase(
         case_id="slack_search_messages_empty",
         provider_service="slack",
         capability_id="slack.search_messages",
-        arguments={"query": "NO_SUCH_PROVIDER_CONTRACT_MESSAGE", "count": 20},
+        arguments={"query": "NO_SUCH_PROVIDER_CONTRACT_MESSAGE", "limit": 20},
         assert_baseline=_baseline,
-        assert_outcome=exact_output({"ok": True, "total": 0, "matches": []}),
+        assert_outcome=exact_output({"matches": [], "total": 0}),
         outcome_class="empty",
+        expected_request_count=2,
         setup_provider_proxy=static_provider_json_response(
             method="GET",
             path="/api/search.messages",
@@ -282,12 +287,14 @@ SLACK_PROVIDER_OPERATION_CASES = (
         ),
         expect_provider_forward=False,
         expected_proxy_profile="provider_contract_empty",
+        expected_forwarded_request_count=1,
+        expected_profile_request_count=1,
     ),
     ProviderOperationCase(
         case_id="slack_list_conversations",
         provider_service="slack",
         capability_id="slack.list_conversations",
-        arguments={"types": "public_channel", "limit": 200},
+        arguments={"kinds": ["channel"], "limit": 200},
         assert_baseline=_baseline,
         assert_outcome=_list_conversations_outcome,
     ),
@@ -295,9 +302,9 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_list_conversations_empty",
         provider_service="slack",
         capability_id="slack.list_conversations",
-        arguments={"types": "mpim", "limit": 200},
+        arguments={"kinds": ["group_dm"], "limit": 200},
         assert_baseline=_baseline,
-        assert_outcome=exact_output({"ok": True, "conversations": []}),
+        assert_outcome=exact_output({"conversations": []}),
         outcome_class="empty",
         setup_provider_proxy=static_provider_json_response(
             method="GET",
@@ -323,18 +330,12 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_get_conversation_info_empty",
         provider_service="slack",
         capability_id="slack.get_conversation_info",
-        arguments={"channel": "C_EMPTY"},
+        arguments={"conversation": "C_EMPTY"},
         assert_baseline=_baseline,
         assert_outcome=exact_output(
             {
-                "ok": True,
-                "conversation": {
-                    "id": "C_EMPTY",
-                    "is_channel": False,
-                    "is_private": False,
-                    "is_im": False,
-                    "is_mpim": False,
-                },
+                "conversation": "C_EMPTY",
+                "kind": "other",
             }
         ),
         outcome_class="empty",
@@ -359,14 +360,11 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_get_conversation_history_empty",
         provider_service="slack",
         capability_id="slack.get_conversation_history",
-        arguments={"channel": "C_EMPTY", "limit": 50},
+        arguments={"conversation": "C_EMPTY", "limit": 50},
         assert_baseline=_baseline,
         assert_outcome=exact_output(
             {
-                "ok": True,
                 "messages": [],
-                "has_more": False,
-                "current_user_id": EMPTY_USER_ID,
             }
         ),
         outcome_class="empty",
@@ -388,14 +386,11 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_get_thread_replies_empty",
         provider_service="slack",
         capability_id="slack.get_thread_replies",
-        arguments={"channel": "C_EMPTY", "thread_ts": "0.000001", "limit": 50},
+        arguments={"conversation": "C_EMPTY", "thread": "0.000001", "limit": 50},
         assert_baseline=_baseline,
         assert_outcome=exact_output(
             {
-                "ok": True,
                 "messages": [],
-                "has_more": False,
-                "current_user_id": EMPTY_USER_ID,
             }
         ),
         outcome_class="empty",
@@ -416,18 +411,12 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_get_user_info_empty",
         provider_service="slack",
         capability_id="slack.get_user_info",
-        arguments={"user_id": EMPTY_USER_ID},
+        arguments={"user_ref": EMPTY_USER_ID},
         assert_baseline=_baseline,
         assert_outcome=exact_output(
             {
-                "ok": True,
-                "user": {
-                    "id": EMPTY_USER_ID,
-                    "name": "",
-                    "real_name": "",
-                    "display_name": "",
-                    "is_bot": False,
-                },
+                "user_ref": EMPTY_USER_ID,
+                "is_bot": False,
             }
         ),
         outcome_class="empty",
@@ -464,9 +453,7 @@ SLACK_PROVIDER_OPERATION_CASES = (
         assert_baseline=_baseline,
         assert_outcome=exact_output(
             {
-                "ok": True,
-                "user_id": EMPTY_USER_ID,
-                "team_id": EMPTY_TEAM_ID,
+                "user_ref": EMPTY_USER_ID,
             }
         ),
         outcome_class="empty",

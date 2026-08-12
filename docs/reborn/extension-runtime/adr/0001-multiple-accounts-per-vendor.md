@@ -39,10 +39,10 @@ resolve_account(user, extension, vendor):
 Implemented at the existing requester-authorization stage in the credential
 selection path (today's single-account behavior is the named fallback
 `select_latest_duplicate_user_reusable_account`,
-`crates/ironclaw_auth/src/product_auth/credentials/runtime_credentials.rs`);
+`crates/domains/ironclaw_auth/src/product_auth/credentials/runtime_credentials.rs`);
 the selection request already carries the requester
 (`CredentialAccountSelectionRequest.requester_extension`,
-`crates/ironclaw_auth/src/credential.rs`).
+`crates/domains/ironclaw_auth/src/credential.rs`).
 
 ## Invariants
 
@@ -108,7 +108,7 @@ follow-up PR after P7.
   already exists — the per-extension indirection needs no new plumbing
   through dispatch.
 - Auth flows complete to a specific `credential_account_id`
-  (`crates/ironclaw_auth/src/domain.rs`).
+  (`crates/domains/ironclaw_auth/src/domain.rs`).
 
 ## Open questions for the implementing PR
 

@@ -76,6 +76,12 @@ historical_seconds = 8
 retry = "never"
 
 [[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_projects_api.py"
+affinity = "served-api-routes"
+historical_seconds = 12
+retry = "never"
+
+[[suite]]
 path = "tests/e2e/scenarios/test_reborn_webui_v2_session_api.py"
 affinity = "served-api-routes"
 historical_seconds = 8

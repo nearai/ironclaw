@@ -26,8 +26,6 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
-const HTTP_TOOL_URL_A: &str = "https://api.example.test/v1/items/a";
-const HTTP_TOOL_URL_B: &str = "https://api.example.test/v1/items/b";
 /// A vision-capable model id per `ironclaw_llm::vision_models::VISION_PATTERNS`
 /// (mirrors `tests/reborn_integration_attach.rs`).
 const VISION_MODEL: &str = "claude-3-5-sonnet-20241022";
@@ -111,9 +109,8 @@ async fn golden_multi_turn_history() {
 /// a substring check like `assert_model_request_contains` cannot see.
 #[tokio::test]
 async fn golden_context_surfacing() {
-    let provider = RecordingCommunicationContextProvider::with_target_and_channel(
-        "reborn-golden-target",
-        "slack",
+    let provider = RecordingCommunicationContextProvider::with_notification_count_and_channel(
+        1,
         "reborn-golden-channel",
     );
     let h = RebornIntegrationHarness::test_default()
@@ -133,28 +130,47 @@ async fn golden_context_surfacing() {
 }
 
 /// (f) Parallel tool_calls: one assistant response carrying TWO `tool_calls[]`
-/// entries, both exact-matched. Distinct from (b): pins that multiple
-/// tool_calls in one message each get a distinct id, and each following `tool`
-/// message's `tool_call_id` lines up with the right one, in order.
+/// entries for a production capability whose descriptor is parallel-safe.
+/// The executor unit test pins actual overlap with deterministic scheduling.
+/// This integration test first creates its own file fixture through the real
+/// write capability, then pins descriptor classification, composition wiring,
+/// durable result persistence, exact dispatch count, and input-order replay.
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
-        .with_builtin_http_tools()
+        .with_durable_capability_io_file_tools()
+        .with_parallel_tool_batches()
         .script([
+            RebornScriptedReply::tool_call(
+                "builtin.write_file",
+                json!({
+                    "path": "/workspace/parallel.txt",
+                    "content": "first\nsecond\n"
+                }),
+            ),
             RebornScriptedReply::tool_calls([
-                ("builtin.http", json!({"url": HTTP_TOOL_URL_A})),
-                ("builtin.http", json!({"url": HTTP_TOOL_URL_B})),
+                (
+                    "builtin.read_file",
+                    json!({"path": "/workspace/parallel.txt", "offset": 1, "limit": 1}),
+                ),
+                (
+                    "builtin.read_file",
+                    json!({"path": "/workspace/parallel.txt", "offset": 2, "limit": 1}),
+                ),
             ]),
-            RebornScriptedReply::text("fetched both"),
+            RebornScriptedReply::text("read both"),
         ])
         .build()
         .await
         .expect("harness builds");
-    h.submit_turn("fetch both items")
+    h.submit_turn("write a file, then read both lines")
         .await
         .expect("turn completes");
+    h.assert_tool_invocation_count("builtin.read_file", 2)
+        .await
+        .expect("both parallel-safe read calls reached the production capability host once");
     h.assert_golden_payload("parallel_tool_calls");
-    h.assert_reply_eq("fetched both")
+    h.assert_reply_eq("read both")
         .await
         .expect("final reply matches exactly");
 }
@@ -234,7 +250,7 @@ async fn golden_gated_turn_approve() {
 // `state.compaction_state.force_compact_on_next_iteration`, but Reborn's
 // `DefaultPlanner` wires `PromptCompactionStep` to
 // `ActiveTaskPreservingCompactionStrategy::should_compact`
-// (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
+// (crates/loop/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
 // which never reads that flag — it only compacts on a genuine ~8,000+ token
 // accumulated tail. The force path is a dead letter under Reborn's installed
 // strategy; exercising it here needs a production fix (out of scope) or a

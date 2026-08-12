@@ -1,7 +1,7 @@
 """Admin user-management E2E against the real ``ironclaw-reborn serve`` binary.
 
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
-`ironclaw_product::AdminUserService`) over HTTP against the standalone
+`ironclaw_product_contracts::admin_users::AdminUserService`) over HTTP against the standalone
 Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
 router in-process), this exercises serve.rs's real wiring: the operator
 env-bearer authenticator, and the signed-session-store token minter that must
@@ -519,6 +519,7 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
         "Slack deployment configuration",
         "Telegram deployment configuration",
         "Google OAuth client credentials",
+        "Web push deployment configuration",
     ]
     for group_name in group_names:
         await expect(

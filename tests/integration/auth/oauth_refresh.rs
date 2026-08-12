@@ -20,12 +20,12 @@ mod support;
 
 use chrono::{Duration, Utc};
 use ironclaw_auth::{AuthProductScope, AuthSurface, CredentialAccountLookupRequest};
+use ironclaw_composition::{
+    KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
+};
 use ironclaw_host_api::{
     ids::{InvocationId, UserId},
     resource::ResourceScope,
-};
-use ironclaw_reborn_composition::{
-    KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
 };
 use reborn_support::oauth_flow::connect_google_account;
 

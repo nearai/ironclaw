@@ -109,7 +109,12 @@ REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"), "<REDACTED_ANTHROPIC_KEY>"),
     (re.compile(r"sk-(?!ant-)[A-Za-z0-9_-]{20,}"), "<REDACTED_OPENAI_KEY>"),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "<REDACTED_AWS_ACCESS_KEY>"),
-    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer <REDACTED>"),
+    # 16+ token-alphabet chars only, mirroring scrub-artifacts.sh: prose from
+    # model-visible tool descriptions ("bearer for a static API token …")
+    # lands in results via tool_search output and must not be mangled, while
+    # every real bearer credential shape is far longer than any English word
+    # that can follow "bearer".
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}"), "Bearer <REDACTED>"),
     # Generic `key=value` / `key: value` assignments. Mirrors the
     # corresponding rules in scrub-artifacts.sh so anything that script
     # would have stripped from a log file also gets stripped from a

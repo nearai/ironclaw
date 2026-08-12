@@ -12,13 +12,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
 };
-use ironclaw_product::ProductTriggerReason;
 use ironclaw_turns::{LoopMessageRef, TurnStatus};
 use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
@@ -77,13 +77,23 @@ async fn reborn_identity_prompt_scope_isolation_parity() {
         alice.actor.user_id, bob.actor.user_id,
         "distinct external actors must resolve to distinct canonical users before identity can isolate"
     );
+    // Ephemeral-per-ping + run-acts-as-invoker (#7377): each ping runs under
+    // its OWN pinger-owned scope — owner == actor, never a shared/first-binder
+    // owner — and the identity context below follows the ACTOR, never the
+    // scope owner and never a configured subject. (This binary harness's
+    // binding double is conversation-keyed and does NOT model per-ping thread
+    // minting; that distinctness is pinned at the conversations tier. What
+    // this test locks is that neither run's scope is owned by anyone but its
+    // own actor, and that identity isolation tracks the actor.)
     assert_eq!(
-        alice.thread_id, bob.thread_id,
-        "BotMention submissions in the same shared room should bind to one shared thread"
+        alice.thread_scope.owner_user_id,
+        Some(alice.actor.user_id.clone()),
+        "alice's run scope is owned by alice — owner == actor"
     );
     assert_eq!(
-        alice.thread_scope, bob.thread_scope,
-        "shared-thread identity isolation must be exercised inside one thread scope"
+        bob.thread_scope.owner_user_id,
+        Some(bob.actor.user_id.clone()),
+        "bob's run scope is owned by bob — owner == actor, never a shared/first-binder owner"
     );
     identity_source.set_identity(bob.actor.user_id.as_str(), BOB_IDENTITY);
     harness

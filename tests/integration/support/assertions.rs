@@ -17,12 +17,13 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
-use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_config::BudgetDefaults;
+use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
-use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
+use ironclaw_loop_contracts::{BatchPolicyKind, LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
-use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
+use ironclaw_threads::SessionThreadService as _;
 use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState};
 use rust_decimal::Decimal;
 
@@ -106,7 +107,7 @@ pub enum ToolErrorClass {
 impl ToolErrorClass {
     /// The `safe_summary` prefix the executor writes for this class — see
     /// `capability_{failed,denied}_summary` in
-    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    /// `crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`.
     fn summary_prefix(self) -> &'static str {
         match self {
             Self::Failed => "capability failed with ",
@@ -419,6 +420,50 @@ impl RebornIntegrationHarness {
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
     /// proves prompt-injected content (safety banners, skill instructions,
     /// profile lines) actually reached the model.
+    /// Assert that some captured model request carried a User-role message
+    /// containing `text` — the end-to-end proof that a queued steering message
+    /// actually reached the model (through the real transcript rebuild), not
+    /// merely that its transcript status flipped.
+    pub async fn assert_model_saw_user_message(&self, text: &str) -> HarnessResult<()> {
+        let messages = self.captured_model_user_messages();
+        if messages.iter().any(|message| message.contains(text)) {
+            return Ok(());
+        }
+        Err(format!(
+            "no captured model request carried a user message containing {text:?}; saw {messages:?}"
+        )
+        .into())
+    }
+
+    /// This thread's transcript row for the (first) user message whose content
+    /// contains `text`. Reads through the same `SessionThreadService` the run
+    /// persisted through.
+    pub async fn user_message_record(
+        &self,
+        text: &str,
+    ) -> HarnessResult<ironclaw_threads::ThreadMessageRecord> {
+        let history = self
+            .thread_harness
+            .service
+            .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+                scope: self.thread_harness.scope.clone(),
+                thread_id: self.binding.thread_id.clone(),
+            })
+            .await?;
+        history
+            .messages
+            .iter()
+            .find(|message| {
+                message.kind == ironclaw_threads::MessageKind::User
+                    && message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(text))
+            })
+            .cloned()
+            .ok_or_else(|| format!("no user message containing {text:?} in thread history").into())
+    }
+
     pub async fn assert_system_prompt_contains(&self, text: &str) -> HarnessResult<()> {
         let prompts = self.captured_system_prompts();
         if prompts.iter().any(|prompt| prompt.contains(text)) {
@@ -492,6 +537,25 @@ impl RebornIntegrationHarness {
         }
         Err(format!(
             "no model message content contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert that the final interactive model request still carries `needle`.
+    /// This avoids a vacuous pass from an earlier request when testing context
+    /// retained across a long-running turn.
+    pub async fn assert_last_model_message_content_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let last = requests.last().ok_or("no model requests were captured")?;
+        if last.iter().any(|message| message.content.contains(needle)) {
+            return Ok(());
+        }
+        Err(format!(
+            "final model request did not contain {needle:?}; captured {} request(s)",
             requests.len()
         )
         .into())
@@ -1031,6 +1095,36 @@ impl RebornIntegrationHarness {
         }
         Err(format!(
             "expected model recovery class {expected:?} and no {forbidden:?}; saw {classes:?}"
+        )
+        .into())
+    }
+
+    /// Assert the loop's caller-visible policy for a capability batch of the
+    /// specified size. The policy controls whether execution may proceed in
+    /// parallel and whether a suspension stops the remaining batch.
+    pub async fn assert_capability_batch_policy(
+        &self,
+        call_count: u32,
+        expected: BatchPolicyKind,
+    ) -> HarnessResult<()> {
+        let policies = self
+            .loop_milestones()
+            .into_iter()
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::CapabilityBatchStarted {
+                    call_count: actual_count,
+                    policy,
+                    ..
+                } if actual_count == call_count => Some(policy),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if policies.contains(&expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "no CapabilityBatchStarted milestone for a {call_count}-call batch classified \
+             {expected:?}; saw {policies:?}"
         )
         .into())
     }
@@ -1644,6 +1738,22 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the compactor persisted at least `minimum` durable summaries.
+    pub async fn assert_summary_artifact_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let count = self
+            .thread_harness
+            .summary_artifacts(self.binding.thread_id.clone())
+            .await?
+            .len();
+        if count >= minimum {
+            return Ok(());
+        }
+        Err(format!("expected at least {minimum} durable summary artifact(s), saw {count}").into())
+    }
+
     /// Assert no durable compaction summary contains forbidden content. The
     /// diagnostic deliberately omits `needle` and summary bodies.
     pub async fn assert_summary_artifacts_lack(&self, needle: &str) -> HarnessResult<()> {
@@ -1893,6 +2003,21 @@ impl RebornIntegrationHarness {
     pub async fn assert_conversation_history_contains(&self, needle: &str) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, None, needle)
             .await
+    }
+
+    pub async fn assert_conversation_history_message_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        if history.len() >= minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "persisted conversation history contained {} message(s), expected at least {minimum}",
+            history.len()
+        )
+        .into())
     }
 
     /// Assert NO persisted thread-history message's `content` contains

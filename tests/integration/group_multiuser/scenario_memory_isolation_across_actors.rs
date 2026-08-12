@@ -2,7 +2,7 @@
 //! capability backend. Actor A writes a private memory; a DISTINCT actor B
 //! cannot read or search it, while A still can — the tool-tier proof that
 //! Reborn memory is scoped by the run's owner (`MemoryDocumentScope` keys the
-//! path on the caller's user id, `crates/ironclaw_memory_native/src/path.rs`).
+//! path on the caller's user id, `crates/extensions/packages/memory-native/src/path.rs`).
 //!
 //! Related QA: issue #5460 ("memories visible to every user in the workspace")
 //! — the reporter noted the TOOL path is already isolated; this scenario pins
@@ -62,7 +62,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
     // Non-vacuity: if `with_actor_id` regressed to a no-op, both actors would
     // share one owner and this scenario would degrade to the same-owner case.
-    if a.binding.subject_user_id == b.binding.subject_user_id {
+    if a.binding.actor_user_id == b.binding.actor_user_id {
         return Err("with_actor_id seam no-op: both actors resolved the same owner".into());
     }
     b.submit_turn("find the launch codename")

@@ -3,9 +3,10 @@
 This guide is for the standalone `ironclaw serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
-Slack support ships in the binary. It has one gate: runtime config must set
-`[slack].enabled = true`, or the deployment env must set
-`IRONCLAW_REBORN_SLACK_ENABLED=true`.
+Slack support ships in the binary, and there is no configuration key or
+environment variable that turns it on. The Slack webhook route is always
+mounted; Slack goes live once the Slack extension is installed and its setup is
+completed in the WebUI at `/extensions`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -30,7 +31,8 @@ cargo build \
   --bin ironclaw
 ```
 
-Slack is disabled unless the mounted or seeded Reborn config enables it.
+Neither command needs a Slack-specific build flag or feature: the route is
+compiled in and mounted unconditionally.
 
 ## Public Endpoint
 
@@ -85,35 +87,38 @@ IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
-IRONCLAW_REBORN_SLACK_ENABLED=true
 OPENAI_API_KEY=sk-...
 ```
 
 ## Reborn Config
 
-Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
-`ironclaw config init` or start the Docker image once to seed it.
+The Reborn config file lives at `$IRONCLAW_REBORN_HOME/config.toml`; run
+`ironclaw config init` or start the Docker image once to seed it if it does not
+exist yet.
 
-Minimal Slack config:
+It carries no Slack settings. There is no `[slack]` section to add and no Slack
+key to set: `slack.enabled` is retired, so `ironclaw config set slack.enabled`
+answers with migration guidance instead of writing anything.
 
-```toml
-[slack]
-enabled = true
-```
-
-`enabled` is the only Slack boot setting. You can also set
-`IRONCLAW_REBORN_SLACK_ENABLED=true` instead of editing config. The env var
-overrides only the route enablement gate: `true`/`1` mounts Slack, while
-`false`/`0` acts as a deployment kill switch.
-
-Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes the
+`POST /webhooks/extensions/slack/events` is mounted unconditionally, and it
+answers `503 temporarily_unavailable` until the Slack extension's ingress
+signing secret is registered. Installing the Slack extension from `/extensions`
+and completing its setup is what registers that secret, exposes the
 manifest-declared Slack deployment fields in Admin Configuration, and makes a
 personal Slack connection available through the Slack extension's user OAuth
 flow.
-Slack installation ids, team/app ids, the bot token, the signing secret,
-OAuth client credentials, and channel mappings are configured after startup
-from Admin Configuration. These deployment values are never shown in a user's
-extension setup flow.
+
+Slack installation ids, team/app ids, the bot token, the signing secret, and
+OAuth client credentials are configured after startup from Admin
+Configuration. These deployment values are never shown in a user's extension
+setup flow.
+
+> **"Admin Configuration" and the "Slack card" are the same place.** This guide
+> uses the operator-facing name; [Slack](/channels/slack) uses the UI path.
+> Concretely: web interface -> **Extensions** -> **Channels** tab -> scroll to the
+> bottom of the Built-in section -> **Configure** on the Slack card. (Extensions
+> opens on the **Registry** tab, which is *not* where channels are connected.)
+> Every "Admin Configuration" reference below means that dialog.
 
 As an operator, open Admin, Configuration, then Slack deployment configuration.
 Save:
@@ -124,19 +129,36 @@ Save:
 | Team ID | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
 | App ID | Slack app id, visible as `api_app_id` in Events API payloads. |
 | Bot user ID | Slack member id for the app's bot user (for example, the `U…` id returned at installation). |
-| Shared subject | Optional Reborn user scope available for shared-channel routing. |
 | Bot token | Slack bot token. Stored in the Reborn secret store; never returned by the API. |
 | Signing secret | Slack signing secret. Stored in the Reborn secret store; never returned by the API. |
 | OAuth client ID | Client id for the Slack app's user OAuth flow. |
 | OAuth client secret | Client secret for the Slack app's user OAuth flow. Stored in the Reborn secret store. |
 
-After Slack deployment configuration is saved, use its allowed-channel and
-subject-route fields to map Slack channel ids to team agents. Users separately
-install Slack from Extensions and complete their own OAuth flow; that personal
-membership and credential state does not mutate the operator configuration.
+There is no shared-channel configuration at all. Inviting the bot into a
+Slack channel is what enables that channel: Slack only delivers a channel's
+events to the app because the bot is a member, so the bot's presence — an
+event arriving through the verified webhook — is itself the admission. To
+stop serving a channel, remove the bot from it.
 
-Unrouted shared Slack channels fail closed instead of silently inheriting a
-personal/default user scope.
+In a shared channel the bot answers each participant as themselves — there
+is no shared subject user or per-channel subject route to assign, and each
+shared-channel message runs as the Slack user who sent it. Users separately
+install Slack from Extensions and complete their own OAuth flow to pair. A
+participant who mentions the bot before pairing gets a short pairing notice
+threaded on their own message (never a broadcast into the room) pointing
+them at the Slack connect flow in Extensions; their personal membership and
+credential state does not mutate the operator configuration.
+
+### Migrating an existing config.toml
+
+An existing file that still carries a `[slack]` or `[telegram]` section keeps
+parsing, so an older deployment does not break on upgrade. A leftover Slack
+*setup* field (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`,
+`user_id`, `shared_subject_user_id`, `channel_routes`, `signing_secret_env`,
+`bot_token_env`) fails `serve` closed with a migration pointer rather than
+being silently ignored. A section left with only inert keys still boots, and
+logs a deprecation notice. Either way the fix is the same: delete the section,
+because nothing reads it.
 
 ## Slack App Configuration
 
@@ -306,9 +328,17 @@ Verification checklist:
 
 ## Troubleshooting
 
-### Slack routes are not mounted
+### Slack events are rejected with 503 or 401
 
-Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
+There is no config or env enablement gate to check; the route is always mounted.
+
+A 503 `temporarily_unavailable` means the Slack extension's ingress signing secret is not
+registered yet. Register it in Admin Configuration for Slack (the Slack card — see the
+note under "Reborn Config" for the exact UI path; landing on the wrong Extensions tab is
+the usual reason this step is missed).
+
+A 401 means a signing secret is registered but does not match the app. Compare the value
+there against **Basic Information -> Signing Secret** in the Slack app.
 
 ### Slack route never receives events
 
@@ -340,9 +370,16 @@ Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/produ
 
 Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in Admin Configuration match the Slack app that emitted the event.
 
-### Shared-channel turns are rejected
+### Shared channel gets no answer, or a pairing notice
 
-Configure Shared subject or use the WebUI Slack channel picker to allow the channel.
+There is no channel allowlist to configure: any channel the bot has been
+invited to is served, because the channel's events reaching the verified
+webhook is itself the admission. If a mention produces nothing at all, the
+event is not arriving — see "Channel mention does not reach Reborn" above.
+If the bot instead answers a specific user with a pairing notice threaded on
+their message, that user has not connected Slack yet — they complete the
+Slack OAuth connect from Extensions, since every shared-channel participant
+runs as themselves.
 
 ### Slash command outside the bot DM is denied
 

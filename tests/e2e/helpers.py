@@ -305,6 +305,8 @@ SEL_V2 = {
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "thread_search": "input[placeholder='Search chats...']",
     "thread_load_more": "[data-testid='thread-load-more']",
+    "thread_new": "[data-testid='new-chat']",
+    "thread_item": "[data-testid='thread-item']",
     "sign_out_button": "button[title='Sign out']",
     "nav_chat": "a[href='/chat']",
     "nav_settings_inference": "a[href='/settings/inference']",
@@ -319,6 +321,22 @@ SEL_V2 = {
     "connection_status": "[data-testid='connection-status']",
     "connection_status_toggle": "[data-testid='connection-status-toggle']",
     "connection_status_label": "[data-testid='connection-status-label']",
+    "inspector_panel": "[data-testid='inspector-panel']",
+    "inspector_prompt_content": "[data-testid='inspector-prompt-content']",
+    "inspector_tab_activity": "[data-testid='inspector-tab-activity']",
+    "inspector_activity_content": "[data-testid='inspector-activity-content']",
+    "inspector_tab_stats": "[data-testid='inspector-tab-stats']",
+    "inspector_stats_content": "[data-testid='inspector-stats-content']",
+    "inspector_close": "[data-testid='inspector-close']",
+    "inspector_open": "[data-testid='inspector-open']",
+    "inspector_tab_prompt": "[data-testid='inspector-tab-prompt']",
+    "inspector_health": "[data-testid='inspector-health']",
+    "inspector_stream_health": "[data-testid='inspector-stream-health']",
+    "inspector_stream_state": "[data-testid='inspector-stream-state']",
+    "inspector_stream_reconnects": "[data-testid='inspector-stream-reconnects']",
+    "inspector_stream_updates": "[data-testid='inspector-stream-updates']",
+    "inspector_stream_last_update": "[data-testid='inspector-stream-last-update']",
+    "inspector_status_notice": "[data-testid='inspector-status-notice']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
@@ -377,8 +395,17 @@ SEL_V2 = {
     "tool_activity_detail": "[data-testid='tool-activity-detail']",
     "projects_grid": "[data-testid='projects-grid']",
     "projects_search_input": "[data-testid='projects-search-input']",
+    "projects_summary": "[data-testid='projects-summary']",
+    "projects_summary_for": (
+        "[data-testid='projects-summary'] [data-summary-kind='{kind}']"
+    ),
+    "projects_summary_value_for": (
+        "[data-testid='projects-summary'] [data-summary-kind='{kind}'] "
+        "[data-testid='projects-summary-value']"
+    ),
     "project_card": "[data-testid='project-card']",
     "project_card_for": "[data-testid='project-card'][data-project-id='{id}']",
+    "project_updated_at": "[data-testid='project-updated-at']",
     "project_open_workspace": "[data-testid='project-open-workspace']",
     "project_workspace": "[data-testid='project-workspace']",
     "project_workspace_for": "[data-testid='project-workspace'][data-project-id='{id}']",
@@ -389,6 +416,9 @@ SEL_V2 = {
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.
+    "workspace_file_link_for": (
+        "a[data-workspace-path='{path}']"
+    ),
     "project_file_chip": "[data-testid='project-file-chip']",
     "project_file_chip_for": "[data-testid='project-file-chip'][data-file-path='{path}']",
     # Inline one-click download icon on a project-file chip; `{path}` scopes it
@@ -399,6 +429,8 @@ SEL_V2 = {
     ),
     # Download action inside the shared attachment preview modal.
     "attachment_download": "[data-testid='attachment-download']",
+    "attachment_open_workspace": "[data-testid='attachment-open-workspace']",
+    "attachment_preview_pdf_frame_for": "iframe[title='{filename}']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
     "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
     "logs_entry": "[data-testid='logs-entry']",
@@ -406,6 +438,8 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "logs_level_filter": "[data-testid='logs-level-filter']",
+    "logs_target_filter": "input[placeholder='Filter by target…']",
     "logs_pagination": "[data-testid='logs-pagination']",
     "logs_load_older": "[data-testid='logs-load-older']",
     "logs_load_older_error": "[data-testid='logs-load-older-error']",
@@ -426,11 +460,26 @@ SEL_V2 = {
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
     "llm_provider_disclosure": "llm-provider-disclosure",
+    "onboarding_provider_card_for": (
+        "[data-testid='onboarding-provider-card']"
+        "[data-provider-id='{provider_id}']"
+    ),
+    "onboarding_provider_setup": "[data-testid='onboarding-provider-setup']",
     "automation_row_for": (
         "[data-testid='automation-row'][data-automation-id='{id}']"
     ),
     "automation_name_button_for": (
         "[data-testid='automation-name-button'][data-automation-id='{id}']"
+    ),
+    "automation_action_for": (
+        "[data-testid='automation-action-button'][data-automation-id='{id}']"
+    ),
+    "automation_delete_for": (
+        "[data-testid='automation-delete-button'][data-automation-id='{id}']"
+    ),
+    "automation_delete_dialog_for": (
+        "[data-testid='automation-delete-dialog'][data-automation-id='{id}'] "
+        "[role='dialog']"
     ),
     "automation_filter_for": (
         "[data-testid='automation-filter'][data-filter='{filter}']"

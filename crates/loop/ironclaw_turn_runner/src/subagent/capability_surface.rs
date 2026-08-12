@@ -1,0 +1,245 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
+use ironclaw_loop_contracts::LoopRunContext;
+use ironclaw_loop_host::{
+    CapabilityResolveError, CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
+};
+
+use crate::planned_driver_factory::is_subagent_planned_run_profile;
+
+pub(crate) struct SubagentCapabilitySurfaceResolver {
+    inner: Arc<dyn CapabilitySurfaceProfileResolver>,
+    material_source: Arc<dyn SubagentPromptMaterialSource>,
+}
+
+impl SubagentCapabilitySurfaceResolver {
+    pub(crate) fn new(
+        inner: Arc<dyn CapabilitySurfaceProfileResolver>,
+        material_source: Arc<dyn SubagentPromptMaterialSource>,
+    ) -> Self {
+        Self {
+            inner,
+            material_source,
+        }
+    }
+}
+
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for SubagentCapabilitySurfaceResolver {
+    async fn resolve(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        let base = self.inner.resolve(run_context).await?;
+        if !is_subagent_planned_run_profile(run_context) {
+            return Ok(base);
+        }
+        let material = self
+            .material_source
+            .material_for_run(run_context)
+            .await
+            .map_err(|error| CapabilityResolveError::unavailable(error.safe_summary))?;
+        Ok(base.narrow_to_capability_ids(material.allowed_capabilities))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeSet, sync::Arc};
+
+    use async_trait::async_trait;
+    use ironclaw_agent_loop::test_support::test_run_context;
+    use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
+    use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
+    use ironclaw_loop_host::CapabilitySurfaceProfileResolver;
+    use ironclaw_loop_host::{
+        CapabilityResolveError, SubagentPromptMaterial, SubagentPromptMaterialSource,
+    };
+    use ironclaw_turns::{RunProfileId, RunProfileVersion};
+
+    use crate::planned_driver_factory::{
+        PLANNED_DRIVER_DEFAULT_VERSION, SUBAGENT_PLANNED_DRIVER_ID, SUBAGENT_PLANNED_PROFILE_ID,
+    };
+
+    use super::SubagentCapabilitySurfaceResolver;
+
+    fn cap(value: &str) -> CapabilityId {
+        CapabilityId::new(value).expect("valid capability id")
+    }
+
+    fn planned_subagent_context() -> LoopRunContext {
+        let mut context = test_run_context("subagent-capability-surface");
+        context.resolved_run_profile.profile_id =
+            RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent planned profile id");
+        context.resolved_run_profile.loop_driver.id =
+            ironclaw_loop_contracts::LoopDriverId::new(SUBAGENT_PLANNED_DRIVER_ID)
+                .expect("subagent planned driver id");
+        context.resolved_run_profile.loop_driver.version =
+            RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION);
+        context
+    }
+
+    fn allowlist(ids: &[&str]) -> CapabilitySurfacePolicy {
+        CapabilitySurfacePolicy::allow_only(ids.iter().copied().map(cap))
+    }
+
+    struct StaticResolver(CapabilitySurfacePolicy);
+
+    #[async_trait]
+    impl ironclaw_loop_host::CapabilitySurfaceProfileResolver for StaticResolver {
+        async fn resolve(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FailingSource;
+
+    #[async_trait]
+    impl SubagentPromptMaterialSource for FailingSource {
+        async fn material_for_run(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<SubagentPromptMaterial, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "prompt material unavailable for test",
+            ))
+        }
+    }
+
+    struct SucceedingSource(SubagentPromptMaterial);
+
+    #[async_trait]
+    impl SubagentPromptMaterialSource for SucceedingSource {
+        async fn material_for_run(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<SubagentPromptMaterial, AgentLoopHostError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FailingResolver;
+
+    #[async_trait]
+    impl ironclaw_loop_host::CapabilitySurfaceProfileResolver for FailingResolver {
+        async fn resolve(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+            Err(CapabilityResolveError::internal(
+                "inner resolver failed for test",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_propagates_material_source_error_as_unavailable() {
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(CapabilitySurfacePolicy::allow_all())),
+            Arc::new(FailingSource),
+        );
+
+        let error = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect_err("material source failure should surface as unavailable");
+
+        match error {
+            CapabilityResolveError::Unavailable { reason } => {
+                assert_eq!(reason, "prompt material unavailable for test");
+            }
+            other => panic!("unexpected resolve error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_propagates_inner_resolver_error_on_subagent_context() {
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(FailingResolver),
+            Arc::new(FailingSource),
+        );
+
+        let error = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect_err("inner resolver failure should surface unchanged");
+
+        match error {
+            CapabilityResolveError::Internal { reason } => {
+                assert_eq!(reason, "inner resolver failed for test");
+            }
+            other => panic!("unexpected resolve error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_intersects_base_and_material_allowsets_for_subagent_context() {
+        let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
+        let material_caps =
+            BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(base.clone())),
+            Arc::new(SucceedingSource(SubagentPromptMaterial {
+                direction_markdown: "test".to_string(),
+                goal: ironclaw_loop_host::SubagentPromptGoal {
+                    task: "test".to_string(),
+                    handoff: None,
+                },
+                allowed_capabilities: material_caps,
+            })),
+        );
+
+        let resolved = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect("subagent runs should intersect base and material allowsets");
+
+        assert_eq!(resolved, allowlist(&["builtin.read_file"]));
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_material_allowset_when_base_is_all_for_subagent_context() {
+        let material_caps =
+            BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(CapabilitySurfacePolicy::allow_all())),
+            Arc::new(SucceedingSource(SubagentPromptMaterial {
+                direction_markdown: "test".to_string(),
+                goal: ironclaw_loop_host::SubagentPromptGoal {
+                    task: "test".to_string(),
+                    handoff: None,
+                },
+                allowed_capabilities: material_caps.clone(),
+            })),
+        );
+
+        let resolved = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect("subagent runs with an all base allowset should return the material allowset");
+
+        assert_eq!(resolved, CapabilitySurfacePolicy::allow_only(material_caps));
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_base_allowset_for_non_subagent_runs_without_material_source() {
+        let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(base.clone())),
+            Arc::new(FailingSource),
+        );
+
+        let resolved = resolver
+            .resolve(&test_run_context("non-subagent-capability-surface"))
+            .await
+            .expect("non-subagent runs should return the base allowset");
+
+        assert_eq!(resolved, base);
+    }
+}

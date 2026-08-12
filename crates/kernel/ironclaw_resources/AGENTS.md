@@ -1,0 +1,46 @@
+# Agent Map — ironclaw_resources
+
+## Start Here
+
+- Read `README.md` for orientation (charter, measured deps/consumers, gates).
+  This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
+- Read `Cargo.toml` for actual dependencies and feature shape.
+- Use these Reborn contracts as the source of truth before changing behavior:
+- `docs/reborn/contracts/resources.md`
+- `docs/reborn/contracts/kernel-boundary.md`
+- `docs/reborn/contracts/processes.md`
+
+## What This Crate Owns
+
+- Resource reservation, reconciliation, release, and quota accounting, currently:
+- The `ResourceGovernor` trait (`src/lib.rs`) with `InMemoryResourceGovernor`, `PersistentResourceGovernor`, and `FilesystemResourceGovernor` (`src/filesystem_governor.rs`, the one host-runtime wires); the `ResourceGovernorStorePort` trait with the `JsonFileResourceGovernorStore` and `ResourceGovernorStore` (`src/resource_store.rs`) implementations. Re-derive with `rg -n "pub (trait|struct) \\w*Governor\\w*" src/`.
+- Budget dimensions (`ResourceDimension`: `Usd`, `InputTokens`, `OutputTokens`, `WallClockMs`, `OutputBytes`, `NetworkEgressBytes`, `ProcessCount`, `ConcurrencySlots`) scoped by `ResourceAccount` (tenant/user/project/agent/mission/thread), with `ResourceLimits`, `ResourceValue`, `ResourceTally`, `ResourceDenial`, `ResourceError`, `ResourceGovernorSnapshot`.
+- Reservation/receipt vocabulary `ResourceReservation` / `ResourceReceipt`, re-exported from `ironclaw_host_api`.
+- Crate-local public API, tests, and fixtures needed to prove that ownership.
+
+## Guardrails
+
+- Own resource reservation, reconciliation, release, and quota accounting.
+- No costed or quota-limited work should execute without an active
+  reservation or explicit documented exception.
+- Do not import runtimes, dispatcher, capabilities, approvals, processes,
+  events, or product workflow crates.
+- Preserve tenant/user/project scope in every reservation and receipt.
+- Keep accounting deterministic and safe under concurrent reservations.
+
+## Do Not Move In Here
+
+- process/runtime execution logic or best-effort accounting where contracts require fail-closed behavior.
+- Secrets, raw host paths, backend error details, and unredacted user content in errors, events, snapshots, logs, or docs.
+
+## Validation
+
+- Fast local check: `cargo test -p ironclaw_resources`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
+- If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
+
+## Agent Notes
+
+- Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
+- Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
+- If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.
