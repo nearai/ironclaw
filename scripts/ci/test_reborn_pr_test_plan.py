@@ -1558,21 +1558,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     exact_targets,
                 )
 
-    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
-        """The entrypoint and configs are decided; their neighbours are not.
+    def test_hosted_config_selects_its_root_test_partition(self) -> None:
+        """A container config with a root-test reader selects that partition.
 
-        `docker/` is classified per-file for the same reason repo-root
-        `scripts/` is: a blanket prefix would silently absorb paths with no
-        owning lane. Keep the fail-closed arm proven for the ones nobody has
-        decided — the hosted-single-tenant configs are read only by
-        `tests/dockerfile_runtime_home.rs`, which `_root_test_partitions()` does
-        not inventory, so no lane can be selected for them.
+        The hosted-single-tenant configs are read only by
+        `tests/dockerfile_runtime_home.rs`, inventoried by
+        `_root_test_partitions()` since the docs/internal/reborn consolidation
+        gave it a lane.
         """
+        reader = "tests/dockerfile_runtime_home.rs"
+        inventory = planner._root_test_partitions()
+        self.assertIn(reader, inventory)
         for path in (
+            reader,
             "docker/reborn/config.hosted-single-tenant.toml",
             "docker/reborn/config.hosted-single-tenant-volume.toml",
-            "docker/process-sandbox-entrypoint.sh",
         ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertEqual(plan["root_partitions"], [inventory[reader]])
+
+    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
+        """`docker/` is classified per-file for the same reason repo-root
+        `scripts/` is: a blanket prefix would silently absorb paths with no
+        owning lane. Keep the fail-closed arm proven for the one nobody has
+        decided.
+        """
+        for path in ("docker/process-sandbox-entrypoint.sh",):
             with self.subTest(path=path):
                 with self.assertRaisesRegex(
                     ValueError, "unclassified pull-request path"
