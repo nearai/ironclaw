@@ -684,12 +684,6 @@ fn user_model_preference_command_view(
     catalog: &UserModelCatalog,
     preference: &UserModelPreference,
 ) -> CommandResultView {
-    let preferred = preference.model.as_deref().unwrap_or("workspace default");
-    let effective = preference
-        .model
-        .as_deref()
-        .or(catalog.workspace_default.as_deref())
-        .unwrap_or("not configured");
     let mut lines = Vec::new();
     if catalog.selection_enabled {
         lines.push(format!("Available models: {}", catalog.models.join(", ")));
@@ -697,6 +691,27 @@ fn user_model_preference_command_view(
     } else {
         lines.push("User model selection is not configured for this workspace.".to_string());
     }
+    let (preferred, effective) = match preference.model.as_deref() {
+        Some(model)
+            if catalog.selection_enabled
+                && catalog.models.iter().any(|available| available == model) =>
+        {
+            (model.to_string(), model.to_string())
+        }
+        Some(model) => {
+            lines.push(
+                "Your saved preference is no longer available. Use `/model default`.".to_string(),
+            );
+            (format!("{model} (unavailable)"), "unavailable".to_string())
+        }
+        None => (
+            "workspace default".to_string(),
+            catalog
+                .workspace_default
+                .clone()
+                .unwrap_or_else(|| "not configured".to_string()),
+        ),
+    };
     CommandResultView {
         title: title.to_string(),
         fields: vec![

@@ -56,15 +56,22 @@ impl<F: RootFilesystem + ?Sized> UserModelPreferenceStore
             .await
         {
             Ok(Some(bytes)) => bytes,
+            // The bounded-read contract uses `None` for an existing oversized file.
             Ok(None) => return Err(UserModelPreferenceStoreError::InvalidData),
             Err(FilesystemError::NotFound { .. }) => return Ok(None),
-            Err(error) => {
-                tracing::error!(error = %error, "user model preference read failed");
+            Err(_) => {
+                tracing::error!(
+                    error_category = "filesystem_unavailable",
+                    "user model preference read failed"
+                );
                 return Err(UserModelPreferenceStoreError::Unavailable);
             }
         };
-        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-            tracing::error!(error = %error, "user model preference record is invalid");
+        serde_json::from_slice(&bytes).map(Some).map_err(|_| {
+            tracing::error!(
+                error_category = "invalid_record",
+                "user model preference record is invalid"
+            );
             UserModelPreferenceStoreError::InvalidData
         })
     }
@@ -84,8 +91,11 @@ impl<F: RootFilesystem + ?Sized> UserModelPreferenceStore
         self.filesystem
             .write_bytes(&scope, &path, bytes)
             .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "user model preference write failed");
+            .map_err(|_| {
+                tracing::error!(
+                    error_category = "filesystem_unavailable",
+                    "user model preference write failed"
+                );
                 UserModelPreferenceStoreError::Unavailable
             })
     }
@@ -208,6 +218,38 @@ mod tests {
                 .await
                 .expect("read other user after reconstruction"),
             None,
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_preference_fails_closed_as_invalid_data() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let filesystem = Arc::new(ScopedFilesystem::new(backend, |scope| {
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/llm-preferences")?,
+                VirtualPath::new(format!(
+                    "/tenants/{}/users/{}/llm-preferences",
+                    scope.tenant_id.as_str(),
+                    scope.user_id.as_str()
+                ))?,
+                MountPermissions::read_write(),
+            )])
+        }));
+        let test_caller = caller("tenant-a", "alice");
+        filesystem
+            .write_bytes(
+                &FilesystemUserModelPreferenceStore::<InMemoryBackend>::scope(&test_caller),
+                &FilesystemUserModelPreferenceStore::<InMemoryBackend>::path()
+                    .expect("preference path"),
+                vec![b'x'; PREFERENCE_MAX_BYTES + 1],
+            )
+            .await
+            .expect("write oversized record directly");
+        let store = FilesystemUserModelPreferenceStore::new(filesystem);
+
+        assert_eq!(
+            store.read(&test_caller).await,
+            Err(UserModelPreferenceStoreError::InvalidData),
         );
     }
 }
