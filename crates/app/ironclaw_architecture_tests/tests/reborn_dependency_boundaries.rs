@@ -737,7 +737,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // one defaulted port capability declares when ordered batch middleware
         // must retain batch entry. Scheduling and hook behavior remain in their
         // owning loop crates. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_316),
+        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // one bounded
+        // truncation-watermark DTO carried across the existing context and
+        // prompt contracts. Window selection and task-pinning behavior remain
+        // in ironclaw_threads and ironclaw_loop_host.
+        ("ironclaw_loop_contracts", 13_326),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

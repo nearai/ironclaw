@@ -5,6 +5,7 @@ use std::{
 
 use crate::{CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter};
 use async_trait::async_trait;
+use futures::future::join_all;
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy,
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
@@ -671,6 +672,25 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        // The executor clears this flag only for a planner-approved parallel
+        // batch. Preserve invocation order in the returned vector while
+        // allowing the read-only bridge futures to overlap.
+        if !request.stop_on_first_suspension {
+            let resolutions = join_all(
+                request
+                    .invocations
+                    .into_iter()
+                    .map(|invocation| self.invoke_capability(invocation)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+            return Ok(ResolutionBatch {
+                resolutions,
+                stopped_on_suspension: false,
+            });
+        }
+
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
@@ -2009,9 +2029,95 @@ mod tests {
         }
     }
 
+    struct BarrierWriter {
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for BarrierWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.barrier.wait().await;
+            TestWriter.write_capability_result(write).await
+        }
+    }
+
     #[derive(Default)]
     struct CapturingWriter {
         outputs: Mutex<Vec<Value>>,
+    }
+
+    #[tokio::test]
+    async fn parallel_discovery_batch_overlaps_bridge_invocations() {
+        let definitions = (0..6)
+            .map(|index| {
+                provider_definition(
+                    &format!("fixture.lookup_{index}"),
+                    &format!("fixture__lookup_{index}"),
+                    "Lookup records",
+                )
+            })
+            .collect();
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:parallel-discovery")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port_with_writer(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(BarrierWriter {
+                barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            }),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface initializes the disclosure catalog");
+
+        let search = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_SEARCH_NAME,
+                json!({"query": "lookup", "limit": 2}),
+            )))
+            .await
+            .expect("search registers");
+        let describe = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_DESCRIBE_NAME,
+                json!({"name": "fixture__lookup_5"}),
+            )))
+            .await
+            .expect("describe registers");
+        let requests = [search, describe]
+            .into_iter()
+            .map(|candidate| LoopRequest {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .collect();
+
+        let batch = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            port.invoke_capability_batch(LoopRequestBatch {
+                invocations: requests,
+                stop_on_first_suspension: false,
+            }),
+        )
+        .await
+        .expect("parallel discovery calls must reach the writer concurrently")
+        .expect("parallel discovery batch succeeds");
+
+        assert_eq!(batch.resolutions.len(), 2);
+        assert!(!batch.stopped_on_suspension);
     }
 
     #[async_trait]
@@ -2101,6 +2207,29 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .expect("visible surface");
+        let hint_of = |name: &str| {
+            surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.safe_name == name)
+                .unwrap_or_else(|| panic!("{name} descriptor on the deferred surface"))
+                .concurrency_hint
+        };
+        assert_eq!(
+            hint_of(TOOL_SEARCH_NAME),
+            ConcurrencyHint::SafeForParallel,
+            "tool_search is a side-effect-free catalog lookup"
+        );
+        assert_eq!(
+            hint_of(TOOL_DESCRIBE_NAME),
+            ConcurrencyHint::SafeForParallel,
+            "tool_describe is a side-effect-free schema lookup"
+        );
+        assert_eq!(
+            hint_of(TOOL_CALL_NAME),
+            ConcurrencyHint::Exclusive,
+            "an unresolved tool_call can target an arbitrary capability"
+        );
         assert!(
             !surface
                 .descriptors

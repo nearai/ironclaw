@@ -443,10 +443,35 @@ PR_STATIC_CONTROL_PATHS = {
     # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
     # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
     # and owns the image build, not the entrypoint's behaviour. `docker/` stays
-    # per-file, never a prefix: `docker/reborn/config.*.toml` and
-    # `docker/process-sandbox-entrypoint.sh` have no owning lane and must keep
-    # refusing.)
+    # per-file, never a prefix: it mixes classes, and the shipped runtime
+    # configs beside this script belong to a Rust lane instead — see
+    # `DOCKER_RUNTIME_CONFIG_OWNERS` below. `docker/process-sandbox-entrypoint.sh`
+    # has no owning lane and must keep refusing.)
     "docker/reborn/entrypoint.sh",
+}
+# Shipped container configs a Reborn Rust test parses and asserts on, mapped to
+# the test source that owns them. They are NOT static control: the membership
+# rule for that set is "no Reborn test lane reads the file", and
+# `ironclaw_cli`'s `smoke` test reads both of these — it parses each through
+# `ironclaw_config::RebornConfigFile::parse_text` and pins the resulting
+# profile, storage backend and policy (`docker_reborn_production_config_uses_postgres_storage`
+# and its local-config sibling). Calling them prose would silently under-select
+# the one lane that can catch a broken production config.
+#
+# Both were unclassified until 2026-08-11, when #7471's Postgres pool change
+# edited `config.production.toml` and the fail-closed arm failed
+# `Detect Reborn test scope`, cascading into the whole `Tests (Reborn)`
+# roll-up. Classified as the pair they are, rather than one per red run —
+# the same lesson the repo-root metadata block above records.
+#
+# The two `config.hosted-single-tenant*.toml` siblings are deliberately absent:
+# their reader is `tests/dockerfile_runtime_home.rs`, which is not in
+# `_root_test_partitions()` (that inventory covers `tests/reborn_*.rs` only), so
+# no lane here can be selected for them. They keep refusing until that is
+# decided.
+DOCKER_RUNTIME_CONFIG_OWNERS = {
+    "docker/reborn/config.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.production.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
@@ -778,6 +803,24 @@ def build_plan(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
+            continue
+        if path in DOCKER_RUNTIME_CONFIG_OWNERS:
+            owner = DOCKER_RUNTIME_CONFIG_OWNERS[path]
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"container config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"shipped container config parsed by {owner}: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated workflow owns: {path}")

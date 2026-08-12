@@ -68,6 +68,14 @@ use tokio::sync::Mutex;
 
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Env vars the production `*_from_config_and_env` storage resolver reads.
+/// Named here rather than imported: composition keeps them private, and the
+/// config file only ever carries the variable *names*.
+const POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
+const SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
+const RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
+    "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
+
 async fn build_runtime_for_test(
     input: RebornHostBindings,
 ) -> Result<RebornRuntime, RebornBuildError> {
@@ -1502,6 +1510,155 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
         .expect("trigger table exists after production build");
     let count: i64 = row.get(0);
     assert_eq!(count, 0);
+}
+
+/// The process journal runs on its own PostgreSQL pool so a heartbeat never
+/// queues behind data-plane traffic — but a second pool is only safe if it
+/// reaches the *same rows*. Pointed at a different database (or opened with a
+/// different connection config), every heartbeat would land where no lease
+/// reader looks and healthy runs would expire underneath themselves.
+///
+/// `postgres_from_config_and_env` is the only public constructor that resolves
+/// a connection *config*, and therefore the only one that opens the second
+/// pool at all: the caller-supplied-handle constructors leave the journal on
+/// the shared data-plane handle. So this drives the config-and-env entry point,
+/// submits a turn through the public turn coordinator (the journal writes its
+/// process row over its own pool), and reads that row back over a connection
+/// neither build pool owns.
+///
+/// The in-memory `process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_root`
+/// unit test pins mount-set parity cheaply; only this one can prove the rows.
+#[tokio::test]
+async fn production_postgres_process_journal_pool_writes_rows_the_data_plane_reads() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _url_env = EnvVarGuard::set(POSTGRES_URL_ENV, &database_url);
+    let _key_env = EnvVarGuard::set(SECRET_MASTER_KEY_ENV, "01234567890123456789012345678901");
+    let _governor_env = EnvVarGuard::set(RESOURCE_GOVERNOR_SINGLETON_ENV, "true");
+    let config_file = ironclaw_config::RebornConfigFile {
+        policy: Some(ironclaw_config::PolicySection {
+            deployment_mode: Some("hosted_multi_tenant".to_string()),
+            default_profile: Some("secure_default".to_string()),
+            ..Default::default()
+        }),
+        storage: Some(ironclaw_config::StorageSection {
+            backend: Some(ironclaw_config::StorageBackend::Postgres),
+            url_env: Some(POSTGRES_URL_ENV.to_string()),
+            secret_master_key_env: Some(SECRET_MASTER_KEY_ENV.to_string()),
+            pool_max_size: Some(4),
+        }),
+        ..Default::default()
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_runtime_for_test(
+        RebornHostBindings::postgres_from_config_and_env(
+            RebornCompositionProfile::Production,
+            "journal-pool-owner",
+            Some(&config_file),
+        )
+        .expect("connection-config postgres bindings")
+        .with_production_trust_policy(production_trust_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .expect("production postgres runtime should build from a connection config");
+
+    let owner = UserId::new("journal-pool-owner").expect("owner");
+    let scope = ironclaw_turns::TurnScope::new_with_owner(
+        ironclaw_host_api::ids::TenantId::new("journal-pool-tenant").expect("tenant"),
+        None,
+        None,
+        ironclaw_host_api::ids::ThreadId::new("journal-pool-thread").expect("thread"),
+        Some(owner.clone()),
+    );
+    ironclaw_turns::TurnCoordinator::submit_turn(
+        services.turn_coordinator_for_test().as_ref(),
+        ironclaw_turns::SubmitTurnRequest {
+            requested_model: None,
+            scope,
+            actor: ironclaw_turns::TurnActor::new(owner),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("journal-pool-message")
+                .expect("message ref"),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
+                .expect("source binding"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
+                .expect("reply binding"),
+            requested_run_profile: Some(
+                ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
+            ),
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("journal-pool-turn")
+                .expect("idempotency key"),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        },
+    )
+    .await
+    .expect("submit through the production turn coordinator");
+
+    handle.shutdown().await;
+
+    // Neither build pool owns this connection: if the journal pool had been
+    // opened against anything but the configured database, the row would be
+    // missing here.
+    let reader = ironclaw_filesystem::PostgresRootFilesystem::new(pool);
+    assert!(
+        process_journal_contains_scope(&reader, "journal-pool-tenant", "journal-pool-owner").await,
+        "the process row the journal wrote over its own pool must be readable over a \
+         different connection to the data plane's database"
+    );
+}
+
+/// Poll the row-native process journal for a process in `tenant_id`/`user_id`.
+///
+/// Bounded rather than a fixed sleep: the journal's group-commit flusher makes
+/// the write durable shortly after submit returns, so the test waits for that
+/// and fails at the deadline instead of racing it.
+async fn process_journal_contains_scope<F>(filesystem: &F, tenant_id: &str, user_id: &str) -> bool
+where
+    F: ironclaw_filesystem::RootFilesystem,
+{
+    let prefix = ironclaw_host_api::path::VirtualPath::new(
+        "/tenants/__system__/users/__system__/processes/materialized/process",
+    )
+    .expect("row-native process journal path");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let entries = match filesystem.list_dir(&prefix).await {
+            Ok(entries) => entries,
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => Vec::new(),
+            Err(error) => panic!("list row-native process journal: {error}"),
+        };
+        for entry in entries {
+            let path = ironclaw_host_api::path::VirtualPath::new(format!(
+                "{}/{}",
+                prefix.as_str(),
+                entry.name
+            ))
+            .expect("row-native process path");
+            let body = filesystem
+                .read_file(&path)
+                .await
+                .expect("read row-native process");
+            let process: Value =
+                serde_json::from_slice(&body).expect("deserialize row-native process");
+            if process.pointer("/scope/tenant_id").and_then(Value::as_str) == Some(tenant_id)
+                && process.pointer("/scope/user_id").and_then(Value::as_str) == Some(user_id)
+            {
+                return true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test]

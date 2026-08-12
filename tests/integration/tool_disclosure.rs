@@ -41,6 +41,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
+use ironclaw_loop_contracts::BatchPolicyKind;
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
@@ -241,6 +242,62 @@ async fn bridged_disclosure_never_advertises_globally_disabled_spawn_subagent() 
         .assert_reply_contains("done without spawning")
         .await
         .expect("the run continues after the recoverable unknown-tool results");
+}
+
+/// Search and describe are read-only catalog lookups, so one model response
+/// may safely probe them together. A recoverable bad describe must not prevent
+/// its valid siblings from completing.
+#[tokio::test]
+async fn discovery_batch_classifies_parallel_and_preserves_valid_siblings() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_calls([
+                (
+                    TOOL_SEARCH_NAME,
+                    serde_json::json!({"query": "get repository", "limit": 5}),
+                ),
+                (
+                    TOOL_DESCRIBE_NAME,
+                    serde_json::json!({"name": FLAT_GITHUB_TOOL_NAME}),
+                ),
+                (
+                    TOOL_DESCRIBE_NAME,
+                    serde_json::json!({"name": "missing__catalog_tool"}),
+                ),
+            ]),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("probe the github catalog")
+        .await
+        .expect("discovery batch completes despite one recoverable lookup failure");
+
+    harness
+        .assert_capability_batch_policy(3, BatchPolicyKind::Parallel)
+        .await
+        .expect("side-effect-free discovery bridges classify parallel");
+    harness
+        .assert_model_message_content_contains("tool_search returned catalog matches")
+        .await
+        .expect("valid search sibling reaches the next model request");
+    harness
+        .assert_model_message_content_contains("tool_describe returned schema")
+        .await
+        .expect("valid describe sibling reaches the next model request");
+    harness
+        .assert_model_message_content_contains("tool_describe target is unknown")
+        .await
+        .expect("recoverable invalid describe reaches the next model request");
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn continues after the recoverable bad describe");
 }
 
 /// Negative control: the SAME wide catalog under explicit
