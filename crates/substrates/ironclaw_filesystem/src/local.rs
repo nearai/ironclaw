@@ -646,37 +646,7 @@ async fn atomic_write_file(
         CasExpectation::Any => tokio::fs::rename(&temp, target)
             .await
             .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
-        CasExpectation::Absent => match tokio::fs::hard_link(&temp, target).await {
-            Ok(()) => tokio::fs::remove_file(&temp).await.map_err(|error| {
-                io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
-                    tracing::debug!(
-                        error = ?cleanup_error,
-                        "best-effort cleanup of write temp file failed after CAS conflict"
-                    );
-                }
-                Err(FilesystemError::VersionMismatch {
-                    path: virtual_path.clone(),
-                    expected: None,
-                    found: Some(RecordVersion::from_backend(0)),
-                })
-            }
-            Err(error) => {
-                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
-                    tracing::debug!(
-                        error = ?cleanup_error,
-                        "best-effort cleanup of write temp file failed after hard-link error"
-                    );
-                }
-                Err(io_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    error,
-                ))
-            }
-        },
+        CasExpectation::Absent => publish_absent_temp(virtual_path, &temp, target).await,
         CasExpectation::Version(_) => Err(FilesystemError::Unsupported {
             path: virtual_path.clone(),
             operation: FilesystemOperation::WriteFile,
@@ -685,6 +655,92 @@ async fn atomic_write_file(
 
     install_result?;
     sync_parent_dir(virtual_path, parent).await
+}
+
+#[cfg(not(windows))]
+async fn publish_absent_temp(
+    virtual_path: &VirtualPath,
+    temp: &Path,
+    target: &Path,
+) -> Result<(), FilesystemError> {
+    match tokio::fs::hard_link(temp, target).await {
+        Ok(()) => tokio::fs::remove_file(&temp)
+            .await
+            .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after CAS conflict"
+                );
+            }
+            Err(FilesystemError::VersionMismatch {
+                path: virtual_path.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(0)),
+            })
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after hard-link error"
+                );
+            }
+            Err(io_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error,
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn publish_absent_temp(
+    virtual_path: &VirtualPath,
+    temp: &Path,
+    target: &Path,
+) -> Result<(), FilesystemError> {
+    // Windows rename is an atomic create-only publication: unlike Unix rename,
+    // it refuses to replace an existing destination. Use that native behavior
+    // instead of `CreateHardLinkW`, which can return `PermissionDenied` on
+    // hosted Windows runners even when both paths are writable and share a
+    // volume. The existence read is only error classification after rename
+    // has already failed; it never decides whether publication may proceed.
+    match tokio::fs::rename(temp, target).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let target_exists = tokio::fs::try_exists(target)
+                .await
+                .map_err(|inspect_error| {
+                    io_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        inspect_error,
+                    )
+                })?;
+            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after rename error"
+                );
+            }
+            if target_exists {
+                Err(FilesystemError::VersionMismatch {
+                    path: virtual_path.clone(),
+                    expected: None,
+                    found: Some(RecordVersion::from_backend(0)),
+                })
+            } else {
+                Err(io_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error,
+                ))
+            }
+        }
+    }
 }
 
 fn unique_temp_path(
@@ -824,9 +880,21 @@ async fn sync_parent_dir_for_operation(
     parent: &Path,
     operation: FilesystemOperation,
 ) -> Result<(), FilesystemError> {
+    #[cfg(windows)]
+    {
+        // `tokio::fs::File::open` cannot open a Windows directory without
+        // `FILE_FLAG_BACKUP_SEMANTICS`. The file contents were already
+        // flushed before the atomic rename; Windows does not expose a
+        // portable parent-directory fsync equivalent through std/tokio.
+        let _ = (virtual_path, parent, operation);
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
     let dir = tokio::fs::File::open(parent)
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
+    #[cfg(not(windows))]
     dir.sync_all()
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))
