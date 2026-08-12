@@ -108,10 +108,10 @@ manifest-declared Slack deployment fields in Admin Configuration, and makes a
 personal Slack connection available through the Slack extension's user OAuth
 flow.
 
-Slack installation ids, team/app ids, the bot token, the signing secret,
-OAuth client credentials, and channel mappings are configured after startup
-from Admin Configuration. These deployment values are never shown in a user's
-extension setup flow.
+Slack installation ids, team/app ids, the bot token, the signing secret, and
+OAuth client credentials are configured after startup from Admin
+Configuration. These deployment values are never shown in a user's extension
+setup flow.
 
 > **"Admin Configuration" and the "Slack card" are the same place.** This guide
 > uses the operator-facing name; [Slack](/channels/slack) uses the UI path.
@@ -129,27 +129,25 @@ Save:
 | Team ID | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
 | App ID | Slack app id, visible as `api_app_id` in Events API payloads. |
 | Bot user ID | Slack member id for the app's bot user (for example, the `U…` id returned at installation). |
-| Allowed channels | Optional JSON array of Slack channel ids (for example `["C0123ABCD"]`) the bot may serve as shared channels. Shared channels not listed here fail closed. |
 | Bot token | Slack bot token. Stored in the Reborn secret store; never returned by the API. |
 | Signing secret | Slack signing secret. Stored in the Reborn secret store; never returned by the API. |
 | OAuth client ID | Client id for the Slack app's user OAuth flow. |
 | OAuth client secret | Client secret for the Slack app's user OAuth flow. Stored in the Reborn secret store. |
 
-After Slack deployment configuration is saved, list the shared Slack channel
-ids the bot should serve in the Allowed channels field
-(`slack_allowed_channels`). That is the whole shared-channel configuration:
-the bot answers each participant as themselves — there is no shared subject
-user or per-channel subject route to assign, and each shared-channel message
-runs as the Slack user who sent it. Users separately install Slack from
-Extensions and complete their own OAuth flow to pair; an unpaired participant
-in an allowed shared channel gets no reply at all (the bot never posts a
-one-person pairing prompt into a shared room — pairing happens through
-Extensions, and direct messages still offer the connect prompt), and that
-personal membership and credential state does not mutate the operator
-configuration.
+There is no shared-channel configuration at all. Inviting the bot into a
+Slack channel is what enables that channel: Slack only delivers a channel's
+events to the app because the bot is a member, so the bot's presence — an
+event arriving through the verified webhook — is itself the admission. To
+stop serving a channel, remove the bot from it.
 
-Shared Slack channels not listed in `slack_allowed_channels` fail closed
-instead of silently inheriting a personal/default user scope.
+In a shared channel the bot answers each participant as themselves — there
+is no shared subject user or per-channel subject route to assign, and each
+shared-channel message runs as the Slack user who sent it. Users separately
+install Slack from Extensions and complete their own OAuth flow to pair. A
+participant who mentions the bot before pairing gets a short pairing notice
+threaded on their own message (never a broadcast into the room) pointing
+them at the Slack connect flow in Extensions; their personal membership and
+credential state does not mutate the operator configuration.
 
 ### Migrating an existing config.toml
 
@@ -372,13 +370,16 @@ Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/produ
 
 Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in Admin Configuration match the Slack app that emitted the event.
 
-### Shared-channel turns are rejected
+### Shared channel gets no answer, or a pairing notice
 
-Add the channel id to the Allowed channels field (`slack_allowed_channels`) in
-Admin Configuration for Slack; shared channels not listed there fail closed.
-If the bot instead answers a specific user with a pairing prompt, that user has
-not connected Slack yet — they complete the Slack OAuth connect from
-Extensions, since every shared-channel participant runs as themselves.
+There is no channel allowlist to configure: any channel the bot has been
+invited to is served, because the channel's events reaching the verified
+webhook is itself the admission. If a mention produces nothing at all, the
+event is not arriving — see "Channel mention does not reach Reborn" above.
+If the bot instead answers a specific user with a pairing notice threaded on
+their message, that user has not connected Slack yet — they complete the
+Slack OAuth connect from Extensions, since every shared-channel participant
+runs as themselves.
 
 ### Slash command outside the bot DM is denied
 

@@ -925,14 +925,13 @@ impl SessionThreadService for InMemorySessionThreadService {
     ) -> Result<ContextWindow, SessionThreadError> {
         let state = self.state.lock().await;
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
-        let mut messages = context_messages_with_summary_replacements(thread);
-        if request.max_messages < messages.len() {
-            let start = messages.len() - request.max_messages;
-            messages = messages.split_off(start);
-        }
+        let messages = context_messages_with_summary_replacements(thread);
+        let (messages, recent_window_truncation) =
+            crate::contract::truncate_context_window(messages, request.max_messages);
         Ok(ContextWindow {
             thread_id: request.thread_id,
             messages,
+            recent_window_truncation,
         })
     }
 

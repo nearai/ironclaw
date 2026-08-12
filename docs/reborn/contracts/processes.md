@@ -67,8 +67,22 @@ worker and token match. Expiry policy preserves the prior turn guarantees:
 - expired `CancelRequested` work becomes terminal `Cancelled`;
 - checkpoint-free work is safely requeued only within the bounded crash
   reclaim budget;
-- checkpointed or reclaim-exhausted work becomes terminal `Failed` with
-  sanitized `lease_expired` or `crash_retry_exhausted` evidence.
+- work whose latest checkpoint replays no external side effect — kind
+  `BeforeModel` or `BeforeBlock` — is requeued under that same bounded budget,
+  but only once the lease has been expired for a full lease TTL. That grace
+  window is the zombie fence: a worker still running would have renewed its
+  lease inside it, so anything still expired afterwards is genuinely gone;
+- work whose latest checkpoint precedes a side effect (`BeforeSideEffect`), or
+  whose checkpoint kind is unknown, becomes terminal `Failed` with sanitized
+  `lease_expired`. There is no durable idempotency for a replayed capability
+  call, so this stays fail-closed;
+- reclaim-exhausted work becomes terminal `Failed` with sanitized
+  `lease_expired` or `crash_retry_exhausted` evidence.
+
+The checkpoint kind travels on the process snapshot beside `checkpoint_ref`,
+because a recovery sweep reads process rows without loading checkpoint rows. A
+snapshot written before the kind was recorded reads as unknown, and unknown
+fails closed.
 
 Retries must target the latest authoritative run for a turn. A replacement
 checkpoint is linked to the new process identity, and child retries retain the

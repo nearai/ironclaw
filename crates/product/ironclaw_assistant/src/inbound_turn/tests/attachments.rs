@@ -38,6 +38,8 @@ impl ProductBindingResolver for LandingBindingStub {
             thread_id: thread_id(),
             agent_id: Some(AgentId::new("agent:alpha").unwrap()),
             project_id: None,
+            source_binding_ref: SourceBindingRef::new("source:alpha").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:alpha").unwrap(),
         })
     }
 

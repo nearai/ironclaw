@@ -125,14 +125,23 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// observed value move with this record so the increase is explicit.
 /// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
 /// delivery refactor with #7214's sandbox profile and binding assembly.
-/// ✎ Re-measured 40_747 → 40_811 on 2026-08-08 after merging main into
-/// run-acts-as-invoker: the acting-user scope helper and shared-admission
-/// wiring add +64 production LOC on the merged tree. Manifest ceiling and
-/// observed value move with this record.
-/// ✎ Re-recorded 40_811 → 41_135 on 2026-08-08 for #7171 (skill-bundle staging plus the
-/// host-reachability root map), paired with the `[gate].loc_ceiling` raise in the same commit --
+/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
+/// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
 /// this ratchet fails when the two disagree.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_135;
+/// ✎ Union re-measured 41_509 → 41_582 on 2026-08-10 after merging main into
+/// implement-issue-6896-fix: #7131's run-failure settlement observer adds its
+/// production wiring and inline regression coverage to the current main tree.
+/// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
+/// manifest ceiling and observed value move with this record.
+/// ✎ Re-recorded 41_582 → 41_731 on 2026-08-11 for #7471: the dedicated
+/// process-journal PostgreSQL pool adds its service-graph assembly (second
+/// pool open + journal filesystem mount wiring). Measured on this branch's
+/// merged tree with `bash scripts/ci/check-composition-budget.sh`; the
+/// manifest ceiling (41_810, seeded from the merge-queue commit where
+/// concurrent mainline growth adds ~79 LOC on top of this tree) stays within
+/// the nudge window of this record.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_731;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

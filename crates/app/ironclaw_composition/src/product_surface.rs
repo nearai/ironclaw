@@ -251,6 +251,15 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
+    if let Some(web_push) = runtime.web_push.as_ref() {
+        api = api.with_web_push_product_service(Arc::new(
+            ironclaw_assistant::RebornWebPushProductService::new(
+                Arc::clone(&web_push.subscriptions),
+                web_push.vapid_public_key.clone(),
+                web_push.allowed_push_hosts.clone(),
+            ),
+        ));
+    }
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_service(channel_connection);
     }

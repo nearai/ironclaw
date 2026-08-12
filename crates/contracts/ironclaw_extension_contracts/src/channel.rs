@@ -104,6 +104,12 @@ pub struct ChannelDescriptor {
     pub inbound: bool,
     #[serde(default)]
     pub outbound: bool,
+    /// This channel can fulfil blocked-automation notifications (approval/auth
+    /// gates, failure notices). Independent of `inbound`/`outbound`: a channel
+    /// may deliver notifications without being a two-way conversation surface
+    /// (e.g. a browser-push channel, notification-only for final replies).
+    #[serde(default)]
+    pub notifications: bool,
     /// Required: how external conversations bind (checklist MAN-10).
     pub conversation_model: ConversationModel,
     /// Exact product command tokens exposed by this channel, without a leading
@@ -183,27 +189,7 @@ impl ChannelDescriptor {
                         host: egress.host.clone(),
                     });
                 }
-                let well_formed = match injection {
-                    ironclaw_host_api::http::RuntimeCredentialTarget::Header { name, .. } => {
-                        ironclaw_host_api::http::valid_http_field_name(name)
-                    }
-                    ironclaw_host_api::http::RuntimeCredentialTarget::QueryParam { name } => {
-                        !name.trim().is_empty() && !name.contains(char::is_whitespace)
-                    }
-                    ironclaw_host_api::http::RuntimeCredentialTarget::PathPlaceholder {
-                        placeholder,
-                    } => {
-                        !placeholder.is_empty()
-                            && placeholder
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    }
-                    ironclaw_host_api::http::RuntimeCredentialTarget::BodyJsonPointer {
-                        pointer,
-                        ..
-                    } => pointer.starts_with('/'),
-                };
-                if !well_formed {
+                if injection.validate_declaration().is_err() {
                     return Err(ChannelDescriptorError::InvalidEgressInjection {
                         host: egress.host.clone(),
                     });
@@ -500,6 +486,13 @@ pub struct ChannelPresentation {
     pub supports_markdown: bool,
     #[serde(default)]
     pub supports_threads: bool,
+    /// Whether the channel replies to a shared-conversation message by
+    /// creating/continuing a vendor-side thread anchored on it, as opposed
+    /// to an inline anchored reply in the flat conversation. Declares the
+    /// reply-placement contract; the per-vendor anchor mechanics (a thread
+    /// root id vs. a reply-to-message id) live in each channel package.
+    #[serde(default)]
+    pub can_reply_in_threads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_chars: Option<u32>,
     /// Optional per-command display prefix a channel adapter renders before
@@ -594,6 +587,7 @@ credential_handle = "vendor_bot_token"
 [presentation]
 supports_markdown = true
 supports_threads = true
+can_reply_in_threads = true
 max_message_chars = 40000
 "#
     }
@@ -723,6 +717,10 @@ max_message_chars = 40000
         assert_eq!(ingress.route_suffix.as_str(), "events");
         assert_eq!(ingress.body_limit_bytes, 1_048_576);
         assert!(channel.presentation.supports_threads);
+        // Reply-placement contract (#7377): declared in the documented shape,
+        // absent elsewhere in this module's fixtures — the field defaults to
+        // false (anchored inline replies) unless a channel opts in.
+        assert!(channel.presentation.can_reply_in_threads);
     }
 
     #[test]
@@ -816,6 +814,37 @@ max_message_chars = 40000
         );
         let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
         channel.validate().unwrap();
+    }
+
+    #[test]
+    fn basic_egress_injection_parses_and_rejects_invalid_usernames() {
+        let source = |username: &str| {
+            documented_channel_toml().replace(
+                "credential_handle = \"vendor_bot_token\"",
+                &format!(
+                    "credential_handle = \"vendor_bot_token\"\n\
+                     injection = {{ type = \"basic\", username = \"{username}\" }}"
+                ),
+            )
+        };
+
+        let channel: ChannelDescriptor = toml::from_str(&source("api-user")).unwrap();
+        channel.validate().unwrap();
+        assert!(matches!(
+            channel.egress[0].injection,
+            Some(ironclaw_host_api::http::RuntimeCredentialTarget::Basic { .. })
+        ));
+
+        for invalid in [" ", "user:name", r"user\u000Aname"] {
+            let channel: ChannelDescriptor = toml::from_str(&source(invalid)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidEgressInjection {
+                    host: "vendor.example".to_string(),
+                },
+                "expected Basic username rejection for {invalid:?}"
+            );
+        }
     }
 
     #[test]

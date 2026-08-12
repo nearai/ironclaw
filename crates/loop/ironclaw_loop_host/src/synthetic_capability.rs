@@ -923,7 +923,9 @@ mod tests {
         assert_eq!(result_writes.load(Ordering::SeqCst), 0);
     }
 
-    async fn owner_differs_from_actor_context() -> LoopRunContext {
+    // Owner == actor since the ephemeral-per-ping remodel; the replay-scope
+    // isolation these tests pin no longer rests on any owner-vs-actor split.
+    async fn run_context_for_replay_isolation() -> LoopRunContext {
         let profile = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
@@ -935,7 +937,7 @@ mod tests {
             ThreadId::new("thread-deploy-boundary").expect("thread id"),
         );
         scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::explicit(Some(
-            ironclaw_host_api::ids::UserId::new("user-legacy-owner").expect("owner id"),
+            ironclaw_host_api::ids::UserId::new("user-participant").expect("owner id"),
         ));
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile).with_actor(
             ironclaw_host_api::turn::TurnActor::new(
@@ -998,27 +1000,29 @@ mod tests {
         }
     }
 
-    /// The accepted deploy-boundary ruling, pinned on the synthetic path (the
-    /// runtime-port sibling lives in `capability_port.rs`): a run parked with
-    /// owner ≠ actor BEFORE the run-acts-as-invoker deploy saved its replay
-    /// payload under the OWNER-derived scope; the post-deploy resume loads
-    /// under the acting user, must MISS, and must fail closed as a terminal
-    /// `Unavailable` — never dispatch the handler with re-resolved input.
+    /// Replay-payload scope isolation, pinned on the synthetic path (the
+    /// runtime-port sibling lives in `capability_port.rs`): a payload saved
+    /// under one scope user is INVISIBLE to a resume that loads under a
+    /// different scope user — the resume must MISS and fail closed as a
+    /// terminal `Unavailable`, never dispatching the handler with re-resolved
+    /// input. (Pre-ephemeral this modeled an owner ≠ actor deploy boundary;
+    /// owner == actor now, so the miss is a generic stale/rotated-scope miss.)
     #[tokio::test]
-    async fn approval_resume_misses_owner_scoped_replay_payload_and_fails_closed() {
+    async fn approval_resume_misses_mismatched_scope_replay_payload_and_fails_closed() {
         let handler_invocations = Arc::new(AtomicUsize::new(0));
         let replay_fs = replay_payload_filesystem();
-        let run_context = owner_differs_from_actor_context().await;
+        let run_context = run_context_for_replay_isolation().await;
 
-        // Pre-deploy shape: payload saved under the OWNER-first scope.
+        // Seed the payload under a DIFFERENT (stale/rotated) scope user, so the
+        // run-scoped resume below cannot see it.
         let invocation_id = ironclaw_host_api::ids::InvocationId::new();
-        let mut owner_scope = run_context.scope.to_resource_scope();
-        owner_scope.user_id =
-            ironclaw_host_api::ids::UserId::new("user-legacy-owner").expect("owner id");
+        let mut foreign_scope = run_context.scope.to_resource_scope();
+        foreign_scope.user_id =
+            ironclaw_host_api::ids::UserId::new("user-foreign-scope").expect("foreign user id");
         use ironclaw_capabilities::ReplayPayloadStorePort as _;
         ironclaw_capabilities::ReplayPayloadStore::new(Arc::clone(&replay_fs))
             .save(
-                owner_scope,
+                foreign_scope,
                 invocation_id,
                 ironclaw_capabilities::ReplayPayload {
                     input: serde_json::json!({"message": "hello"}),
@@ -1030,7 +1034,7 @@ mod tests {
                 },
             )
             .await
-            .expect("seed the owner-scoped payload");
+            .expect("seed the mismatched-scope payload");
 
         let port =
             synthetic_port_for_resume(run_context, replay_fs, Arc::clone(&handler_invocations))
@@ -1054,7 +1058,7 @@ mod tests {
                 auth_resume: None,
             })
             .await
-            .expect_err("an owner-scoped payload must be invisible to the acting-user resume");
+            .expect_err("a mismatched-scope payload must be invisible to the run-scoped resume");
 
         assert_eq!(
             error.kind,
@@ -1070,23 +1074,23 @@ mod tests {
     }
 
     /// Positive control for the test above: the SAME dance with the payload
-    /// saved under the acting-user scope (the post-deploy shape on both
+    /// saved under the run's OWN resource scope (the matching shape on both
     /// sides) dispatches the handler exactly once — proving the miss above is
     /// the scope mismatch, not an unrelated failure.
     #[tokio::test]
-    async fn approval_resume_loads_acting_scope_replay_payload_and_dispatches() {
+    async fn approval_resume_loads_matching_scope_replay_payload_and_dispatches() {
         let handler_invocations = Arc::new(AtomicUsize::new(0));
         let replay_fs = replay_payload_filesystem();
-        let run_context = owner_differs_from_actor_context().await;
+        let run_context = run_context_for_replay_isolation().await;
 
         let invocation_id = ironclaw_host_api::ids::InvocationId::new();
-        let acting_scope = run_context.acting_resource_scope(
+        let run_scope = run_context.acting_resource_scope(
             &ironclaw_host_api::ids::UserId::new("user-fallback").expect("user id"),
         );
         use ironclaw_capabilities::ReplayPayloadStorePort as _;
         ironclaw_capabilities::ReplayPayloadStore::new(Arc::clone(&replay_fs))
             .save(
-                acting_scope,
+                run_scope,
                 invocation_id,
                 ironclaw_capabilities::ReplayPayload {
                     input: serde_json::json!({"message": "hello"}),
@@ -1098,7 +1102,7 @@ mod tests {
                 },
             )
             .await
-            .expect("seed the acting-scoped payload");
+            .expect("seed the matching-scope payload");
 
         let port =
             synthetic_port_for_resume(run_context, replay_fs, Arc::clone(&handler_invocations))
@@ -1121,7 +1125,7 @@ mod tests {
             auth_resume: None,
         })
         .await
-        .expect("an acting-scoped payload resumes the capability");
+        .expect("a matching-scope payload resumes the capability");
 
         assert_eq!(
             handler_invocations.load(Ordering::SeqCst),

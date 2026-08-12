@@ -64,7 +64,9 @@ Tier-selection rule: `.claude/rules/testing.md`.
 
 Totals: **51** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**868** test functions).
+**102** Python scenario files (**869** test functions) registered in the active
+Reborn coverage map below. Section 6 separately inventories retained and legacy
+Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
@@ -125,13 +127,13 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
-| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's — through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
+| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
 | The user can… | Evidence |
 |---|---|
-| Share one deployment with someone else and each keep their own threads | `scenario_two_actors_own_threads.rs` |
+| Mention the bot in a shared channel and have the run act as the pinger — a second, distinct actor's run acts as itself, never the first binder (owner == actor) — while a Direct-route probe of the shared conversation is refused. Ephemeral-per-ping thread minting is pinned at the conversations tier and the channel e2e. | `scenario_shared_route_refuses_direct_reclassification.rs` |
 | Not read another user's memories (and still read their own) | `scenario_memory_isolation_across_actors.rs` |
 | Not have another user's "always allow" apply to them | `scenario_auto_approve_isolation_across_actors.rs` |
 | Not see another user's run/turn state | `scenario_turn_state_isolation_across_actors.rs` |
@@ -187,10 +189,11 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
-| With a large tool catalog, bridged mode and the production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools | `tool_disclosure.rs` |
+| With a large tool catalog, progressive-disclosure modes and the `namespaces` production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools; a complete search signature invokes directly, while incomplete or explicitly inspected results fall back through `tool_describe` | `tool_disclosure.rs` |
 | Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
 | Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
+| A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
 | Creating a project through chat persists it | `project_create.rs` |
@@ -238,6 +241,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Scheduled-origin runs carry their origin into persisted state | `triggered_submit.rs` |
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
+| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-push` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_push_enrollment_and_notification_channel_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
 One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
@@ -254,6 +258,8 @@ channel-delivery journeys (two-lane model):
 | Have a conditional fire that calls no delivery tool produce zero outbound attempts | `conditional_fire_with_no_delivery_call_produces_zero_attempts` |
 | Get blocked-fire notices fanned out to every notification channel, first approve wins | `blocked_fire_fans_out_and_first_approve_wins` |
 | Keep a blocked fire app-only when the notification-channel set is empty | `empty_notification_set_keeps_blocked_fire_in_app_only` |
+| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_push_notice_to_enrolled_browser` |
+| Have a dead browser subscription (push service answers `410 Gone`) pruned after one notice attempt | `gone_push_subscription_is_pruned_after_notice_attempt` |
 
 ---
 
@@ -407,6 +413,7 @@ entries.
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
+| Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |
 | Use plan mode (`/plan`, checklist, approve, status) | `test_plan_mode.py` (5) |
 | As an admin: create users, hand out one-time tokens, page the user list, set roles, suspend/activate, manage write-only secrets, delete users | `test_admin_api.py` (18) |
 | Bootstrap as the single-tenant owner with stable identity | `test_ownership_model.py` (8), `test_multi_tenant_greeting.py` |
@@ -429,7 +436,7 @@ entries.
 | Kill the process (`kill -9`) and still find their history | `test_reborn_blackbox_smoke.py` (5) |
 | Restart gracefully and keep thread history and "always approve" | `test_reborn_blackbox_smoke.py`, `test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_always_approve_survives_reborn_restart` |
 | Not be XSS'd by assistant or user content | `test_reborn_webui_v2_legacy_rendering.py` (3), `test_csp.py` (4) |
-| Upload attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (7) |
+| Upload and reselect attachments within count/size/type limits, with extraction and placeholders | `test_reborn_webui_v2_legacy_attachments.py` (8) |
 | Have the model retried on HTTP errors and broken SSE streams, and cancel a slow inference | `test_reborn_webui_v2_streaming_run_control_api.py` |
 
 ### 6.10 Provider contracts & fixtures (Emulate-backed)

@@ -38,6 +38,11 @@ pub struct ChannelInboundSurfaceRequest {
     pub received_at: chrono::DateTime<chrono::Utc>,
     pub message: NormalizedInboundMessage,
     pub classification: Option<ChannelInboundClassification>,
+    /// Recent vendor-side conversation history fetched host-side at ingress
+    /// (through the channel's restricted egress) for shared-channel triggers.
+    /// UNTRUSTED third-party text, advisory only: `None` whenever the channel
+    /// has no such capability or the fetch degraded.
+    pub channel_context: Option<String>,
 }
 
 /// Durable channel admission evidence returned by product workflow.

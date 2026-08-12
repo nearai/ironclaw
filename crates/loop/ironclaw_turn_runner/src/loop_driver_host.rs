@@ -131,8 +131,9 @@ use ironclaw_loop_contracts::{
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus,
+    runner::ClaimedTurnRun,
 };
 use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use tokio::task::JoinHandle;
@@ -1017,6 +1018,10 @@ where
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
     model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
     cancellation_factory: Arc<dyn RunCancellationFactory>,
+    /// The journal-backed ownership authority. Held so every host this factory
+    /// builds can fence its transcript writes on the claimed run's lease still
+    /// being live (`ThreadBackedLoopTranscriptPort::with_run_lease_fence`).
+    agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
@@ -1116,15 +1121,16 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
+        agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
         safety_context: InstructionSafetyContext,
     ) -> Self {
-        let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
-            AgentTurnRunCancellationFactory::new(Arc::clone(&agent_turn_runtime)),
-        );
+        let cancellation_factory: Arc<dyn RunCancellationFactory> =
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                Arc::clone(&agent_turn_runtime) as Arc<dyn AgentTurnRuntimePort>,
+            ));
         Self {
             thread_service,
             thread_scope,
@@ -1135,6 +1141,7 @@ where
             model_accountant: Arc::new(NoOpBudgetAccountant),
             model_policy_guard: Arc::new(NoOpPolicyGuard),
             cancellation_factory,
+            agent_turn_runtime,
             config,
             skill_context_source: None,
             attachment_read_port: None,
@@ -1628,6 +1635,17 @@ where
         if let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
+        // Channel-origin runs carry host-fetched conversation history on the
+        // persisted product context; the port renders it as one framed
+        // UNTRUSTED system-context block beside identity/skill context.
+        if let Some(channel_context) = run_context
+            .product_context
+            .as_ref()
+            .and_then(|product| product.channel_context.as_ref())
+        {
+            context_adapter =
+                context_adapter.with_channel_conversation_context(channel_context.clone());
+        }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This
@@ -1961,6 +1979,13 @@ where
             effective_scope.clone(),
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
+        )
+        // The lease this run was claimed under. A transcript append carries no
+        // lease of its own, so without this a worker whose lease recovery
+        // already reclaimed could still append beside the replacement's reply.
+        .with_run_lease_fence(
+            Arc::clone(&self.agent_turn_runtime),
+            request.claimed_run.lease_token,
         );
         if let Some(port) = self.reply_attachment_intent_port.as_ref() {
             transcript_adapter =
@@ -2617,9 +2642,11 @@ fn validate_thread_scope(
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is not part of the
     // on-disk thread path, so a wrong owner silently reads an empty subtree.
-    // Actor-fallback turns still require owner=actor. Explicit-owner turns
-    // intentionally allow actor/subject divergence for shared Slack/team
-    // routes, but the explicit subject must match the resolved thread owner.
+    // Explicit-owner turns (host/trigger creators, subagent parent→child
+    // propagation) must match the resolved thread owner; actor-fallback turns
+    // (multi-user WebChat) require owner==actor. Since the ephemeral-per-ping
+    // remodel owner IS the actor, so the actor-fallback check passes trivially
+    // and stays as a real scope-mismatch safety guard.
     if run_context.scope.has_explicit_thread_owner() {
         if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
             return Err(RebornLoopDriverHostError::ScopeMismatch {
@@ -2878,6 +2905,10 @@ mod thread_scope_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/compaction_tests.rs"]
 mod compaction_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/run_lease_fence_tests.rs"]
+mod run_lease_fence_tests;
 
 #[cfg(test)]
 mod tests {
