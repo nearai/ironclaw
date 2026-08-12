@@ -239,6 +239,18 @@ where
         self
     }
 
+    /// The configured lease TTL in the journal's millisecond representation.
+    ///
+    /// Claim, heartbeat, and expiry recovery all carry the same TTL into the
+    /// journal command, so they share one conversion and one rejection.
+    fn lease_duration_millis(&self) -> Result<u64, ProcessJournalStoreError> {
+        u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
+            ProcessJournalStoreError::InvalidRequest(
+                "process lease duration exceeds journal representation".to_string(),
+            )
+        })
+    }
+
     async fn submit_process_inner(
         &self,
         request: SubmitProcessRequest,
@@ -718,12 +730,7 @@ where
         &self,
         request: ClaimProcessesRequest,
     ) -> Result<Vec<ClaimedProcess>, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let claimed = match self
             .execute(StoredProcessCommand::Claim {
                 request,
@@ -744,12 +751,7 @@ where
         &self,
         request: ProcessLeaseRequest,
     ) -> Result<ProcessJournalCursor, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let snapshot = match self
             .execute(StoredProcessCommand::Heartbeat {
                 request,
@@ -768,8 +770,12 @@ where
         &self,
         request: RecoverExpiredProcessLeasesRequest,
     ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
+        let lease_duration_millis = self.lease_duration_millis()?;
         let response = match self
-            .execute(StoredProcessCommand::RecoverExpired(request))
+            .execute(StoredProcessCommand::RecoverExpired {
+                request,
+                lease_duration_millis,
+            })
             .await?
         {
             StoredCommandOutcome::Recovered(response) => response,

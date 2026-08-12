@@ -38,8 +38,10 @@
 //! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`): runs on
 //!   `RebornIntegrationGroup::multiuser_approvals()`, whose C-MULTIUSER
 //!   `scope_capability_by_run_owner` seam scopes each actor's gated write to
-//!   its own run owner. Plain (non-gated) distinct-actor isolation is covered
-//!   by `reborn_group_multiuser::two_actors_own_threads`.
+//!   its own run owner. Plain (non-gated) distinct-actor coverage lives in
+//!   `reborn_group_multiuser`: `shared_route_refuses_direct_reclassification`
+//!   (Shared-route run-as-pinger + Direct-route refusal) plus the per-actor
+//!   isolation scenarios.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]

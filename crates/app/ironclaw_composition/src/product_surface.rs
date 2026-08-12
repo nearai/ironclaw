@@ -251,6 +251,15 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
+    if let Some(web_push) = runtime.web_push.as_ref() {
+        api = api.with_web_push_product_service(Arc::new(
+            ironclaw_assistant::RebornWebPushProductService::new(
+                Arc::clone(&web_push.subscriptions),
+                web_push.vapid_public_key.clone(),
+                web_push.allowed_push_hosts.clone(),
+            ),
+        ));
+    }
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_service(channel_connection);
     }
@@ -300,7 +309,11 @@ pub(crate) fn build_llm_config_service(
     let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
         runtime.secret_store(),
     ));
-    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
+    let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
+        Arc::clone(&runtime.scoped_filesystem),
+    ));
+    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys)
+        .with_model_policy_store(model_policy_store);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);
     }

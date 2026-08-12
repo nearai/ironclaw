@@ -38,9 +38,19 @@ where
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
-        self.outbound_preferences_service
+        // The notification-channel picker shows notification-capable targets;
+        // the model-facing list (`list_outbound_delivery_targets_for_model`)
+        // narrows the same union base to `final_replies`, so the two
+        // capabilities stay independent (a final-reply-only target is never
+        // shown here, and a notification-only target is never shown to the model).
+        let mut response = self
+            .outbound_preferences_service
             .list_outbound_delivery_targets(caller)
-            .await
+            .await?;
+        response
+            .targets
+            .retain(|option| option.capabilities.notifications);
+        Ok(response)
     }
 
     pub(super) async fn build_notification_channels_view(

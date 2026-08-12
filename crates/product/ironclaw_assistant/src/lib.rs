@@ -143,10 +143,10 @@ pub use commands::{
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
 pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
-// `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
-// and `ProductConversationSubjectRouteResolver` are deliberately absent: they
-// moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
-// grants no second import path (`reborn_product_contract_location_scan.rs`).
+// `ProductConversationRouteKey`, `SharedConversationAdmissionRequest`, and
+// `SharedConversationAdmission` are deliberately absent: they live in
+// `ironclaw_product_contracts::shared_admission` (WS2.2 lineage), and that
+// crate grants no second import path (`reborn_product_contract_location_scan.rs`).
 // `ProductActorUserResolutionRequest`, `ProductActorUserResolver` and
 // `ResolvedProductActorUser` left for the same reason and under the same rule:
 // `ironclaw_product_contracts::actor_identity` (WS2.5).
@@ -357,8 +357,8 @@ pub use reborn_services::{
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornVendorAuthAccounts, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction,
-    RunArtifactToolCall, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    RebornVendorAuthAccounts, RebornWebPushProductService, RunArtifactLogs, RunArtifactMessage,
+    RunArtifactRedaction, RunArtifactToolCall, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
@@ -370,7 +370,8 @@ pub use reborn_services::{
     TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope, UnavailableRebornViewProvider,
     UnsupportedAutomationProductService, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductService, list_outbound_delivery_targets_for_model,
+    UnsupportedOutboundPreferencesProductService, UnsupportedWebPushProductService,
+    WebPushProductService, list_outbound_delivery_targets_for_model,
     notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
     outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
     parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,

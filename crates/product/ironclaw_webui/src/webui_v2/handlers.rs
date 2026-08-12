@@ -89,7 +89,11 @@ use ironclaw_product_contracts::ironhub::{
 };
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPolicyRequest,
+    UpsertLlmProviderRequest, UserModelCatalog,
+};
+use ironclaw_product_contracts::operator_llm::{
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY, USER_MODEL_CATALOG_VIEW,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_product_contracts::package_lifecycle::{
@@ -114,7 +118,14 @@ use ironclaw_product_contracts::product_wire::{
     RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
     SettingsToolPermissionState,
 };
+use ironclaw_product_contracts::product_wire::{
+    RebornWebPushStatusResponse, RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse,
+    RebornWebPushUnsubscribeRequest, RebornWebPushUnsubscribeResponse,
+};
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
+use ironclaw_product_contracts::web_push::{
+    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND, WEB_PUSH_UNSUBSCRIBE_COMMAND,
+};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
@@ -1419,7 +1430,10 @@ pub async fn stream_events(
 /// and `sse_capacity::REJECTION_REFUND_LIMIT` for why refunding stops once
 /// a caller hammers a saturated cap.
 fn sse_capacity_rejected(refundable: bool) -> Response {
-    let response = sse_concurrency_exhausted().into_response();
+    let mut response = sse_concurrency_exhausted().into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     if refundable {
         mark_rate_limit_refundable(response)
     } else {
@@ -2255,6 +2269,56 @@ pub async fn set_notification_channels(
         body,
     )
     .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/web-push/status`
+///
+/// The deployment's VAPID public key (`applicationServerKey`) plus the
+/// caller's enrolled browsers — redacted to push-service hosts; endpoint
+/// capability URLs never leave the backend.
+pub async fn web_push_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornWebPushStatusResponse>, WebUiV2HttpError> {
+    let response = query_product_view(
+        state.services(),
+        caller,
+        WEB_PUSH_STATUS_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/web-push/subscriptions`
+///
+/// Enroll (or refresh) the caller's current browser for web push. Body:
+/// [`RebornWebPushSubscribeRequest`]; the endpoint is validated against the
+/// supported push-service allowlist before persistence.
+pub async fn web_push_subscribe(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornWebPushSubscribeRequest>,
+) -> Result<Json<RebornWebPushSubscribeResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, WEB_PUSH_SUBSCRIBE_COMMAND, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/web-push/subscriptions/remove`
+///
+/// Remove one of the caller's browser enrollments by endpoint. POST (not
+/// DELETE) because the endpoint is a long capability URL carried in the body.
+pub async fn web_push_unsubscribe(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornWebPushUnsubscribeRequest>,
+) -> Result<Json<RebornWebPushUnsubscribeResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, WEB_PUSH_UNSUBSCRIBE_COMMAND, body)
+            .await?;
     Ok(Json(response))
 }
 
@@ -3886,6 +3950,63 @@ pub async fn run_operator_service_lifecycle(
 #[derive(Debug, Deserialize)]
 pub struct LlmProviderPath {
     pub provider_id: String,
+}
+
+/// `GET /api/webchat/v2/llm/models`
+///
+/// User-safe catalog for the caller's tenant. Unlike the operator provider
+/// snapshot, this response contains no endpoints or credential metadata.
+pub async fn get_user_model_catalog(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<UserModelCatalog>, WebUiV2HttpError> {
+    Ok(Json(
+        query_user_model_catalog(state.services(), caller).await?,
+    ))
+}
+
+async fn query_user_model_catalog(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+) -> Result<UserModelCatalog, ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: USER_MODEL_CATALOG_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
+}
+
+/// `PUT /api/webchat/v2/llm/model-policy`
+pub async fn set_user_model_policy(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<SetUserModelPolicyRequest>,
+) -> Result<Json<UserModelCatalog>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_USER_MODEL_POLICY_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "user model policy",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    Ok(Json(
+        query_user_model_catalog(state.services(), caller).await?,
+    ))
 }
 
 /// `GET /api/webchat/v2/llm/providers`

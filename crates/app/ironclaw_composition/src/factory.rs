@@ -37,10 +37,7 @@ use crate::input::{
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
-use crate::runtime_mounts::{
-    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
-    workspace_mount_view,
-};
+use crate::runtime_mounts::{memory_mount_view, workspace_mount_view};
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
 #[cfg(test)]
@@ -209,7 +206,7 @@ pub(crate) use trigger_creation_assembly::LateBoundAgentTurnRuntime;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
-mod production_backend_assembly;
+pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
@@ -257,6 +254,19 @@ pub(crate) type ComposedToolPermissionOverrideStore =
     ToolPermissionOverrideStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<CompositeRootFilesystem>;
+
+/// Composed web-push handles the product surface consumes: the subscription
+/// store behind the subscribe/unsubscribe commands and the (non-secret)
+/// VAPID public key browsers use as `applicationServerKey`.
+#[derive(Clone)]
+pub(crate) struct WebPushComposition {
+    pub(crate) subscriptions: Arc<dyn ironclaw_web_push::WebPushSubscriptionStore>,
+    pub(crate) vapid_public_key: String,
+    /// Push-service hosts enrollments may target, read from the web-push
+    /// manifest's `[[channel.egress]]` declarations (the same list the
+    /// channel's restricted egress enforces at send time).
+    pub(crate) allowed_push_hosts: Vec<String>,
+}
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
@@ -326,7 +336,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
-    pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -385,6 +394,10 @@ pub(crate) struct RebornRuntimeStores {
     /// are consumed by `build_reborn_runtime` when the channel host assembly
     /// starts.
     pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    /// The web-push channel's composed handles (subscription store + the
+    /// advertised VAPID public key); `None` when the binary supplied no
+    /// web-push runtime slot.
+    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     /// Manifest-declared deployment channel surfaces, independent of user
     /// installation/activation state.
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
@@ -703,6 +716,47 @@ pub(super) use with_shared_host_runtime_wiring;
 /// here, at build time, from declarative connection config — construction no
 /// longer performs database I/O. The `Prebuilt` arm is the caller-supplied
 /// test escape hatch and is preferred verbatim when present.
+/// Connections the process journal opens for itself.
+///
+/// The journal issues one heartbeat per running turn plus its group-commit
+/// flusher's writes, and nothing else uses this pool — which is exactly why two
+/// connections are enough. The point is not capacity, it is that a heartbeat
+/// never waits behind event-store, trigger, or result-read traffic.
+const PROCESS_JOURNAL_POOL_MAX_SIZE: usize = 2;
+
+/// The pools a PostgreSQL deployment runs on: the shared data plane, and a small
+/// dedicated one for the process journal.
+pub(crate) struct PostgresPools {
+    pub(crate) data_plane: deadpool_postgres::Pool,
+    /// `None` when the caller handed in an already-opened pool and there is no
+    /// connection config to open a second one from; the journal then shares the
+    /// data-plane pool, as it always did.
+    pub(crate) process_journal: Option<deadpool_postgres::Pool>,
+}
+
+fn open_postgres_pools_from_source(
+    source: PostgresPoolSource,
+) -> Result<PostgresPools, RebornBuildError> {
+    match source {
+        PostgresPoolSource::Prebuilt(pool) => Ok(PostgresPools {
+            data_plane: pool,
+            process_journal: None,
+        }),
+        PostgresPoolSource::Config(connection) => {
+            let process_journal = ironclaw_event_store::open_postgres_pool_with_tls_options(
+                connection.url.clone(),
+                PROCESS_JOURNAL_POOL_MAX_SIZE,
+                connection.tls_options,
+            )?
+            .into_driver();
+            Ok(PostgresPools {
+                data_plane: open_postgres_pool_from_source(PostgresPoolSource::Config(connection))?,
+                process_journal: Some(process_journal),
+            })
+        }
+    }
+}
+
 fn open_postgres_pool_from_source(
     source: PostgresPoolSource,
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {

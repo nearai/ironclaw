@@ -22,9 +22,10 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LlmConfigService, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LlmConfigService,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
+    UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -148,6 +149,12 @@ mod thread_artifact;
 mod trace_credits;
 mod types;
 mod views;
+mod web_push;
+
+// Crate-internal seam for the runtime communication context (#7247): the
+// model-facing prompt slice reuses the extensions card's per-caller auth
+// verdict instead of re-deriving "connected for this caller" a second way.
+pub(crate) use extensions::{CallerExtensionAuth, caller_extension_auth};
 
 pub use admin_configuration::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
@@ -234,7 +241,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
-    SettingsToolPermissionState,
+    RebornWebPushStatusResponse, RebornWebPushSubscribeOutcome, RebornWebPushSubscribeRequest,
+    RebornWebPushSubscribeResponse, RebornWebPushSubscriptionInfo, RebornWebPushUnsubscribeRequest,
+    RebornWebPushUnsubscribeResponse, SettingsToolPermissionState,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -291,6 +300,15 @@ pub use types::{
     RebornVendorAuthAccounts,
 };
 pub use views::UnavailableRebornViewProvider;
+pub use web_push::{
+    RebornWebPushProductService, UnsupportedWebPushProductService, WebPushProductService,
+};
+// The web-push descriptors live in `ironclaw_product_contracts::web_push`
+// (transport/product boundary: transports consume the boundary crate). One
+// import path, no re-export (§11.2.4).
+use ironclaw_product_contracts::web_push::{
+    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND_ID, WEB_PUSH_UNSUBSCRIBE_COMMAND_ID,
+};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -2220,6 +2238,7 @@ pub struct RebornServices<
     channel_connection_service: Arc<dyn ChannelConnectionService>,
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
+    web_push_service: Arc<dyn WebPushProductService>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
@@ -2303,6 +2322,7 @@ where
             outbound_preferences_service: Arc::new(
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
+            web_push_service: Arc::new(UnsupportedWebPushProductService),
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
@@ -2484,6 +2504,14 @@ where
         outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     ) -> Self {
         self.outbound_preferences_service = outbound_preferences_service;
+        self
+    }
+
+    pub fn with_web_push_product_service(
+        mut self,
+        web_push_service: Arc<dyn WebPushProductService>,
+    ) -> Self {
+        self.web_push_service = web_push_service;
         self
     }
 
@@ -3630,7 +3658,7 @@ where
         let caller = self
             .authorize_create_thread_project(caller, request.project_id.clone())
             .await?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::CreateThread {
             caller,
             client_action_id,
@@ -3676,13 +3704,13 @@ where
         // Decode + budget inline attachment bytes before the request is
         // consumed into the (bytes-free, serializable) command.
         let attachments = request.decode_attachments()?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::SendMessage {
             scope,
             actor,
             client_action_id,
             content,
-            requested_model,
+            mut requested_model,
         } = command
         else {
             return Err(ProductSurfaceError::internal_invariant());
@@ -3816,6 +3844,12 @@ where
                 }
             }
         } else {
+            // Resolve tenant policy before any new message or attachment side
+            // effect. Existing idempotent replays above retain their original
+            // turn outcome even if an administrator later changes the policy.
+            requested_model = self
+                .resolve_user_model(caller.clone(), requested_model)
+                .await?;
             // Land attachment bytes (if any) into project storage before the
             // message is accepted, recording each as a transcript reference.
             // The stable per-message external_event_id is the path's message
@@ -4107,6 +4141,11 @@ where
                 let response = self.build_llm_config_view(caller).await?;
                 views::view_page(response)
             }
+            id if id == USER_MODEL_CATALOG_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_catalog_view(caller).await?;
+                views::view_page(response)
+            }
             id if id == THREADS_VIEW.id => {
                 let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params)
@@ -4130,6 +4169,11 @@ where
             id if id == NOTIFICATION_CHANNELS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_notification_channels_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == WEB_PUSH_STATUS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.web_push_service.status(caller).await?;
                 views::view_page(response)
             }
             id if id == TRACE_CREDITS_VIEW.id => {

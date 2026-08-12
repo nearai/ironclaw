@@ -47,4 +47,8 @@ pub(super) const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
     ".venv",
     "venv",
     "__pycache__",
+    // Staged skill bundles (`bundle_staging::STAGED_SKILLS_DIRNAME`). Copies of read-only store
+    // content, not the user's files. Load-bearing, not cosmetic: without it a workspace walk
+    // descends into staged bundles and the two-thread fixture hangs.
+    ".skills",
 ];

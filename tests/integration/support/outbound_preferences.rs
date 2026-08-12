@@ -116,6 +116,7 @@ impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
                         final_replies: true,
                         gate_prompts: true,
                         auth_prompts: true,
+                        notifications: true,
                     },
                 }),
             });
@@ -155,6 +156,7 @@ impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
                             final_replies: true,
                             gate_prompts: true,
                             auth_prompts: true,
+                            notifications: true,
                         },
                     }),
                 },
@@ -182,6 +184,7 @@ fn target_option(target_id: &str, display_name: &str) -> RebornOutboundDeliveryT
             final_replies: true,
             gate_prompts: true,
             auth_prompts: true,
+            notifications: true,
         },
     }
 }

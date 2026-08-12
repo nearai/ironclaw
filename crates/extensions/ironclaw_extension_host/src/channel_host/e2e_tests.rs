@@ -168,11 +168,15 @@ const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
 const PROJECT: &str = "project:slack";
 const USER: &str = "user:slack-alice";
+/// Second paired identity for the shared-thread scenarios (#7377): U456 is
+/// bound to bob from harness construction, exactly like alice's U123.
+const USER_B: &str = "user:slack-bob";
 /// The generic assembly keys the inbound graph by EXTENSION id.
 const ADAPTER: &str = "slack";
 const INSTALLATION: &str = "install_alpha";
 const TEAM: &str = "T-A";
 const SLACK_USER: &str = "U123";
+const SLACK_USER_B: &str = "U456";
 const CHANNEL: &str = "D123";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
@@ -238,8 +242,9 @@ struct Harness {
     /// ingress, including identities that were connected before this process
     /// started.
     dm_targets: Arc<FilesystemChannelDmTargetStore>,
-    /// The production configure service backing the assembly — admission
-    /// scenarios save routing values through it mid-test.
+    /// The production configure service backing the assembly — configure
+    /// scenarios save `[channel.config]` values through it mid-test (e.g.
+    /// the outbound workspace claim).
     channel_config: Arc<ChannelConfigService>,
     /// The harness's outbound state store — the SAME allocation the
     /// assembly's delivery deps read communication preferences from, so
@@ -545,7 +550,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             )
             .expect("static inbound batch store configuration"),
         ),
-        None,
+        // The ingress-side channel egress (production: composition's real
+        // transport) — channel-context hydration (#7377) fetches through it
+        // at admission time. The same recording transport serves the
+        // delivery side below.
+        Some(Arc::new(egress.clone()) as Arc<dyn ChannelEgressTransport>),
     );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
@@ -562,10 +571,16 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         },
     ));
 
-    let identity_lookup = Arc::new(RecordingUserIdentityLookup::new([(
-        format!("{INSTALLATION}:{SLACK_USER}"),
-        UserId::new(USER).expect("user"), // safety: static test user id is valid.
-    )]));
+    let identity_lookup = Arc::new(RecordingUserIdentityLookup::new([
+        (
+            format!("{INSTALLATION}:{SLACK_USER}"),
+            UserId::new(USER).expect("user"), // safety: static test user id is valid.
+        ),
+        (
+            format!("{INSTALLATION}:{SLACK_USER_B}"),
+            UserId::new(USER_B).expect("user"), // safety: static test user id is valid.
+        ),
+    ]));
     let dm_targets = generic_dm_target_store();
 
     let channel_config = configured_channel_config().await;
@@ -620,6 +635,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                     max_wait: options.max_wait,
                     max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
                     max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+                    first_nudge_after: Duration::from_secs(3600),
+                    renudge_interval: Duration::from_secs(3600),
                 },
                 triggered_delivery_store: Arc::clone(&triggered_delivery_store),
             }),
@@ -651,7 +668,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             &ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
             ChannelExtras {
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
-                subject_route_resolver: None,
+                shared_admission: None,
                 storage_roots: None,
             },
         )
@@ -769,15 +786,10 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                     "slack_oauth_client_secret".to_string(),
                     "e2e-slack-client-secret".to_string(),
                 ),
-                // Shared-channel admission (§5.3): the manifest declares the
-                // `*_allowed_channels` convention, so unrouted shared
-                // conversations fail closed — the harness admits the one
-                // channel its scenarios exercise, exactly as an operator
-                // would through the configure surface.
-                (
-                    "slack_allowed_channels".to_string(),
-                    r#"["C123"]"#.to_string(),
-                ),
+                // Deliberately NO admission-related config: shared-channel
+                // admission (§5.3) is presence-based — an event delivered
+                // through the verified ingress is itself the admission — so
+                // there is no allowlist for an operator to save.
             ],
         )
         .await
@@ -1307,6 +1319,7 @@ impl ironclaw_outbound::OutboundDeliveryTargetProvider for StaticNotificationTar
                 progress: false,
                 gate_prompts: true,
                 auth_prompts: true,
+                notifications: true,
                 modalities: Vec::new(),
             },
             destination: self.destination.clone(),
@@ -1569,6 +1582,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -1848,6 +1863,8 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -1974,6 +1991,8 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -2382,96 +2401,332 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     );
 }
 
-/// Generic shared-channel admission (§5.3): an unconfigured shared channel
-/// fails closed (no turn, no reply, vendor still gets its 2xx); saving the
-/// channel into `slack_allowed_channels` admits the next event under the
-/// managed derived subject (the retired lane's `user:slack-channel:{sha16}`
-/// value shape); an explicit `slack_subject_routes` entry runs its channel
-/// as the configured subject. Saves take effect per request — no rebuild.
+/// Generic shared-channel admission (§5.3) is PRESENCE-BASED: a shared
+/// channel event arriving through the production assembly with NO
+/// admission-related configuration anywhere produces a served turn — the
+/// bot receiving the event through its verified ingress IS the admission.
+/// The turn runs AS THE PAIRED ACTOR who invoked it — the thread owner is
+/// the actor's canonical user, with no derived or configured subject — and
+/// the reply lands in the shared channel itself.
+///
+/// Pin changed twice with the run-acts-as-invoker ruling: first the managed
+/// derived subject (`user:slack-channel:{sha16}`) and `slack_subject_routes`
+/// were retired, then the operator channel-allowlist config itself. The
+/// harness saves zero admission config, which is now the production shape.
 #[tokio::test]
-async fn shared_channel_admission_follows_saved_channel_config() {
+async fn shared_channel_message_is_served_by_presence() {
     let harness = build_harness(TurnMode::Complete {
         assistant_text: "channel reply".into(),
     })
     .await;
-    let extension_id = ExtensionId::new("slack").expect("extension id"); // safety: static id is valid.
 
-    // C777 is not in the harness's saved allowed list: fail closed.
-    let refused = harness.post_event(SHARED_CHANNEL_UNROUTED).await;
-    assert_eq!(refused.status(), StatusCode::OK, "vendor keeps its 2xx");
-    harness.drain().await;
-    assert_eq!(
-        harness.coordinator.submitted_turn_count(),
-        0,
-        "an unrouted shared channel must not reach the turn coordinator"
-    );
-    assert!(
-        harness.slack_messages().is_empty(),
-        "no reply may leak into an unadmitted shared channel"
-    );
-
-    // The operator admits C777 (fresh event id: the refused event settled
-    // terminally in the durable idempotency ledger).
-    harness
-        .channel_config
-        .save(
-            &extension_id,
-            vec![(
-                "slack_allowed_channels".to_string(),
-                r#"["C123","C777"]"#.to_string(),
-            )],
-        )
-        .await
-        .expect("save allowed channels"); // safety: manifest declares the handle.
-    let admitted = harness.post_event(SHARED_CHANNEL_ALLOWED).await;
+    let admitted = harness.post_event(SHARED_CHANNEL_EVENT).await;
     assert_eq!(admitted.status(), StatusCode::OK);
     harness.drain().await;
     let scopes = harness.coordinator.submitted_scopes();
-    assert_eq!(scopes.len(), 1, "the admitted channel submits one turn");
-    let expected_managed_subject = ironclaw_extension_host::managed_channel_subject_user_id(
-        ADAPTER,
-        &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        &ironclaw_host_api::product_adapter::AdapterInstallationId::new(INSTALLATION)
-            .expect("installation"), // safety: static test installation id is valid.
-        Some(TEAM),
-        "C777",
-    )
-    .expect("managed subject derivation");
+    assert_eq!(
+        scopes.len(),
+        1,
+        "a shared channel event is admitted by presence and submits one turn"
+    );
+    let expected_actor = UserId::new(USER).expect("user"); // safety: static test user id is valid.
     assert_eq!(
         scopes[0].thread_owner.explicit_owner_user_id(),
-        Some(&expected_managed_subject),
-        "an allowed channel runs under the managed derived subject"
+        Some(&expected_actor),
+        "a shared channel turn runs as the paired actor who invoked it"
     );
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], "C777");
     assert_eq!(messages[0]["text"], "channel reply");
+}
 
-    // An explicit subject route wins for its channel.
-    harness
-        .channel_config
-        .save(
-            &extension_id,
-            vec![(
-                "slack_subject_routes".to_string(),
-                r#"{"C888":"user:ops-agent"}"#.to_string(),
-            )],
-        )
-        .await
-        .expect("save subject routes"); // safety: manifest declares the handle.
-    let routed = harness.post_event(SHARED_CHANNEL_ROUTED).await;
-    assert_eq!(routed.status(), StatusCode::OK);
+/// Added with the run-acts-as-invoker ruling (#7377): a paired user's
+/// TOP-LEVEL channel mention (no `thread_ts` on the vendor event) roots its
+/// own conversation — the slack adapter normalizes the topic to the pinged
+/// message's own `ts` — and the served turn's reply lands IN THAT THREAD:
+/// the vendor POST carries `thread_ts` equal to the pinged message's ts
+/// (manifest `presentation.can_reply_in_threads = true`). Reply placement is
+/// part of the shared-thread contract, not a cosmetic default.
+#[tokio::test]
+async fn slack_top_level_mention_roots_a_thread_and_replies_in_it() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "threaded reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(TOP_LEVEL_MENTION_EVENT).await;
+    assert_eq!(response.status(), StatusCode::OK);
     harness.drain().await;
-    let scopes = harness.coordinator.submitted_scopes();
-    assert_eq!(scopes.len(), 2);
+
     assert_eq!(
-        scopes[1]
-            .thread_owner
-            .explicit_owner_user_id()
-            .map(|user| user.as_str()),
-        Some("user:ops-agent"),
-        "an explicit subject route runs its channel as the configured subject"
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "the paired user's top-level mention is served as a turn"
     );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C888");
+    assert_eq!(messages[0]["text"], "threaded reply");
+    assert_eq!(
+        messages[0]["thread_ts"], "1710000004.000001",
+        "the reply threads on the pinged message's own ts — a top-level \
+         mention roots its own conversation thread"
+    );
+}
+
+/// Added with the run-acts-as-invoker ruling (#7377): an UNPAIRED user's
+/// channel mention executes NO run. The fixed `connect_required` notice is
+/// posted into the conversation through the same anchored placement replies
+/// use (threaded on the pinged message's ts), and a repeat mention in that
+/// same thread inside the throttle window posts nothing more — presence
+/// admits the conversation, pairing gates the run, and the nudge addresses
+/// the one unpaired sender rather than the room.
+#[tokio::test]
+async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "never produced".into(),
+    })
+    .await;
+
+    let response = harness.post_event(UNPAIRED_MENTION_EVENT).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert!(
+        harness.coordinator.submitted_scopes().is_empty(),
+        "an unpaired sender must not execute a run"
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "exactly one connect notice: {messages:?}"
+    );
+    assert_eq!(messages[0]["channel"], "C889");
+    assert_eq!(
+        messages[0]["text"].as_str(),
+        Some(slack_generic_connect_required_notice().as_str()),
+        "the notice is this wiring's connect_required copy, verbatim"
+    );
+    assert_eq!(
+        messages[0]["thread_ts"], "1710000005.000001",
+        "the nudge threads on the sender's own ping — same anchored \
+         placement as replies"
+    );
+
+    // A second mention from the same unpaired sender inside the SAME thread
+    // (the same conversation — a top-level ping roots its own) within the
+    // throttle window posts nothing and still runs nothing.
+    let response = harness.post_event(UNPAIRED_MENTION_REPEAT_EVENT).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert!(harness.coordinator.submitted_scopes().is_empty());
+    assert_eq!(
+        harness.slack_messages().len(),
+        1,
+        "the per-conversation throttle suppresses the repeat nudge"
+    );
+}
+
+/// Ephemeral-per-ping: two users mentioning the bot inside the SAME vendor
+/// thread T are each served in their OWN pinger-owned ephemeral thread
+/// (distinct canonical threads, each run acting as its own invoker); every
+/// reply still lands under `thread_ts == T`. (Cross-user awareness comes from
+/// channel-history hydration, not a shared internal transcript — the shared
+/// transcript is retired; per-event threads are pinned at the conversations
+/// tier and hydration by the hydration scenario.)
+#[tokio::test]
+async fn slack_in_thread_mentions_each_run_in_their_own_thread_replying_in_the_vendor_thread() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "shared thread reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(IN_THREAD_MENTION_ALICE).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    let response = harness.post_event(IN_THREAD_MENTION_BOB).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let scopes = harness.coordinator.submitted_scopes();
+    assert_eq!(scopes.len(), 2, "both paired users' mentions are served");
+    assert_ne!(
+        scopes[1].thread_id, scopes[0].thread_id,
+        "each ping runs in its OWN ephemeral thread — no shared canonical thread"
+    );
+    let actors = harness.coordinator.submitted_actors();
+    assert_eq!(actors.len(), 2);
+    assert_eq!(actors[0].user_id.as_str(), USER);
+    assert_eq!(
+        actors[1].user_id.as_str(),
+        USER_B,
+        "each run acts as its own invoker"
+    );
+
+    // Reply placement: both replies thread on the EXISTING vendor thread T,
+    // not on the individual pings.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    for message in &messages {
+        assert_eq!(message["channel"], "C890");
+        assert_eq!(message["text"], "shared thread reply");
+        assert_eq!(
+            message["thread_ts"], "1710000006.000001",
+            "replies land in the mentioned thread T"
+        );
+    }
+}
+
+/// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
+/// inside A's ACTIVE thread (threaded connect notice, no run); carol pairs
+/// through the harness pairing seam; her next in-thread message is then served
+/// in her OWN pinger-owned ephemeral thread (distinct from A's), acting as
+/// carol — the vendor thread's context is supplied by hydration, not a shared
+/// transcript.
+#[tokio::test]
+async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "midthread reply".into(),
+    })
+    .await;
+
+    // A roots the thread and is served.
+    let response = harness.post_event(MIDTHREAD_ROOT_MENTION_ALICE).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(harness.coordinator.submitted_scopes().len(), 1);
+
+    // Unpaired carol mentions inside A's active thread: NO run, one connect
+    // nudge threaded at the same T.
+    let response = harness.post_event(MIDTHREAD_UNPAIRED_MENTION_CAROL).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "an unpaired sender must not execute a run"
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2, "A's reply + carol's nudge: {messages:?}");
+    assert_eq!(
+        messages[1]["text"].as_str(),
+        Some(slack_generic_connect_required_notice().as_str()),
+    );
+    assert_eq!(
+        messages[1]["thread_ts"], "1710000007.000001",
+        "the nudge is threaded into A's active thread"
+    );
+
+    // Carol pairs (the harness identity-binding seam), then messages in the
+    // same thread: her turn joins the SAME canonical thread, acting as her.
+    harness.identity_lookup.bind(
+        format!("{INSTALLATION}:U457"),
+        UserId::new("user:slack-carol").expect("user"), // safety: static test user id is valid.
+    );
+    let response = harness.post_event(MIDTHREAD_PAIRED_MENTION_CAROL).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let scopes = harness.coordinator.submitted_scopes();
+    assert_eq!(scopes.len(), 2, "carol's post-pairing mention is served");
+    assert_ne!(
+        scopes[1].thread_id, scopes[0].thread_id,
+        "carol's run is her OWN ephemeral thread, distinct from A's"
+    );
+    let actors = harness.coordinator.submitted_actors();
+    assert_eq!(actors[1].user_id.as_str(), "user:slack-carol");
+
+    // Both replies (A's and carol's) are threaded on A's root ping.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 3, "A reply + nudge + carol reply");
+    assert_eq!(messages[2]["text"], "midthread reply");
+    assert_eq!(messages[2]["thread_ts"], "1710000007.000001");
+}
+
+/// Added with the run-acts-as-invoker ruling (#7377): shared-channel pings
+/// are hydrated with vendor-side conversation context at ingress, fetched
+/// over the manifest's bot-token GET egress, and the admitted turn's product
+/// context carries the formatted, host-sanitized text — advisory, untrusted,
+/// and absent rather than fatal on any vendor refusal (the other scenarios'
+/// unscripted channels prove the degrade arm by construction).
+///
+/// Placement note: hydration runs on the NORMALIZED conversation ref, whose
+/// topic a top-level mention roots on its own ts — the adapter detects that
+/// rooted-by-this-ping shape (topic == the ping's own message id) and
+/// fetches recent CHANNEL history for it (the just-rooted thread holds
+/// nothing); only mentions inside a pre-existing thread fetch that thread's
+/// replies. This pins the composed rule end to end.
+#[tokio::test]
+async fn slack_top_level_mention_hydrates_channel_context() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "hydrated reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(HYDRATED_TOP_LEVEL_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    // The hydration GET crossed the recorded egress with the normalized
+    // conversation's path and parameters.
+    let context_requests: Vec<_> = harness
+        .egress
+        .requests()
+        .into_iter()
+        .filter(|request| request.url.contains("/api/conversations.history"))
+        .collect();
+    assert_eq!(
+        context_requests.len(),
+        1,
+        "exactly one context fetch for the ping; all egress: {:?}",
+        harness
+            .egress
+            .requests()
+            .iter()
+            .map(|request| request.url.clone())
+            .collect::<Vec<_>>()
+    );
+    let url = url::Url::parse(&context_requests[0].url).expect("context URL parses");
+    assert_eq!(url.host_str(), Some("slack.com"));
+    let query: std::collections::HashMap<String, String> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    assert_eq!(query.get("channel").map(String::as_str), Some("C892"));
+    assert!(
+        !query.contains_key("ts"),
+        "a top-level ping hydrates recent CHANNEL history, not the one-message \
+         thread it just rooted: {query:?}"
+    );
+    assert!(
+        query.contains_key("limit"),
+        "context fetch is bounded: {query:?}"
+    );
+
+    // The fetched context rides the admitted turn's product context,
+    // formatted from the scripted vendor history.
+    let contexts = harness.coordinator.submitted_channel_contexts();
+    assert_eq!(contexts.len(), 1, "the mention is served as one turn");
+    let context = contexts[0]
+        .as_deref()
+        .expect("the admitted turn carries channel context");
+    assert!(
+        context.contains("deploy went out at noon"),
+        "context carries the scripted history: {context:?}"
+    );
+    assert!(
+        context.contains("any regressions so far?"),
+        "context carries the full scripted slice: {context:?}"
+    );
+
+    // The turn itself is served and replies in its own thread as usual.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C892");
+    assert_eq!(messages[0]["text"], "hydrated reply");
+    assert_eq!(messages[0]["thread_ts"], "1710000008.000001");
 }
 
 #[tokio::test]
@@ -2538,7 +2793,12 @@ async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "a running turn posts a working indicator before the reply"
+    );
 
     harness
         .coordinator
@@ -2768,7 +3028,13 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+            && messages[1]["text"] != messages[0]["text"],
+        "the resumed turn posts a working indicator distinct from the auth prompt"
+    );
 
     harness
         .coordinator
@@ -2814,6 +3080,8 @@ struct RecordingTurnState {
     blocked_run_id: Option<TurnRunId>,
     submitted_turn_count: usize,
     submitted_scopes: Vec<TurnScope>,
+    submitted_actors: Vec<TurnActor>,
+    submitted_channel_contexts: Vec<Option<String>>,
 }
 
 impl RecordingTurnCoordinator {
@@ -2825,6 +3093,8 @@ impl RecordingTurnCoordinator {
                 blocked_run_id: None,
                 submitted_turn_count: 0,
                 submitted_scopes: Vec::new(),
+                submitted_actors: Vec::new(),
+                submitted_channel_contexts: Vec::new(),
             })),
             threads,
             mode,
@@ -2859,6 +3129,28 @@ impl RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .submitted_scopes
+            .clone()
+    }
+
+    /// Acting identities of submitted turns, in submission order — the
+    /// shared-thread scenarios (#7377) assert each RUN acts as its own
+    /// invoker even when both land in one canonical thread.
+    fn submitted_actors(&self) -> Vec<TurnActor> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .submitted_actors
+            .clone()
+    }
+
+    /// Host-fetched channel conversation context per submitted turn, in
+    /// submission order — the hydration scenario (#7377) asserts the ingress
+    /// fetch reached the admitted turn's product context.
+    fn submitted_channel_contexts(&self) -> Vec<Option<String>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .submitted_channel_contexts
             .clone()
     }
 
@@ -2989,8 +3281,8 @@ impl RecordingTurnCoordinator {
     ///
     /// This prevents the delivery loop from waking in the gap between
     /// `resume_blocked_run_to_running` and `complete_active_run`, observing
-    /// `Running` with no blocked marker, and posting the "Ironclaw is thinking..."
-    /// working indicator — which would produce a spurious 4th message and make the
+    /// `Running` with no blocked marker, and posting the working indicator —
+    /// which would produce a spurious 4th message and make the
     /// `messages.len() == 3` assertion flaky.
     async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductSurfaceFailure> {
         // Append the final assistant message first (does not touch `state`).
@@ -3070,6 +3362,10 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         let run_id = request.requested_run_id.unwrap_or_default();
+        let submitted_channel_context = request
+            .product_context
+            .as_ref()
+            .and_then(|context| context.channel_context.clone());
         let status = match &self.mode {
             TurnMode::Complete { assistant_text } => {
                 append_final_assistant_message(
@@ -3124,6 +3420,12 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.submitted_turn_count += 1;
         state.submitted_scopes.push(run_state.scope.clone());
+        if let Some(actor) = run_state.actor.clone() {
+            state.submitted_actors.push(actor);
+        }
+        state
+            .submitted_channel_contexts
+            .push(submitted_channel_context);
         state.active_run_id = Some(run_id);
         if matches!(
             status,
@@ -3628,6 +3930,17 @@ fn slack_response_for_approved(
             .as_bytes(),
         );
     }
+    // Channel-context hydration fixture (#7377): only C892 has scripted
+    // channel history (NEWEST-first, as `conversations.history` returns it;
+    // the adapter reverses to oldest-first) — every other conversation's
+    // context GET falls through to the bare `{"ok":true}` (no `messages`),
+    // which the adapter degrades to no-context, keeping the other scenarios
+    // hydration-free.
+    if path == "/api/conversations.history" && approved.url.contains("channel=C892") {
+        return response(
+            br#"{"ok":true,"messages":[{"user":"U123","text":"any regressions so far?","ts":"1719.200"},{"user":"U111","text":"deploy went out at noon","ts":"1719.100"}]}"#,
+        );
+    }
     response(br#"{"ok":true}"#)
 }
 
@@ -3641,14 +3954,14 @@ fn stable_slack_test_ts(body: &[u8]) -> String {
 
 #[derive(Debug, Default)]
 struct RecordingUserIdentityLookup {
-    bindings: std::collections::HashMap<String, UserId>,
+    bindings: Mutex<std::collections::HashMap<String, UserId>>,
     calls: Mutex<Vec<(String, String)>>,
 }
 
 impl RecordingUserIdentityLookup {
     fn new(bindings: impl IntoIterator<Item = (String, UserId)>) -> Self {
         Self {
-            bindings: bindings.into_iter().collect(),
+            bindings: Mutex::new(bindings.into_iter().collect()),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -3658,6 +3971,17 @@ impl RecordingUserIdentityLookup {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// The harness pairing seam (#7377): binding a provider identity
+    /// mid-test is what "the user paired" looks like at this assembly's
+    /// identity boundary — the next inbound resolution (which always
+    /// re-reads for freshness) sees the new binding immediately.
+    fn bind(&self, provider_user_id: impl Into<String>, user_id: UserId) {
+        self.bindings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(provider_user_id.into(), user_id);
     }
 }
 
@@ -3675,7 +3999,12 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
         if provider != "slack" {
             return Ok(None);
         }
-        Ok(self.bindings.get(provider_user_id).cloned())
+        Ok(self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(provider_user_id)
+            .cloned())
     }
 
     async fn user_has_provider_binding(
@@ -3686,7 +4015,12 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
         if provider != "slack" {
             return Ok(false);
         }
-        Ok(self.bindings.values().any(|bound| bound == user_id))
+        Ok(self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .any(|bound| bound == user_id))
     }
 }
 
@@ -4052,34 +4386,138 @@ const DM_AUTH: &str = r#"{
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
 	}"#;
 
-// ── Shared-channel admission fixtures ────────────────────────────────────────
-// Used by `shared_channel_admission_follows_saved_channel_config`. C777/C888
-// are outside the harness's default allowed list; distinct event ids keep
-// the terminally-settled refusal out of the admitted replays.
+// ── Shared-channel admission fixture ─────────────────────────────────────────
+// Used by `shared_channel_message_is_served_by_presence`. C777 appears in no
+// configuration anywhere: the event reaching the verified ingress is the
+// whole admission.
 
-const SHARED_CHANNEL_UNROUTED: &str = r#"{
+const SHARED_CHANNEL_EVENT: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
-  "event_id":"Ev-shared-unrouted",
-  "event":{"type":"app_mention","user":"U123","channel":"C777","text":"<@UBOT> hello","ts":"1710000003.000001"}
-}"#;
-
-const SHARED_CHANNEL_ALLOWED: &str = r#"{
-  "type":"event_callback",
-  "team_id":"T-A",
-  "api_app_id":"A-slack",
-  "event_id":"Ev-shared-allowed",
+  "event_id":"Ev-shared-presence",
   "event":{"type":"app_mention","user":"U123","channel":"C777","text":"<@UBOT> hello again","ts":"1710000003.000002"}
 }"#;
 
-const SHARED_CHANNEL_ROUTED: &str = r#"{
+// ── Shared-thread placement fixtures (#7377) ─────────────────────────────────
+// A top-level app_mention carries no `thread_ts`: it roots its own thread,
+// and the reply must land under `thread_ts == ts`. C888/C889 appear in no
+// configuration anywhere (presence-based admission).
+
+/// Paired user's top-level mention; used by
+/// `slack_top_level_mention_roots_a_thread_and_replies_in_it`.
+const TOP_LEVEL_MENTION_EVENT: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
-  "event_id":"Ev-shared-routed",
-  "event":{"type":"app_mention","user":"U123","channel":"C888","text":"<@UBOT> route me","ts":"1710000003.000003"}
+  "event_id":"Ev-thread-root",
+  "event":{"type":"app_mention","user":"U123","channel":"C888","text":"<@UBOT> root a thread","ts":"1710000004.000001"}
 }"#;
+
+/// U999 has no identity binding anywhere in the harness; used by
+/// `slack_unpaired_mention_gets_a_threaded_pairing_notice`.
+const UNPAIRED_MENTION_EVENT: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-unpaired-mention",
+  "event":{"type":"app_mention","user":"U999","channel":"C889","text":"<@UBOT> hello?","ts":"1710000005.000001"}
+}"#;
+
+/// The same unpaired sender mentioning again INSIDE the thread their first
+/// ping rooted — the same conversation, so the nudge throttle applies.
+const UNPAIRED_MENTION_REPEAT_EVENT: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-unpaired-mention-2",
+  "event":{"type":"app_mention","user":"U999","channel":"C889","text":"<@UBOT> hello??","ts":"1710000005.000002","thread_ts":"1710000005.000001"}
+}"#;
+
+// ── In-thread shared-conversation fixtures (#7377) ───────────────────────────
+// Both mentions carry the SAME `thread_ts` — the vendor thread rooted at
+// 1710000006.000001 — so they address one shared conversation. U123 is
+// alice, U456 is bob (both paired from harness construction).
+
+const IN_THREAD_MENTION_ALICE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-inthread-alice",
+  "event":{"type":"app_mention","user":"U123","channel":"C890","text":"<@UBOT> summarize this thread","ts":"1710000006.000002","thread_ts":"1710000006.000001"}
+}"#;
+
+const IN_THREAD_MENTION_BOB: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-inthread-bob",
+  "event":{"type":"app_mention","user":"U456","channel":"C890","text":"<@UBOT> bob follows up here","ts":"1710000006.000003","thread_ts":"1710000006.000001"}
+}"#;
+
+// ── Pairing-mid-thread fixtures (#7377) ──────────────────────────────────────
+// Alice roots a thread; U457 (carol) is unpaired at first contact and pairs
+// mid-test through the harness identity-binding seam.
+
+const MIDTHREAD_ROOT_MENTION_ALICE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-midthread-alice",
+  "event":{"type":"app_mention","user":"U123","channel":"C891","text":"<@UBOT> kick off the incident","ts":"1710000007.000001"}
+}"#;
+
+const MIDTHREAD_UNPAIRED_MENTION_CAROL: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-midthread-carol-unpaired",
+  "event":{"type":"app_mention","user":"U457","channel":"C891","text":"<@UBOT> wait for me","ts":"1710000007.000002","thread_ts":"1710000007.000001"}
+}"#;
+
+const MIDTHREAD_PAIRED_MENTION_CAROL: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-midthread-carol-joined",
+  "event":{"type":"app_mention","user":"U457","channel":"C891","text":"<@UBOT> carol joined in","ts":"1710000007.000003","thread_ts":"1710000007.000001"}
+}"#;
+
+/// Top-level mention in C892 — the one channel `slack_response_for_approved`
+/// scripts `conversations.history` messages for; used by
+/// `slack_top_level_mention_hydrates_channel_context`.
+const HYDRATED_TOP_LEVEL_MENTION: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-hydrated-mention",
+  "event":{"type":"app_mention","user":"U123","channel":"C892","text":"<@UBOT> what changed today?","ts":"1710000008.000001"}
+}"#;
+
+/// The `connect_required` copy this assembly's wiring produces. The harness
+/// wires `channel_pairing: None` (composition wires the real registry, whose
+/// per-extension pairing service serves the manifest's
+/// `[connection.notices]` copy — pinned at the integration tier), so the
+/// host falls back to [`ChannelConnectionNoticePolicy::generic`] over the
+/// manifest's display name. Deriving the expectation from the same
+/// production constructor and the shipped manifest's `name` keeps this a pin
+/// of the wiring, not a test-local copy of the wording.
+fn slack_generic_connect_required_notice() -> String {
+    let manifest = slack_manifest_from_bundled_inventory();
+    let prefix = "\nname = \"";
+    let start = manifest
+        .find(prefix)
+        .expect("bundled slack manifest declares its display name") // safety: shipped manifest fixture declares `name`.
+        + prefix.len();
+    let end = manifest[start..]
+        .find('"')
+        .map(|offset| start + offset)
+        .expect("manifest name string is closed"); // safety: shipped manifest fixture is valid TOML.
+    ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy::generic(
+        &manifest[start..end],
+    )
+    .connect_required
+}
 
 const APP_MENTION_AUTH: &str = r#"{
   "type":"event_callback",
@@ -4582,7 +5020,10 @@ use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
 /// durable extension installation id (`INSTALLATION`) the active snapshot
 /// carries. Stored beta preferences embed this id in their binding refs.
 const RETIRED_INSTALLATION: &str = "retired-setup-install";
-/// A shared channel routed to the operator through `slack_subject_routes`.
+/// A shared channel id as stored preferences from the retired subject-route
+/// model reference it. Pin changed with the run-acts-as-invoker ruling: no
+/// configured subject owns a shared channel any more, so refs naming it must
+/// fail closed rather than resolve to a per-user delivery target.
 const ROUTED_CHANNEL: &str = "C777";
 
 fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
@@ -4624,35 +5065,43 @@ fn operator_caller() -> OutboundDeliveryTargetScope {
     )
 }
 
-/// Save the `[channel.config]` values the generic target provider reads:
-/// the workspace claim (space id) and one explicit subject route assigning
-/// `ROUTED_CHANNEL` to the operator.
+/// Save the `[channel.config]` value the generic target provider reads: the
+/// workspace claim (space id). Pin changed with the run-acts-as-invoker
+/// ruling: the manifest no longer declares `slack_subject_routes`, and no
+/// saved value can assign a shared channel to a user any more.
 async fn save_outbound_target_config(harness: &Harness) {
     harness
         .channel_config
         .save(
             &ExtensionId::new(ADAPTER).expect("extension id"), // safety: static id is valid.
-            vec![
-                ("slack_team_id".to_string(), TEAM.to_string()),
-                (
-                    "slack_subject_routes".to_string(),
-                    format!(r#"{{"{ROUTED_CHANNEL}":"{USER}"}}"#),
-                ),
-            ],
+            vec![("slack_team_id".to_string(), TEAM.to_string())],
         )
         .await
-        .expect("save outbound target config"); // safety: manifest declares the handles.
+        .expect("save outbound target config"); // safety: manifest declares the handle.
 }
 
+// Pin changed with the run-acts-as-invoker ruling: shared channels are no
+// longer per-user delivery targets, so the registry now exposes the caller's
+// provisioned personal DM instead of a subject-routed shared channel.
 #[tokio::test]
 async fn generic_outbound_target_registration_exposes_provider_through_registry() {
     let harness = build_harness(TurnMode::Running).await;
     save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("provision DM target");
     let registry = ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default();
 
     register_generic_channel_outbound_targets(
         &registry,
-        generic_outbound_target_deps(&harness, generic_dm_target_store()),
+        generic_outbound_target_deps(&harness, dm_targets),
     );
 
     let caller = operator_caller();
@@ -4668,7 +5117,7 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
     let registered = &listed[0];
     assert_eq!(
         registered.summary.target_id.as_str(),
-        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}")
+        format!("slack:personal-dm:{TEAM}:{USER}")
     );
     assert_eq!(registered.summary.channel.as_str(), ADAPTER);
     assert!(registered.owner.matches_scope(&caller));
@@ -4676,12 +5125,15 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
         .conversation_for_target(&registered.destination)
         .expect("registered target should retain its Slack destination");
     assert_eq!(conversation.space_id(), Some(TEAM));
-    assert_eq!(conversation.conversation_id(), ROUTED_CHANNEL);
+    assert_eq!(conversation.conversation_id(), CHANNEL);
 }
 
-/// The generic provider lists the operator's routed shared channel (from
-/// `slack_subject_routes`) and their provisioned personal DM (from the
-/// generic DM-target store) — no lane-owned state anywhere.
+/// The generic provider lists the caller's provisioned personal DM (from the
+/// generic DM-target store) — no lane-owned state anywhere. Pin changed with
+/// the run-acts-as-invoker ruling: shared channels are no longer per-user
+/// delivery targets (their ownership came from the retired subject routes),
+/// so only the DM is listed and a stored shared-channel target id fails
+/// closed at resolution.
 #[tokio::test]
 async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store() {
     let harness = build_harness(TurnMode::Running).await;
@@ -4703,24 +5155,28 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         .list_outbound_delivery_targets(&operator_caller())
         .await
         .expect("target list");
-    assert_eq!(listed.len(), 2, "one shared + one DM target: {listed:?}");
-
-    let shared = listed
-        .iter()
-        .find(|entry| entry.summary.target_id.as_str().contains("shared-channel"))
-        .expect("shared-channel target listed");
-    assert_eq!(
-        shared.summary.target_id.as_str(),
-        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"),
-        "generic ids keep the retired lane's shape"
+    assert_eq!(listed.len(), 1, "only the DM target is listed: {listed:?}");
+    assert!(
+        listed
+            .iter()
+            .all(|entry| !entry.summary.target_id.as_str().contains("shared-channel")),
+        "no shared-channel target may be offered: {listed:?}"
     );
-    let shared_reply_target = &shared.destination;
-    let shared_conversation = codec
-        .conversation_for_target(shared_reply_target)
-        .expect("shared binding ref decodes");
-    assert_eq!(shared_conversation.conversation_id(), ROUTED_CHANNEL);
-    assert_eq!(shared_conversation.space_id(), Some(TEAM));
-    assert!(!codec.is_personal_direct_message(shared_reply_target));
+
+    // A stored shared-channel target id from the retired subject model fails
+    // closed at resolution — no per-user owner exists for it any more.
+    let retired_shared_target_id = ironclaw_outbound::OutboundDeliveryTargetId::new(format!(
+        "slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"
+    ))
+    .expect("retired target id builds");
+    assert!(
+        provider
+            .resolve_outbound_delivery_target(&operator_caller(), &retired_shared_target_id)
+            .await
+            .expect("resolve succeeds")
+            .is_none(),
+        "a stored shared-channel target id must not resolve"
+    );
 
     let dm = listed
         .iter()
@@ -4779,7 +5235,7 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
             .await
             .expect("list succeeds")
             .is_empty(),
-        "another user sees neither the operator's routed channel nor their DM"
+        "another user does not see the operator's DM target"
     );
     for entry in &listed {
         assert!(
@@ -4883,10 +5339,13 @@ async fn generic_dm_target_rejects_record_from_a_different_workspace() {
 }
 
 /// REGRESSION (migration tolerance): stored beta preferences embed the
-/// RETIRED setup installation id in their binding refs. Resolution must
-/// tolerate both ids — ownership is proven against caller-scoped generic
-/// state, never against the ref's installation segment — and each resolve
-/// returns a freshly encoded ref carrying the DURABLE installation id.
+/// RETIRED setup installation id in their binding refs. Personal-DM
+/// resolution must tolerate both ids — ownership is proven against
+/// caller-scoped generic state, never against the ref's installation segment
+/// — and each resolve returns a freshly encoded ref carrying the DURABLE
+/// installation id. Pin changed with the run-acts-as-invoker ruling: stored
+/// SHARED-conversation refs now fail closed whichever id they carry — their
+/// per-user ownership came from the retired subject routes.
 #[tokio::test]
 async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs() {
     let harness = build_harness(TurnMode::Running).await;
@@ -4909,7 +5368,8 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
     let project = ProjectId::new(PROJECT).expect("project"); // safety: static test project id is valid.
     let durable_segment = format!("installation:{}:{INSTALLATION};", INSTALLATION.len());
 
-    // Shared-channel preference saved under the retired setup id.
+    // Shared-channel preference saved under the retired setup id: fails
+    // closed — no per-user owner exists for a shared conversation any more.
     let retired_shared = ironclaw_slack_extension::slack_shared_channel_reply_target_binding_ref(
         &retired_installation,
         &agent,
@@ -4918,18 +5378,13 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         ROUTED_CHANNEL,
     )
     .expect("retired shared ref builds");
-    let resolved_shared = provider
-        .resolve_reply_target_binding(&operator_caller(), &retired_shared)
-        .await
-        .expect("resolve succeeds")
-        .expect("retired-id shared preference still resolves");
     assert!(
-        resolved_shared
-            .destination
-            .as_str()
-            .contains(&durable_segment),
-        "re-resolved ref carries the durable installation id: {}",
-        resolved_shared.destination.as_str()
+        provider
+            .resolve_reply_target_binding(&operator_caller(), &retired_shared)
+            .await
+            .expect("resolve succeeds")
+            .is_none(),
+        "a stored shared-conversation preference must fail closed"
     );
 
     // Personal-DM preference saved under the retired setup id.
@@ -4953,8 +5408,8 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         resolved_dm.destination.as_str()
     );
 
-    // Fail-closed arms: a tampered actor never resolves; an unrouted
-    // conversation never resolves (regardless of which id the ref carries).
+    // Fail-closed arms: a tampered actor never resolves; every other shared
+    // conversation fails closed too (regardless of which id the ref carries).
     let tampered_actor = ironclaw_slack_extension::slack_personal_dm_reply_target_binding_ref(
         &retired_installation,
         &agent,
@@ -4986,7 +5441,7 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
             .await
             .expect("resolve succeeds")
             .is_none(),
-        "an unrouted shared conversation must not resolve"
+        "a shared-conversation ref must not resolve"
     );
 }
 
@@ -5447,10 +5902,9 @@ async fn slash_dispatcher_bare_returns_prefixed_help() {
 /// scenario pins — `post_command_feedback` addresses the rejection notice at
 /// `envelope.external_conversation_ref()` directly (verified by reading
 /// `crates/product/ironclaw_assistant/src/run_delivery/observer.rs`), independent of
-/// any shared-conversation binding/allowlist resolution, so the notice
-/// targets the invoking channel even though `C777` is never configured on
-/// `slack_allowed_channels` (only `C123` is). No command executes and no
-/// turn is submitted.
+/// any shared-conversation binding resolution, so the notice targets the
+/// invoking shared channel `C777`. No command executes and no turn is
+/// submitted.
 #[tokio::test]
 async fn slash_dispatcher_outside_dm_is_rejected_direct_only() {
     let harness = build_harness(TurnMode::Complete {

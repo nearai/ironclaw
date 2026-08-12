@@ -285,25 +285,27 @@ where
     Ok(services)
 }
 
+/// Write-side skill mounts for the production path.
+///
+/// Delegates to [`crate::runtime_mounts::db_backed_skill_management_mount_view`] so this view and
+/// every reader are built from one decision about where skills live. They were three separate
+/// definitions over two trees, which is nearai/ironclaw#7168 — see that function for the table.
 pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/skills")?,
-            VirtualPath::new(format!(
-                "/tenants/{}/users/{}/skills",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str()
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/system/skills")?,
-            VirtualPath::new("/system/skills")?,
-            MountPermissions::read_only(),
-        ),
-    ])
+    crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
+}
+
+/// Read-side skill mounts for the hosted multi-tenant Postgres path.
+///
+/// Delegates to the same source as the writer, so `/skills` cannot resolve to a different tree than
+/// `skill_install` wrote to. Kept as a named function because this is the branch selected when a
+/// build supplies no `workspace_filesystems` of its own, and the name is what makes that branch
+/// searchable from the bug.
+pub(crate) fn production_skill_context_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    crate::runtime_mounts::db_backed_skill_context_mount_view(scope)
 }
 
 pub(crate) fn production_system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError>
@@ -339,6 +341,8 @@ pub(super) async fn build_backend_production(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
+        web_push_runtime_slot,
+        web_push_vapid_subject,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -412,7 +416,7 @@ pub(super) async fn build_backend_production(
                 (
                     Arc::new(ScopedFilesystem::new(
                         Arc::clone(&stores.filesystem),
-                        scoped_skill_context_mount_view,
+                        production_skill_context_mount_view,
                     )),
                     Arc::new(ScopedFilesystem::with_fixed_view(
                         Arc::clone(&stores.filesystem),
@@ -422,10 +426,6 @@ pub(super) async fn build_backend_production(
                 )
             }
         };
-    let skill_mounts =
-        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -476,6 +476,24 @@ pub(super) async fn build_backend_production(
     let outbound_stores = build_outbound_stores(Arc::clone(&stores.filesystem));
     let outbound_delivery_targets =
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
+    // Extension-owned catalog providers arrive opaquely on the channel
+    // bindings (e.g. web-push's constant per-user entry); register each under
+    // its extension id so composition never names a concrete extension.
+    for binding in &channel_extension_bindings {
+        if let Some(provider) = &binding.outbound_target_provider {
+            outbound_delivery_targets
+                .register_provider(
+                    binding.extension_id.as_str().to_string(),
+                    Arc::clone(provider),
+                )
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "outbound target provider registration failed for {}: {error}",
+                        binding.extension_id
+                    ),
+                })?;
+        }
+    }
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
     let extension_registry =
@@ -490,7 +508,7 @@ pub(super) async fn build_backend_production(
     } = build_budget_sinks();
     let process_journal_store = Arc::new(
         ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::clone(
-            &stores.filesystem,
+            &stores.process_journal_filesystem,
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
@@ -868,10 +886,13 @@ pub(super) async fn build_backend_production(
     let deployment_bindings = available_manifests
         .iter()
         .filter(|manifest| {
-            manifest
-                .channel
-                .as_ref()
-                .is_some_and(|channel| channel.inbound && channel.ingress.is_some())
+            manifest.channel.as_ref().is_some_and(|channel| {
+                // Ingress-bearing channels need deployment mounting before any
+                // installation exists; outbound-only channels (web push) need
+                // the same deployment binding so delivery resolution finds
+                // their adapter without an installation record.
+                (channel.inbound && channel.ingress.is_some()) || channel.outbound
+            })
         })
         .filter_map(|manifest| {
             channel_extension_bindings
@@ -996,6 +1017,15 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
+    let web_push = assemble_web_push(
+        web_push_runtime_slot.as_ref(),
+        web_push_vapid_subject.as_deref(),
+        &stores.filesystem,
+        &secret_store,
+        &channel_egress_scope,
+        &deployment_channels,
+    )
+    .await?;
     let lifecycle_continuation_facade: Arc<dyn LifecycleProductService> = Arc::new(
         ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
@@ -1317,7 +1347,6 @@ pub(super) async fn build_backend_production(
         channel_disconnect_slot,
         runtime_http_egress,
         ironhub_link_state,
-        skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
         skill_filesystem,
@@ -1350,6 +1379,7 @@ pub(super) async fn build_backend_production(
         standalone_wasm_runtime_credential_provider_captured,
         credential_refresh_worker,
         channel_extension_bindings,
+        web_push,
         deployment_channels,
         extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,
@@ -1360,9 +1390,150 @@ pub(super) async fn build_backend_production(
     })
 }
 
+/// Install the web-push runtime (subscription store) into the binary's slot
+/// and ensure the deployment VAPID credential exists, returning the handles
+/// the product surface consumes. `None` when the binary supplied no slot
+/// (compositions without the web-push channel).
+async fn assemble_web_push<S>(
+    slot: Option<&ironclaw_web_push::WebPushRuntimeSlot>,
+    vapid_subject: Option<&str>,
+    filesystem: &Arc<CompositeRootFilesystem>,
+    secret_store: &Arc<S>,
+    channel_egress_scope: &ironclaw_host_api::resource::ResourceScope,
+    deployment_channels: &Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
+) -> Result<Option<crate::factory::WebPushComposition>, RebornBuildError>
+where
+    S: ironclaw_secrets::SecretStorePort + ?Sized,
+{
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+    // One source of truth for admissible push-service hosts: the channel's
+    // own manifest egress declarations. An absent deployment binding leaves
+    // the list empty, so enrollment fails closed rather than admitting
+    // endpoints delivery could never reach.
+    let allowed_push_hosts: Vec<String> = deployment_channels
+        .extension(ironclaw_web_push::WEB_PUSH_EXTENSION_ID)
+        .and_then(|binding| {
+            binding.resolved.channel.as_ref().map(|channel| {
+                channel
+                    .egress
+                    .iter()
+                    .map(|egress| egress.host.clone())
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    if allowed_push_hosts.is_empty() {
+        tracing::debug!(
+            target: "ironclaw::web_push",
+            "web-push deployment binding is missing or declares no egress hosts; browser \
+             enrollment will fail closed"
+        );
+    }
+    let subscriptions: Arc<dyn ironclaw_web_push::WebPushSubscriptionStore> =
+        Arc::new(ironclaw_web_push::FilesystemWebPushSubscriptionStore::new(
+            crate::wrap_scoped(Arc::clone(filesystem)),
+        ));
+    slot.install(Arc::new(ironclaw_web_push::WebPushRuntime {
+        subscriptions: Arc::clone(&subscriptions),
+    }))
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("web push runtime slot could not be installed: {error}"),
+    })?;
+
+    let vapid_handle = ironclaw_host_api::ids::SecretHandle::new(
+        ironclaw_web_push::WEB_PUSH_VAPID_CREDENTIAL_HANDLE,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("web push VAPID handle is invalid: {error}"),
+    })?;
+    // Ensure the deployment VAPID keypair exists, then advertise the public
+    // key from the CANONICAL stored material — not from a locally-generated
+    // copy. The store has no create-if-absent primitive and permits
+    // replacement, so two replicas cold-starting against a shared empty store
+    // can each generate and `put` a distinct keypair (last write wins). By
+    // always reading back after ensuring presence, every replica converges on
+    // whichever keypair won the race and hands browsers the matching
+    // `applicationServerKey`; the only residual is a sub-second window on the
+    // losing replica between its own `put` and this read-back. A true
+    // single-writer election would need a create-if-absent secret-store
+    // primitive (follow-up).
+    let existing = secret_store
+        .metadata(channel_egress_scope, &vapid_handle)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("web push VAPID credential lookup failed: {error}"),
+        })?;
+    if existing.is_none() {
+        let subject = vapid_subject
+            .map(str::to_string)
+            .unwrap_or_else(|| "mailto:webpush@ironclaw.invalid".to_string());
+        let generated =
+            ironclaw_web_push::generate_vapid_key_material(&subject).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("web push VAPID key generation failed: {error}"),
+                }
+            })?;
+        secret_store
+            .put(
+                channel_egress_scope.clone(),
+                vapid_handle.clone(),
+                ironclaw_secrets::SecretMaterial::from(generated.material_json),
+                None,
+            )
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("web push VAPID credential seeding failed: {error}"),
+            })?;
+    }
+    // Read back the canonical material and validate its shape before exposing
+    // the public key — a corrupt persisted blob fails composition here rather
+    // than surfacing later as a push-service rejection on every delivery.
+    let lease = secret_store
+        .lease_once(channel_egress_scope, &vapid_handle)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("web push VAPID credential lease failed: {error}"),
+        })?;
+    let material = secret_store
+        .consume(channel_egress_scope, lease.id)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("web push VAPID credential read failed: {error}"),
+        })?;
+    let parsed: ironclaw_host_api::http::VapidCredentialMaterialV1 =
+        serde_json::from_str(secrecy::ExposeSecret::expose_secret(&material)).map_err(|error| {
+            // Log the bound serde cause server-side (it names the malformed
+            // field/offset) before mapping to a sanitized boot error — the
+            // material carries the private key, so the cause must not ride the
+            // returned error's message.
+            tracing::warn!(
+                target: "ironclaw::web_push",
+                error = %error,
+                "stored web push VAPID credential material failed to parse"
+            );
+            RebornBuildError::InvalidConfig {
+                reason: "stored web push VAPID credential material is malformed".to_string(),
+            }
+        })?;
+    parsed
+        .validate_shape()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("stored web push VAPID credential material is invalid: {error}"),
+        })?;
+    let vapid_public_key = parsed.public_key_b64url;
+    Ok(Some(crate::factory::WebPushComposition {
+        subscriptions,
+        vapid_public_key,
+        allowed_push_hosts,
+    }))
+}
+
 async fn finish_production_backend(
     context: RebornProductionBuildContext,
     filesystem: Arc<CompositeRootFilesystem>,
+    process_journal_filesystem: Option<Arc<CompositeRootFilesystem>>,
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
@@ -1375,7 +1546,8 @@ async fn finish_production_backend(
         secret_master_key,
         event_store_config,
     )
-    .await?;
+    .await?
+    .with_process_journal_filesystem(process_journal_filesystem);
     build_backend_production(context, stores, trigger_repository, leader_lock).await
 }
 
@@ -1412,6 +1584,8 @@ pub(super) async fn build_libsql_production(
     finish_production_backend(
         context,
         filesystem,
+        // libSQL is single-writer by design; a second handle buys nothing.
+        None,
         trigger_repository,
         secret_master_key,
         event_store_config,
@@ -1423,6 +1597,7 @@ pub(super) async fn build_libsql_production(
 pub(super) async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
+    process_journal_pool: Option<deadpool_postgres::Pool>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
@@ -1447,9 +1622,29 @@ pub(super) async fn build_postgres_production(
         database_filesystem,
         "production-postgres-reborn-state",
     )?;
+    // Seed the built-in skills into the DATABASE-backed `/system/skills`.
+    //
+    // Hosted multi-tenant production shipped with zero built-in skills. The bundled seeder is only
+    // reachable from `bootstrap_standalone_host`, which this path does not run (correctly -- it writes
+    // through a host-disk filesystem, and a tenant here has no host disk). `/system/skills` is mounted
+    // here, to the database, and nothing ever wrote to it, so Settings -> Skills read an empty root and
+    // said "No skills installed" while local-dev listed all 32.
+    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
+        filesystem.as_ref(),
+        &ironclaw_host_api::path::VirtualPath::new("/system/skills")?,
+    )
+    .await?;
+    let process_journal_filesystem = process_journal_pool
+        .map(|pool| {
+            crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+                PostgresRootFilesystem::new(pool),
+            ))
+        })
+        .transpose()?;
     finish_production_backend(
         context,
         filesystem,
+        process_journal_filesystem,
         trigger_repository,
         secret_master_key,
         ironclaw_event_store::RebornEventStoreConfig::PostgresPool {

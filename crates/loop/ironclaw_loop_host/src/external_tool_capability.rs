@@ -244,6 +244,10 @@ impl ExternalToolCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for ExternalToolCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.inner.requires_ordered_batch_invocation()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner_tool_definitions()?;
         let surface = self.surface.lock().map_err(|_| surface_lock_error())?;

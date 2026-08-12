@@ -217,9 +217,13 @@ The record is keyed by scope (`DeliveryDefaultScope`, effectively
 - `notification_targets: Vec<OutboundDeliveryTargetId>` — an explicit,
   user-configured **set** of 0..8 catalog targets (`NOTIFICATION_TARGETS_CAP`)
   that receive gate prompts, auth prompts, and failure notices for a
-  background/routine run with no live source route. Empty means "notification
-  channels are the web app only" — there is no dedicated in-app pseudo-target
-  to configure instead.
+  background/routine run with no live source route. Empty means "no external
+  notification route" — the run's reply still lands in its own thread, and
+  there is no dedicated in-app pseudo-target to configure instead. (✎
+  2026-08-08: the `web-push` catalog target — browser push to the user's
+  enrolled devices — is a real, provider-backed external target selectable in
+  this set like any channel target; it did not reintroduce the retired
+  in-app pseudo-target.)
 - `legacy_notification_target: Option<ReplyTargetBindingRef>` — read-migration
   input only (serialized under the historical wire name `final_reply_target`
   so a pre-migration row still deserializes). Nothing writes it.

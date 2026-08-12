@@ -1,6 +1,6 @@
 # `crates/extensions/` — everything "installable package"
 
-**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, both channel packages) · **Crates:** 8 (re-derive: `ls -d crates/extensions/*/` for the family crates, `ls -d crates/extensions/packages/*/` for the 14 packages, of which 4 carry crates) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
+**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 10 (re-derive: `ls -d crates/extensions/*/` for the family crates, `ls -d crates/extensions/packages/*/` for the 15 packages, of which 5 carry crates) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
 
 ## What this family is
 
@@ -120,6 +120,7 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
 | `slack/` | `slack` | 8 tools + channel | `slack` | wasm (tools) + first-party adapter | crate `ironclaw_slack_extension` + `wasm/` |
 | `telegram/` | `telegram` | channel only (no tools, no auth recipe — deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
+| `web-push/` | `web-push` | channel only (outbound-only browser push; no ingress, no pairing — VAPID key material auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_push_extension` |
 | `web-access/` | `web-access` | 2 tools | — | first_party | data-only (executor: `extension_support::web_access`) |
 
 Data-only packages ship through the `PACKAGES` inventory in

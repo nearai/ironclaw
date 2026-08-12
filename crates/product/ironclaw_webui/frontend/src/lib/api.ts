@@ -403,6 +403,39 @@ export function setNotificationChannels({ targetIds } = {}) {
   });
 }
 
+// --- Web push (browser notifications) ---
+
+export function getWebPushStatus() {
+  return apiFetch(`${V2_BASE}/web-push/status`);
+}
+
+export function subscribeWebPush({ endpoint, keys, userAgent } = {}) {
+  if (!endpoint) {
+    return Promise.reject(new Error("endpoint is required"));
+  }
+  if (!keys || !keys.p256dh || !keys.auth) {
+    return Promise.reject(new Error("keys.p256dh and keys.auth are required"));
+  }
+  return apiFetch(`${V2_BASE}/web-push/subscriptions`, {
+    method: "POST",
+    body: JSON.stringify({
+      endpoint,
+      keys: { p256dh: keys.p256dh, auth: keys.auth },
+      user_agent: userAgent || undefined,
+    }),
+  });
+}
+
+export function unsubscribeWebPush({ endpoint } = {}) {
+  if (!endpoint) {
+    return Promise.reject(new Error("endpoint is required"));
+  }
+  return apiFetch(`${V2_BASE}/web-push/subscriptions/remove`, {
+    method: "POST",
+    body: JSON.stringify({ endpoint }),
+  });
+}
+
 // --- Operator logs ---
 
 export function queryLogs({

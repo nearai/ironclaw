@@ -411,6 +411,11 @@ impl RefreshingCapabilityPort {
 
 #[async_trait::async_trait]
 impl LoopCapabilityPort for RefreshingCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        self.current_port()
+            .map_or(true, |port| port.requires_ordered_batch_invocation())
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.current_port()?.tool_definitions()
     }

@@ -45,7 +45,20 @@ pub const MAX_MODELS_IN_STATS: usize = 64;
 // may each contain both bounded arguments and a bounded result.
 pub const DEFAULT_MAX_ACTIVITY_ENTRIES: usize = 1_000;
 pub const DEFAULT_MAX_TRACKED_SESSIONS: usize = 8;
-pub const DEFAULT_MAX_RETAINED_RUNS_PER_SESSION: usize = 2;
+/// Retained runs per `(tenant, user, thread)`, and therefore how many turns
+/// back the inspector can actually answer for.
+///
+/// This is a hard ceiling as well as a default: `DiagnosticStoreLimits` may
+/// only shrink a limit, never raise it, so capture can never be inflated at
+/// runtime. Capture is unconditional — it runs whether or not an operator
+/// opened the inspector — so each increment is resident process memory, up to
+/// roughly 2.5 MiB per run once bounded prompt and tool payloads are counted.
+///
+/// The browser's turn-navigation window must not exceed this, or navigation
+/// offers turns the host cannot serve. `MAX_INSPECTOR_RUNS_PER_THREAD` in
+/// `crates/product/ironclaw_webui/frontend/src/pages/chat/inspector/inspector-activity.ts`
+/// mirrors it, pinned by `reborn_inspector_retention_alignment`.
+pub const DEFAULT_MAX_RETAINED_RUNS_PER_SESSION: usize = 4;
 pub const DEFAULT_MAX_LIVE_UPDATE_SCOPES: usize =
     DEFAULT_MAX_TRACKED_SESSIONS * DEFAULT_MAX_RETAINED_RUNS_PER_SESSION;
 pub const DEFAULT_MAX_MODEL_CALLS_PER_RUN: usize = 128;
@@ -1546,6 +1559,40 @@ mod tests {
             error,
             "diagnostic text original byte length is smaller than source text",
         );
+    }
+
+    #[test]
+    fn streamed_tool_updates_never_serialize_arguments_or_results() {
+        let marker = "must-only-exist-in-the-dedicated-detail-response";
+        let detail = ToolExecutionDiagnostic::new(
+            CapabilityActivityId::new(),
+            None,
+            "builtin.echo",
+            Some(format!(r#"{{"secret":"{marker}"}}"#)),
+            Some(marker.to_string()),
+            ToolExecutionStatus::Succeeded,
+            Some(7),
+            None,
+            None,
+            None,
+        );
+        let result_truncated = detail.result_truncated();
+        let update = DiagnosticUpdateKind::ToolExecutionUpdated {
+            activity_id: detail.activity_id,
+            model_call_id: detail.model_call_id,
+            capability_name: detail.capability_name,
+            status: detail.status,
+            duration_ms: detail.duration_ms,
+            output_bytes: detail.output_bytes,
+            result_truncated,
+        };
+
+        let serialized = serde_json::to_string(&update).expect("serialize tool update");
+        assert!(!serialized.contains(marker));
+        assert!(!serialized.contains("arguments"));
+        assert!(!serialized.contains("result\""));
+        assert!(serialized.contains("output_bytes"));
+        assert!(serialized.contains("result_truncated"));
     }
 
     #[test]

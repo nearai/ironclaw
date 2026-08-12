@@ -149,6 +149,105 @@ async fn install_rejects_name_mismatch() {
     assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
 }
 
+/// A skill discovery would skip must never be persisted: the missing description is derived.
+///
+/// `FilesystemSkillBundleSource::validate_bundle_manifest` rejects a bundle whose `description:` is
+/// empty (`InvalidSkillBundle`) and only `warn!`s about it, so an install without one used to succeed
+/// and produce a skill that was listed in Settings, readable by name, and skipped by every discovery
+/// pass forever.
+///
+/// Measured with a real model on a live local-dev server: asked to save a reusable skill, it wrote
+/// frontmatter carrying `name:` alone. The install reported success, Settings listed the skill, and
+/// the next conversation logged `skipping skill bundle: its manifest could not be validated` and
+/// answered without it (nearai/ironclaw#7168). The name-only manifest parses cleanly and yields an
+/// empty description, which is exactly why nothing errored.
+///
+/// Repaired rather than refused: a refusal reaches the model as `InputEncode` / "the tool input could
+/// not be encoded", naming neither the field nor the fix, so the authoring turn is lost instead of
+/// corrected.
+#[tokio::test]
+async fn install_derives_a_missing_description_so_discovery_cannot_skip_the_skill() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    let installed = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: "---\nname: clinical-si-converter\n---\n\nConvert lab values between US conventional and SI units.\n",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .expect("a name-only manifest installs, with its description derived");
+    assert_eq!(installed.name, "clinical-si-converter");
+
+    let written = read_file(
+        filesystem.as_ref(),
+        "/projects/skills/clinical-si-converter/SKILL.md",
+    )
+    .await;
+    let parsed = crate::parse_skill_md(&written).expect("stored SKILL.md parses");
+    assert!(
+        !parsed.manifest.description.trim().is_empty(),
+        "the stored manifest must carry a description, or discovery skips this bundle forever and \
+         nothing reports it: {written}"
+    );
+    assert_eq!(
+        parsed.manifest.name, "clinical-si-converter",
+        "repairing the description must not disturb the name discovery matches on"
+    );
+    assert!(
+        parsed.manifest.description.contains("Convert lab values"),
+        "the derived description comes from the skill's own opening prose; got {:?}",
+        parsed.manifest.description
+    );
+    assert!(
+        written.contains("Convert lab values between US conventional and SI units."),
+        "the body must be passed through untouched: {written}"
+    );
+}
+
+/// The gate must not refuse a well-formed skill, which would break self-creation outright.
+#[tokio::test]
+async fn install_accepts_a_manifest_with_a_description() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    let installed = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md(
+                "clinical-si-converter",
+                "Convert clinical lab values between US conventional and SI units.",
+                "PROMPT",
+            ),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .expect("a described manifest installs");
+    assert_eq!(installed.name, "clinical-si-converter");
+
+    // An author-supplied description must survive verbatim: deriving over the top of a real one
+    // would silently degrade routing for every skill.
+    let written = read_file(
+        filesystem.as_ref(),
+        "/projects/skills/clinical-si-converter/SKILL.md",
+    )
+    .await;
+    let parsed = crate::parse_skill_md(&written).expect("stored SKILL.md parses");
+    assert_eq!(
+        parsed.manifest.description,
+        "Convert clinical lab values between US conventional and SI units."
+    );
+}
+
 #[tokio::test]
 async fn install_accepts_named_plain_markdown_content() {
     let filesystem = Arc::new(InMemoryBackend::default());
@@ -173,7 +272,11 @@ async fn install_accepts_named_plain_markdown_content() {
         "/projects/skills/qa-smoke-skill/SKILL.md",
     )
     .await;
-    assert!(written.starts_with("---\nname: qa-smoke-skill\n---\n\n"));
+    // Synthesized frontmatter must carry a description, not `name:` alone. `name:` alone is exactly
+    // the shape discovery skips, so the previous expectation here pinned a skill that installed
+    // successfully and could never be activated (nearai/ironclaw#7168).
+    assert!(written.starts_with("---\nname: qa-smoke-skill\ndescription: "));
+    assert!(written.contains("\n---\n\n"));
     assert!(written.contains("Say \"qa skill loaded\""));
 
     let listed = list_skills(&context).await.unwrap();
