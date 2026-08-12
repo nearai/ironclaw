@@ -1975,6 +1975,13 @@ fn terminal_ack_for_error(error: &ProductSurfaceFailure) -> Option<ProductInboun
             ProductRejectionKind::PolicyDenied,
             reason.clone(),
         ))),
+        ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason,
+            retryable: false,
+        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+            ProductRejectionKind::InvalidRequest,
+            reason.clone(),
+        ))),
         ProductSurfaceFailure::InboundAttachmentFailed {
             reason,
             retryable: false,
@@ -1993,6 +2000,9 @@ fn terminal_ack_for_error(error: &ProductSurfaceFailure) -> Option<ProductInboun
         | ProductSurfaceFailure::Transient { .. }
         | ProductSurfaceFailure::BeforeInboundPolicyFailed {
             permanent: false, ..
+        }
+        | ProductSurfaceFailure::InboundModelResolutionFailed {
+            retryable: true, ..
         }
         | ProductSurfaceFailure::InboundAttachmentFailed {
             retryable: true, ..

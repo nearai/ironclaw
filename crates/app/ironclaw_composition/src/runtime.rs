@@ -556,6 +556,8 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) llm_config_service:
+        Option<Arc<dyn ironclaw_product_contracts::operator_llm::LlmConfigService>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
@@ -1156,6 +1158,7 @@ impl RebornRuntime {
                     thread_service,
                     turn_coordinator,
                     input_enqueue: self.webui_input_enqueue(),
+                    llm_config: self.llm_config_service.clone(),
                     approval_interaction: None,
                     auth_interaction: None,
                     identity,
@@ -3978,12 +3981,19 @@ pub(crate) async fn build_runtime_with_resource_governor(
         projection_services
     };
 
+    let llm_config_service = crate::product_surface::compose_llm_config_service(
+        boot.as_ref(),
+        Arc::clone(&services.secret_store),
+        Arc::clone(&scoped_filesystem),
+        llm_reload.as_ref(),
+    );
     let started_channel_host = crate::extension_host_assembly::build_runtime_channel_host(
         &services,
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
             turn_coordinator: Arc::clone(&planned_turn_coordinator),
             input_enqueue: Arc::clone(&host_input_enqueue),
+            llm_config: llm_config_service.clone(),
             approval_interaction: Arc::clone(&approval_interaction_service),
             auth_interaction: Arc::clone(&auth_interaction_service),
             thread_scope: &thread_scope,
@@ -4316,6 +4326,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: Arc::clone(&services.secret_store),
         scoped_filesystem,
+        llm_config_service,
         admin_secret_provisioner,
         project_service,
         diagnostic_store,

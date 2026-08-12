@@ -27,6 +27,8 @@ use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
     ProductSourceChannel,
 };
+use ironclaw_product_contracts::operator_llm::{LlmConfigService, LlmConfigServiceError};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
@@ -245,6 +247,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     thread_service: T,
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    llm_config: Option<Arc<dyn LlmConfigService>>,
     input_enqueue: Arc<dyn HostInputEnqueuePort>,
 }
 
@@ -270,8 +273,38 @@ where
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            llm_config: None,
             input_enqueue,
         }
+    }
+
+    /// Resolve explicit model hints and caller-scoped saved preferences before
+    /// a channel message crosses the durable acceptance boundary.
+    pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
+        self.llm_config = Some(llm_config);
+        self
+    }
+
+    async fn resolve_user_model(
+        &self,
+        binding: &ResolvedBinding,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, ProductSurfaceFailure> {
+        let Some(llm_config) = self.llm_config.as_ref() else {
+            return Ok(requested_model);
+        };
+        llm_config
+            .resolve_user_model(
+                ProductSurfaceCaller::new(
+                    binding.tenant_id.clone(),
+                    binding.actor_user_id.clone(),
+                    binding.agent_id.clone(),
+                    binding.project_id.clone(),
+                ),
+                requested_model,
+            )
+            .await
+            .map_err(inbound_model_resolution_failure)
     }
 
     /// Wire the port that lands inline attachment bytes into project storage
@@ -519,9 +552,23 @@ where
             )
             .await?;
 
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
-            .await
-            .map(InboundUserMessageDispatch::Accepted)
+        let ProductInboundPayload::UserMessage(payload) = envelope_for_turn.payload() else {
+            return Err(ProductSurfaceFailure::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        let requested_model = self
+            .resolve_user_model(&prepared_for_turn.binding, payload.requested_model.clone())
+            .await?;
+
+        self.accept_prepared_user_message(
+            prepared_for_turn,
+            envelope_for_turn,
+            attachments,
+            requested_model,
+        )
+        .await
+        .map(InboundUserMessageDispatch::Accepted)
     }
 
     async fn resolve_inbound_attachments(
@@ -695,17 +742,30 @@ where
             return Ok(None);
         };
 
-        submit_or_replay_accepted_message(
-            &self.thread_service,
-            &self.turn_coordinator,
-            self.input_enqueue.as_ref(),
+        let mut handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
             replay,
             prepared.submit_idempotency_key.clone(),
             envelope.received_at(),
             prepared,
-        )
-        .await
-        .map(Some)
+        )?;
+        if let ProductInboundTurnHandoff::NeedsSubmission(submission) = &mut handoff {
+            let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+                return Err(ProductSurfaceFailure::UnsupportedActionKind {
+                    kind: "non_user_message".into(),
+                });
+            };
+            submission.requested_model = self
+                .resolve_user_model(&prepared.binding, payload.requested_model.clone())
+                .await?;
+        }
+        handoff
+            .submit_or_replay(
+                &self.thread_service,
+                &self.turn_coordinator,
+                self.input_enqueue.as_ref(),
+            )
+            .await
+            .map(Some)
     }
 
     async fn accept_prepared_user_message(
@@ -713,6 +773,7 @@ where
         prepared: PreparedUserMessage,
         envelope: &ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
+        requested_model: Option<String>,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
@@ -814,7 +875,7 @@ where
                 adapter_id: prepared.adapter_id,
                 source_channel: prepared.source_channel,
                 surface_type: prepared.surface_type,
-                requested_model: payload.requested_model.clone(),
+                requested_model,
                 channel_context: payload.channel_context.clone(),
             }))
             .submit_or_replay(
@@ -904,27 +965,27 @@ fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFail
     }
 }
 
-async fn submit_or_replay_accepted_message<T, C>(
-    thread_service: &T,
-    turn_coordinator: &C,
-    input_enqueue: &dyn HostInputEnqueuePort,
-    replay: AcceptedInboundMessageReplay,
-    submit_idempotency_key: String,
-    received_at: DateTime<Utc>,
-    prepared: &PreparedUserMessage,
-) -> Result<InboundTurnOutcome, ProductSurfaceFailure>
-where
-    T: SessionThreadService,
-    C: TurnCoordinator,
-{
-    ProductInboundTurnHandoff::from_replay_with_prepared(
-        replay,
-        submit_idempotency_key,
-        received_at,
-        prepared,
-    )?
-    .submit_or_replay(thread_service, turn_coordinator, input_enqueue)
-    .await
+fn inbound_model_resolution_failure(error: LlmConfigServiceError) -> ProductSurfaceFailure {
+    match error {
+        LlmConfigServiceError::InvalidRequest { reason, .. } => {
+            ProductSurfaceFailure::InboundModelResolutionFailed {
+                reason,
+                retryable: false,
+            }
+        }
+        LlmConfigServiceError::NotFound => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "requested model was not found".into(),
+            retryable: false,
+        },
+        LlmConfigServiceError::Unavailable => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "model selection is temporarily unavailable".into(),
+            retryable: true,
+        },
+        LlmConfigServiceError::Internal => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "model selection failed".into(),
+            retryable: false,
+        },
+    }
 }
 
 enum ProductInboundTurnHandoff {

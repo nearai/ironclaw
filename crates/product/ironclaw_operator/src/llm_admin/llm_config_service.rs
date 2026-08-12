@@ -882,12 +882,12 @@ impl LlmConfigService for RebornLlmConfigService {
             .user_model_preference_store
             .as_ref()
             .ok_or(LlmConfigServiceError::Unavailable)?;
-        let policy = self
-            .active_model_policy(&caller)
-            .await?
-            .ok_or(LlmConfigServiceError::Unavailable)?;
         let model = match request.model {
             Some(model) => {
+                let policy = self
+                    .active_model_policy(&caller)
+                    .await?
+                    .ok_or(LlmConfigServiceError::Unavailable)?;
                 let model = validated_model_id("model", &model)?;
                 if !policy
                     .allowed_models
@@ -1961,6 +1961,61 @@ mod tests {
                 .await
                 .expect("workspace default"),
             Some("model-a".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_preference_can_be_reset_after_the_active_provider_changes() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        service
+            .set_user_model_policy(
+                user.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+        service
+            .admin()
+            .set_provider("openai", Some("gpt-test"))
+            .expect("switch active provider");
+
+        assert!(matches!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-a".to_string()),
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::Unavailable)
+        ));
+        assert_eq!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest { model: None },
+                )
+                .await
+                .expect("clear stale preference"),
+            UserModelPreference { model: None },
+        );
+        assert_eq!(
+            service
+                .user_model_preference(user)
+                .await
+                .expect("read cleared preference"),
+            UserModelPreference { model: None },
         );
     }
 

@@ -1169,25 +1169,27 @@ mod tests {
     #[test]
     fn server_only_diagnostics_never_enter_product_visible_operator_logs() {
         let token = uuid::Uuid::new_v4().to_string();
-        let message = format!("raw backend cause {token}");
+        let direct_message = format!("direct raw backend cause {token}");
+        let nested_message = format!("nested raw backend cause {token}");
+        let subscriber = tracing_subscriber::registry().with(OperatorLogLayer);
+        let dispatch = tracing::Dispatch::new(subscriber);
 
-        capture_tracing_log(
-            &tracing::Level::ERROR,
-            SERVER_DIAGNOSTIC_TARGET,
-            message.clone(),
-            Vec::new(),
-        );
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::error!(
+                target: SERVER_DIAGNOSTIC_TARGET,
+                message = direct_message.as_str()
+            );
+            tracing::error!(
+                target: "ironclaw_server_diagnostics::filesystem",
+                message = nested_message.as_str()
+            );
+        });
 
-        let response = operator_log_buffer().query(
-            RebornLogQueryRequest::default()
-                .set_limit(10)
-                .set_target("ironclaw_server_diagnostics"),
-        );
+        let response = operator_log_buffer().query(RebornLogQueryRequest::default().set_limit(500));
         assert!(
-            response
-                .entries
-                .iter()
-                .all(|entry| entry.message != message),
+            response.entries.iter().all(|entry| {
+                !entry.message.contains(&direct_message) && !entry.message.contains(&nested_message)
+            }),
             "server-only causes must not cross into the product-visible log buffer"
         );
     }
