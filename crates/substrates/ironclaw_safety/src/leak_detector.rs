@@ -45,6 +45,9 @@ use regex::Regex;
 
 const MAX_BARE_JWT_CANDIDATE_LEN: usize = 64 * 1024;
 
+/// Replacement text emitted when [`LeakDetector`] redacts a detected secret.
+pub const LEAK_DETECTOR_REDACTION_MARKER: &str = "[REDACTED]";
+
 /// Action to take when a leak is detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeakAction {
@@ -520,7 +523,7 @@ fn apply_redactions(content: &str, ranges: &[Range<usize>]) -> String {
         if range.start > last_end {
             result.push_str(&content[last_end..range.start]);
         }
-        result.push_str("[REDACTED]");
+        result.push_str(LEAK_DETECTOR_REDACTION_MARKER);
         last_end = range.end;
     }
 

@@ -1,10 +1,8 @@
 use std::sync::LazyLock;
 
-use ironclaw_safety::LeakDetector;
+use ironclaw_safety::{LEAK_DETECTOR_REDACTION_MARKER, LeakDetector};
 
 use crate::config::{WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER};
-
-const LEAK_DETECTOR_REDACTION_MARKER: &str = "[REDACTED]";
 
 static LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 
