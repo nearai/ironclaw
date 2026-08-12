@@ -457,6 +457,15 @@ h1,h2,h3,p{margin:0}
 .v-foundational .sugg:hover svg{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border));color:var(--v2-accent-text)}
 .v-foundational .composer{border-radius:20px;background:var(--v2-card-bg);min-height:120px;padding:14px 16px}
 .v-foundational .composer .field{min-height:62px;font-size:15px}
+/* item 1: no agent-mode selector in Foundational (kept in Vision) */
+.v-foundational .modebtn,.v-foundational .modemenu{display:none}
+/* item 3: one active job at a time — the other cards are disabled while one runs (Foundational) */
+.tcard.is-locked{opacity:.42;pointer-events:none;filter:saturate(.55)}
+/* item 6: completed / error status chips on the card action row */
+.acts .cstat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600}
+.acts .cstat.ok{color:var(--v2-positive-text)}
+.acts .cstat.err{color:var(--v2-danger-text)}
+.acts .cstat svg{width:14px;height:14px}
 
 /* ============================================================
    Thread + Plan scenes
@@ -896,6 +905,8 @@ h1,h2,h3,p{margin:0}
   var ICO_REFRESH='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
   var CARD_X='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   var CONNECT_ICO='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>';
+  var ICO_PLUS='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
+  var ICO_ALERT='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>';
   function cardHTML(c,idx,state,opts){
     opts=opts||{};
     var v=(state==='completed')?c.done:c.sug;
@@ -903,17 +914,27 @@ h1,h2,h3,p{margin:0}
     var head='<div class="thd">'+logo+'<b class="ttl">'+v.title+'</b></div>';
     var xbtn='<button class="cardx" data-act="cancel" data-i="'+idx+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button>';
     var connectable=c.conn&&c.conn.length;
+    var found=(version==='foundational');
+    var anyRunning=found&&cardStates.some(function(s){return s==='running';});
+    var locked=anyRunning&&state!=='running';   // item 3: one active job at a time — others disabled (Foundational)
     var body,acts;
     if(state==='unconnected'&&connectable){
       body='<div class="tdesc conhint">Connect '+c.label+' to run this suggestion.</div>';
       acts='<div class="acts"><button class="approve" data-act="connect" data-i="'+idx+'">'+CONNECT_ICO+(c.conn.length===1?('Connect '+c.label):('Connect '+c.conn.length+' tools'))+'</button></div>';
     } else {
       body='<div class="tdesc">'+v.desc+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
-      if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
-      else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
-      else acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
+      if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>'+(found?'Working — activity in the thread':'Automating…')+'</span></div>';
+      else if(state==='failed') acts='<div class="acts"><span class="cstat err">'+ICO_ALERT+'Couldn’t complete</span><button class="txt" data-act="approve" data-i="'+idx+'">'+ICO_REFRESH+'Try again</button></div>';   // item 6: lightweight error/incomplete status
+      else if(state==='completed') acts=found
+        ? (scheduled[idx]
+            ? '<div class="acts"><span class="cstat ok"><span class="bdot"></span>Automation scheduled · Automations</span></div>'
+            : '<div class="acts"><span class="cstat ok"><span class="bdot"></span>Completed</span><button class="txt" data-act="automation" data-i="'+idx+'">'+ICO_PLUS+'Automation</button></div>')   // items 4 & 6: completed status + "+ Automation" (no Revert/Modify)
+        : '<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
+      else acts=found
+        ? '<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button></div>'   // item 6: Modify deprecated in Foundational
+        : '<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
     }
-    var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'');
+    var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'')+(locked?' is-locked':'');
     var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
     return '<div class="'+cls+'" data-i="'+idx+'">'+xbtn+head+body+acts+spark+'</div>';
   }
@@ -925,7 +946,8 @@ h1,h2,h3,p{margin:0}
   var agentMode='Suggest';
   function modeProposed(){ return agentMode==='Suggest'||agentMode==='Plan'; }
   var cardStates=CARDS.map(function(){ return 'suggested'; });
-  function resetCardStates(){ cardStates=CARDS.map(function(){ return modeProposed()?'suggested':'completed'; }); }
+  var scheduled=CARDS.map(function(){ return false; });   // item 4: "+ Automation" clicked → a scheduled automation was created
+  function resetCardStates(){ cardStates=CARDS.map(function(){ return modeProposed()?'suggested':'completed'; }); scheduled=CARDS.map(function(){ return false; }); }
   function visibleIdx(){ var v=[]; for(var i=0;i<CARDS.length;i++){ if(cardStates[i]!=='dismissed') v.push(i); } return v; }
   function renderCards(revealFirstOnly){
     var vis=visibleIdx(),html='',dhtml='';
@@ -943,6 +965,7 @@ h1,h2,h3,p{margin:0}
         if(a==='connect'){ openAuth(CARDS[i].conn, null, function(){ cardStates[i]='suggested'; render(); }); return; }
         if(a==='modify'){ openModify(CARDS[i].sug.title); return; }
         if(a==='approve'){ cardStates[i]='running'; render(); setTimeout(function(){ if(cardStates[i]==='running'){ cardStates[i]='completed'; render(); } },950); return; }
+        if(a==='automation'){ scheduled[i]=true; render(); return; }   // item 4: create scheduled automation (via prompt injection → automations dashboard)
         if(a==='cancel') cardStates[i]='dismissed';
         else if(a==='revert') cardStates[i]='suggested';
         else return;
@@ -1018,7 +1041,7 @@ h1,h2,h3,p{margin:0}
     0:'The <b>cold start</b>, enterprise. Tools are pre-connected by the workspace admin — no connect step; the screen goes straight to a prompt.',
     1:'The <b>cold start</b>, enterprise. Tools are pre-connected by the workspace admin — no connect step; the screen goes straight to a prompt.'
   };
-  // Agent modes per version (Foundational is scoped to Suggest / Plan / Auto Approve)
+  // Agent modes per version — Vision only; Foundational (v1) has no agent-mode selector (item 1)
   var MODES={
     vision:[['Suggest','Always ask before taking any action.'],['Plan','Draft a plan of tasks and wait for approval.'],['Auto','Auto-run approved task types without asking.'],['Bypass','Full automation — act without approvals. Use with care.']],
     foundational:[['Suggest','Always ask for approval before performing a task or automation.'],['Plan','Describe the activity and the steps needed, then wait for approval.'],['Auto Approve','Auto-approve task types you\'ve already approved, plus any task you request.']]
@@ -1056,7 +1079,7 @@ h1,h2,h3,p{margin:0}
     else h=HERO[step];
     heroTitle.textContent=h[0];heroSub.textContent=h[1];
     capN.textContent='Beat '+step+' / '+MAX;
-    capC.innerHTML = isVision ? CAP[step] : (prop ? FOUND_CAP[step] : '<b>Foundational · Auto Approve</b> — approved task types run automatically; these are already done. Dismiss (×) or type to ask for more.');
+    capC.innerHTML = isVision ? CAP[step] : FOUND_CAP[step];
     var coach=(dir==='coach'),empty=(step<=1),working=(isVision&&step===2);
     show(connectBlock, empty && connectState==='open' && isVision);
     show(ghostBlock, empty && coach && isVision);

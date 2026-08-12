@@ -11,7 +11,7 @@ This is the plan for taking OOBE from design into shipped product, **in two phas
 
 ## What this proposes
 
-The WebChat v2 landing view today is a hero + composer + three static suggestion chips ([`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). A brand-new user has no idea what IronClaw can take off their plate, and no first moment of value. The OOBE work fills that gap with **suggested task cards** the agent surfaces on first run — each connects a tool, then becomes an approve / modify / dismiss proposal, then flips to a "done for you" result.
+The WebChat v2 landing view today is a hero + composer + three static suggestion chips ([`empty-state.tsx`](../../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). A brand-new user has no idea what IronClaw can take off their plate, and no first moment of value. The OOBE work fills that gap with **suggested task cards** the agent surfaces on first run — each connects a tool, then becomes an approve / modify / dismiss proposal, then flips to a "done for you" result.
 
 The proposal splits that into two tracks so the near-term build is decoupled from the north-star:
 
@@ -57,7 +57,7 @@ The single most important framing for review: **how much of Foundational is new.
 
 | Capability | Foundational basis | Classification |
 |---|---|---|
-| Landing surface the cards mount on | [`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) (hero + composer) | **Extend shipped** |
+| Landing surface the cards mount on | [`empty-state.tsx`](../../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) (hero + composer) | **Extend shipped** |
 | Card busy / "Automating…" state | `NearProcessIndicator` (#6901, on `main`) | **Reuse shipped** |
 | Per-card **Connect** CTA + OAuth | extension-authorization path on `main` (`extension-pairing-api`, `product-auth-oauth-events`, pairing/telegram panels) | **Reuse shipped** |
 | Agent modes (Suggest / Plan / Auto) | approval-gate system on `main` (`resolve_gate`, `global_auto_approve`) | **New UI over shipped** |

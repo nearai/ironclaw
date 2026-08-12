@@ -12,7 +12,7 @@ This is the evidence-backed specification behind the overview. It states the pro
 
 **Goal:** design and ship the first five minutes for a brand-new IronClaw user landing in WebChat v2 right after their workspace is provisioned.
 
-**Today (on `main`):** the landing view is a hero title, a composer, and three static suggestion chips ([`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). The automation surfaces that would give a first moment of value — a "done for you" carousel, inline rich-preview cards, a Plan card, an agent-mode pill — all assume automations *already exist*. A fresh account has none, so the cold-start and the first-automation moments are undesigned. That gap is what this fills.
+**Today (on `main`):** the landing view is a hero title, a composer, and three static suggestion chips ([`empty-state.tsx`](../../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). The automation surfaces that would give a first moment of value — a "done for you" carousel, inline rich-preview cards, a Plan card, an agent-mode pill — all assume automations *already exist*. A fresh account has none, so the cold-start and the first-automation moments are undesigned. That gap is what this fills.
 
 **Non-goals:** this proposal does not redesign the steady-state chat, the automations management page, or the extension catalog. It adds a first-run layer on top of them and reuses them where they already do the job.
 
@@ -40,7 +40,28 @@ Everything in Foundational **plus**:
 
 **The load-bearing property:** every Vision piece is a *superset* of a Foundational piece — per-card connect → batched connect; static first card → animated reveal; plain drawer → docked frame; 3 modes → 4 modes. Foundational is never thrown away; Vision extends it.
 
+## 2A. Phase 1 (v1) — implementation update  *(governs where it differs from §3–§6)*
+
+*Added after the mockup review. Six UX changes define the Phase-1 Foundational build; each wires to an **existing** backend seam verified on current `main` — so v1 needs **no new `AutomationTask` events/projection** (the wiring contract's §2–§3 are deferred, not required for v1). Where this section differs from §3–§6, this governs for Phase 1.*
+
+1. **No agent-mode selector.** Foundational drops the Suggest / Plan / Auto-Approve pill (it stays in the **Vision** mockup); approvals are per-card, per-action. *(Supersedes P4 / D-F4 for Foundational — agent modes become Vision-only.)*
+2. **Thread shows live activity; cards are status affordances.** A deliberate divergence from the mockup's inline rich-preview cards: Foundational uses the **existing** thread event stream — approving a card submits a **foreground** turn and the thread renders `running` / `capability_activity` / `final_reply` frames as they happen; the task card mirrors that run's status. (`WebChatV2Event`, SSE `GET /api/webchat/v2/threads/{id}/events`, frontend `useChatEvents.ts`.)
+3. **One active job at a time.** While a suggested job is processing, the other cards are **disabled** — a user can't queue or run multiple at once. Enforced backend-side already: `submit_turn` returns `DeferredBusy` / `RejectedBusy` when a run is active on the thread (`RebornSubmitTurnResponse`), so the UI reflects a real constraint (Foundational only).
+4. **"+ Automation" replaces Revert.** On a completed card, **+ Automation** creates a **scheduled** automation by injecting a prompt into the thread so the agent calls `builtin.trigger_create` (there is no REST "create automation" route — prompt injection is the intended path); it then surfaces in the **Automations dashboard** (`GET /api/webchat/v2/automations`, `pages/automations/`).
+5. **v1 renders connect + approval UI without background jobs.** Cards show a **Connect** CTA (existing extension setup / OAuth: `POST /api/webchat/v2/extensions/{id}/setup` → `builtin.extension_setup_submit`; auth surfaces as the `AuthRequired` frame) and an **Approve** action. Nothing runs in the background — the user connects extensions manually, and approval kicks off a foreground turn.
+6. **No Modify; status-driven completion.** The Modify action is dropped. A card shows a **Completed** status when the run's `final_reply` lands, and a lightweight **error / incomplete** status on a `failed` frame.
+
+### Approve → agent job activity (the wiring)
+
+`Approve` = `POST /api/webchat/v2/threads/{thread_id}/messages` (`send_message` → `RebornServices::submit_turn` → `TurnCoordinator::submit_turn`, returning a `run_id`); the card subscribes to that run's events for its status. If the tool isn't connected, the card runs the **Connect** flow first (§5 above). Approval/gate prompts inside the run resolve via `POST …/runs/{run_id}/gates/{gate_ref}/resolve` (`resolve_gate`). **No new backend endpoints are required for v1** — the net-new work is the frontend task-card / connect-CTA / status components (the rolled-back prototype is the starting point), plus a thin client over the seams above.
+
+### Open UX question (from the busy-run constraint)
+
+Because `submit_turn` defers/rejects a second approval while a run is active, decide the UX for a user approving a second card mid-run (queue vs. block-with-tooltip). The mockup currently **blocks** (disables the other cards — change 3).
+
 ## 3. Foundational scope — builds-on-preexisting vs. net-new
+
+*Note: §2A above governs Phase 1 where they differ (agent modes → Vision-only; Modify/Revert removed; connect+approve, no background jobs). The classification below still holds — it just predates the six changes.*
 
 This is the section the review turns on. Each Foundational capability is classified: **Reuse shipped** (call existing code unchanged), **New UI over shipped** (new presentation, existing mechanism), or **Net-new** (new surface + backing).
 
@@ -48,7 +69,7 @@ This is the section the review turns on. Each Foundational capability is classif
 
 | # | Capability | Preexisting basis on `main` (verified) | What Foundational adds | Class |
 |---|---|---|---|---|
-| P1 | Landing surface for the cards | [`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) — hero, composer, suggestion chips | Mount a suggestion drawer above the composer; the hero/composer are untouched | Extend shipped |
+| P1 | Landing surface for the cards | [`empty-state.tsx`](../../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) — hero, composer, suggestion chips | Mount a suggestion drawer above the composer; the hero/composer are untouched | Extend shipped |
 | P2 | Card busy / "Automating…" state | `near-process-indicator.tsx` (branded streaming indicator, #6901) | Render it verbatim inside a running card | Reuse shipped |
 | P3 | Per-card **Connect** CTA + OAuth | extension-authorization path: `lib/extension-pairing-api.ts`, `lib/product-auth-oauth-events.ts`, `lib/channel-connection-events.ts`, `components/telegram-setup-panel.tsx`, `components/pairing-web-code-panel.tsx` | Card's connect action routes into that flow via the shared `extension_name` resolver — **no new auth path** (CLAUDE.md extension/auth invariant) | Reuse shipped |
 | P4 | Agent modes (Suggest / Plan / Auto) | approval-gate system: `resolve_gate`, the `global_auto_approve` feature, `ApprovalCard` | The mode pill is a **new presentation** over these; `auto` is the typed generalization of `global_auto_approve` (§7) | New UI over shipped |
