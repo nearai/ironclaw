@@ -34,6 +34,31 @@ function deriveDeviceState(probe) {
 }
 
 /**
+ * The signed-in account's endpoint digests from the setup-status `detail`,
+ * for correlation against this browser's own subscription digest.
+ *
+ * Correlation needs digest coverage of the FULL registration set: a
+ * registration without a digest could be the local subscription's match, so
+ * partial coverage must read "unavailable" (`null`), never "not mine". An
+ * empty registration set is a real answer ([]): the account holds no
+ * enrollment, so a local subscription is provably not this account's.
+ */
+export function accountEndpointDigestsFromDetail(detail) {
+  const registrations = detail ? detail.registrations || [] : null;
+  if (!registrations) return null;
+  const digests = registrations
+    .map((registration) => registration && registration.endpoint_digest)
+    .filter((digest) => typeof digest === "string" && digest);
+  return digests.length === registrations.length ? digests : null;
+}
+
+/** The channel's client bootstrap key from the setup-status `detail`
+ * (`detail.bootstrap.vapid_public_key`), or "" when unpublished. */
+export function vapidPublicKeyFromDetail(detail) {
+  return (detail && detail.bootstrap && detail.bootstrap.vapid_public_key) || "";
+}
+
+/**
  * Per-browser push-device state for the notification-channels panel's
  * session-channel row: the account-level enrollment summary (the generic
  * notification-setup status view, keyed by the session channel's
@@ -42,14 +67,19 @@ function deriveDeviceState(probe) {
  *
  * The status response's channel-opaque `detail` is interpreted HERE — this
  * hook is part of the session channel's own client — as
- * `{ vapid_public_key, subscription_count, subscriptions[].endpoint_digest }`.
+ * `{ registration_count, registrations: [{ registration_id, created_at,
+ * endpoint_digest }], bootstrap: { vapid_public_key } }` (the shape
+ * `RegistrationChannelNotificationSetupService::project` emits, with
+ * `bootstrap` published by the channel's `DeliveryClientBootstrap`).
  * The account-level toggle (whether the channel is a notification channel)
  * stays in the ordinary draft/save set — this hook only manages the device
  * dimension underneath it. Browser state is correlated with the signed-in
- * account through the detail's `endpoint_digest` values, so a subscription
- * enrolled by a DIFFERENT account in the same browser profile is never
- * presented as this account's enrollment (and never offered a local
- * unsubscribe that would sever the other account).
+ * account through the registrations' `endpoint_digest` values, so a
+ * subscription enrolled by a DIFFERENT account in the same browser profile is
+ * never presented as this account's enrollment (and never offered a local
+ * unsubscribe that would sever the other account). A registration set whose
+ * digests are incomplete yields `null` (correlation unavailable), never a
+ * false "other account".
  */
 export function useDevicePush({ extensionId } = {}) {
   const queryClient = useQueryClient();
@@ -67,11 +97,7 @@ export function useDevicePush({ extensionId } = {}) {
   React.useEffect(() => {
     if (!statusSettled) return undefined;
     let cancelled = false;
-    const accountEndpointDigests = statusDetail
-      ? (statusDetail.subscriptions || [])
-          .map((subscription) => subscription.endpoint_digest)
-          .filter((digest) => typeof digest === "string" && digest)
-      : null;
+    const accountEndpointDigests = accountEndpointDigestsFromDetail(statusDetail);
     getDevicePushState({ accountEndpointDigests }).then(
       (state) => {
         if (!cancelled) setProbe(state);
@@ -98,7 +124,7 @@ export function useDevicePush({ extensionId } = {}) {
       if (!extensionId) {
         throw new Error("session channel extension is unavailable");
       }
-      const vapidPublicKey = statusQuery.data?.detail?.vapid_public_key;
+      const vapidPublicKey = vapidPublicKeyFromDetail(statusQuery.data?.detail);
       if (!vapidPublicKey) {
         throw new Error("notification setup key is unavailable");
       }
@@ -113,8 +139,8 @@ export function useDevicePush({ extensionId } = {}) {
 
   return {
     browser: { ...(probe || {}), state: deriveDeviceState(probe) },
-    subscriptionCount: statusQuery.data?.detail?.subscription_count ?? 0,
-    vapidPublicKey: statusQuery.data?.detail?.vapid_public_key || "",
+    subscriptionCount: statusQuery.data?.detail?.registration_count ?? 0,
+    vapidPublicKey: vapidPublicKeyFromDetail(statusQuery.data?.detail),
     isStatusLoading: statusQuery.isLoading,
     statusError: statusQuery.error || null,
     isBusy: enrollMutation.isPending || unenrollMutation.isPending,

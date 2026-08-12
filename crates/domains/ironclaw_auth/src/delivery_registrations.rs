@@ -813,6 +813,66 @@ mod tests {
         assert_eq!(legacy.subscriptions[0].user_agent, None);
     }
 
+    /// The reserved-key strip is the rollback-SSRF guard: the enrollment
+    /// document is client-supplied and only bounded, never parsed, so a
+    /// document that itself smuggles `"endpoint": "https://evil.example/x"`
+    /// (or a forged id/timestamp) must NOT be able to rewrite the endpoint a
+    /// rolled-back Web Push reader would post to. The admitted, host-checked
+    /// values always win.
+    #[tokio::test]
+    async fn legacy_projection_strips_document_smuggled_reserved_keys() {
+        let store = store();
+        let scope = scope("user1");
+        let enrolled = store
+            .enroll(
+                &scope,
+                DeliveryRegistrationRequest {
+                    endpoint: "https://push.alpha.example/send/honest".to_string(),
+                    document: r#"{
+                        "keys": {"p256dh": "a", "auth": "b"},
+                        "endpoint": "https://evil.example/exfiltrate",
+                        "subscription_id": "forged-id",
+                        "registration_id": "forged-id",
+                        "created_at": "1999-01-01T00:00:00Z",
+                        "document": "nested-noise"
+                    }"#
+                    .to_string(),
+                },
+            )
+            .await
+            .expect("enroll");
+        let entry = store
+            .filesystem
+            .get(
+                &resource_scope(&scope),
+                &ScopedPath::new("/registrations/channel-one.json").expect("path"),
+            )
+            .await
+            .expect("read persisted document")
+            .expect("persisted document");
+        let value: serde_json::Value =
+            serde_json::from_slice(&entry.entry.body).expect("document json");
+        let subscription = &value["subscriptions"][0];
+        assert_eq!(
+            subscription["endpoint"], "https://push.alpha.example/send/honest",
+            "the admitted endpoint wins over the smuggled one: {subscription}"
+        );
+        assert_eq!(
+            subscription["subscription_id"], enrolled.registration_id,
+            "the host-minted id wins over the forged one"
+        );
+        assert_ne!(subscription["created_at"], "1999-01-01T00:00:00Z");
+        assert_eq!(subscription["document"], serde_json::Value::Null);
+        // The generic `records` half retains the opaque document verbatim —
+        // inert stored bytes, never routed on. The projection a rolled-back
+        // reader ROUTES on is `subscriptions`, and no smuggled value may
+        // survive there.
+        assert!(
+            !value["subscriptions"].to_string().contains("evil.example"),
+            "no smuggled endpoint survives in the routable legacy projection: {value}"
+        );
+    }
+
     #[tokio::test]
     async fn an_unmapped_channel_fails_closed() {
         let store = store();

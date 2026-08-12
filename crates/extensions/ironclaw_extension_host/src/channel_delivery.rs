@@ -197,7 +197,17 @@ impl DeliveryReplyContextSource for IngressReplyContextSource {
                 conversation: conversation_fingerprint.to_string(),
             })
             .await
-            .map_err(|_| DeliveryReplyContextError)
+            .map_err(|error| {
+                // The port error is a sanitized unit — log the bound store
+                // cause here or the whole reply-context read path is
+                // diagnostics-free when the store is down.
+                tracing::warn!(
+                    extension_id = %extension_id,
+                    %error,
+                    "reply-context store read failed"
+                );
+                DeliveryReplyContextError
+            })
     }
 }
 

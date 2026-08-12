@@ -620,7 +620,11 @@ test("getNotificationSetupStatus reads the channel's generic status route", asyn
         extension_id: "some-channel",
         requires_setup: true,
         enabled: false,
-        detail: { vapid_public_key: "k" },
+        detail: {
+          registration_count: 0,
+          registrations: [],
+          bootstrap: { vapid_public_key: "k" },
+        },
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
@@ -631,7 +635,7 @@ test("getNotificationSetupStatus reads the channel's generic status route", asyn
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, "/api/webchat/v2/channels/some-channel/notifications");
   assert.equal(status.requires_setup, true);
-  assert.equal(status.detail.vapid_public_key, "k");
+  assert.equal(status.detail.bootstrap.vapid_public_key, "k");
   await assert.rejects(getNotificationSetupStatus(), /extensionId is required/);
   assert.equal(calls.length, 1, "a missing extension id must never reach fetch");
 });

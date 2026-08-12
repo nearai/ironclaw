@@ -575,6 +575,38 @@ fn ack_submit_metadata_round_trips() {
     assert_eq!(ack, back);
 }
 
+// These enums ride the durable session-inbound action ledger; the variant
+// tags are persisted vocabulary and must follow the repo-wide snake_case
+// contract from the first row written — retrofitting a casing change later
+// is a data migration.
+#[test]
+fn inbound_trust_and_binding_directive_persist_snake_case_tags() {
+    let caller = crate::surface::ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-a").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("user-a").expect("user"),
+        None,
+        None,
+    );
+    let trust = serde_json::to_value(ProductInboundTrust::SessionCaller { caller })
+        .expect("serialize trust");
+    assert!(
+        trust.get("session_caller").is_some(),
+        "session-caller tag must persist snake_case: {trust}"
+    );
+
+    let external = serde_json::to_value(ProductInboundBindingDirective::ExternalRef)
+        .expect("serialize directive");
+    assert_eq!(external, serde_json::json!("external_ref"));
+    let owned = serde_json::to_value(ProductInboundBindingDirective::OwnedThread {
+        thread_id: ironclaw_host_api::ids::ThreadId::new("thread-a").expect("thread"),
+    })
+    .expect("serialize directive");
+    assert!(
+        owned.get("owned_thread").is_some(),
+        "owned-thread tag must persist snake_case: {owned}"
+    );
+}
+
 // The trust seam: a session envelope must never expose a verified webhook
 // claim, and external-ref builders must fail closed on it rather than
 // running the webhook binding machinery for a browser message.

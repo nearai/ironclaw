@@ -65,6 +65,14 @@ impl RecordedProductSurfaceSubmit {
         ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID).expect("adapter id")
     }
 
+    /// The channel parameter of the raw submit request. OpenAI-compatible
+    /// clients cannot learn a channel id, so the workflows must submit `None`
+    /// (the legacy session-surface lane) — see
+    /// `ProductSubmitTurnRequest::extension_id`.
+    pub(crate) fn extension_id(&self) -> Option<&str> {
+        self.request.extension_id.as_deref()
+    }
+
     pub(crate) fn external_event_id(&self) -> ExternalEventId {
         ExternalEventId::new(
             self.request

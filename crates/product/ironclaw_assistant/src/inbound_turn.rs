@@ -62,6 +62,12 @@ const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
 const ATTACHMENT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 const ATTACHMENT_CLEANUP_MAX_THREADS: usize = 50;
 const ATTACHMENT_CLEANUP_MAX_MESSAGES: usize = 10_000;
+/// Persisted session-lane binding-ref prefixes — byte-identical to what the
+/// dedicated browser path always wrote. Changing either breaks replay of
+/// already-accepted messages; they are defined once so the two construction
+/// sites cannot drift.
+const SESSION_SOURCE_BINDING_PREFIX: &str = "webui-src";
+const SESSION_REPLY_BINDING_PREFIX: &str = "webui-reply";
 
 /// Run a before-inbound policy with the workflow-owned wall-clock budget.
 ///
@@ -673,7 +679,7 @@ where
         // written by the dedicated browser path keep matching.
         let session_binding_id = session_source_binding_id(&scope, &actor);
         let source_binding_ref = bounded_source_binding_ref(
-            "webui-src",
+            SESSION_SOURCE_BINDING_PREFIX,
             &session_binding_id,
             DEFAULT_BINDING_REF_RAW_MAX_BYTES,
         )
@@ -681,7 +687,7 @@ where
             reason: format!("invalid session src ref: {e}"),
         })?;
         let reply_target_binding_ref = bounded_reply_target_binding_ref(
-            "webui-reply",
+            SESSION_REPLY_BINDING_PREFIX,
             &session_binding_id,
             DEFAULT_BINDING_REF_RAW_MAX_BYTES,
         )
@@ -1443,7 +1449,7 @@ impl AcceptedProductInboundTurn {
             ),
             SubmissionLane::Session => (
                 bounded_source_binding_ref(
-                    "webui-src",
+                    SESSION_SOURCE_BINDING_PREFIX,
                     &source_binding_id,
                     DEFAULT_BINDING_REF_RAW_MAX_BYTES,
                 )
@@ -1451,7 +1457,7 @@ impl AcceptedProductInboundTurn {
                     reason: format!("invalid src ref: {e}"),
                 })?,
                 bounded_reply_target_binding_ref(
-                    "webui-reply",
+                    SESSION_REPLY_BINDING_PREFIX,
                     &reply_target_binding_id,
                     DEFAULT_BINDING_REF_RAW_MAX_BYTES,
                 )

@@ -287,7 +287,17 @@ fn build_channel_envelope(
 fn product_attachment_descriptor(
     attachment: &InboundAttachment,
 ) -> Result<ProductAttachmentDescriptor, ProductAdapterError> {
-    let kind = match attachment.mime_type.split('/').next().unwrap_or_default() {
+    // MIME types are case-insensitive external input on both the channel and
+    // session paths — fold once here so `IMAGE/PNG` classifies as an image,
+    // not a document (the persisted descriptor kind is what the model sees).
+    let kind = match attachment
+        .mime_type
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "image" => ProductAttachmentKind::Image,
         "audio" => ProductAttachmentKind::Audio,
         "video" => ProductAttachmentKind::Video,

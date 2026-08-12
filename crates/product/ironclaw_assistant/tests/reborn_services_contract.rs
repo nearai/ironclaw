@@ -3769,6 +3769,53 @@ async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
 }
 
 #[tokio::test]
+async fn submit_turn_model_policy_backend_fault_stays_retryable() {
+    // Regression: `LlmConfigServiceError::Internal` mapped to a PERMANENT
+    // policy failure, which the workflow settles durably as
+    // Rejected(PolicyDenied) in the session idempotency ledger — the same
+    // client_action_id kept failing even after the backend recovered. A
+    // backend fault is not a policy verdict: it surfaces transient, settles
+    // nothing, and the SAME action id succeeds on retry.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Err(LlmConfigServiceError::Internal));
+    let services =
+        session_services(threads, coordinator.clone()).with_llm_config_service(policy.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let request = || {
+        session_submit_request(json!({
+            "client_action_id": "send-through-backend-fault",
+            "thread_id": "thread-alpha",
+            "content": "hello from webui"
+        }))
+        .expect("request")
+    };
+    services
+        .submit_turn(caller(), request())
+        .await
+        .expect_err("a model-policy backend fault must surface");
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "nothing may be submitted while the policy backend is down"
+    );
+
+    // Backend recovers; the SAME client_action_id must now succeed — a
+    // durable permanent settle would replay the rejection here instead.
+    let response = services
+        .submit_turn(caller(), request())
+        .await
+        .expect("the same action id succeeds after the backend recovers");
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
 async fn submit_turn_rejects_disallowed_model_before_message_side_effects() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
@@ -6602,6 +6649,79 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
     assert_eq!(
         onboarding.credential_next_step.as_deref(),
         Some("After saving the token, activate GitHub to publish its tools.")
+    );
+}
+
+#[tokio::test]
+async fn a_directory_classified_session_channel_is_hidden_from_the_extension_list() {
+    // The fail-open arm (no directory wired → everything listed) is covered
+    // by every other listing test passing `None`. This pins the PRESENT arm:
+    // the deployment's session channel is host infrastructure, not an
+    // installable row — a regression that inverts `is_some_and` or drops the
+    // filter must fail here while an unrelated extension still survives.
+    struct TwoExtensionListingService {
+        session_channel: LifecycleInstalledExtensionSummary,
+        unrelated: LifecycleInstalledExtensionSummary,
+    }
+
+    #[async_trait]
+    impl LifecycleProductService for TwoExtensionListingService {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            assert!(matches!(action, LifecycleProductAction::ExtensionList));
+            Ok(LifecycleProductResponse {
+                package_ref: None,
+                phase: self.session_channel.phase,
+                blockers: Vec::new(),
+                message: None,
+                payload: Some(LifecycleProductPayload::ExtensionList {
+                    extensions: vec![self.session_channel.clone(), self.unrelated.clone()],
+                    count: 2,
+                }),
+            })
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            panic!("list_extensions should execute the list action, not project one package")
+        }
+    }
+
+    let installed = |id: &str| LifecycleInstalledExtensionSummary {
+        summary: extension_summary(id, Vec::new(), None),
+        phase: InstallationState::Installed,
+        install_scope: None,
+    };
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(Arc::new(TwoExtensionListingService {
+        session_channel: installed("web-app"),
+        unrelated: installed("github"),
+    }))
+    .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+        session_channels: vec!["web-app"],
+    }));
+
+    let response = query_extensions(&services, caller())
+        .await
+        .expect("extension list response");
+    let listed: Vec<&str> = response
+        .extensions
+        .iter()
+        .map(|extension| extension.package_ref.id.as_str())
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["github"],
+        "the session channel is hidden; unrelated extensions survive"
     );
 }
 
@@ -17598,21 +17718,42 @@ async fn submit_turn_with_extension_id_requires_a_session_channel_directory() {
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
 }
 
-#[tokio::test]
-async fn submit_turn_requires_the_manifest_session_channel_identity() {
-    let services = session_services(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
+#[test]
+fn builtin_session_surface_id_matches_the_kernel_transport_constant() {
+    // The contracts crate cannot import the kernel (layer order points the
+    // other way), so the two spellings of the host transport identity are
+    // pinned equal here instead. Both are persisted coordinates; neither may
+    // move independently.
+    assert_eq!(
+        ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID,
+        ironclaw_turns::product_context::WEBUI_SOURCE_CHANNEL,
     );
+}
+
+#[tokio::test]
+async fn submit_turn_without_extension_id_admits_under_the_legacy_api_surface() {
+    // The unparameterized lane is the OpenAI-compatible API's documented wire
+    // shape (`ProductSubmitTurnRequest::extension_id`): headless SDK clients
+    // cannot learn a channel id from `GET /session`, so `None` submits under
+    // the built-in surface identity — even on a deployment with no session
+    // channel directory at all. Regression: 97274d5c9a removed this arm and
+    // hard-404'd every `/v1/chat/completions` submission.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    let error = services
+    let response = services
         .submit_turn(
             caller(),
             submit_request_for_extension(None, "thread-alpha", "send-without-channel"),
         )
         .await
-        .expect_err("the retired built-in session identity must not be inferred");
-    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+        .expect("API transports submit under the legacy surface without a channel parameter");
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
 }
 
 #[tokio::test]
@@ -17633,6 +17774,18 @@ async fn submit_turn_rejects_an_unknown_or_non_session_extension_as_not_found() 
         )
         .await
         .expect_err("a webhook channel must never admit session submissions");
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+
+    // The built-in surface id is not route-addressable either: naming it
+    // through the parameterized route must 404 unless a manifest channel
+    // actually claims it. Only the unparameterized API lane reaches it.
+    let error = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("webui"), "thread-alpha", "send-builtin-by-name"),
+        )
+        .await
+        .expect_err("the built-in surface id is not a route-addressable channel");
     assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
     assert_eq!(
         coordinator.submission_count(),

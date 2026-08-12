@@ -1041,7 +1041,17 @@ impl DeliveryCoordinator {
                 &conversation.conversation_fingerprint(),
             )
             .await
-            .map_err(|_| CoordinatedDeliveryError::ReplyContextUnavailable);
+            .map_err(|error| {
+                // The attempt settles Failed/TransportUnavailable below — log
+                // the bound source first so a reply-context store outage is
+                // distinguishable from a genuine transport fault.
+                debug!(
+                    extension_id = %channel.extension_id,
+                    %error,
+                    "delivery coordinator: reply-context read failed"
+                );
+                CoordinatedDeliveryError::ReplyContextUnavailable
+            });
 
         let reply_context = match reply_context {
             Ok(context) => context,
@@ -1163,12 +1173,18 @@ impl DeliveryCoordinator {
             let report = half.send(envelope.clone(), channel.egress.as_ref()).await;
             match report {
                 Ok(report) => {
-                    if report.parts.len() != envelope.parts.len() {
+                    // Coverage, not equality: adapters own part fan-out and
+                    // may report one outcome per vendor chunk (the adapter
+                    // conformance suite legalizes outcomes >= parts), so a
+                    // longer report is chunking evidence. Fewer outcomes than
+                    // envelope parts means some part has no evidence at all —
+                    // malformed, settled Unknown, never blindly retried.
+                    if report.parts.len() < envelope.parts.len() {
                         debug!(
                             extension_id = %channel.extension_id,
                             expected_parts = envelope.parts.len(),
                             reported_parts = report.parts.len(),
-                            "delivery coordinator: adapter report cardinality mismatch"
+                            "delivery coordinator: adapter report covers fewer outcomes than envelope parts"
                         );
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Unknown, None)
                             .await;

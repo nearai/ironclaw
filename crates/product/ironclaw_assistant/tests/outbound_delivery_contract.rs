@@ -1308,6 +1308,45 @@ async fn malformed_adapter_report_cardinality_is_terminal_unknown_without_retry(
 }
 
 #[tokio::test]
+async fn chunked_adapter_report_with_more_outcomes_than_parts_is_delivered() {
+    // Slack and Telegram fan one long text part out as several vendor chunks
+    // and push one PartDeliveryOutcome per chunk (the adapter conformance
+    // suite legalizes outcomes >= parts). Regression: the coordinator
+    // required exact equality, settling fully delivered chunked replies as
+    // Unknown/Failed — a model-visible failure inviting a duplicate resend of
+    // a message every recipient already received.
+    let (result, adapter, store, scope) = coordinate_workspace_reply(
+        &NO_PROJECT_FILESYSTEM,
+        "one long reply that the vendor splits into two chunks",
+        Vec::new(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-chunk-1"), sent("ts-chunk-2")],
+        })],
+    )
+    .await;
+
+    let outcome = result.expect("chunked send delivers");
+    match outcome {
+        CoordinatedDeliveryOutcome::Delivered {
+            vendor_message_refs,
+            ..
+        } => assert_eq!(
+            vendor_message_refs,
+            vec!["ts-chunk-1".to_string(), "ts-chunk-2".to_string()],
+            "every chunk's provider evidence rides the outcome"
+        ),
+        other => panic!("chunked send must settle Delivered, got {other:?}"),
+    }
+    assert_eq!(adapter.deliver_calls(), 1);
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
 async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_file("/workspace/report.pdf", 3);

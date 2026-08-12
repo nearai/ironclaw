@@ -300,10 +300,20 @@ fn fold_tally(tally: &FanOutTally) -> PartDeliveryOutcome {
         };
     }
     if tally.accepted > 0 {
-        if tally.unauthorized.is_some() || tally.retryable.is_some() || tally.permanent.is_some() {
+        if let Some(cause) = tally
+            .unauthorized
+            .as_deref()
+            .or(tally.retryable.as_deref())
+            .or(tally.permanent.as_deref())
+        {
+            // Partial fan-out settles Permanent (already-accepted browsers
+            // must never be double-pushed by a retry) — but the durable
+            // attempt record keeps the failing cause, so an operator can
+            // tell a rate limit from a rejected key.
             return PartDeliveryOutcome::Permanent {
-                reason: "browser push was accepted by only part of the enrolled client fanout"
-                    .to_string(),
+                reason: format!(
+                    "browser push was accepted by only part of the enrolled client fanout ({cause})"
+                ),
             };
         }
         // Push services return 201/202 with no durable message reference the

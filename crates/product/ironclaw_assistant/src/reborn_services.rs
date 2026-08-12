@@ -2279,9 +2279,14 @@ impl BeforeInboundPolicy for SessionModelSelectionPolicy {
                 })
             }
             Err(LlmConfigServiceError::Internal) => {
+                // A backend fault is not a policy verdict: `permanent: true`
+                // would settle Rejected(PolicyDenied) in the durable session
+                // idempotency ledger, poisoning this client_action_id even
+                // after the backend recovers. Fail transient so the caller
+                // can retry the same action.
                 Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
                     reason: "model selection policy failed".to_string(),
-                    permanent: true,
+                    permanent: false,
                 })
             }
         }
@@ -3811,17 +3816,25 @@ where
         };
         // A channel-parameterized submission must name a deployment channel
         // whose declared entrypoint is the authenticated session — fail
-        // closed (404, indistinguishable from an absent route) otherwise.
-        let Some(extension_id) = &extension_id else {
-            return Err(ProductSurfaceError::not_found());
+        // closed (404, indistinguishable from an absent route) otherwise. An
+        // unparameterized submission is the legacy API lane
+        // (`ProductSubmitTurnRequest::extension_id`): OpenAI-compatible
+        // clients cannot learn a channel id, so they submit under the
+        // built-in surface identity. That id stays out of the parameterized
+        // route — naming it there still 404s below unless a manifest channel
+        // claims it.
+        let session_surface = match &extension_id {
+            Some(extension_id) => {
+                let Some(directory) = &self.session_channels else {
+                    return Err(ProductSurfaceError::service_unavailable(false));
+                };
+                if !directory.is_session_channel(extension_id) {
+                    return Err(ProductSurfaceError::not_found());
+                }
+                extension_id.as_str()
+            }
+            None => SESSION_SURFACE_ADAPTER_ID,
         };
-        let Some(directory) = &self.session_channels else {
-            return Err(ProductSurfaceError::service_unavailable(false));
-        };
-        if !directory.is_session_channel(extension_id) {
-            return Err(ProductSurfaceError::not_found());
-        }
-        let session_surface = extension_id.as_str();
         let thread_id = scope.thread_id.clone();
         // Serialize with thread deletion (delete_thread holds the same
         // per-thread lock across its active-run probe + delete).
@@ -6618,7 +6631,7 @@ fn parse_run_id_field(
 }
 
 fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceError> {
-    TurnRunId::parse(value).map_err(|_| ProductSurfaceError::internal_invariant())
+    TurnRunId::parse(value).map_err(ProductSurfaceError::internal_from)
 }
 
 fn webui_source_binding_ref_from_raw(
@@ -6639,6 +6652,13 @@ fn webui_reply_target_binding_ref_from_raw(
     })
 }
 
+/// Transport identity stamped on session-lane submissions that did not name
+/// a channel extension (the OpenAI-compatible API transports). Not a channel
+/// name: `webui` is the product transport itself, the same constant the turn
+/// kernel uses for the WebUi source channel — and not route-addressable, the
+/// parameterized session route resolves only manifest-declared channels.
+const SESSION_SURFACE_ADAPTER_ID: &str =
+    ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID;
 /// External-actor ref kind for session callers in admission fingerprints.
 const SESSION_ACTOR_KIND: &str = "session_user";
 
@@ -6652,13 +6672,13 @@ fn session_inbound_request(
     requested_model: Option<String>,
     attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
 ) -> Result<ChannelInboundSurfaceRequest, ProductSurfaceError> {
-    let adapter_id = ProductAdapterId::new(session_surface)
-        .map_err(|_| ProductSurfaceError::internal_invariant())?;
+    let adapter_id =
+        ProductAdapterId::new(session_surface).map_err(ProductSurfaceError::internal_from)?;
     let source_channel =
         ironclaw_product_contracts::inbound::ProductSourceChannel::new(session_surface)
-            .map_err(|_| ProductSurfaceError::internal_invariant())?;
+            .map_err(ProductSurfaceError::internal_from)?;
     let installation_id = AdapterInstallationId::new(caller.tenant_id.as_str())
-        .map_err(|_| ProductSurfaceError::internal_invariant())?;
+        .map_err(ProductSurfaceError::internal_from)?;
     // Session and webhook ingress converge on the same complete attachment
     // type. Provider descriptors and download handles never cross this edge.
     let message = ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage {
@@ -6667,18 +6687,18 @@ fn session_inbound_request(
             caller.user_id.as_str(),
             Option::<String>::None,
         )
-        .map_err(|_| ProductSurfaceError::internal_invariant())?,
+        .map_err(ProductSurfaceError::internal_from)?,
         conversation: ironclaw_extension_contracts::external::ExternalConversationRef::new(
             None,
             thread_id.as_str(),
             None,
             None,
         )
-        .map_err(|_| ProductSurfaceError::internal_invariant())?,
+        .map_err(ProductSurfaceError::internal_from)?,
         event_id: ironclaw_extension_contracts::external::ExternalEventId::new(
             client_action_id.as_str(),
         )
-        .map_err(|_| ProductSurfaceError::internal_invariant())?,
+        .map_err(ProductSurfaceError::internal_from)?,
         text: content,
         trigger: ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
         attachments,
@@ -7226,7 +7246,7 @@ fn create_thread_metadata_json(
     serde_json::to_string(&serde_json::json!({
         "client_action_id": client_action_id.as_str(),
     }))
-    .map_err(|_| ProductSurfaceError::internal_invariant())
+    .map_err(ProductSurfaceError::internal_from)
 }
 
 fn validate_log_query_modes(tail: bool, follow: bool) -> Result<(), ProductSurfaceError> {

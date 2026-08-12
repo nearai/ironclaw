@@ -832,7 +832,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // durable transcript row from volatile live text. The contract only
         // names that fact; projection, delivery, and WebUI behavior remain in
         // their owning product crates. Count read from this gate.
-        ("ironclaw_product_contracts", 16_155),
+        // 16_155 -> 16_167 (2026-08-12, review fixes): +12 lines of
+        // vocabulary, no logic — the restored `BUILTIN_SESSION_SURFACE_ID`
+        // persisted-coordinate constant with its doc (the OpenAI-compat
+        // unparameterized session lane), and `#[serde(rename_all)]` on the
+        // two ledger-persisted inbound enums. Count read from this gate.
+        ("ironclaw_product_contracts", 16_167),
         ("ironclaw_prompt_envelope", 832),
     ];
 

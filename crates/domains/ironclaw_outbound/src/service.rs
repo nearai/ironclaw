@@ -93,7 +93,7 @@ impl<'a> OutboundPolicyService<'a> {
         }
         validate_delivery_scope_candidate(&request.scope, &request.candidate)?;
         let delivery_id = OutboundDeliveryId::for_policy_request(&request)?;
-        if let Some(attempt) = self
+        let stored_prepared = if let Some(attempt) = self
             .store
             .load_delivery_attempt(request.scope.clone(), delivery_id)
             .await?
@@ -103,8 +103,20 @@ impl<'a> OutboundPolicyService<'a> {
                     reason: "stored delivery identity does not match replay request",
                 });
             }
-            return Ok(OutboundDeliveryDecision::AlreadyRecorded { attempt });
-        }
+            // A row still `Prepared` is a crash between record and the
+            // Prepared -> Sending claim: no vendor egress has happened
+            // (`OutboundDeliveryStatus::Prepared` pins "crash here -> safe to
+            // retry"), so the replay falls through to a fresh validation of
+            // the live target instead of wedging as already-in-flight. Every
+            // other status — including `Sending`, where egress may already
+            // have happened — replays the stored row as authoritative.
+            if attempt.status != OutboundDeliveryStatus::Prepared {
+                return Ok(OutboundDeliveryDecision::AlreadyRecorded { attempt });
+            }
+            Some(attempt)
+        } else {
+            None
+        };
 
         let validation = self
             .reply_target_validator
@@ -120,6 +132,12 @@ impl<'a> OutboundPolicyService<'a> {
             Ok(claim) => {
                 claim.validate_against(&request.candidate)?;
                 let target = ValidatedReplyTargetBinding::from_claim(claim);
+                if let Some(attempt) = stored_prepared {
+                    // Crash-recovery replay: the stored Prepared row IS the
+                    // attempt — no rewrite, so the only transition it can
+                    // ever take is the claim CAS.
+                    return Ok(OutboundDeliveryDecision::Authorized { attempt, target });
+                }
                 let attempt = OutboundDeliveryAttempt {
                     delivery_id,
                     scope: request.scope,
@@ -137,7 +155,16 @@ impl<'a> OutboundPolicyService<'a> {
             }
             Err(OutboundError::AccessDenied) => {
                 let attempt = OutboundDeliveryAttempt {
-                    delivery_id,
+                    // A revoked crash-recovery replay must not rewrite the
+                    // stable Prepared row a concurrent claimer could be
+                    // racing for (`update_delivery_status` is not
+                    // status-guarded); the rejection is a distinct audit row,
+                    // like the transient-validator arm below.
+                    delivery_id: if stored_prepared.is_some() {
+                        OutboundDeliveryId::new()
+                    } else {
+                        delivery_id
+                    },
                     scope: request.scope,
                     candidate: request.candidate,
                     status: OutboundDeliveryStatus::Failed,

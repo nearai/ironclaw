@@ -80,6 +80,33 @@ struct RunNotificationDeliveryContext<'a> {
     actor: &'a TurnActor,
 }
 
+/// The live working indicator for one run: the currently posted message (if
+/// any) and a monotonic post counter. Notice delivery ids are stable per
+/// `notice_ref`, so every re-post — a nudge refresh, or re-entering the wait
+/// loop after a gate cycle retracted the indicator — must carry a fresh ref;
+/// replaying an already-delivered ref settles `AlreadyDelivered` and no
+/// indicator appears. The counter never resets within a run.
+#[derive(Default)]
+struct WorkingIndicator {
+    message: Option<DeliveredChannelMessage>,
+    posts: u32,
+}
+
+impl WorkingIndicator {
+    /// The next post's notice ref. The first post keeps the historical bare
+    /// `working:{run_id}` bytes; every later post is suffixed with the
+    /// monotonic index.
+    fn next_notice_ref(&mut self, run_id: TurnRunId) -> String {
+        let index = self.posts;
+        self.posts += 1;
+        if index == 0 {
+            format!("working:{run_id}")
+        } else {
+            format!("working:{run_id}:{index}")
+        }
+    }
+}
+
 /// Mutable per-run reaction state threaded through the live delivery loop: the
 /// reaction currently shown on the triggering message, and a monotonic id so
 /// each transition is a distinct, idempotent delivery.
@@ -471,7 +498,7 @@ impl RunDeliveryObserver {
             Err(error) => return Err(error.into()),
         }
         let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
-        let mut working_message: Option<DeliveredChannelMessage> = None;
+        let mut working_indicator = WorkingIndicator::default();
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
         // The current run-lifecycle reaction on the triggering message and a
         // monotonic id for each transition. Stays `None` until a working phase
@@ -484,7 +511,7 @@ impl RunDeliveryObserver {
                     &scope,
                     run_id,
                     delivered_blocked_marker.as_ref(),
-                    &mut working_message,
+                    &mut working_indicator,
                     &mut reaction_state,
                 )
                 .await
@@ -495,7 +522,7 @@ impl RunDeliveryObserver {
                     // indicator. Retract it and mark the triggering message ❌;
                     // the caller posts the "taking longer / check the web app"
                     // notice.
-                    if let Some(message) = working_message.take() {
+                    if let Some(message) = working_indicator.message.take() {
                         self.services
                             .retract_message(scope.clone(), Some(run_id), message)
                             .await;
@@ -526,7 +553,7 @@ impl RunDeliveryObserver {
                 actionable_state.status,
                 TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
             ) {
-                if let Some(message) = working_message.take() {
+                if let Some(message) = working_indicator.message.take() {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
@@ -566,7 +593,7 @@ impl RunDeliveryObserver {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .record_delivered(run_id);
-                        if let Some(message) = working_message.take() {
+                        if let Some(message) = working_indicator.message.take() {
                             self.services
                                 .retract_message(scope.clone(), Some(run_id), message)
                                 .await;
@@ -646,7 +673,7 @@ impl RunDeliveryObserver {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record_delivered(run_id);
-                if let Some(message) = working_message.take() {
+                if let Some(message) = working_indicator.message.take() {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
@@ -690,7 +717,7 @@ impl RunDeliveryObserver {
         scope: &TurnScope,
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
-        working_message: &mut Option<DeliveredChannelMessage>,
+        working_indicator: &mut WorkingIndicator,
         reaction_state: &mut SourceReactionState,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
@@ -722,13 +749,14 @@ impl RunDeliveryObserver {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
             if blocked_actionable_marker(&state).is_none() {
-                if working_message.is_none() {
+                if working_indicator.message.is_none() {
                     // First working notice for this running stretch. Vary the
                     // line per run (seeded by the run id) so a channel with
                     // several runs in flight keeps one voice each, and mark the
                     // triggering message with 👀 so the user sees which ping is
                     // being worked on.
-                    *working_message = self
+                    let notice_ref = working_indicator.next_notice_ref(run_id);
+                    working_indicator.message = self
                         .services
                         .post_notice(
                             DeliveryIntent::Working,
@@ -736,7 +764,7 @@ impl RunDeliveryObserver {
                             Some(run_id),
                             envelope.external_conversation_ref(),
                             prompts::working_message(notice_seed),
-                            format!("working:{run_id}"),
+                            notice_ref,
                         )
                         .await;
                     self.set_source_reaction(
@@ -752,7 +780,7 @@ impl RunDeliveryObserver {
                     // repost) with an escalated "still working" line so the user
                     // knows it hasn't stalled, keeping the latest status at the
                     // bottom of the conversation. Each gap doubles.
-                    if let Some(previous) = working_message.take() {
+                    if let Some(previous) = working_indicator.message.take() {
                         self.services
                             .retract_message(scope.clone(), Some(run_id), previous)
                             .await;
@@ -760,7 +788,8 @@ impl RunDeliveryObserver {
                     nudge_count += 1;
                     next_nudge_at += nudge_gap;
                     nudge_gap = nudge_gap.saturating_mul(2);
-                    *working_message = self
+                    let notice_ref = working_indicator.next_notice_ref(run_id);
+                    working_indicator.message = self
                         .services
                         .post_notice(
                             DeliveryIntent::Working,
@@ -768,7 +797,7 @@ impl RunDeliveryObserver {
                             Some(run_id),
                             envelope.external_conversation_ref(),
                             prompts::long_running_message(notice_seed, nudge_count),
-                            format!("working:{run_id}:{nudge_count}"),
+                            notice_ref,
                         )
                         .await;
                 }
@@ -1726,10 +1755,26 @@ fn rejection_ack_for_surface_error(error: &ProductAdapterError) -> Option<Produc
             kind,
             retryable: false,
             ..
-        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-            product_rejection_kind_for_surface_rejection(*kind),
-            "workflow rejected resolution",
-        ))),
+        } => {
+            // A duplicate or replay-unavailable resolution is not a policy
+            // verdict on THIS message: the original action already produced
+            // its result and feedback, so these settle silently. Widening
+            // them into `PolicyDenied` rendered the fixed DM-only command
+            // copy at a user retrying a command in a direct conversation —
+            // a false statement that hid the real (already-delivered)
+            // outcome.
+            if matches!(
+                kind,
+                ProductSurfaceRejectionKind::DuplicateAction
+                    | ProductSurfaceRejectionKind::ReplayUnavailable
+            ) {
+                return None;
+            }
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                product_rejection_kind_for_surface_rejection(*kind),
+                "workflow rejected resolution",
+            )))
+        }
         _ => None,
     }
 }
@@ -1800,6 +1845,54 @@ fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
 /// OAuth setup links are only safe in a private DM.
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
+}
+
+#[cfg(test)]
+mod rejection_ack_tests {
+    use super::rejection_ack_for_surface_error;
+    use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+    use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductRejectionKind};
+
+    fn surface_rejected(kind: ProductSurfaceRejectionKind) -> ProductAdapterError {
+        ProductAdapterError::SurfaceRejected {
+            kind,
+            status_code: 409,
+            retryable: false,
+            reason: ironclaw_host_api::product_adapter::RedactedString::new(
+                "workflow rejected resolution",
+            ),
+        }
+    }
+
+    // Regression: widening Duplicate/Replay into PolicyDenied rendered the
+    // fixed "Commands can only be used in a direct conversation" copy at a
+    // user retrying a command in a DM — false, and it hid the real outcome.
+    // These families settle silently; the original action's feedback stands.
+    #[test]
+    fn duplicate_and_replay_rejections_settle_silently() {
+        for kind in [
+            ProductSurfaceRejectionKind::DuplicateAction,
+            ProductSurfaceRejectionKind::ReplayUnavailable,
+        ] {
+            assert!(
+                rejection_ack_for_surface_error(&surface_rejected(kind)).is_none(),
+                "{kind:?} must not produce user-facing rejection feedback"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rejections_still_produce_the_denied_ack() {
+        let ack = rejection_ack_for_surface_error(&surface_rejected(
+            ProductSurfaceRejectionKind::AdmissionRejected,
+        ))
+        .expect("a real policy rejection still acks");
+        assert!(matches!(
+            ack,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+        ));
+    }
 }
 
 #[cfg(test)]

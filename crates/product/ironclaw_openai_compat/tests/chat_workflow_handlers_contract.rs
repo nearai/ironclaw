@@ -67,6 +67,16 @@ async fn chat_completion_route_submits_product_surface_and_returns_projection() 
     let envelopes = workflow.accepted_envelopes();
     assert_eq!(envelopes.len(), 1);
     assert_eq!(envelopes[0].adapter_id().as_str(), "openai_compat");
+    // The caller half of the None-lane seam (the surface half is pinned in
+    // ironclaw_assistant's contract suite): OpenAI-compatible clients cannot
+    // name a session channel, so the workflow submits without one. Regression:
+    // 97274d5c9a made the surface hard-404 this shape, taking down every
+    // /v1/chat/completions submission.
+    assert_eq!(
+        envelopes[0].extension_id(),
+        None,
+        "compat submissions ride the unparameterized legacy session surface"
+    );
     assert_eq!(
         envelopes[0].external_event_id().as_str(),
         body["id"].as_str().expect("id")

@@ -210,6 +210,108 @@ async fn an_expired_endpoint_is_reported_for_pruning_not_removed_locally() {
     assert_eq!(egress.urls().len(), 1, "the send is attempted, then pruned");
 }
 
+/// The push-service status classification decides coordinator retry
+/// semantics, so every arm is pinned: 401/403 → Unauthorized (revoked VAPID
+/// authorization), 413 → Permanent (payload limit), 429 and 5xx → Retryable,
+/// transport error → Ambiguous (the send may have landed). Only 2xx/410 were
+/// covered before, leaving the retry-vs-fail contract entirely unpinned.
+#[tokio::test]
+async fn push_service_status_classification_drives_retry_semantics() {
+    for (status, expect) in [
+        (401u16, "unauthorized"),
+        (403, "unauthorized"),
+        (413, "permanent"),
+        (429, "retryable"),
+        (500, "retryable"),
+        (503, "retryable"),
+        (418, "permanent"),
+    ] {
+        let egress = RecordingEgress::with_statuses(vec![status]);
+        let report = WebAppChannelAdapter::new()
+            .deliver(
+                envelope(vec![registration("reg-1", "a", &valid_document())]),
+                &egress,
+            )
+            .await
+            .expect("deliver");
+        let [part] = report.parts.as_slice() else {
+            panic!(
+                "one outcome per part for status {status}: {:?}",
+                report.parts
+            );
+        };
+        let actual = match part {
+            PartDeliveryOutcome::Unauthorized { .. } => "unauthorized",
+            PartDeliveryOutcome::Permanent { .. } => "permanent",
+            PartDeliveryOutcome::Retryable { .. } => "retryable",
+            PartDeliveryOutcome::Ambiguous { .. } => "ambiguous",
+            PartDeliveryOutcome::Sent { .. } => "sent",
+        };
+        assert_eq!(actual, expect, "status {status} classified as {actual}");
+    }
+}
+
+/// A transport-level egress failure means the send MAY have reached the push
+/// service — the only honest classification is Ambiguous, which the
+/// coordinator settles as Unknown and never blindly retries.
+#[tokio::test]
+async fn transport_failure_classifies_ambiguous() {
+    struct TransportFailingEgress;
+
+    #[async_trait]
+    impl RestrictedEgress for TransportFailingEgress {
+        async fn send(
+            &self,
+            _request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            Err(RestrictedEgressError::Transport {
+                reason: "connection reset mid-request".to_string(),
+            })
+        }
+    }
+
+    let report = WebAppChannelAdapter::new()
+        .deliver(
+            envelope(vec![registration("reg-1", "a", &valid_document())]),
+            &TransportFailingEgress,
+        )
+        .await
+        .expect("deliver");
+    assert!(
+        matches!(
+            report.parts.as_slice(),
+            [PartDeliveryOutcome::Ambiguous { .. }]
+        ),
+        "{:?}",
+        report.parts
+    );
+}
+
+/// A mixed fan-out — some browsers accepted, one failed — settles Permanent
+/// (never Retryable: a whole-envelope retry would double-push the browsers
+/// that already accepted) and the durable reason carries the failing cause.
+#[tokio::test]
+async fn partial_fanout_settles_permanent_and_keeps_the_cause() {
+    let egress = RecordingEgress::with_statuses(vec![201, 429]);
+    let report = WebAppChannelAdapter::new()
+        .deliver(
+            envelope(vec![
+                registration("reg-ok", "a", &valid_document()),
+                registration("reg-limited", "b", &valid_document()),
+            ]),
+            &egress,
+        )
+        .await
+        .expect("deliver");
+    let [PartDeliveryOutcome::Permanent { reason }] = report.parts.as_slice() else {
+        panic!("partial fanout must settle Permanent: {:?}", report.parts);
+    };
+    assert!(
+        reason.contains("rate limited"),
+        "the durable reason names the failing cause, not just the partiality: {reason}"
+    );
+}
+
 /// The coordinator resolves zero registrations to a "no target" outcome
 /// before this half is called, so reaching it with an empty list means the
 /// channel declared no enrollment requirement. Say so; do not pretend a send

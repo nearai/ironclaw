@@ -187,6 +187,15 @@ impl RegistrationChannelNotificationSetupService {
                 serde_json::json!({
                     "registration_id": registration.registration_id,
                     "created_at": registration.created_at,
+                    // Lowercase hex SHA-256 of the stored endpoint — the
+                    // correlation key the channel's own client compares
+                    // against its local subscription's digest
+                    // (`device-push.ts::endpointDigestHex`), so a browser can
+                    // tell whether ITS subscription belongs to this account
+                    // without the endpoint capability URL ever crossing the
+                    // wire.
+                    "endpoint_digest":
+                        ironclaw_common::hashing::sha256_hex(registration.endpoint.as_bytes()),
                 })
             })
             .collect();

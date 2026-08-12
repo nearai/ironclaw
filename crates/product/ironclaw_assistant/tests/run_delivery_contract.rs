@@ -1617,6 +1617,22 @@ async fn observer_marks_needs_input_while_blocked_then_swaps_back_and_completes(
         ],
         "reaction tracks working → needs-input → working → done"
     );
+
+    // Regression: notice delivery ids are stable per notice_ref, and the
+    // post-gate re-post used the SAME `working:{run_id}` ref as the first
+    // stretch — the stored row was already Delivered, so the re-post settled
+    // AlreadyDelivered and the user saw no indicator after resolving the
+    // gate. The re-post must reach the adapter as a fresh delivery.
+    let texts = harness.adapter.texts();
+    let first_working = texts
+        .first()
+        .expect("the first adapter send is the working indicator")
+        .clone();
+    assert_eq!(
+        texts.iter().filter(|text| **text == first_working).count(),
+        2,
+        "the working indicator is re-posted after the gate cycle: {texts:?}"
+    );
 }
 
 /// A long-running run refreshes its working indicator in place with escalating

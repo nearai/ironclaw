@@ -30,7 +30,7 @@ service = "web-app.extension/v1"
 # takes effect on restart.
 [admin_configuration]
 group_id = "extension.web-app"
-display_name = "Web push deployment configuration"
+display_name = "Web app deployment configuration"
 description = "Auto-generated VAPID application-server key material for browser push (host-managed; not operator-supplied)."
 fields = [
   { handle = "web_push_vapid", label = "VAPID key material (auto-generated)", secret = true, required = false, host_managed = true },

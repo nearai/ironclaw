@@ -313,9 +313,12 @@ pub struct OutboundDeliveryAttempt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryDecision {
-    /// The stable delivery fact was already recorded. Its durable state is
+    /// The stable delivery fact was already recorded past the point of
+    /// possible vendor egress (`Sending` or terminal). Its durable state is
     /// authoritative, so replay must not revalidate a target or mint another
-    /// audit attempt.
+    /// audit attempt. A row still `Prepared` — a crash before the claim, no
+    /// egress possible — is deliberately NOT this: it re-enters validation
+    /// and returns `Authorized` on the stored row.
     AlreadyRecorded {
         attempt: OutboundDeliveryAttempt,
     },

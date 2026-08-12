@@ -769,6 +769,7 @@ impl fmt::Display for ProductSourceChannel {
 /// (T1). The workflow matches on the arm — webhook binding/pairing machinery
 /// must never run for a session caller and vice versa.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductInboundTrust {
     VerifiedInbound { auth_claim: VerifiedAuthClaim },
     SessionCaller { caller: ProductSurfaceCaller },
@@ -776,6 +777,7 @@ pub enum ProductInboundTrust {
 
 /// How the workflow binds the envelope to a canonical conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductInboundBindingDirective {
     /// Resolve or look up the conversation binding from the envelope's
     /// external refs through the binding resolver (webhook channels).

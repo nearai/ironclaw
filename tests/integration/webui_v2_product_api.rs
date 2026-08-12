@@ -2573,6 +2573,15 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
         .expect("host-minted registration id is present");
     uuid::Uuid::parse_str(registration_id)
         .unwrap_or_else(|error| panic!("registration id must be a UUID ({error}): {body}"));
+    // The digest is the browser's only correlation key: lowercase hex SHA-256
+    // of the endpoint, matching device-push.ts::endpointDigestHex exactly.
+    // Regression: project() omitted it, so every enrolled browser derived
+    // "enrolled by another account" and the panel offered no unenroll.
+    assert_eq!(
+        body["detail"]["registrations"][0]["endpoint_digest"],
+        ironclaw_common::hashing::sha256_hex(ENDPOINT.as_bytes()),
+        "{body}"
+    );
     assert!(
         !body.to_string().contains(ENDPOINT),
         "the full endpoint capability URL must never leave the backend: {body}"
