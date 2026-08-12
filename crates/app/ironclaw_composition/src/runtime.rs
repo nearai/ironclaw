@@ -3664,8 +3664,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
     );
     // The bound provider's own memory guidance for the model, if it ships any
     // (#7185). The text is the provider's — it names that provider's tools and
-    // describes that provider's recall behavior — so composition only asks the
-    // bound descriptor for it and appends what comes back. Two conditions, both
+    // describes that provider's recall behavior — resolved generically at
+    // bundle-construction time against the BOUND provider's own asset table
+    // (`memory_provider_factory::resolve_memory_provider`), never by a
+    // host-side match on a specific provider's constants. Two conditions, both
     // necessary: a provider must actually be resolved (a `Disabled` binding
     // registers no package, so the model sees no `ironclaw.memory.*` tools and
     // must not be told they exist), and that provider must declare a
@@ -3673,10 +3675,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let memory_guidance = wired_memory_context_service
         .is_some()
         .then(|| {
-            ironclaw_host_runtime::memory_native_extension::memory_guidance_text(&memory_lifecycle)
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_guidance.clone())
+                .unwrap_or_default()
         })
-        .flatten()
-        .map(str::to_string);
+        .flatten();
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside

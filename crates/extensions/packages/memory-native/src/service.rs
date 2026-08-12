@@ -57,6 +57,14 @@ pub const MEMORY_GUIDANCE_DOC_REF: &str = "prompts/memory-guidance.md";
 /// system prompt by composition while this provider is the bound one (#7185).
 pub const MEMORY_GUIDANCE: &str = include_str!("../prompts/memory-guidance.md");
 
+/// This package's guidance asset table: every `[memory].guidance_doc` ref its
+/// own manifest may declare, paired with the text it names. The host resolves
+/// a bound provider's declared ref against exactly this table — generically,
+/// not by naming this package's constants in a host-side match — so a
+/// manifest ref this table does not carry is a manifest/asset desync, not a
+/// silently dropped guidance.
+pub const MEMORY_GUIDANCE_ASSETS: &[(&str, &str)] = &[(MEMORY_GUIDANCE_DOC_REF, MEMORY_GUIDANCE)];
+
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
 const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
