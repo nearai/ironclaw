@@ -7,6 +7,8 @@ import { test } from "vitest";
 import { primaryRoutes } from "./routes";
 
 const SOURCE_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const RETIRED_ROUTINES_ROUTE =
+  /<Route\b[^>]*\bpath=["']\/?routines(?:\/:routineId)?["']/s;
 
 function productionSources(directory = SOURCE_ROOT): Array<[string, string]> {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -30,9 +32,19 @@ test("Retired Routines routes are absent from navigation and the app router", ()
   const appSource = readFileSync(new URL("./app.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(
     appSource,
-    /<Route\b[^>]*\bpath=["']routines(?:\/:routineId)?["']/s,
+    RETIRED_ROUTINES_ROUTE,
     "Neither /routines nor /routines/:routineId may remain registered",
   );
+});
+
+test("Retired Routines route guard recognizes nested and absolute paths", () => {
+  for (const path of ["routines", "routines/:routineId", "/routines", "/routines/:routineId"]) {
+    assert.match(
+      `<Route path="${path}" element={<RoutinesPage />} />`,
+      RETIRED_ROUTINES_ROUTE,
+      `route guard must reject ${path}`,
+    );
+  }
 });
 
 test("Production source has no retired Routines page imports or links", () => {
