@@ -40,7 +40,6 @@ pub struct AdminConfigurationSubmittedValue {
 pub struct AdminConfigurationFieldState {
     pub handle: SecretHandle,
     pub label: String,
-    /// Manifest-declared operator help text; empty when none was declared.
     pub description: String,
     pub secret: bool,
     pub required: bool,
