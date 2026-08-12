@@ -4,7 +4,7 @@
 
 This is the evidence-backed specification behind the overview. It states the problem, defines the two-phase model, inventories **what extends shipped code vs. what is net-new** (§3–§4 — the core framing), enumerates every dependency with an implementation approach (§5), maps the work onto the existing codebase and the #6918 family folders — now landed on `main` (§6), and records the security model, test strategy, risks, and open decisions. §11 explains how the APDD kit and PR #6918 frameworks are applied.
 
-> **Branch is code-free.** The earlier UI prototype (#6994) was rolled back in review; this branch carries the design artifacts (the [mockup](mockup.html) + [integration-review.html](integration-review.html)) and this written plan. Where this spec says *"the prototype"* or *"mock→`fetch` swap,"* it describes the *demonstrated* target UI and the earlier prototype — not code in this PR. The first implementation builds fresh against the [contract](AUTOMATION-TASKS-CONTRACT.md) and the mockup.
+> **Implementation is landing behind an off-by-default flag.** The earlier UI prototype (#6994) was rolled back in review; this branch carries the design artifacts (the [mockup](mockup.html) + [integration-review.html](integration-review.html)) and this written plan. Where this spec says *"the prototype"* or *"mock→`fetch` swap,"* it describes the *demonstrated* target UI and the earlier prototype — not code in this PR. Implementation **restarted** — slice 1 (`SuggestedTaskCard` + a gated surface) is landed, `oobe_suggestions` off by default; see [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 ---
 

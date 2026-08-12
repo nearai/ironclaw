@@ -8,7 +8,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 
 ## F0 — De-risk & unblock
 
-- [x] Prototype code rolled back — branch is **code-free** (`crates/` identical to `main`); POR is the mockup + integration-review + this plan.
+- [x] Prototype rolled back; design reworked (§2A). Implementation **restarted behind an off-by-default flag** — slice 1 (`SuggestedTaskCard` + gated surface) landed, gate-green.
 - [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); the `AUTOMATION-TASKS-CONTRACT.md` moved into `docs/design/oobe/`.
 - [ ] **Carousel gate (D-F5)** — *deferred to the implementation PR:* when the carousel is (re)built, it must not return `MOCK_COMPLETED_TASKS` to real users (behind DEV/flag or an empty real projection).
 - [x] Contract reconciled to the post-#6918 family-folder names (`ironclaw_event_log` + `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `ironclaw_assistant`; `src/webui_v2/` confirmed current).

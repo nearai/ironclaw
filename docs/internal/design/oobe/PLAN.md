@@ -21,7 +21,7 @@
 3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer), 4 (carousel gating), 5 (DESIGN.md pilot). One thread each.
 4. **(Optional) D-F6 seed** — land a first-draft `DESIGN.md` capturing the v2 token system + card taxonomy, if the pilot is approved. Docs-only, unblocks design review of later phases.
 
-*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4/§10.5 decided. (This branch is code-free and already mergeable as docs.)*
+*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4/§10.5 decided. (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
 
 ## Phase F1 — Automation-task backend (D-F1) — the leverage phase
 
@@ -88,7 +88,7 @@ Each is additive and a superset of a Foundational piece; none redo Foundational 
 
 ## Coordination notes
 
-- **PR #6994** (this branch) is **code-free**: it carries the design artifacts (mockup + integration-review) and this proposal package. The earlier UI prototype on it was rolled back in review (mock automations shown to real users; an autonomy selector execution ignored — IronLoop/CodeRabbit blockers), so the carousel gate (D-F5) and the mode-pill confinement (D-F4) move to the implementation PRs rather than gating this one.
+- **PR #6994** (this branch) carries the design/plan **and** the rolling Foundational v1 implementation (behind an off-by-default flag; slice 1 landed). The earlier UI prototype on it was rolled back in review (mock automations shown to real users; an autonomy selector execution ignored — IronLoop/CodeRabbit blockers), so the carousel gate (D-F5) and the mode-pill confinement (D-F4) move to the implementation PRs rather than gating this one.
 - **Issue #6993** tracks the backend (D-F1, D-F4, and the D-V3 anticipatory states). This plan supersedes its ordering with the phased sequence above; keep #6993 as the tracking issue and tick CHECKLIST boxes in the PRs that land them.
 - **#6918 family reorg — landed on `main`.** The branch is merged up to date with it; every new backend piece goes straight into its current family folder (PROPOSAL §6): events/projection → `crates/events/`, facade/DTOs → `crates/product/ironclaw_assistant`, routes → `crates/product/ironclaw_webui`, suggestion producer → `crates/domains/ironclaw_triggers`. Keep semantic changes out of any remaining move-only PRs.
 - **WS1.x contracts** (`ironclaw_product_contracts` / `ironclaw_extension_contracts` / `ironclaw_loop_contracts`, landed) — the new task DTOs/ports belong in `ironclaw_product_contracts`, not inlined into `ironclaw_product`.
