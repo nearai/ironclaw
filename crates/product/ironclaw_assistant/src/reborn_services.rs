@@ -22,9 +22,10 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LlmConfigService, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LlmConfigService,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
+    UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -3657,7 +3658,7 @@ where
         let caller = self
             .authorize_create_thread_project(caller, request.project_id.clone())
             .await?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::CreateThread {
             caller,
             client_action_id,
@@ -3703,13 +3704,13 @@ where
         // Decode + budget inline attachment bytes before the request is
         // consumed into the (bytes-free, serializable) command.
         let attachments = request.decode_attachments()?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::SendMessage {
             scope,
             actor,
             client_action_id,
             content,
-            requested_model,
+            mut requested_model,
         } = command
         else {
             return Err(ProductSurfaceError::internal_invariant());
@@ -3843,6 +3844,12 @@ where
                 }
             }
         } else {
+            // Resolve tenant policy before any new message or attachment side
+            // effect. Existing idempotent replays above retain their original
+            // turn outcome even if an administrator later changes the policy.
+            requested_model = self
+                .resolve_user_model(caller.clone(), requested_model)
+                .await?;
             // Land attachment bytes (if any) into project storage before the
             // message is accepted, recording each as a transcript reference.
             // The stable per-message external_event_id is the path's message
@@ -4132,6 +4139,11 @@ where
             id if id == LLM_CONFIG_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_llm_config_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == USER_MODEL_CATALOG_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_catalog_view(caller).await?;
                 views::view_page(response)
             }
             id if id == THREADS_VIEW.id => {

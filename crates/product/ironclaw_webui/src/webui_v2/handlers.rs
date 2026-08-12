@@ -89,7 +89,11 @@ use ironclaw_product_contracts::ironhub::{
 };
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPolicyRequest,
+    UpsertLlmProviderRequest, UserModelCatalog,
+};
+use ironclaw_product_contracts::operator_llm::{
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY, USER_MODEL_CATALOG_VIEW,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_product_contracts::package_lifecycle::{
@@ -3946,6 +3950,63 @@ pub async fn run_operator_service_lifecycle(
 #[derive(Debug, Deserialize)]
 pub struct LlmProviderPath {
     pub provider_id: String,
+}
+
+/// `GET /api/webchat/v2/llm/models`
+///
+/// User-safe catalog for the caller's tenant. Unlike the operator provider
+/// snapshot, this response contains no endpoints or credential metadata.
+pub async fn get_user_model_catalog(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<UserModelCatalog>, WebUiV2HttpError> {
+    Ok(Json(
+        query_user_model_catalog(state.services(), caller).await?,
+    ))
+}
+
+async fn query_user_model_catalog(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+) -> Result<UserModelCatalog, ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: USER_MODEL_CATALOG_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
+}
+
+/// `PUT /api/webchat/v2/llm/model-policy`
+pub async fn set_user_model_policy(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<SetUserModelPolicyRequest>,
+) -> Result<Json<UserModelCatalog>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_USER_MODEL_POLICY_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "user model policy",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    Ok(Json(
+        query_user_model_catalog(state.services(), caller).await?,
+    ))
 }
 
 /// `GET /api/webchat/v2/llm/providers`
