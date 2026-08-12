@@ -993,6 +993,51 @@ async fn gateway_allows_policy_filtered_discovery_for_named_deferred_capability(
 }
 
 #[tokio::test]
+async fn gateway_allows_prerequisite_and_discovery_for_named_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_prerequisite".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message": "inspect before using hidden tool"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        },
+        ToolCall {
+            id: "call_search".to_string(),
+            name: "tool_search".to_string(),
+            arguments: serde_json::json!({"query": "demo.hidden"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_deferred_prerequisite_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content =
+        "Use the demo.hidden capability after inspecting its input.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected prerequisite and discovery calls");
+    };
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].capability_id.as_str(), "demo.echo");
+    assert_eq!(calls[1].capability_id.as_str(), "ironclaw.tool_search");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn gateway_allows_exact_named_deferred_capability_for_policy_resolution() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_hidden".to_string(),
@@ -5239,6 +5284,15 @@ impl GatewayCapabilityPort {
             validation_error: None,
             registration_error: None,
         }
+    }
+
+    fn with_deferred_prerequisite_surface() -> Self {
+        let mut port = Self::with_hidden_resolvable_tool_surface();
+        let bridge = Self::with_discovery_bridge_surface();
+        port.definitions.extend(bridge.definitions);
+        port.resolvable_definitions
+            .extend(bridge.resolvable_definitions);
+        port
     }
 
     fn with_builtin_shell_surface() -> Self {

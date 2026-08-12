@@ -1424,7 +1424,10 @@ where
         }
         if !tool_definitions.is_empty() {
             let unavailable_capability_guard =
-                unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
+                unavailable_requested_capability_guard(&completion.messages, &tool_definitions)
+                    .filter(|guard| {
+                        !requested_capability_is_resolvable(capabilities.as_ref(), guard)
+                    });
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
             let mut llm_tool_definitions = tool_definitions
                 .into_iter()
@@ -1996,6 +1999,36 @@ impl UnavailableCapabilityGuard {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|name| name == canonical || name == encoded)
     }
+}
+
+fn requested_capability_is_resolvable(
+    capabilities: &dyn ironclaw_loop_contracts::LoopCapabilityPort,
+    guard: &UnavailableCapabilityGuard,
+) -> bool {
+    // The advertised surface may be only a token-bounded subset. Resolve the
+    // exact provider name through the fully decorated port before classifying
+    // it as unavailable; the port applies disclosure policy and remains the
+    // authoritative fail-closed gate for deferred direct calls.
+    let provider_name = guard.capability_id.as_str().replace('.', "__");
+    let Ok(probe) = ProviderToolCall::from_parts(
+        "capability-availability-guard",
+        "capability-availability-guard",
+        None,
+        "capability-availability-guard",
+        provider_name,
+        serde_json::json!({}),
+    ) else {
+        return false;
+    };
+    capabilities
+        .provider_tool_call_capability_ids(&probe)
+        .is_ok_and(|ids| {
+            ids.provider_capability_id == guard.capability_id
+                || ids
+                    .effective_capability_ids
+                    .iter()
+                    .any(|id| id == &guard.capability_id)
+        })
 }
 
 fn unavailable_requested_capability_guard(
