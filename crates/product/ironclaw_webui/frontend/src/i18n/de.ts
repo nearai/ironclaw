@@ -686,7 +686,7 @@ registerPack("de", {
   "jobs.detail.tabs.files": "Dateien",
 
   // Automations page
-  "automations.action.pause": "Pause",
+  "automations.action.pause": "Pausieren",
   "automations.action.resume": "Fortsetzen",
   "automations.eyebrow": "Geplante Arbeit",
   "automations.title": "Automatisierungen",
