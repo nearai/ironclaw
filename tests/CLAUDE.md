@@ -282,7 +282,7 @@ channel-delivery journeys (two-lane model):
 |---|---|
 | A provider failure yields a sanitized, *retryable* failure and the user can retry and resume | `reborn_failure_retry_resume_e2e.rs` (6) |
 | Sub-agents spawn end-to-end | `reborn_subagent_spawn_e2e.rs` (5) |
-| The shipped Docker image has a usable runtime home | `dockerfile_runtime_home.rs` (19) |
+| The shipped Docker image has a usable runtime home, and its runtime stage ships an HTTP client the orchestrator healthcheck can run | `dockerfile_runtime_home.rs` (20) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
 
 **Scope isolation parity** — one bin per boundary; each proves data from one scope is

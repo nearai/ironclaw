@@ -605,19 +605,14 @@ def _bound_pr_buckets(
 
 
 def _root_test_partitions() -> dict[str, int]:
-    support_tests = (
-        ["support_unit_tests"]
-        if (ROOT / "tests/support_unit_tests.rs").is_file()
-        else []
-    )
-    names = sorted(
-        [
-            path.stem
-            for path in (ROOT / "tests").glob("reborn_*.rs")
-            if path.is_file()
-        ]
-        + support_tests
-    )
+    # Every root test target, not just the `reborn_*` ones. Cargo
+    # auto-discovers `tests/*.rs` for the root package, so a narrower glob left
+    # the remainder (`dockerfile_runtime_home`, `trace_format`,
+    # `trace_llm_tests`, the `e2e_trace_runtime_policy_*` pair) outside the
+    # inventory — and the planner fails closed, so touching one of them in a PR
+    # aborted planning with `unmapped test or CI path`. Ported from #7303 on
+    # `release/1.1.0-rc.1`.
+    names = sorted({path.stem for path in (ROOT / "tests").glob("*.rs") if path.is_file()})
     return {f"tests/{name}.rs": index % 4 for index, name in enumerate(names)}
 
 

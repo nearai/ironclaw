@@ -606,8 +606,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
             [integration_inventory[integration_path]],
         )
 
-        docker_only_path = "tests/e2e_trace_runtime_policy_serde.rs"
-        self.assertNotIn(docker_only_path, planner._root_test_partitions())
+        # Root tests reach the inventory the same way integration tests do.
+        # `tests/e2e_trace_runtime_policy_serde.rs` used to sit outside it
+        # (the inventory globbed only `tests/reborn_*.rs`), so it selected the
+        # Docker lane and nothing else; since the inventory covers every root
+        # test it must also keep its own partition.
+        root_path = "tests/e2e_trace_runtime_policy_serde.rs"
+        root_inventory = planner._root_test_partitions()
+        self.assertIn(root_path, root_inventory)
+        self.assertNotIn(root_path, integration_inventory)
+
+        root_plan = self.plan("pull_request", [root_path])
+        self.assertTrue(root_plan["run_sandbox_docker"])
+        self.assertEqual(root_plan["root_partitions"], [root_inventory[root_path]])
+        self.assertEqual(root_plan["integration_lanes"], [])
+
+        # A sandbox-Docker path in neither inventory still selects the Docker
+        # lane alone.
+        docker_only_path = "Dockerfile.sandbox-worker"
+        self.assertNotIn(docker_only_path, root_inventory)
         self.assertNotIn(docker_only_path, integration_inventory)
 
         docker_only_plan = self.plan("pull_request", [docker_only_path])
@@ -895,6 +912,27 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "\\\n      --ignore-rust-version -- --nocapture",
             lane_runner,
         )
+
+    def test_non_reborn_root_tests_are_classified(self) -> None:
+        """Every `tests/*.rs` target is in the root inventory, not just `reborn_*`.
+
+        The inventory used to glob only `tests/reborn_*.rs`, so the remaining
+        root tests (`dockerfile_runtime_home.rs`, `trace_format.rs`,
+        `trace_llm_tests.rs`, the `e2e_trace_runtime_policy_*` pair) fell
+        through to the fail-closed `unmapped test or CI path` arm — touching
+        one of them in a PR failed `Detect Reborn test scope` outright.
+        Ported from #7303 on `release/1.1.0-rc.1`.
+        """
+        inventory = planner._root_test_partitions()
+        for name in (
+            "tests/dockerfile_runtime_home.rs",
+            "tests/trace_format.rs",
+            "tests/trace_llm_tests.rs",
+        ):
+            with self.subTest(path=name):
+                self.assertIn(name, inventory)
+                plan = self.plan("pull_request", [name])
+                self.assertEqual(plan["root_partitions"], [inventory[name]])
 
     def test_unmapped_crate_path_widens_instead_of_refusing(self) -> None:
         """A crate path with no owning package widens to the exhaustive plan.
