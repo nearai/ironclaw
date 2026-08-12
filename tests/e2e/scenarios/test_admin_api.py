@@ -519,6 +519,7 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
         "Slack deployment configuration",
         "Telegram deployment configuration",
         "Google OAuth client credentials",
+        "Web push deployment configuration",
     ]
     for group_name in group_names:
         await expect(

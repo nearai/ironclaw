@@ -17,8 +17,11 @@ import {
   queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
+  getWebPushStatus,
   setNotificationChannels,
   setupExtension,
+  subscribeWebPush,
+  unsubscribeWebPush,
 } from "./api";
 
 const originalFetch = globalThis.fetch;
@@ -402,8 +405,8 @@ test("setNotificationChannels sends an explicit empty array as the intentional c
   };
 
   // An explicit `[]` stays the one supported way to clear the set (spec §7:
-  // "an empty list means notifications stay in the web app only") — the
-  // guard above rejects only the *absent* argument.
+  // an empty list clears every notification channel) — the guard above
+  // rejects only the *absent* argument.
   await setNotificationChannels({ targetIds: [] });
 
   assert.equal(calls.length, 1);
@@ -601,4 +604,89 @@ test("clientActionId falls back when global crypto is null", () => {
     assert.match(id, /^[0-9a-f]{32}$/);
     assert.notEqual(id, "0".repeat(32));
   });
+});
+
+test("getWebPushStatus reads the web-push status route", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(
+      JSON.stringify({ vapid_public_key: "k", subscription_count: 0, subscriptions: [] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const status = await getWebPushStatus();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/web-push/status");
+  assert.equal(status.vapid_public_key, "k");
+});
+
+test("subscribeWebPush posts the subscription wire body and validates required keys", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ outcome: "enrolled" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await subscribeWebPush({
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    keys: { p256dh: "pk", auth: "as" },
+    userAgent: "TestBrowser/1.0",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/web-push/subscriptions");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    keys: { p256dh: "pk", auth: "as" },
+    user_agent: "TestBrowser/1.0",
+  });
+
+  await assert.rejects(subscribeWebPush(), /endpoint is required/);
+  await assert.rejects(
+    subscribeWebPush({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" }),
+    /keys\.p256dh and keys\.auth are required/,
+  );
+  assert.equal(calls.length, 1, "invalid input must never reach fetch");
+});
+
+test("unsubscribeWebPush posts the endpoint removal body", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ removed: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await unsubscribeWebPush({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/web-push/subscriptions/remove");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+  });
+  await assert.rejects(unsubscribeWebPush({}), /endpoint is required/);
 });

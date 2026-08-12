@@ -5650,7 +5650,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "team_id": "T123",
                     "api_app_id": "A123",
                     "oauth_client_id": "persisted-client-id",
-                    "allowed_channels": '["C0SHARED"]',
                 },
             )
             payload, preflight = run_live_qa._slack_setup_payload(
@@ -5667,11 +5666,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "persisted-client-id")
         self.assertEqual(payload.get("bot_user_id"), "U-BOT")
-        # run-acts-as-invoker: no shared_subject_user_id / subject_routes keys;
-        # the persisted allowed-channel admission list rides through.
+        # run-acts-as-invoker: no shared_subject_user_id / subject_routes
+        # keys, and no channel-allowlist key either — shared-channel
+        # admission is presence-based, so no admission config rides through.
+        # The exact key set pins that nothing beyond deployment identity and
+        # credentials is submitted.
         self.assertNotIn("shared_subject_user_id", payload)
         self.assertNotIn("subject_routes", payload)
-        self.assertEqual(payload.get("allowed_channels"), '["C0SHARED"]')
+        self.assertEqual(
+            sorted(payload),
+            [
+                "api_app_id",
+                "bot_token",
+                "bot_user_id",
+                "installation_id",
+                "oauth_client_id",
+                "oauth_client_secret",
+                "signing_secret",
+                "team_id",
+            ],
+        )
         self.assertTrue(preflight["personal_oauth_ready"])
 
     def test_slack_setup_payload_prefers_env_oauth_client_id(self):
@@ -5704,8 +5718,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "fresh-client-id")
         self.assertEqual(preflight["oauth_client_id"], "fresh-client-id")
-        # No admission list configured anywhere -> the empty JSON array default.
-        self.assertEqual(payload.get("allowed_channels"), "[]")
         self.assertTrue(preflight["personal_oauth_ready"])
 
     def test_slack_setup_payload_requires_oauth_client_material(self):
@@ -5922,7 +5934,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 {"name": "slack_api_app_id"},
                 {"name": "slack_bot_user_id"},
                 {"name": "slack_oauth_client_id"},
-                {"name": "slack_allowed_channels"},
             ],
         }
 
@@ -5997,7 +6008,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "signing_secret": "signing-secret-value",
                             "oauth_client_id": "oauth-client-id",
                             "oauth_client_secret": "oauth-client-secret-value",
-                            "allowed_channels": "[]",
                         },
                         {},
                     ),
@@ -6037,7 +6047,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                 "slack_api_app_id": "A123",
                                 "slack_bot_user_id": "U-BOT",
                                 "slack_oauth_client_id": "oauth-client-id",
-                                "slack_allowed_channels": "[]",
                             },
                         },
                     },
@@ -6061,7 +6070,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             result["request"]["field_handles"],
             [
-                "slack_allowed_channels",
                 "slack_api_app_id",
                 "slack_bot_user_id",
                 "slack_installation_id",

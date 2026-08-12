@@ -3,6 +3,7 @@ import { test } from "vitest";
 
 import {
   CONNECTION_LOST_RUN_FAILURE_KEY,
+  NO_PROGRESS_RUN_FAILURE_KEY,
   failureMessageForRequestError,
   failureMessageForRunStatus,
   failureMessageForStreamError,
@@ -21,6 +22,8 @@ const ENGLISH_FAILURE_COPY = {
   "chat.failure.recoveryRequired":
     "The run is awaiting recovery — backend reported `recovery_required`.",
   "chat.failure.run": "The run failed before producing a reply.",
+  [NO_PROGRESS_RUN_FAILURE_KEY]:
+    "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
   "chat.failure.streamRetryable":
     "The chat stream hit a retryable error: {detail}.",
   "chat.failure.stream": "The chat stream failed: {detail}.",
@@ -56,6 +59,17 @@ test("failureMessageForRunStatus formats category underscores", () => {
       failureSummary: null,
     }, t),
     "The run failed: driver invalid request.",
+  );
+});
+
+test("failureMessageForRunStatus makes no-progress failures actionable without a summary", () => {
+  assert.equal(
+    failureMessageForRunStatus({
+      status: "failed",
+      failureCategory: "no_progress_detected",
+      failureSummary: null,
+    }, t),
+    "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
   );
 });
 

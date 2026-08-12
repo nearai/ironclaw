@@ -27,7 +27,6 @@ use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_extension_contracts::recipe::IngressVerificationRecipe;
-use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extension_host::active::{ActiveExtension, ActiveSnapshot};
 use ironclaw_extension_host::ingress::{
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
@@ -65,54 +64,29 @@ use crate::extension_ingress::{
 use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 
-fn admin_configuration_fields(
-    resolved: &ironclaw_extension_registry::ResolvedExtensionManifest,
-) -> Vec<RecipeSecretField> {
-    resolved
-        .admin_configuration
-        .iter()
-        .flat_map(|descriptor| descriptor.fields.iter())
-        .map(|field| RecipeSecretField {
-            handle: field.handle.clone(),
-            label: field.label.clone(),
-            secret: field.secret,
-        })
-        .collect()
-}
-
-/// The manifest-driven default admission resolver, or `None` (= reject every
-/// shared conversation). `None` when the manifest declares no
-/// `*_allowed_channels` handle — and unconditionally when the channel's actor
-/// identity is not per-user: an operator-resolver channel that admitted a
-/// group would run every participant as the operator, the exact exposure the
-/// run-acts-as-invoker rule removed.
+/// The default admission resolver, or `None` (= reject every shared
+/// conversation). Admission is presence-based: the channel's verified
+/// ingress only delivers a conversation's events to this deployment because
+/// the bot is in that conversation, so delivery for this installation is the
+/// membership evidence and needs no operator configuration. `None` —
+/// unconditionally — when the channel's actor identity is not per-user: an
+/// operator-resolver channel that admitted a group would run every
+/// participant as the operator, the exact exposure the run-acts-as-invoker
+/// rule removed.
 fn default_shared_admission(
     actor_identity_is_per_user: bool,
-    source: &HostedChannelSource,
     adapter_id: &ProductAdapterId,
     installation_id: &AdapterInstallationId,
-    channel_config: &Arc<ChannelConfigService>,
-) -> Result<Option<Arc<dyn SharedConversationAdmission>>, String> {
+) -> Option<Arc<dyn SharedConversationAdmission>> {
     if !actor_identity_is_per_user {
-        return Ok(None);
+        return None;
     }
-    let fields = admin_configuration_fields(source.resolved());
-    let Some(handle) =
-        ironclaw_extension_host::channel_shared_admission::shared_channel_admission_handle(&fields)
-    else {
-        return Ok(None);
-    };
-    let extension_id = ExtensionId::new(source.extension_id())
-        .map_err(|error| format!("invalid extension id: {error}"))?;
-    Ok(Some(Arc::new(
-        ironclaw_extension_host::channel_shared_admission::ChannelConfigSharedAdmission::new(
+    Some(Arc::new(
+        ironclaw_extension_host::channel_shared_admission::PresenceSharedAdmission::new(
             adapter_id.clone(),
             installation_id.clone(),
-            extension_id,
-            handle,
-            Arc::clone(channel_config),
         ),
-    )))
+    ))
 }
 
 /// Derive the trusted-evidence shape the generic inbound sink mints from the
@@ -162,9 +136,9 @@ pub struct ChannelExtras {
     /// lane that builds the triggered hook.
     pub preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
     /// Optional shared-conversation admission override. Absent, the
-    /// assembly installs the DEFAULT generic resolver over the extension's
-    /// `*_allowed_channels` `[channel.config]` value when the manifest
-    /// declares the handle.
+    /// assembly installs the DEFAULT presence-based resolver: delivery
+    /// through the channel's verified ingress for this installation is the
+    /// membership evidence, so it admits with no configuration.
     pub shared_admission: Option<Arc<dyn SharedConversationAdmission>>,
     /// Legacy storage-root override for the per-extension workflow state.
     pub storage_roots: Option<ChannelWorkflowStorageRoots>,
@@ -789,7 +763,7 @@ impl GenericChannelHostAssembly {
     ///
     /// Everything here is host policy: where the durable state lives, which
     /// identity policy resolves a verified actor, whether shared conversations
-    /// are admitted (the `*_allowed_channels` connected-channel list), which
+    /// are admitted (presence through the channel's verified ingress), which
     /// commands the manifest declares, and how the channel words its connect
     /// notices. What product does with them — the installation scope, the
     /// binding service, the surface, the observer — is behind the port.
@@ -811,27 +785,25 @@ impl GenericChannelHostAssembly {
         };
         let installation_id = AdapterInstallationId::new(source.installation_id())
             .map_err(|error| format!("invalid installation id: {error}"))?;
-        // Generic shared-conversation admission (§5.3): fail-closed either
-        // way — an extras override wins; otherwise a channel declaring the
-        // `*_allowed_channels` config convention gets the default resolver
-        // over its `[channel.config]` value, and a channel declaring no
-        // admission handle gets `None`, which rejects every shared
-        // conversation. A channel WITHOUT per-user actor identity (no OAuth
-        // vendor, no pairing strategy) never admits shared conversations at
-        // all, allowlisted or not: every participant there resolves to the
-        // operator, which is exactly the exposure run-acts-as-invoker
-        // removed — closed structurally rather than by manifest inventory.
-        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> =
-            match &extras.shared_admission {
-                Some(resolver) => Some(Arc::clone(resolver)),
-                None => default_shared_admission(
-                    actor_identity_is_per_user,
-                    source,
-                    &adapter_id,
-                    &installation_id,
-                    &self.deps.channel_config,
-                )?,
-            };
+        // Generic shared-conversation admission (§5.3): an extras override
+        // wins; otherwise the default resolver admits by PRESENCE — the
+        // conversation's events reached this installation through the
+        // channel's verified ingress because the bot is in the conversation,
+        // and that delivery is the whole admission. A channel WITHOUT
+        // per-user actor identity (no OAuth vendor, no pairing strategy)
+        // never admits shared conversations at all and gets `None`, which
+        // rejects every shared conversation: every participant there
+        // resolves to the operator, which is exactly the exposure
+        // run-acts-as-invoker removed — closed structurally rather than by
+        // manifest inventory.
+        let shared_admission: Option<Arc<dyn SharedConversationAdmission>> = match &extras
+            .shared_admission
+        {
+            Some(resolver) => Some(Arc::clone(resolver)),
+            None => {
+                default_shared_admission(actor_identity_is_per_user, &adapter_id, &installation_id)
+            }
+        };
         let channel = source.resolved().channel.as_ref();
         Ok(ChannelWorkflowRequest {
             adapter_id,
@@ -1159,6 +1131,7 @@ mod tests {
         HmacSha256VerificationRecipe, SharedSecretHeaderRecipe, SignatureEncoding,
         SignedPayloadSegment,
     };
+    use ironclaw_product_contracts::shared_admission::SharedConversationAdmissionRequest;
 
     use super::*;
 
@@ -1239,6 +1212,58 @@ mod tests {
         assert_eq!(
             roots.conversations.as_str(),
             "/tenants/acme-tenant/shared/channel-extensions/vendorx/conversations"
+        );
+    }
+
+    /// Pin for the run-acts-as-invoker ruling (#7377): a channel WITHOUT
+    /// per-user actor identity (no OAuth vendor, no pairing strategy) must get
+    /// NO shared-conversation admission resolver at all — `None` fails every
+    /// shared conversation closed in the product workflow. Such a channel
+    /// resolves every participant to the operator, so admitting a group there
+    /// would run every participant AS the operator — the exact exposure the
+    /// ruling removed. The gate must hinge on `actor_identity_is_per_user`
+    /// itself (an unconditional `if false { return None }` or an
+    /// always-`Some` default both fail here).
+    #[tokio::test]
+    async fn operator_identity_channel_gets_no_shared_admission_resolver() {
+        let adapter_id = ProductAdapterId::new("vendorx").expect("adapter id");
+        let installation_id = AdapterInstallationId::new("vendorx-install-1").expect("install id");
+
+        assert!(
+            default_shared_admission(false, &adapter_id, &installation_id).is_none(),
+            "an operator-identity channel must never receive an admission resolver"
+        );
+
+        // Per-user identity gets the presence default — and the resolver is
+        // bound to THIS adapter installation, proven behaviorally (its fields
+        // are private): it admits its own installation's conversation and
+        // refuses a foreign installation's. A resolver constructed with the
+        // wrong identity would invert one of these.
+        let resolver = default_shared_admission(true, &adapter_id, &installation_id)
+            .expect("per-user identity installs the presence-based default");
+        let request = |installation: &str| SharedConversationAdmissionRequest {
+            adapter_id: adapter_id.clone(),
+            installation_id: AdapterInstallationId::new(installation).expect("install id"),
+            route_key:
+                ironclaw_product_contracts::shared_admission::ProductConversationRouteKey::new(
+                    Some("S1".to_string()),
+                    "C777".to_string(),
+                )
+                .expect("route key"),
+        };
+        assert!(
+            resolver
+                .shared_conversation_admitted(request("vendorx-install-1"))
+                .await
+                .expect("admission resolves"),
+            "the default resolver admits its own installation by presence"
+        );
+        assert!(
+            !resolver
+                .shared_conversation_admitted(request("vendorx-install-2"))
+                .await
+                .expect("admission resolves"),
+            "the default resolver is bound to its own installation, not admit-all"
         );
     }
 }

@@ -18,7 +18,9 @@ use crate::commands::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
-use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ProductTriggerReason};
+use ironclaw_extension_contracts::channel_adapter::{
+    OutboundPart, ProductTriggerReason, ReactionAction, RunReaction,
+};
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
@@ -76,6 +78,15 @@ struct RunNotificationDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
+}
+
+/// Mutable per-run reaction state threaded through the live delivery loop: the
+/// reaction currently shown on the triggering message, and a monotonic id so
+/// each transition is a distinct, idempotent delivery.
+#[derive(Default)]
+struct SourceReactionState {
+    current: Option<RunReaction>,
+    seq: u64,
 }
 
 /// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
@@ -457,39 +468,76 @@ impl RunDeliveryObserver {
         let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
         let mut working_message: Option<DeliveredChannelMessage> = None;
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
+        // The current run-lifecycle reaction on the triggering message and a
+        // monotonic id for each transition. Stays `None` until a working phase
+        // places 👀 — an instant reply gets no reaction (and so no terminal swap).
+        let mut reaction_state = SourceReactionState::default();
         loop {
-            let actionable_state = {
-                self.wait_for_actionable(
+            let actionable_state = match self
+                .wait_for_actionable(
                     &envelope,
                     &scope,
                     run_id,
                     delivered_blocked_marker.as_ref(),
                     &mut working_message,
+                    &mut reaction_state,
                 )
                 .await
-                .map_err(|err| {
+            {
+                Ok(state) => state,
+                Err(err) => {
+                    // Timed out (or a wait error): don't leave a stuck "thinking"
+                    // indicator. Retract it and mark the triggering message ❌;
+                    // the caller posts the "taking longer / check the web app"
+                    // notice.
+                    if let Some(message) = working_message.take() {
+                        self.services
+                            .retract_message(scope.clone(), Some(run_id), message)
+                            .await;
+                    }
+                    self.set_source_reaction(
+                        &scope,
+                        run_id,
+                        envelope.external_conversation_ref(),
+                        &mut reaction_state,
+                        RunReaction::Failed,
+                    )
+                    .await;
                     // If a blocked-state notification was already delivered,
                     // a timeout does not leave the user in silence — convert
                     // to the quieter variant so feedback does not double-post.
-                    if matches!(err, RunDeliveryError::RunWaitTimedOut { .. })
-                        && delivered_blocked_marker.is_some()
-                    {
-                        RunDeliveryError::RunWaitTimedOutAfterNotification { run_id }
-                    } else {
-                        err
-                    }
-                })?
+                    return Err(
+                        if matches!(err, RunDeliveryError::RunWaitTimedOut { .. })
+                            && delivered_blocked_marker.is_some()
+                        {
+                            RunDeliveryError::RunWaitTimedOutAfterNotification { run_id }
+                        } else {
+                            err
+                        },
+                    );
+                }
             };
             if matches!(
                 actionable_state.status,
                 TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
-            ) && let Some(message) = working_message.take()
-            {
-                self.services
-                    .retract_message(scope.clone(), Some(run_id), message)
-                    .await;
+            ) {
+                if let Some(message) = working_message.take() {
+                    self.services
+                        .retract_message(scope.clone(), Some(run_id), message)
+                        .await;
+                }
+                // Parked waiting on the user: swap 👀 → ⚠️ on the triggering
+                // message so it reads as "needs you" at a glance.
+                self.set_source_reaction(
+                    &scope,
+                    run_id,
+                    envelope.external_conversation_ref(),
+                    &mut reaction_state,
+                    RunReaction::NeedsInput,
+                )
+                .await;
             }
-            let Some(notification) = self
+            let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
                     &binding,
@@ -499,8 +547,57 @@ impl RunDeliveryObserver {
                     &actionable_state,
                 )
                 .await?
-            else {
-                return Ok(());
+            {
+                Some(notification) => notification,
+                None => {
+                    // A terminal state produced no deliverable notification.
+                    // Never leave a stuck working indicator: retract it. For a
+                    // genuine failure (not a completed-but-empty run) also post a
+                    // brief failure notice and mark ❌ — source-routed through the
+                    // same reliable path as the working indicator, so it reaches
+                    // the originating channel even without a reply-target binding.
+                    if actionable_state.status.is_terminal() {
+                        self.delivery_runs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_delivered(run_id);
+                        if let Some(message) = working_message.take() {
+                            self.services
+                                .retract_message(scope.clone(), Some(run_id), message)
+                                .await;
+                        }
+                        if actionable_state.status == TurnStatus::Completed {
+                            self.set_source_reaction(
+                                &scope,
+                                run_id,
+                                envelope.external_conversation_ref(),
+                                &mut reaction_state,
+                                RunReaction::Done,
+                            )
+                            .await;
+                        } else {
+                            self.services
+                                .post_notice(
+                                    DeliveryIntent::FailureNotice,
+                                    scope.clone(),
+                                    Some(run_id),
+                                    envelope.external_conversation_ref(),
+                                    prompts::RUN_FAILED_MESSAGE,
+                                    format!("run-failed:{run_id}"),
+                                )
+                                .await;
+                            self.set_source_reaction(
+                                &scope,
+                                run_id,
+                                envelope.external_conversation_ref(),
+                                &mut reaction_state,
+                                RunReaction::Failed,
+                            )
+                            .await;
+                        }
+                    }
+                    return Ok(());
+                }
             };
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
@@ -549,6 +646,21 @@ impl RunDeliveryObserver {
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
                 }
+                // Swap to the terminal reaction — ✅ done or ❌ failed. A no-op
+                // if the run never showed a working phase (nothing was reacted).
+                let terminal_reaction = if actionable_state.status == TurnStatus::Completed {
+                    RunReaction::Done
+                } else {
+                    RunReaction::Failed
+                };
+                self.set_source_reaction(
+                    &scope,
+                    run_id,
+                    envelope.external_conversation_ref(),
+                    &mut reaction_state,
+                    terminal_reaction,
+                )
+                .await;
                 for message in messages_to_delete_after_final {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
@@ -574,9 +686,16 @@ impl RunDeliveryObserver {
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
         working_message: &mut Option<DeliveredChannelMessage>,
+        reaction_state: &mut SourceReactionState,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
+        let notice_seed = run_id.to_string().bytes().map(u64::from).sum::<u64>();
+        // "Still working" nudges within this running stretch: the first at
+        // `first_nudge_after`, then each gap doubling so a long run backs off.
+        let mut nudge_count: u64 = 0;
+        let mut next_nudge_at = self.settings.first_nudge_after;
+        let mut nudge_gap = self.settings.renudge_interval;
         loop {
             let state = self
                 .services
@@ -597,24 +716,107 @@ impl RunDeliveryObserver {
             if start.elapsed() >= self.settings.max_wait {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
-            if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
-                *working_message = self
-                    .services
-                    .post_notice(
-                        DeliveryIntent::Working,
-                        scope.clone(),
-                        Some(run_id),
+            if blocked_actionable_marker(&state).is_none() {
+                if working_message.is_none() {
+                    // First working notice for this running stretch. Vary the
+                    // line per run (seeded by the run id) so a channel with
+                    // several runs in flight keeps one voice each, and mark the
+                    // triggering message with 👀 so the user sees which ping is
+                    // being worked on.
+                    *working_message = self
+                        .services
+                        .post_notice(
+                            DeliveryIntent::Working,
+                            scope.clone(),
+                            Some(run_id),
+                            envelope.external_conversation_ref(),
+                            prompts::working_message(notice_seed),
+                            format!("working:{run_id}"),
+                        )
+                        .await;
+                    self.set_source_reaction(
+                        scope,
+                        run_id,
                         envelope.external_conversation_ref(),
-                        prompts::WORKING_MESSAGE,
-                        format!("working:{run_id}"),
+                        reaction_state,
+                        RunReaction::Working,
                     )
                     .await;
+                } else if start.elapsed() >= next_nudge_at {
+                    // The run is taking a while: refresh the indicator (retract +
+                    // repost) with an escalated "still working" line so the user
+                    // knows it hasn't stalled, keeping the latest status at the
+                    // bottom of the conversation. Each gap doubles.
+                    if let Some(previous) = working_message.take() {
+                        self.services
+                            .retract_message(scope.clone(), Some(run_id), previous)
+                            .await;
+                    }
+                    nudge_count += 1;
+                    next_nudge_at += nudge_gap;
+                    nudge_gap = nudge_gap.saturating_mul(2);
+                    *working_message = self
+                        .services
+                        .post_notice(
+                            DeliveryIntent::Working,
+                            scope.clone(),
+                            Some(run_id),
+                            envelope.external_conversation_ref(),
+                            prompts::long_running_message(notice_seed, nudge_count),
+                            format!("working:{run_id}:{nudge_count}"),
+                        )
+                        .await;
+                }
             }
             tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
             poll_interval = poll_interval
                 .saturating_mul(2)
                 .min(std::time::Duration::from_secs(5));
         }
+    }
+
+    /// Transition the run-lifecycle reaction on the triggering message to
+    /// `next` (👀 working → ⚠️ needs-input → 👀 working → ✅ done / ❌ failed),
+    /// removing the previous reaction first so only one shows at a time.
+    /// `current`/`seq` persist the state and a monotonic delivery id across the
+    /// run; a no-op when the reaction is unchanged or there is nothing to react
+    /// to. Best-effort throughout — a reaction never affects the run.
+    async fn set_source_reaction(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        conversation: &ExternalConversationRef,
+        state: &mut SourceReactionState,
+        next: RunReaction,
+    ) {
+        if state.current == Some(next) || conversation.reply_target_message_id().is_none() {
+            return;
+        }
+        if let Some(previous) = state.current.take() {
+            self.services
+                .react_to_source(
+                    scope.clone(),
+                    run_id,
+                    conversation,
+                    previous,
+                    ReactionAction::Remove,
+                    state.seq,
+                )
+                .await;
+            state.seq += 1;
+        }
+        self.services
+            .react_to_source(
+                scope.clone(),
+                run_id,
+                conversation,
+                next,
+                ReactionAction::Add,
+                state.seq,
+            )
+            .await;
+        state.seq += 1;
+        state.current = Some(next);
     }
 
     async fn notification_for_actionable_state(
@@ -996,16 +1198,21 @@ impl RunDeliveryObserver {
         true
     }
 
-    /// A first-contact DM from a user with no identity binding is rejected
-    /// with `BindingRequired`. Instead of silently dropping it, greet them
-    /// with a connect nudge — but ONLY in a 1:1 direct chat: the nudge is
-    /// addressed to one person and must never land in a shared conversation.
-    /// The gate is the adapter's own trigger classification
-    /// (`ProductTriggerReason::DirectChat` — the same signal the OAuth-link
-    /// privacy rule trusts). Deliberately performs NO binding lookup (the
-    /// sender is unbound by definition) and posts only fixed, host-authored
-    /// text. Transport retries arrive as `Duplicate`, so this fires at most
-    /// once per inbound event.
+    /// A message from a user with no identity binding is rejected with
+    /// `BindingRequired`. Instead of silently dropping it, greet them with a
+    /// connect nudge. In a 1:1 direct chat that lands in the DM as before;
+    /// in a shared conversation it lands as a reply anchored on the sender's
+    /// own message (the envelope's message-scoped conversation ref carries
+    /// the anchor — a threading surface roots a thread on the ping, a flat
+    /// surface quotes it), so the nudge addresses the one unpaired sender
+    /// rather than the room. The
+    /// text is fixed, host-authored, and link-free (OAuth links and pairing
+    /// codes stay out of shared surfaces by the private-setup rules).
+    /// Deliberately performs NO binding lookup (the sender is unbound by
+    /// definition). Transport retries arrive as `Duplicate`, so this fires
+    /// at most once per inbound event, and the per-conversation reservation
+    /// throttles repeats — per rooted thread (each top-level ping roots its
+    /// own conversation) and per flat chat or topic.
     async fn post_connect_nudge_if_unbound_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -1017,7 +1224,11 @@ impl RunDeliveryObserver {
         if !matches!(rejection.kind, ProductRejectionKind::BindingRequired) {
             return false;
         }
-        if !envelope_is_direct_chat(envelope) {
+        // Only nudge when the message actually addressed the bot. A shared
+        // channel forwards ordinary chatter and unbound thread replies that
+        // also reject `BindingRequired`; nudging those would butt a "connect"
+        // notice into conversations nobody pointed at the bot.
+        if !envelope_addresses_the_bot(envelope) {
             return false;
         }
         let conversation_key = envelope
@@ -1515,6 +1726,29 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
         envelope.payload(),
         ProductInboundPayload::UserMessage(payload)
             if payload.trigger == ProductTriggerReason::DirectChat
+    )
+}
+
+/// Does this message ADDRESS the bot — a DM, a mention, or a slash command —
+/// as opposed to ordinary channel chatter the adapter merely forwarded?
+///
+/// The connect nudge fires only for addressed messages: a shared channel
+/// delivers every `message` event the bot is subscribed to, and an unbound
+/// human-to-human thread reply (`ReplyToBot` with no existing binding) also
+/// rejects `BindingRequired` — nudging THAT would post a "connect" notice
+/// into a conversation nobody pointed at the bot. Requiring a bot-addressed
+/// trigger keeps the nudge to the "someone tried to use the bot and isn't
+/// paired" case on every surface.
+fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload)
+            if matches!(
+                payload.trigger,
+                ProductTriggerReason::DirectChat
+                    | ProductTriggerReason::BotMention
+                    | ProductTriggerReason::BotCommand
+            )
     )
 }
 

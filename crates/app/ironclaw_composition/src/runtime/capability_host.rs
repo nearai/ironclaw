@@ -1177,12 +1177,10 @@ fn durable_result_scope_error() -> AgentLoopHostError {
 }
 
 /// The scope a run's workspace grants and skill mounts key off. Delegates to
-/// the one contract ladder ([`LoopRunContext::acting_resource_scope`]): a run
-/// acts as the user who invoked it, so its mounts resolve to the same identity
-/// as its gates, settings, and deliveries. This was owner-first until the
-/// run-acts-as-invoker unification (#7377) — owner and actor coincide on every
-/// run constructible since, and a legacy owner≠actor run parked across that
-/// deploy now mounts as its ACTOR, matching the rest of its gate dance.
+/// the one contract derivation ([`LoopRunContext::acting_resource_scope`]): a
+/// run acts as its user, so its mounts resolve to the same identity as its
+/// gates, settings, and deliveries. Since the ephemeral-per-ping remodel a
+/// run's owner IS its actor, so there is a single identity to key off.
 pub(super) fn resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
@@ -1234,8 +1232,8 @@ fn visible_capability_request(
     let extension_id = loop_driver_execution_extension_id(run_context)?;
     // Resolved BEFORE grant minting: extension grants are filtered per caller
     // (#5459 P1 — user-private installs mint grants only for their owner).
-    // The caller is the acting user — one contract ladder for grants, mounts,
-    // and the gate dance alike (run-acts-as-invoker, #7377).
+    // The caller is the run user — one contract derivation for grants, mounts,
+    // and the gate dance alike (owner == actor, #7377).
     let user_id = run_context.acting_user_id(fallback_user_id);
     let mut grants = inputs.policy.builtin_grants(
         &extension_id,

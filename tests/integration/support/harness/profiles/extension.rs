@@ -1915,6 +1915,7 @@ fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBi
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
+        outbound_target_provider: None,
     }
 }
 
@@ -1932,11 +1933,56 @@ fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensio
         preference_target_codec: Some(Arc::new(
             ironclaw_telegram_extension::TelegramPreferenceTargetCodec,
         )),
+        outbound_target_provider: None,
     }
 }
 
 pub(crate) async fn extension_delivery_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_delivery_tools_profile()?.build().await
+}
+
+/// Push-service endpoint token the web-push delivery journeys script a
+/// vendor `410 Gone` for — the "this subscription no longer exists" arm the
+/// adapter must prune on. Mirrored (not imported — a separate test binary)
+/// in `delivery_user_journeys.rs`.
+const WEB_PUSH_GONE_ENDPOINT_TOKEN: &str = "gone-subscription-token";
+
+/// [`extension_delivery_with_gated_write_tools_profile`] PLUS the complete
+/// web-push channel: the deployment binding (adapter + codec + catalog
+/// provider) around one late-bound runtime slot, the slot on the composition
+/// input, the package manifest bundled, and the vendor router extended so
+/// push-service POSTs answer `201 Created` (`410 Gone` for the reserved
+/// endpoint token above). Returns the slot so a scenario can reach the
+/// composed subscription store if it needs read-back.
+pub(crate) fn extension_delivery_with_web_push_tools_profile()
+-> HarnessResult<(ToolsProfile, ironclaw_web_push::WebPushRuntimeSlot)> {
+    let mut profile = extension_delivery_with_gated_write_tools_profile()?;
+    let slot = ironclaw_web_push::WebPushRuntimeSlot::new();
+    let network_egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
+            .with_vendor_router(web_push_delivery_vendor_router()),
+    );
+    profile.options = profile
+        .options
+        .with_web_push_channel_extension(slot.clone())
+        .with_recording_network_egress(network_egress);
+    Ok((profile, slot))
+}
+
+/// The delivery vendor router extended for push services: any POST to an
+/// endpoint on the web-push manifest's declared hosts answers the way a
+/// real push service does — `201 Created` with an empty body (RFC 8030), or
+/// `410 Gone` for the reserved dead-subscription token.
+fn web_push_delivery_vendor_router() -> Arc<VendorResponseRouter> {
+    Arc::new(move |request: &ironclaw_network::NetworkHttpRequest| {
+        if request.url.starts_with("https://fcm.googleapis.com/") {
+            if request.url.contains(WEB_PUSH_GONE_ENDPOINT_TOKEN) {
+                return Some((410, Vec::new()));
+            }
+            return Some((201, Vec::new()));
+        }
+        delivery_vendor_router(request)
+    })
 }
 
 // ── Standard messaging op conformance (standardized messaging framework,

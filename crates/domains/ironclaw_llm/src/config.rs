@@ -23,9 +23,10 @@ pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
 
 /// Prompt cache retention policy for Anthropic.
 ///
-/// Controls Anthropic's automatic prompt caching via a top-level
-/// `cache_control` field injected through rig-core's `additional_params`.
-/// - `None` — caching disabled, no `cache_control` injected.
+/// Controls Anthropic prompt caching — both the explicit per-block
+/// `cache_control` breakpoints (system prompt, last tool definition, last
+/// message block) and the top-level automatic-caching marker.
+/// - `None` — caching disabled, no `cache_control` emitted anywhere.
 /// - `Short` — 5-minute TTL (default), `{"type": "ephemeral"}`, 1.25× write surcharge.
 /// - `Long` — 1-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`, 2× write surcharge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,6 +38,19 @@ pub enum CacheRetention {
     Short,
     /// 1-hour TTL. Write cost: 2× base input.
     Long,
+}
+
+impl CacheRetention {
+    /// The Anthropic `cache_control` marker for this retention, usable both
+    /// as a per-block breakpoint and as the request-level automatic-caching
+    /// field. `None` when caching is disabled.
+    pub(crate) fn cache_control_json(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::None => Option::None,
+            Self::Short => Some(serde_json::json!({"type": "ephemeral"})),
+            Self::Long => Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"})),
+        }
+    }
 }
 
 impl std::str::FromStr for CacheRetention {

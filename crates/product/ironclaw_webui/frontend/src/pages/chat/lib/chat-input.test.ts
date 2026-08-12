@@ -142,6 +142,27 @@ function renderChatInput({
       maxFileBytes: 1024,
       maxTotalBytes: 2048,
     }),
+    useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
+      const ref = context.React.useRef(null);
+      return [
+        () => {
+          if (!disabled) ref.current?.click();
+        },
+        {
+          ref,
+          type: "file",
+          accept,
+          multiple,
+          disabled,
+          hidden: true,
+          onChange: (event) => {
+            const files = Array.from(event.currentTarget.files || []);
+            event.currentTarget.value = "";
+            if (!disabled && files.length > 0) onSelect(files);
+          },
+        },
+      ];
+    },
     NEW_DRAFT_KEY: "__new__",
     clearDraft: () => {},
     clearStagedAttachments: () => {},
@@ -594,7 +615,7 @@ test("ChatInput keeps Enter blocked when submit becomes disabled during send", a
 
   // Re-render in production would update submitDisabledRef before the original
   // async send closure reaches finally.
-  const submitDisabledRef = refs[5];
+  const submitDisabledRef = refs[4];
   submitDisabledRef.current = true;
   resolveSend();
   await flushAsyncHandlers();
@@ -724,6 +745,27 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
       maxFileBytes: 1024,
       maxTotalBytes: 2048,
     }),
+    useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
+      const ref = context.React.useRef(null);
+      return [
+        () => {
+          if (!disabled) ref.current?.click();
+        },
+        {
+          ref,
+          type: "file",
+          accept,
+          multiple,
+          disabled,
+          hidden: true,
+          onChange: (event) => {
+            const files = Array.from(event.currentTarget.files || []);
+            event.currentTarget.value = "";
+            if (!disabled && files.length > 0) onSelect(files);
+          },
+        },
+      ];
+    },
     NEW_DRAFT_KEY: "__new__",
     clearDraft: () => {},
     clearStagedAttachments: () => {},

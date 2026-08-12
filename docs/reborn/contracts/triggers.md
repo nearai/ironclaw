@@ -288,6 +288,14 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   project is not a wildcard.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
+- Prompt assembly for `TurnOriginKind::ScheduledTrigger` must append the
+  unattended scheduled-run protocol in memory. That protocol tells the model
+  that no human is present, requires it to perform the stored task instead of
+  ending with a question or menu, permits only bounded assumptions within the
+  stored request, identifies the final reply as the run's recorded output, and
+  preserves host approval, authentication, authorization, and policy gates.
+  The trusted turn origin is the switch; an interactive run must not receive
+  this protocol merely because it shares a run profile or process.
 
 Host-trusted trigger ingress request fields are:
 
@@ -406,7 +414,13 @@ and submit-result bookkeeping:
 - `ironclaw_triggers::ClearActiveFireRequest` plus
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
-  has observed a terminal turn outcome.
+  has observed a terminal turn outcome;
+- after an accepted run is durably cleared with `TriggerRunHistoryStatus::Error`,
+  `TriggerFireSettlementObserver::on_run_failure_settled` receives the exact
+  tenant, trigger, fire-slot, and run identities. Successful terminal runs and
+  clear races do not emit this failure settlement. The observer is an
+  automation-health signal only; it does not mint a replacement turn or bypass
+  the normal triggered-run delivery watcher.
 
 The poller treats per-record due-fire processing and active-run terminal lookup
 errors as structured tick report outcomes so one bad record does not block other
@@ -527,7 +541,12 @@ after completion. An omitted selection inherits the sealed source route; an
 explicit target is re-resolved at send time and fails closed if it is removed,
 unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
 persists the result without external egress. Trigger execution itself still
-does not choose, parse, or infer a destination.
+does not choose, parse, or infer a destination. (✎ 2026-08-08: the retired
+in-app "WebApp selection" sentence above describes the pre-#7157 stored-target
+model; under the shipped two-lane model the `web-push` catalog target is a
+real external destination — a routine that should notify the browser pins it
+in the prompt's delivery step like any channel target, and the
+notification-channel set fans gate/auth/failure notices to it when selected.)
 
 ---
 

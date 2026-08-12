@@ -659,14 +659,34 @@ fn with_binary_host_extension_bindings_from_bundles(
     first_party_bundles: Vec<FirstPartyPackageBundle>,
 ) -> anyhow::Result<RebornHostBindings> {
     crate::first_party::assert_first_party_bundles_present(&first_party_bundles)?;
+    let channel_extensions = native_extensions::bundled_channel_extensions();
+    let mut services_input = services_input
+        .with_channel_extension_bindings(channel_extensions.bindings)
+        .with_web_push_runtime_slot(channel_extensions.web_push_runtime);
+    if let Some(subject) = web_push_vapid_subject_from_env() {
+        services_input = services_input.with_web_push_vapid_subject(subject);
+    }
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
-        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
         .with_first_party_bundles(first_party_bundles)
         .with_first_party_registrars(crate::first_party::bundled_first_party_registrars())
         .with_credential_account_visibility_policy(
             crate::first_party::first_party_credential_account_visibility_policy(),
         ))
+}
+
+/// RFC 8292 `sub` for the seeded VAPID credential: the deployment's public
+/// https base URL when one is configured, else `None` (composition falls
+/// back to a stable placeholder). Reads the same env var the serve command
+/// validates for OAuth callbacks; a malformed value degrades to the
+/// placeholder rather than failing boot.
+fn web_push_vapid_subject_from_env() -> Option<String> {
+    let raw = std::env::var("IRONCLAW_REBORN_WEBUI_BASE_URL").ok()?; // silent-ok: optional env-derived contact URI, placeholder fallback is safe
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.starts_with("https://") && trimmed.len() > "https://".len() {
+        return Some(trimmed.to_string());
+    }
+    None
 }
 
 pub(crate) struct RuntimeServicesInput {
@@ -1600,6 +1620,22 @@ fn runner_settings(
             if secs == 0 {
                 anyhow::bail!(
                     "config file [runner].heartbeat_interval_secs must be greater than 0"
+                );
+            }
+            // A heartbeat costs interval + timeout (the supervisor passes the
+            // interval as the timeout), so one attempt costs 2 * interval. Past
+            // half the process lease TTL the lease can expire before the
+            // worker even records its first failure; the scheduler clamps such
+            // intervals to its lease-derived bound, but an operator's explicit
+            // configuration should be rejected, not silently rewritten.
+            let max_runner_heartbeat_interval_secs =
+                ironclaw_composition::MAX_HEARTBEAT_INTERVAL_WITHIN_LEASE.as_secs();
+            if secs > max_runner_heartbeat_interval_secs {
+                anyhow::bail!(
+                    "config file [runner].heartbeat_interval_secs must not exceed {} seconds \
+                     so a heartbeat attempt and its failure window fit inside the process \
+                     lease TTL",
+                    max_runner_heartbeat_interval_secs,
                 );
             }
             settings.heartbeat_interval = Duration::from_secs(secs);

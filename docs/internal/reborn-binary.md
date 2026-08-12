@@ -565,7 +565,7 @@ url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 # Optional; defaults to 2. Keep below the PostgreSQL server or managed
 # session-pool cap after reserving capacity for restarts and operator sessions.
-pool_max_size = 2
+pool_max_size = 8
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
