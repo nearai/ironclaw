@@ -237,10 +237,6 @@ export function App() {
           <Route path="projects" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
           <Route path="projects/:projectId" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
           <Route
-            path="projects/:projectId/missions/:missionId"
-            element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
-          />
-          <Route
             path="projects/:projectId/threads/:threadId"
             element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
           />

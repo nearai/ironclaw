@@ -38,14 +38,6 @@ const PROJECT_ROLE_LABELS = {
   unknown: "Unknown",
 };
 
-const MISSION_STATUS_LABELS = {
-  active: "Active",
-  paused: "Paused",
-  completed: "Completed",
-  failed: "Failed",
-  unknown: "Unknown",
-};
-
 const THREAD_STATE_LABELS = {
   running: "Running",
   done: "Done",
@@ -127,14 +119,6 @@ export function projectStateTone(state) {
   return state === "active" ? "success" : "muted";
 }
 
-export function missionTone(status) {
-  if (status === "Active") return "signal";
-  if (status === "Paused") return "warning";
-  if (status === "Completed") return "success";
-  if (status === "Failed") return "danger";
-  return "muted";
-}
-
 export function threadTone(state) {
   if (state === "Running") return "signal";
   if (state === "Done" || state === "Completed") return "success";
@@ -161,22 +145,6 @@ export function formatProjectRole(role, t) {
     labels: PROJECT_ROLE_LABELS,
     keyPrefix: "projects.projectRole",
   });
-}
-
-export function formatMissionStatus(status, t) {
-  return formatEnumLabel(status, t, {
-    labels: MISSION_STATUS_LABELS,
-    keyPrefix: "projects.status",
-  });
-}
-
-export function formatMissionCadence(mission, t) {
-  if (mission?.cadence_description) return mission.cadence_description;
-  const cadenceType = mission?.cadence_type || "";
-  if (String(cadenceType).toLowerCase() === "manual") {
-    return tx(t, "projects.missions.manual", {}, "Manual");
-  }
-  return cadenceType || tx(t, "projects.missions.manual", {}, "Manual");
 }
 
 export function formatThreadState(state, t) {
@@ -258,19 +226,6 @@ export function summarizeOverview(overview) {
     activeProjects: counts?.active ?? 0,
     archivedProjects: counts?.archived ?? 0,
   };
-}
-
-export function missionStatusCounts(missions = []) {
-  return missions.reduce(
-    (counts, mission) => {
-      if (mission?.status === "Active") counts.active += 1;
-      else if (mission?.status === "Paused") counts.paused += 1;
-      else if (mission?.status === "Completed") counts.completed += 1;
-      else if (mission?.status === "Failed") counts.failed += 1;
-      return counts;
-    },
-    { active: 0, paused: 0, completed: 0, failed: 0 }
-  );
 }
 
 export function projectCount(t, key, count) {
