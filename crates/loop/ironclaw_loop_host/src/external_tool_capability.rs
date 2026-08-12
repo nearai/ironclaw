@@ -33,8 +33,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityProgress,
-    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+    CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
@@ -90,7 +90,6 @@ impl ToolSpec {
             description_trust: Default::default(),
             // External tools are client-side; the host never runs them in
             // parallel, and they always park, so mark them exclusive.
-            concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: self.parameters_schema.clone(),
         }
     }
@@ -244,8 +243,8 @@ impl ExternalToolCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for ExternalToolCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {

@@ -17,7 +17,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
-    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    CapabilityInputRef, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
     LoopRequestBatch, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
@@ -272,7 +272,6 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             safe_name: self.primary_tool_name().to_string(),
             safe_description: "Echo a test payload".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
         if self.expose_spawn_subagent {
@@ -283,7 +282,6 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: "Spawn a child subagent run and wait for its result".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             });
         }

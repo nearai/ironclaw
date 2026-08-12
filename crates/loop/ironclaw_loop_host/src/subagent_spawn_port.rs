@@ -24,10 +24,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
     CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
-    CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-    LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    CapabilityInputRef, LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
 };
 use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
 use ironclaw_threads::{
@@ -572,7 +572,6 @@ impl SubagentSpawnCapabilityPort {
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: (*self.parameters_schema).clone(),
         }
     }
@@ -1158,8 +1157,11 @@ impl SubagentSpawnCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        invocations
+            .iter()
+            .any(|invocation| invocation.capability_id == self.spawn_id)
+            || self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {

@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,
 };
-use ironclaw_loop_contracts::{CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition};
+use ironclaw_loop_contracts::{CapabilityDescriptorView, ProviderToolDefinition};
 use serde_json::{Map, Value, json};
 
 use crate::ToolDisclosureMode;
@@ -1048,19 +1048,7 @@ fn bridge_descriptor(definition: &ProviderToolDefinition) -> CapabilityDescripto
         safe_name: definition.name.to_string(),
         safe_description: definition.description.clone(),
         description_trust: Default::default(),
-        concurrency_hint: bridge_concurrency_hint(definition.name.as_str()),
         parameters_schema: definition.parameters.clone(),
-    }
-}
-
-/// Search and describe only inspect the per-turn disclosure catalog. An
-/// unresolved `tool_call` can target any capability, so its bridge fallback
-/// remains conservative; resolved calls carry the target capability id and
-/// therefore use that target's own descriptor hint.
-fn bridge_concurrency_hint(name: &str) -> ConcurrencyHint {
-    match name {
-        TOOL_SEARCH_NAME | TOOL_DESCRIBE_NAME => ConcurrencyHint::SafeForParallel,
-        _ => ConcurrencyHint::Exclusive,
     }
 }
 
@@ -1072,7 +1060,6 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
         safe_name: entry.definition.name.to_string(),
         safe_description: entry.definition.description.clone(),
         description_trust: entry.definition.description_trust,
-        concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: entry.definition.parameters.clone(),
     }
 }

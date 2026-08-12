@@ -320,8 +320,8 @@ impl PromotionScopeKey {
 
 #[async_trait]
 impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -1646,7 +1646,7 @@ mod tests {
         result_meta::FailureKind,
     };
     use ironclaw_loop_contracts::{
-        CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
+        CapabilityDescriptorView, InMemoryRunProfileResolver, ResolvedRunProfile,
         RunProfileResolutionRequest, RunProfileResolver,
     };
     use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
@@ -1708,7 +1708,6 @@ mod tests {
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description,
                         description_trust: definition.description_trust,
-                        concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters,
                     })
                     .collect(),
@@ -1827,7 +1826,6 @@ mod tests {
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description.clone(),
                         description_trust: definition.description_trust,
-                        concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters.clone(),
                     })
                     .collect(),
@@ -2211,45 +2209,12 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .expect("visible surface");
-        let hint_of = |name: &str| {
-            surface
-                .descriptors
-                .iter()
-                .find(|descriptor| descriptor.safe_name == name)
-                .unwrap_or_else(|| panic!("{name} descriptor on the deferred surface"))
-                .concurrency_hint
-        };
-        assert_eq!(
-            hint_of(TOOL_SEARCH_NAME),
-            ConcurrencyHint::SafeForParallel,
-            "tool_search is a side-effect-free catalog lookup"
-        );
-        assert_eq!(
-            hint_of(TOOL_DESCRIBE_NAME),
-            ConcurrencyHint::SafeForParallel,
-            "tool_describe is a side-effect-free schema lookup"
-        );
-        assert_eq!(
-            hint_of(TOOL_CALL_NAME),
-            ConcurrencyHint::Exclusive,
-            "an unresolved tool_call can target an arbitrary capability"
-        );
         assert!(
             !surface
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.safe_name == "hidden_tool"),
             "deferred tool should not be model-visible before discovery"
-        );
-        assert_eq!(
-            surface
-                .descriptors
-                .iter()
-                .find(|descriptor| descriptor.safe_name == "read_file")
-                .expect("read_file descriptor")
-                .concurrency_hint,
-            ConcurrencyHint::SafeForParallel,
-            "visible surface must preserve inner descriptor metadata"
         );
         let advertised = port.tool_definitions().expect("tool definitions");
         for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {

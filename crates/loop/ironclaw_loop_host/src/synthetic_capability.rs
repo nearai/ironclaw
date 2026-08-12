@@ -16,7 +16,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
-    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    CapabilityInputRef, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
     LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -98,7 +98,6 @@ pub struct SyntheticCapabilityDescriptor {
     capability_id: CapabilityId,
     provider_tool_name: ProviderToolName,
     description: String,
-    concurrency_hint: ConcurrencyHint,
     parameters_schema: serde_json::Value,
 }
 
@@ -107,7 +106,6 @@ impl SyntheticCapabilityDescriptor {
         capability_id: &str,
         provider_tool_name: &str,
         description: &str,
-        concurrency_hint: ConcurrencyHint,
         parameters_schema: serde_json::Value,
     ) -> Result<Self, AgentLoopHostError> {
         Ok(Self {
@@ -124,7 +122,6 @@ impl SyntheticCapabilityDescriptor {
                 )
             })?,
             description: description.to_string(),
-            concurrency_hint,
             parameters_schema,
         })
     }
@@ -137,7 +134,6 @@ impl SyntheticCapabilityDescriptor {
             safe_name: self.provider_tool_name.as_str().to_string(),
             safe_description: self.description.clone(),
             description_trust: Default::default(),
-            concurrency_hint: self.concurrency_hint,
             parameters_schema: self.parameters_schema.clone(),
         }
     }
@@ -384,8 +380,8 @@ impl SyntheticCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for SyntheticCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -772,7 +768,6 @@ mod tests {
                 TEST_CAPABILITY_ID,
                 TEST_PROVIDER_TOOL_NAME,
                 "Synthetic test capability",
-                ConcurrencyHint::SafeForParallel,
                 serde_json::json!({"type": "object"}),
             )
             .expect("descriptor"),
@@ -960,7 +955,6 @@ mod tests {
                 TEST_CAPABILITY_ID,
                 TEST_PROVIDER_TOOL_NAME,
                 "Synthetic test capability",
-                ConcurrencyHint::SafeForParallel,
                 serde_json::json!({"type": "object"}),
             )
             .expect("descriptor"),

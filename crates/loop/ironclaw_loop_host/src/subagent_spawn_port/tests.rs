@@ -267,7 +267,6 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             }],
         })
@@ -338,7 +337,6 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             }],
         })
@@ -483,6 +481,10 @@ impl LoopCapabilityPort for FixedToolPort {
 
 #[async_trait]
 impl LoopCapabilityPort for RecordingBatchPort {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+        false
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -1340,7 +1342,6 @@ async fn spawn_descriptor_is_present_in_visible_capabilities() {
         DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
     );
     assert_eq!(descriptors[0].runtime, RuntimeKind::FirstParty);
-    assert_eq!(descriptors[0].concurrency_hint, ConcurrencyHint::Exclusive);
 }
 
 #[tokio::test]
@@ -2240,6 +2241,26 @@ async fn invoke_spawn_surfaces_scope_recovery_in_progress_as_retryable_capabilit
         ),
         "the retryable outcome must preserve the scrubbed cause for the model"
     );
+}
+
+#[tokio::test]
+async fn spawn_port_vetoes_only_batches_that_contain_spawn() {
+    let context = test_run_context_with_agent_actor("spawn-batch-order-veto").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(RecordingBatchPort::default()),
+        Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+    );
+    let regular = [invocation("regular.one"), invocation("regular.two")];
+    let with_spawn = [
+        invocation("regular.one"),
+        invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+    ];
+
+    assert!(!port.requires_ordered_batch_invocation(&regular));
+    assert!(port.requires_ordered_batch_invocation(&with_spawn));
 }
 
 #[tokio::test]
