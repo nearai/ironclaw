@@ -23,7 +23,9 @@ function renderLoginPage({ providers = [], isLocalDev = true } = {}) {
     useInterfaceTheme: () => ({ theme: "dark", toggleTheme: () => {} }),
     useT: () => (key) => key,
     cn: (...classes) => classes.flat().filter(Boolean).join(" "),
-    OAuthProviderButtons: component("OAuthProviderButtons"),
+    // A string component type remains visible in the serialized element tree,
+    // allowing the layout assertion to verify the OAuth section itself.
+    OAuthProviderButtons: "OAuthProviderButtons",
     useOAuthProviders: () => providers,
     // Imported from `src/lib/browser-origin.ts`; the VM harness strips
     // imports, so it must be injected here like every other dependency.
@@ -69,22 +71,24 @@ test("login page omits the local-dev hint on a non-local origin even with no OAu
 });
 
 // The OAuth providers (e.g. "Continue with Google") render above the gateway
-// token form, separated by the "or continue with" divider. The divider is
-// page-owned (it separates two sibling auth methods), so it is visible even
-// though `OAuthProviderButtons` itself is mocked out here.
+// token form, separated by the "or continue with" divider. The serializable
+// OAuthProviderButtons sentinel makes the assertion fail if the component is
+// omitted or rendered elsewhere in the page.
 test("login page renders the OAuth providers above the gateway token form", () => {
   const serialized = JSON.stringify(
     renderLoginPage({ providers: ["google"], isLocalDev: false }),
   );
 
+  const providersIndex = serialized.indexOf("OAuthProviderButtons");
   const dividerIndex = serialized.indexOf("login.oauthDivider");
   const tokenIndex = serialized.indexOf("login.tokenLabel");
 
+  assert.notEqual(providersIndex, -1, "expected the OAuth providers to render");
   assert.notEqual(dividerIndex, -1, "expected the OAuth divider to render");
   assert.notEqual(tokenIndex, -1, "expected the gateway token field to render");
   assert.ok(
-    dividerIndex < tokenIndex,
-    "expected the OAuth section to render above the gateway token form",
+    providersIndex < dividerIndex && dividerIndex < tokenIndex,
+    "expected OAuth providers, divider, and token form in that order",
   );
 });
 
