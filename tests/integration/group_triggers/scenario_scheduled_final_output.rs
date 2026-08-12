@@ -5,7 +5,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::{TurnOriginKind, TurnStatus};
+use ironclaw_host_api::turn::{TurnOriginKind, TurnStatus};
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let h = g
@@ -25,9 +25,6 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 RebornScriptedReply::text(questions[0]),
                 RebornScriptedReply::text(questions[1]),
                 RebornScriptedReply::text(questions[2]),
-                RebornScriptedReply::text(
-                    "The scheduled run could not produce a self-contained result.",
-                ),
             ],
         )
         .await?;

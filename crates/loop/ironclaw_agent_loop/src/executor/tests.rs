@@ -2,8 +2,7 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::turn::{
-    CapabilityActivityId, GateResumeDisposition, LoopGateRef, LoopMessageRef, LoopResultRef,
-    TurnRunId,
+    CapabilityActivityId, GateResumeDisposition, LoopGateRef, LoopResultRef, TurnRunId,
 };
 use ironclaw_host_api::{
     decision::DenyReason,
@@ -2744,7 +2743,6 @@ async fn scheduled_question_after_nudge_budget_fails_and_retains_replies() {
         reply_response_with_text(questions[0]),
         reply_response_with_text(questions[1]),
         reply_response_with_text(questions[2]),
-        reply_response_with_text("The scheduled run could not produce a self-contained result."),
     ])
     .with_driver_nudges_enabled()
     .with_scheduled_trigger_origin();
@@ -2772,45 +2770,34 @@ async fn scheduled_question_after_nudge_budget_fails_and_retains_replies() {
 }
 
 #[tokio::test]
-async fn scheduled_admitted_empty_reply_fails_when_nudge_is_unavailable() {
-    let host = MockHost::new(vec![reply_response_with_text(
-        "The scheduled run returned no usable output.",
-    )])
-    .with_scheduled_trigger_origin();
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.last_reply_trailed_off = true;
-    state.last_reply_empty = true;
-    state
-        .assistant_refs
-        .push(LoopMessageRef::new("msg:empty-reply").expect("valid"));
+async fn scheduled_empty_reply_fails_through_canonical_executor() {
+    let host =
+        MockHost::new(vec![reply_response_with_text("   \n")]).with_scheduled_trigger_origin();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let exit = ExitStage
-        .process(
-            ctx,
-            ExitInput {
-                state,
-                kind: StopKind::GracefulStop,
-            },
-        )
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
         .await
-        .expect("exit stage");
+        .expect("execute");
 
     let LoopExit::Failed(failed) = exit else {
-        panic!("expected admitted empty scheduled output to fail, got {exit:?}");
+        panic!("expected empty scheduled output to fail, got {exit:?}");
     };
     assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
-    assert!(
-        failed
-            .explanation_message_refs
-            .iter()
-            .any(|message_ref| message_ref.as_str() == "msg:empty-reply"),
-        "the rejected empty reply reference must remain in failure evidence"
+    let summary = failed
+        .safe_summary
+        .expect("empty scheduled output must carry typed failure detail");
+    assert_eq!(summary.category(), "invalid_model_output");
+    assert_eq!(
+        summary.detail(),
+        Some("model returned an empty assistant response")
     );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["   \n".to_string()]
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
 }
 
 #[tokio::test]
