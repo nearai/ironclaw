@@ -59,7 +59,12 @@ impl<F: RootFilesystem + ?Sized> UserModelPreferenceStore
             // The bounded-read contract uses `None` for an existing oversized file.
             Ok(None) => return Err(UserModelPreferenceStoreError::InvalidData),
             Err(FilesystemError::NotFound { .. }) => return Ok(None),
-            Err(_) => {
+            Err(error) => {
+                tracing::error!(
+                    target: crate::operator_logs::SERVER_DIAGNOSTIC_TARGET,
+                    error = %error,
+                    "user model preference read failed"
+                );
                 tracing::error!(
                     error_category = "filesystem_unavailable",
                     "user model preference read failed"
@@ -67,7 +72,12 @@ impl<F: RootFilesystem + ?Sized> UserModelPreferenceStore
                 return Err(UserModelPreferenceStoreError::Unavailable);
             }
         };
-        serde_json::from_slice(&bytes).map(Some).map_err(|_| {
+        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            tracing::error!(
+                target: crate::operator_logs::SERVER_DIAGNOSTIC_TARGET,
+                error = %error,
+                "user model preference record is invalid"
+            );
             tracing::error!(
                 error_category = "invalid_record",
                 "user model preference record is invalid"
@@ -91,7 +101,12 @@ impl<F: RootFilesystem + ?Sized> UserModelPreferenceStore
         self.filesystem
             .write_bytes(&scope, &path, bytes)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
+                tracing::error!(
+                    target: crate::operator_logs::SERVER_DIAGNOSTIC_TARGET,
+                    error = %error,
+                    "user model preference write failed"
+                );
                 tracing::error!(
                     error_category = "filesystem_unavailable",
                     "user model preference write failed"

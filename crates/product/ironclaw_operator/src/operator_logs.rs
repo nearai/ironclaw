@@ -24,6 +24,9 @@ const MAX_LOG_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_LOG_RESPONSE_BYTES: usize = 256 * 1024;
 const LOG_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const SOURCE: &str = "in_memory_tracing";
+/// Raw causes emitted to this target are server-side diagnostics and must never
+/// enter the product-visible operator log buffer.
+pub(crate) const SERVER_DIAGNOSTIC_TARGET: &str = "ironclaw_server_diagnostics";
 
 static OPERATOR_LOGS: LazyLock<Arc<OperatorLogBuffer>> =
     LazyLock::new(|| Arc::new(OperatorLogBuffer::new(HISTORY_CAP)));
@@ -594,6 +597,12 @@ pub fn capture_tracing_log(
     message: String,
     fields: Vec<(String, String)>,
 ) {
+    if target
+        .strip_prefix(SERVER_DIAGNOSTIC_TARGET)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with("::"))
+    {
+        return;
+    }
     operator_log_buffer().record_with_fields(
         reborn_level_from_tracing(level),
         target,
@@ -1155,6 +1164,32 @@ mod tests {
         );
         assert_eq!(response.entries[0].tool_name.as_deref(), Some(tool_name));
         assert_eq!(response.entries[0].source.as_deref(), Some(source));
+    }
+
+    #[test]
+    fn server_only_diagnostics_never_enter_product_visible_operator_logs() {
+        let token = uuid::Uuid::new_v4().to_string();
+        let message = format!("raw backend cause {token}");
+
+        capture_tracing_log(
+            &tracing::Level::ERROR,
+            SERVER_DIAGNOSTIC_TARGET,
+            message.clone(),
+            Vec::new(),
+        );
+
+        let response = operator_log_buffer().query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_target("ironclaw_server_diagnostics"),
+        );
+        assert!(
+            response
+                .entries
+                .iter()
+                .all(|entry| entry.message != message),
+            "server-only causes must not cross into the product-visible log buffer"
+        );
     }
 
     #[test]
