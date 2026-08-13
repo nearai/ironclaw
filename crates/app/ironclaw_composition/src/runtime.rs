@@ -3078,6 +3078,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
             limit.get(),
         );
     }
+    if let Some(limit) = runner.max_concurrent_unbound_runs {
+        max_running_by_class.insert(
+            ProcessConcurrencyClass::from_trusted("unbound"),
+            limit.get(),
+        );
+    }
     services_input = services_input.with_process_concurrency_limits(ProcessConcurrencyLimits {
         max_running_per_owner: runner
             .max_concurrent_runs_per_user

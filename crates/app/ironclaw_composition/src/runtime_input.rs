@@ -34,7 +34,7 @@ use ironclaw_triggers::TriggerFireAccessChecker;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turn_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT,
+    DEFAULT_MAX_CONCURRENT_UNBOUND_RUNS, DEFAULT_TURN_RUNNER_WORKER_COUNT,
 };
 
 use crate::input::RebornHostBindings;
@@ -184,6 +184,9 @@ pub struct TurnRunnerSettings {
     /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
     /// `None` = unlimited.
     pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for the unbound (prepared-context)
+    /// class. `None` = unlimited.
+    pub max_concurrent_unbound_runs: Option<std::num::NonZeroU32>,
 }
 
 impl Default for TurnRunnerSettings {
@@ -196,6 +199,7 @@ impl Default for TurnRunnerSettings {
             max_concurrent_trigger_runs: Some(DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS),
             // `None` = conversations may use every slot not held by triggers.
             max_concurrent_conversation_runs: None,
+            max_concurrent_unbound_runs: Some(DEFAULT_MAX_CONCURRENT_UNBOUND_RUNS),
         }
     }
 }

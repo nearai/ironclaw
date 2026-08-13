@@ -1630,13 +1630,17 @@ where
             max_messages,
         )
         .with_context_window_cache(Arc::clone(&context_window_cache));
-        if let Some(source) = self.skill_context_source.as_ref() {
+        // An unbound run's prepared context is its COMPLETE input by
+        // contract: no skill, identity, or memory lane is folded in, so the
+        // caller's declared context is exactly what the model sees.
+        let unbound_run = run_context.resolved_run_profile.profile_id.is_unbound();
+        if !unbound_run && let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
-        if let Some(source) = self.identity_context_source.as_ref() {
+        if !unbound_run && let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
-        if let Some(service) = self.memory_context_service.as_ref() {
+        if !unbound_run && let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
         // Channel-origin runs carry host-fetched conversation history on the
@@ -1933,8 +1937,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: gw,
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -1952,8 +1960,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: Arc::clone(&self.model_gateway),
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),

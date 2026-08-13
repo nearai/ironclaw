@@ -60,7 +60,7 @@ pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
 pub use prepared_context::{
     AcceptedPreparedContext, PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PreparedContextRecord,
-    PreparedContextRequest, ThreadServicePreparedContextSource,
+    PreparedContextRequest, ThreadServicePreparedContextSource, read_declarations_for_run_scope,
 };
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers

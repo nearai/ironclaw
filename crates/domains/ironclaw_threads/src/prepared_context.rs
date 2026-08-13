@@ -338,6 +338,50 @@ pub(crate) fn replay_prepared_context(
     })
 }
 
+/// Map a turn scope onto the thread scope its prepared-context record lives
+/// under. `None` when the scope cannot name a prepared thread at all: threads
+/// physically require an agent axis, and an actor-fallback owner cannot be
+/// resolved without an actor.
+pub(crate) fn prepared_thread_scope_for_turn_scope(
+    scope: &ironclaw_host_api::turn::TurnScope,
+) -> Option<ThreadScope> {
+    use ironclaw_host_api::turn::TurnThreadOwner;
+    let agent_id = scope.agent_id.clone()?;
+    let owner_user_id = match &scope.thread_owner {
+        TurnThreadOwner::Ownerless => None,
+        TurnThreadOwner::ExplicitUser { owner_user_id } => Some(owner_user_id.clone()),
+        TurnThreadOwner::ActorFallback => return None,
+    };
+    Some(ThreadScope {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id,
+        project_id: scope.project_id.clone(),
+        owner_user_id,
+        mission_id: None,
+    })
+}
+
+/// Host-build-side read of an ADMITTED run's journaled declarations, keyed by
+/// the run's own thread. Unlike the admission probe below, no ref match is
+/// required: the coordinator already pinned the submission to the prepared
+/// context, so the thread IS the identity here.
+pub async fn read_declarations_for_run_scope(
+    thread_service: &dyn crate::SessionThreadService,
+    scope: &ironclaw_host_api::turn::TurnScope,
+) -> Result<Option<PreparedTurnDeclarations>, SessionThreadError> {
+    let Some(thread_scope) = prepared_thread_scope_for_turn_scope(scope) else {
+        return Ok(None);
+    };
+    match thread_service
+        .read_prepared_context(&thread_scope, &scope.thread_id)
+        .await
+    {
+        Ok(record) => Ok(record.map(|record| record.declarations)),
+        Err(SessionThreadError::UnknownThread { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Admission-side probe over the threads-tier prepared-context record: the
 /// one production implementation of
 /// [`ironclaw_host_api::prepared_context::PreparedContextSource`], wired
@@ -371,7 +415,7 @@ impl ironclaw_host_api::prepared_context::PreparedContextSource
         use ironclaw_host_api::turn::TurnThreadOwner;
 
         // Threads physically require an agent axis; a turn scope without one
-        // cannot name a unbound-prepared thread.
+        // cannot name an unbound-prepared thread.
         let Some(agent_id) = scope.agent_id.clone() else {
             return Ok(None);
         };
@@ -394,7 +438,7 @@ impl ironclaw_host_api::prepared_context::PreparedContextSource
         {
             Ok(Some(record)) => {
                 // The submitted ref must pin the prepared context exactly; a
-                // mismatched ref is not a unbound submission.
+                // mismatched ref is not an unbound submission.
                 if record.accepted_message_ref != accepted_message_ref.as_str() {
                     return Ok(None);
                 }

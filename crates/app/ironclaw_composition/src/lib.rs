@@ -302,6 +302,7 @@ pub struct RebornRuntimeReadinessSnapshot {
     pub text_only_driver: RebornRuntimeComponentStatus,
     pub planned_driver: RebornRuntimeComponentStatus,
     pub subagent_planned_driver: RebornRuntimeComponentStatus,
+    pub unbound_planned_drivers: RebornRuntimeComponentStatus,
     pub planned_default_profile: RebornRuntimeComponentStatus,
 }
 
@@ -350,12 +351,27 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
-    let subagent_planned_driver = match family_registry {
+    let subagent_planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
             ironclaw_turn_runner::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
-                family_registry,
+                Arc::clone(family_registry),
             ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let unbound_planned_drivers = match family_registry {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_turn_runner::planned_driver_factory::register_unbound_planned_driver(
+                &mut registry,
+                Arc::clone(&family_registry),
+            )
+            .and_then(|_| {
+                ironclaw_turn_runner::planned_driver_factory::register_unbound_structured_planned_driver(
+                    &mut registry,
+                    family_registry,
+                )
+            }),
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
@@ -366,6 +382,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         text_only_driver,
         planned_driver,
         subagent_planned_driver,
+        unbound_planned_drivers,
         planned_default_profile,
     }
 }

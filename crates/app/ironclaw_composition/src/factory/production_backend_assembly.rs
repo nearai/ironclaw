@@ -704,8 +704,18 @@ pub(super) async fn build_backend_production(
     let services = apply_post_edit_check_from_env(services)?;
     let security_audit_sink = services.security_audit_sink();
 
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(services.turn_coordinator_for_production()?);
+    // The prepared-context probe backs unbound-profile derivation at
+    // admission; it reads the SAME durable thread store the accept door
+    // journals into.
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+        services
+            .turn_coordinator_for_production()?
+            .with_prepared_context_source(Arc::new(
+                ironclaw_threads::ThreadServicePreparedContextSource::new(Arc::clone(
+                    &thread_service,
+                )),
+            )),
+    );
     let credential_refresh_candidate_source: Option<
         Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;

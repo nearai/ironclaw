@@ -44,7 +44,8 @@ use crate::{
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
         register_default_planned_driver, register_default_text_only_driver,
-        register_subagent_planned_driver,
+        register_subagent_planned_driver, register_unbound_planned_driver,
+        register_unbound_structured_planned_driver,
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
@@ -83,6 +84,19 @@ pub const DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS: std::num::NonZeroU32 =
     match std::num::NonZeroU32::new(8) {
         Some(v) => v,
         // 8 is a non-zero compile-time constant so this arm is never reached.
+        None => std::num::NonZeroU32::MIN,
+    };
+
+/// Default cap for the `unbound` concurrency class (prepared-context runs).
+///
+/// Bounded below [`DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS`]: unbound runs are
+/// programmatic fan-out (subagents, structured extractions), the workload
+/// class most likely to arrive in bursts, and they must never starve the
+/// interactive pool.
+pub const DEFAULT_MAX_CONCURRENT_UNBOUND_RUNS: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(4) {
+        Some(v) => v,
+        // 4 is a non-zero compile-time constant so this arm is never reached.
         None => std::num::NonZeroU32::MIN,
     };
 
@@ -699,7 +713,9 @@ where
         )
     })?;
     register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
-    register_subagent_planned_driver(&mut registry, family_registry)?;
+    register_subagent_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    register_unbound_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    register_unbound_structured_planned_driver(&mut registry, family_registry)?;
     let driver_registry = Arc::new(registry);
 
     let resolver = Arc::new(
@@ -766,7 +782,12 @@ where
     let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
-        .with_process_runtime(agent_turn_runtime.as_ref().clone());
+        .with_process_runtime(agent_turn_runtime.as_ref().clone())
+        .with_prepared_context_source(Arc::new(
+            ironclaw_threads::ThreadServicePreparedContextSource::new(Arc::clone(
+                &parts.thread_service,
+            )),
+        ));
     let base_coordinator_arc = Arc::new(base_coordinator);
     let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
@@ -835,6 +856,11 @@ where
         .map(|id| CapabilityId::new(*id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    let unbound_denied = UNBOUND_DENIED_CAPABILITY_IDS
+        .iter()
+        .map(|id| CapabilityId::new(*id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RuntimeProfiledCapabilityPortFactory {
             inner: parts.capability_factory,
@@ -843,6 +869,8 @@ where
             tool_disclosure_decorator,
             global_denied,
             scheduled_trigger_denied,
+            unbound_denied,
+            declarations_thread_service: Arc::clone(&parts.thread_service),
             tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins,
         });
     let safety_context = parts
@@ -981,6 +1009,19 @@ const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
 ];
 
+/// Unbound runs execute a prepared context with no conversation and no
+/// interactive principal: spawning subagents from one is denied outright
+/// (the spawn tree is a conversation-lane feature), and trigger mutators
+/// stay denied for the same reason a fire's are — a background run minting
+/// more background work is the runaway class this lane must not open.
+const UNBOUND_DENIED_CAPABILITY_IDS: &[&str] = &[
+    ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
+];
+
 /// Runner-private per-run factory that preserves the canonical wrapper order
 /// while passing one resolved policy directly to every consumer that needs
 /// it. The neutral loop-host decorator contract remains synchronous.
@@ -991,6 +1032,11 @@ struct RuntimeProfiledCapabilityPortFactory {
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
     global_denied: Vec<CapabilityId>,
     scheduled_trigger_denied: Vec<CapabilityId>,
+    unbound_denied: Vec<CapabilityId>,
+    /// Declared-tools source for unbound runs: the prepared-context record
+    /// journaled beside the run's thread. Non-empty declared tools narrow the
+    /// resolved surface to exactly that allowlist.
+    declarations_thread_service: Arc<dyn SessionThreadService>,
     tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
 }
 
@@ -1006,13 +1052,46 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             .await
             .map_err(capability_resolve_error_to_agent_host_error)?;
         let mut denied = self.global_denied.clone();
-        if run_context
+        let surface_profile_id = run_context
             .resolved_run_profile
             .capability_surface_profile_id
-            .as_str()
+            .as_str();
+        if surface_profile_id
             == crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
         {
             denied.extend(self.scheduled_trigger_denied.iter().cloned());
+        }
+        if surface_profile_id
+            == crate::planned_driver_factory::UNBOUND_CAPABILITY_SURFACE_PROFILE_ID
+        {
+            denied.extend(self.unbound_denied.iter().cloned());
+            // Declared-tools allowlist: a prepared context that names its
+            // tools narrows the surface to exactly that set (the denies
+            // above still subtract). Empty declared tools keep the default
+            // unbound surface. A read failure fails the host build closed —
+            // running an unbound turn against an unknown declaration set
+            // would silently widen its surface.
+            let declarations = ironclaw_threads::read_declarations_for_run_scope(
+                self.declarations_thread_service.as_ref(),
+                &run_context.scope,
+            )
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
+                    format!("unbound declarations read failed: {error}"),
+                )
+            })?;
+            if let Some(declarations) = declarations
+                && !declarations.tools.is_empty()
+            {
+                let allowed = policy.capability_ids.clone().intersect(
+                    ironclaw_host_api::capability_surface::CapabilityIdScope::only(
+                        declarations.tools,
+                    ),
+                );
+                policy = policy.with_capability_ids(allowed);
+            }
         }
         policy = policy.deny_capability_ids(denied);
         let policy = Arc::new(policy);
@@ -1577,6 +1656,10 @@ mod tests {
             ))),
             global_denied: vec![denied_id.clone()],
             scheduled_trigger_denied: Vec::new(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 
@@ -1719,6 +1802,10 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied,
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 
@@ -1777,6 +1864,10 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 

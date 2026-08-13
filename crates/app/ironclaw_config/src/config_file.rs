@@ -250,6 +250,8 @@ pub struct RunnerSection {
     pub max_concurrent_trigger_runs: Option<u32>,
     /// Max concurrent runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin. `None` or `0` = unlimited.
     pub max_concurrent_conversation_runs: Option<u32>,
+    /// Max concurrent runs in `TurnStatus::Running` for the unbound (prepared-context) class. `None` or `0` = unlimited.
+    pub max_concurrent_unbound_runs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

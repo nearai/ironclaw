@@ -334,6 +334,40 @@ impl RefreshingCapabilityPort {
                 Arc::clone(&self.gate_record_store),
             )?);
         }
+        // Unbound structured runs get the synthetic result tool built from
+        // the run's journaled output schema. The run's contract is "complete
+        // by recording a validated result", so a missing record or schema is
+        // a host build failure, never a silently text-shaped run.
+        if self.run_context.resolved_run_profile.profile_id
+            == ironclaw_host_api::turn::RunProfileId::unbound_structured()
+        {
+            let declarations = ironclaw_threads::read_declarations_for_run_scope(
+                self.thread_service.as_ref(),
+                &self.run_context.scope,
+            )
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
+                    format!("unbound structured declarations read failed: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                    "unbound structured run has no prepared-context declarations",
+                )
+            })?;
+            let ironclaw_host_api::prepared_context::OutputContract::JsonSchema { schema } =
+                declarations.output
+            else {
+                return Err(AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                    "unbound structured run declares no output schema",
+                ));
+            };
+            synthetic_capabilities.push(ironclaw_loop_host::structured_result_capability(schema)?);
+        }
         let port = wrap_synthetic_capabilities(
             port,
             synthetic_capabilities,
