@@ -174,7 +174,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
-| Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
+| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
