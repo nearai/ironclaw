@@ -1,16 +1,12 @@
 //! Doc-fact contract: `docs/api/responses.mdx` matches the real request
 //! policy.
 //!
-//! The published Responses API page shipped claims the router contradicted
-//! (`temperature` "rejected" while the code accepted and forwarded it,
-//! `model` "must be `default`" while any well-formed name passed) — issue
-//! #7317's drift class. The page now carries a machine-readable
-//! `doc-fact:responses-request-policy` marker block (invisible in the
-//! rendered page) and this test drives every claim in it through the same
-//! route-level seam the other `tests/*_contract.rs` files use. The marker's
-//! *values* parameterize the assertions — `temperature_max = 2.0` is proven
-//! by accepting 2.0 and rejecting just above it — so editing the doc's
-//! claims without matching code behavior fails here, and vice versa.
+//! The page carries a machine-readable `doc-fact:responses-request-policy`
+//! marker block (invisible when rendered); this test parses it and drives
+//! every claim through the same route-level seam as the sibling
+//! `*_contract.rs` suites. The marker's values parameterize the assertions
+//! (e.g. accept `temperature_max`, reject just above it), so editing the
+//! doc's claims without matching code behavior fails, and vice versa.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -157,11 +153,9 @@ async fn every_documented_request_field_is_accepted() {
     assert_eq!(workflow.accepted_count(), 1);
 }
 
-/// `tool_choice` is conditionally rejected exactly like `tools`: 400 on the
-/// plain router, accepted (and ignored — no per-request tool-choice surface,
-/// so nothing registers) when external tools are wired. Caught by Copilot
-/// review on the docs PR: `validate_responses_supported_fields_with_external_tools`
-/// never checks `tool_choice`.
+/// `tool_choice` behaves like `tools`: 400 on the plain router, accepted
+/// and ignored when external tools are wired (there is no per-request
+/// tool-choice surface).
 #[tokio::test]
 async fn tool_choice_rejects_without_external_wiring_and_is_ignored_with_it() {
     let facts = doc_facts();

@@ -1,26 +1,13 @@
 //! Doc-fact contract: published docs teach the current manifest schema.
 //!
-//! `docs/extensions/building-a-tool.md` shipped for months telling extension
-//! authors to write `reborn.extension_manifest.v2` manifests — a format the
-//! v3 parser hard-rejects for new work — which is the exact drift class
-//! issue #7317 exists to close. This test pins the published documentation
-//! surface to the schema constant the parser owns:
-//!
-//!   1. no published page mentions the retired v2 schema literal, fenced
-//!      code included (a tutorial's code block is exactly where the drift
-//!      lived);
-//!   2. the tool-building tutorial names the current schema version verbatim
-//!      and documents `origin_gate_matrix` (de-facto mandatory for shipped
-//!      packages via `reborn_origin_gate_matrix_ratchet.rs`).
-//!
-//! Scope is the *published* tree: `docs/` minus the publication fence
-//! (`docs/.mintignore`: `internal/`, `drafts/`, `*.draft.mdx`).
-//! The fenced areas keep historical plans and explicitly-labeled legacy
-//! examples, which legitimately name the retired literal; the pages users
-//! see must not. The fence patterns are mirrored here as constants rather
-//! than parsed from `.mintignore` — that file is frozen (remove-only,
-//! enforced by `scripts/ci/docs_publication_boundary.py`), so the mirror
-//! cannot silently widen.
+//! Asserts no published page mentions the retired v2 schema literal (fenced
+//! code included — a tutorial code block is where the drift lived), and that
+//! the tool-building tutorial names the current schema version and
+//! `origin_gate_matrix`. Scope is the published tree: `docs/` minus the
+//! `.mintignore` fence, mirrored here as constants — that file is frozen
+//! (remove-only, enforced by `scripts/ci/docs_publication_boundary.py`), so
+//! the mirror cannot silently widen. Fenced areas may legitimately name the
+//! retired literal.
 
 use std::path::{Path, PathBuf};
 

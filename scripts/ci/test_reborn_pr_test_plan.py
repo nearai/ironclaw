@@ -1616,14 +1616,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertNotEqual(plan["crate_buckets"], [])
 
     def test_published_docs_page_runs_the_registry_docs_sweep(self) -> None:
-        """A published `docs/` page selects the doc-fact sweep, not prose.
-
-        Regression fixture for the #7378 reachability gap: `docs/` sat in
-        `IGNORED_PREFIXES` while three cargo tests read its pages, so the
-        docs-only PRs most likely to break the doc-fact gates planned
-        `mode=none`, merged green, and left the failure to land on whichever
-        unrelated change ran the full plan next.
-        """
+        """A published `docs/` page selects the doc-fact sweep instead of
+        planning `mode=none` (#7378: docs-only PRs merged green while cargo
+        tests read their pages)."""
         plan = self.plan_real_owners(["docs/extensions/building-a-tool.md"])
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
@@ -1646,8 +1641,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
 
     def test_doc_fact_pinned_pages_add_their_owning_crate(self) -> None:
-        """The two one-to-one pinned pages also select their owning crate,
-        as direct test targets with no reverse-dependency widening."""
+        """The two pinned pages also select their owning crate's doc-fact
+        test, with no reverse-dependency widening."""
         cli = self.plan_real_owners(["docs/using/cli.mdx"])
         self.assertEqual(
             cli["changed_packages"], ["ironclaw", "ironclaw_extension_registry"]

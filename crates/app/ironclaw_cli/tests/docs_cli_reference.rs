@@ -1,23 +1,10 @@
 //! Doc-fact contract: `docs/using/cli.mdx` tracks the real command surface.
 //!
-//! The public CLI reference is hand-written, and nothing coupled it to the
-//! clap tree until now — a renamed or added subcommand silently left the
-//! published page describing a binary that does not exist (issue #7317's
-//! drift class). This test pins the two directions at subcommand
-//! granularity:
-//!
-//!   1. every visible subcommand of the real binary's `--help` appears in at
-//!      least one `` `ironclaw <command>` `` table row of the doc (any
-//!      visible alias form counts);
-//!   2. every `` `ironclaw <command>` `` the doc documents is a real
-//!      subcommand or visible alias (a documented-but-deleted command fails).
-//!
-//! Flag-level coverage is deliberately out of scope — flags churn faster
-//! than commands and a flag gate would train people to stop reading
-//! failures; the doc-truth design doc records it as a follow-up.
-//!
-//! There is no zh mirror of this page (`docs/zh/` has no `using/` tree), so
-//! only the English page is pinned.
+//! Pins both directions at subcommand granularity: every visible subcommand
+//! from `--help` has a doc table row (any visible alias form counts), and
+//! every documented command exists in the binary. Flag-level coverage is
+//! deliberately out of scope (flags churn too fast; recorded as a
+//! follow-up), and there is no zh mirror of this page.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

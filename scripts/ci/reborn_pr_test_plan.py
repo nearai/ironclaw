@@ -59,15 +59,10 @@ def _sandbox_docker_prefixes() -> tuple[str, ...]:
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Doc-fact contract tests (#7378) read `docs/` pages from inside owning
-# crates, so a published-page edit can fail a cargo test and `docs/` is no
-# longer a pure-prose class. The registry's schema-version sweep walks every
-# published page; two pages are additionally pinned one-to-one by the crate
-# owning their truth. Routing selects exactly those test binaries as direct
-# test targets — no reverse-dependency widening, because prose cannot change
-# crate behavior, only the doc-fact assertions that read it. Without this
-# arm the doc-fact gates only ran on full-scope events: the docs-only PRs
-# most likely to break them merged green and the failure landed on whichever
-# unrelated change ran the full plan next.
+# crates, so a published-page edit can fail a cargo test. Route those edits
+# to exactly the doc-fact test binaries (no reverse-dependency widening —
+# prose can only change the assertions that read it); otherwise docs-only
+# PRs merge green and the failure lands on an unrelated change later.
 DOC_FACT_PAGE_TESTS = {
     "docs/using/cli.mdx": ("ironclaw", "docs_cli_reference"),
     "docs/api/responses.mdx": ("ironclaw_openai_compat", "docs_responses_contract"),
