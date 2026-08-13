@@ -145,7 +145,11 @@ fn chat_sse_stream(
                     pacing.reset_backoff();
                     for envelope in envelopes {
                         after_cursor = Some(envelope.cursor.clone());
-                        let ProductStreamEvent::Thread(payload) = &envelope.event;
+                        // The OpenAI-compat surface only opens Thread
+                        // selectors; any other event family is skipped.
+                        let ProductStreamEvent::Thread(payload) = &envelope.event else {
+                            continue;
+                        };
                         let payload_view = payload_view(payload);
                         match payload_view.text {
                             PayloadText::None => {}
@@ -243,7 +247,11 @@ fn response_sse_stream(
                     pacing.reset_backoff();
                     for envelope in envelopes {
                         after_cursor = Some(envelope.cursor.clone());
-                        let ProductStreamEvent::Thread(payload) = &envelope.event;
+                        // The OpenAI-compat surface only opens Thread
+                        // selectors; any other event family is skipped.
+                        let ProductStreamEvent::Thread(payload) = &envelope.event else {
+                            continue;
+                        };
                         let payload_view = payload_view(payload);
                         match payload_view.text {
                             PayloadText::None => {}

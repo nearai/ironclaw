@@ -185,6 +185,11 @@ pub enum ProductStreamSelector {
     /// The existing per-thread projection stream (runtime + live + turn
     /// lifecycle sources behind one composite cursor).
     Thread { thread_id: String },
+    /// The authenticated caller's own run-completion notification stream —
+    /// one durable owner-scoped notice sequence. Carries no
+    /// caller-selectable identity: authorization binds directly to the
+    /// bound caller's tenant/user owner scope.
+    RunCompletions,
 }
 
 /// Generic product event stream request.
@@ -213,6 +218,8 @@ pub struct ProductStreamEventEnvelope {
 pub enum ProductStreamEvent {
     /// A thread projection payload (the existing per-thread vocabulary).
     Thread(ProductOutboundPayload),
+    /// A run-completion notification event (notice/grant/clear).
+    RunCompletion(crate::run_completions::RunCompletionStreamEvent),
 }
 
 /// Generic product event stream response.

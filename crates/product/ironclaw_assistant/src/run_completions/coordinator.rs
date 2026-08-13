@@ -1,0 +1,450 @@
+//! The durable notification coordinator (2026-08-13 design §5.4–§5.6).
+//!
+//! One bounded worker per process: at startup it performs one bounded
+//! reconciliation over pending, expired-grant, and push-owned records, then
+//! sleeps until the earliest `closes_at`/`expires_at` or an explicit wake
+//! from a notice/intent/acknowledgement write. There is no steady interval
+//! scan and no client polling.
+//!
+//! Decision order at a closed intent window (§6.1): a read notice settles;
+//! the best-ranked intent wins one grant; with no eligible intent the
+//! notice falls to the push facade (Phase 3) or settles `NoExternalTarget`.
+//! Grants expire into exactly one re-arbitration before fallback.
+//!
+//! Logging is `debug!` only — background tasks never write `info!`/`warn!`
+//! (REPL rule). No log field carries titles, payloads, endpoints, or
+//! navigation.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use ironclaw_product_contracts::run_completions::RunCompletionIntentKind;
+use tokio::sync::{Notify, watch};
+
+use super::RunCompletionSurfaceServices;
+use super::ingest::ARBITRATION_WINDOW_MS;
+use super::records::{
+    CompletionDeliveryState, CompletionIntentRecord, CompletionSurface, RunCompletionNotice,
+};
+use super::store::{RunCompletionOwner, RunCompletionStoreError};
+
+/// Presentation-grant acknowledgement timeout (§5.4).
+pub const GRANT_ACK_TIMEOUT_MS: i64 = 2_000;
+
+/// Bounded per-tick scan of each non-terminal state partition. Bounded by
+/// the active workload, not history: terminal states are never scanned.
+const DUE_SCAN_LIMIT: usize = 250;
+
+/// Fallback poll when the due queue is empty. Purely a safety net for a
+/// missed wake; ordinary operation is timer + wake driven.
+const IDLE_FALLBACK: Duration = Duration::from_secs(60);
+
+/// Push fallback decision port. Phase 1 wires the always-`NoTarget`
+/// implementation; Phase 3 replaces it with the authorized web-app push
+/// facade. Deciding here keeps the coordinator free of outbound vocabulary.
+#[async_trait::async_trait]
+pub trait CompletionPushFallback: Send + Sync {
+    /// Attempt push ownership + delivery for one pending notice. Returns
+    /// `true` when the notice was transitioned (PushOwned or settled) by
+    /// this fallback; `false` when no push target exists (the coordinator
+    /// settles `NoExternalTarget`).
+    async fn attempt_push(
+        &self,
+        owner: &RunCompletionOwner,
+        notice: &RunCompletionNotice,
+    ) -> Result<bool, RunCompletionStoreError>;
+}
+
+/// Phase 1: external completion delivery is disabled by design (§14 Phase 1
+/// step 6); every no-presenter notice settles in-app-unread.
+pub struct NoPushFallback;
+
+#[async_trait::async_trait]
+impl CompletionPushFallback for NoPushFallback {
+    async fn attempt_push(
+        &self,
+        _owner: &RunCompletionOwner,
+        _notice: &RunCompletionNotice,
+    ) -> Result<bool, RunCompletionStoreError> {
+        Ok(false)
+    }
+}
+
+/// Validation port for `local_os` intents (§7.8): the server checks the
+/// caller's live web-app target selection and the browser instance's
+/// host-owned enrollment; client claims cannot mint permission or a target.
+/// Phase 1 rejects every `local_os` intent (OS presentation ships in
+/// Phase 2 alongside enrollment correlation).
+#[async_trait::async_trait]
+pub trait LocalOsIntentPolicy: Send + Sync {
+    async fn allows_local_os(&self, owner: &RunCompletionOwner, browser_instance_id: &str)
+    -> bool;
+}
+
+pub struct DenyLocalOsIntents;
+
+#[async_trait::async_trait]
+impl LocalOsIntentPolicy for DenyLocalOsIntents {
+    async fn allows_local_os(
+        &self,
+        _owner: &RunCompletionOwner,
+        _browser_instance_id: &str,
+    ) -> bool {
+        false
+    }
+}
+
+pub struct RunCompletionCoordinator {
+    services: Arc<RunCompletionSurfaceServices>,
+    push_fallback: Arc<dyn CompletionPushFallback>,
+    local_os_policy: Arc<dyn LocalOsIntentPolicy>,
+}
+
+impl RunCompletionCoordinator {
+    pub fn new(
+        services: Arc<RunCompletionSurfaceServices>,
+        push_fallback: Arc<dyn CompletionPushFallback>,
+        local_os_policy: Arc<dyn LocalOsIntentPolicy>,
+    ) -> Self {
+        Self {
+            services,
+            push_fallback,
+            local_os_policy,
+        }
+    }
+
+    /// One coordinator pass over every tracked owner. Returns the earliest
+    /// future deadline, for the timer. `now` is injected for deterministic
+    /// tests.
+    pub async fn tick_once(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let mut next_deadline: Option<DateTime<Utc>> = None;
+        let mut observe = |candidate: DateTime<Utc>| {
+            next_deadline = Some(match next_deadline {
+                Some(current) if current <= candidate => current,
+                _ => candidate,
+            });
+        };
+        for owner in self.services.tracked_owners() {
+            match self.tick_owner(&owner, now).await {
+                Ok(Some(deadline)) => observe(deadline),
+                Ok(None) => {
+                    // No outstanding work: stop tracking until re-woken, and
+                    // clear the durable due-registry entry (§5.4). A failed
+                    // clear is harmless — one extra empty scan after the
+                    // next boot.
+                    self.services.untrack_owner(&owner);
+                    if let Err(error) = self.services.notices.clear_owner_due(&owner).await {
+                        tracing::debug!(
+                            target: "ironclaw::reborn::run_completions",
+                            error = %error,
+                            "due-owner clear failed; boot reconciliation will rescan",
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "ironclaw::reborn::run_completions",
+                        error = %error,
+                        "coordinator owner pass failed; will retry on next wake",
+                    );
+                    observe(now + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS));
+                }
+            }
+        }
+        next_deadline
+    }
+
+    async fn tick_owner(
+        &self,
+        owner: &RunCompletionOwner,
+        now: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, RunCompletionStoreError> {
+        let mut next: Option<DateTime<Utc>> = None;
+        let mut observe = |candidate: DateTime<Utc>| {
+            if candidate > now {
+                next = Some(match next {
+                    Some(current) if current <= candidate => current,
+                    _ => candidate,
+                });
+            }
+        };
+
+        let pending = self
+            .services
+            .notices
+            .in_delivery_state(
+                owner,
+                &CompletionDeliveryState::PendingArbitration { closes_at: now },
+                DUE_SCAN_LIMIT,
+            )
+            .await?;
+        for notice in pending {
+            let CompletionDeliveryState::PendingArbitration { closes_at } = notice.delivery
+            else {
+                continue;
+            };
+            if notice.is_read() {
+                continue;
+            }
+            if closes_at > now {
+                observe(closes_at);
+                continue;
+            }
+            self.arbitrate(owner, &notice, now).await?;
+        }
+
+        let granted = self
+            .services
+            .notices
+            .in_delivery_state(
+                owner,
+                &CompletionDeliveryState::Granted {
+                    grant_id: String::new(),
+                    browser_instance_id: String::new(),
+                    surface: CompletionSurface::InApp,
+                    state_revision: 0,
+                    expires_at: now,
+                    grants_issued: 0,
+                },
+                DUE_SCAN_LIMIT,
+            )
+            .await?;
+        for notice in granted {
+            let CompletionDeliveryState::Granted {
+                grant_id,
+                expires_at,
+                grants_issued,
+                ..
+            } = &notice.delivery
+            else {
+                continue;
+            };
+            if *expires_at > now {
+                observe(*expires_at);
+                continue;
+            }
+            // Grant expiry: exactly one re-arbitration before fallback
+            // (§5.4). A second expiry goes straight to fallback.
+            if *grants_issued <= 1 {
+                let closes_at = now + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS);
+                match self
+                    .services
+                    .notices
+                    .regress_expired_grant(owner, &notice.notice_id, grant_id, closes_at)
+                    .await
+                {
+                    Ok(_) => {
+                        self.services.record_stale_grant();
+                        observe(closes_at)
+                    }
+                    Err(RunCompletionStoreError::Conflict { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            } else {
+                match self.fallback(owner, &notice, now).await {
+                    Ok(()) => {}
+                    Err(RunCompletionStoreError::Conflict { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(next)
+    }
+
+    /// Rank the collected intents and issue at most one grant (§5.6).
+    async fn arbitrate(
+        &self,
+        owner: &RunCompletionOwner,
+        notice: &RunCompletionNotice,
+        now: DateTime<Utc>,
+    ) -> Result<(), RunCompletionStoreError> {
+        let mut best: Option<&CompletionIntentRecord> = None;
+        for intent in &notice.intents {
+            if intent.intent == RunCompletionIntentKind::Unavailable {
+                continue;
+            }
+            if intent.intent == RunCompletionIntentKind::LocalOs
+                && !self
+                    .local_os_policy
+                    .allows_local_os(owner, &intent.browser_instance_id)
+                    .await
+            {
+                continue;
+            }
+            best = Some(match best {
+                None => intent,
+                Some(current) => {
+                    if intent_rank(intent.intent) < intent_rank(current.intent)
+                        || (intent_rank(intent.intent) == intent_rank(current.intent)
+                            && ranks_above(intent, current))
+                    {
+                        intent
+                    } else {
+                        current
+                    }
+                }
+            });
+        }
+        let Some(winner) = best else {
+            return match self.fallback(owner, notice, now).await {
+                Ok(()) => Ok(()),
+                Err(RunCompletionStoreError::Conflict { .. }) => Ok(()),
+                Err(error) => Err(error),
+            };
+        };
+        let surface = match winner.intent {
+            RunCompletionIntentKind::WatchingThread => {
+                CompletionSurface::NoSurfaceWatchingThread
+            }
+            RunCompletionIntentKind::InApp => CompletionSurface::InApp,
+            RunCompletionIntentKind::LocalOs => CompletionSurface::LocalOs,
+            // ReplyObserved settles at intent time; Unavailable was skipped.
+            RunCompletionIntentKind::ReplyObserved | RunCompletionIntentKind::Unavailable => {
+                return Ok(());
+            }
+        };
+        let grant_id = format!("rcg-{}", uuid::Uuid::new_v4().simple());
+        let expires_at = now + ChronoDuration::milliseconds(GRANT_ACK_TIMEOUT_MS);
+        match self
+            .services
+            .notices
+            .issue_grant(
+                owner,
+                &notice.notice_id,
+                &grant_id,
+                &winner.browser_instance_id,
+                surface,
+                winner.state_revision,
+                expires_at,
+            )
+            .await
+        {
+            Ok(granted) => {
+                self.services.hub.publish_grant(owner, &granted);
+                Ok(())
+            }
+            // Read/raced elsewhere between scan and CAS: nothing to do.
+            Err(RunCompletionStoreError::Conflict { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// No eligible presenter: push fallback (Phase 3) or in-app-unread
+    /// settlement.
+    async fn fallback(
+        &self,
+        owner: &RunCompletionOwner,
+        notice: &RunCompletionNotice,
+        now: DateTime<Utc>,
+    ) -> Result<(), RunCompletionStoreError> {
+        if self.push_fallback.attempt_push(owner, notice).await? {
+            return Ok(());
+        }
+        self.services
+            .notices
+            .settle_no_target(owner, &notice.notice_id, now)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Priority rank, lowest number wins (§5.6).
+fn intent_rank(intent: RunCompletionIntentKind) -> u8 {
+    match intent {
+        RunCompletionIntentKind::ReplyObserved => 0,
+        RunCompletionIntentKind::WatchingThread => 1,
+        RunCompletionIntentKind::InApp => 2,
+        RunCompletionIntentKind::LocalOs => 3,
+        RunCompletionIntentKind::Unavailable => 4,
+    }
+}
+
+/// Equal-rank tie-break: greatest state revision, then newest focus epoch,
+/// then lexicographically smallest opaque browser/tab IDs (§5.6).
+fn ranks_above(candidate: &CompletionIntentRecord, current: &CompletionIntentRecord) -> bool {
+    (
+        std::cmp::Reverse(candidate.state_revision),
+        std::cmp::Reverse(candidate.focus_epoch),
+        &candidate.browser_instance_id,
+        &candidate.tab_id,
+    ) < (
+        std::cmp::Reverse(current.state_revision),
+        std::cmp::Reverse(current.focus_epoch),
+        &current.browser_instance_id,
+        &current.tab_id,
+    )
+}
+
+/// Worker handle in the trigger-poller/keepalive shape: cancel, then join
+/// with a bounded timeout.
+pub struct RunCompletionCoordinatorHandle {
+    cancel: watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+pub const COORDINATOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl RunCompletionCoordinatorHandle {
+    pub async fn shutdown(self, timeout: Duration) {
+        let _ = self.cancel.send(true);
+        let handle = self.handle;
+        if tokio::time::timeout(timeout, handle).await.is_err() {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_completions",
+                "coordinator did not stop within its shutdown budget",
+            );
+        }
+    }
+}
+
+/// Spawn the coordinator loop: boot reconciliation, then timer/wake-driven
+/// due work.
+///
+/// `boot_scope_owner` names the tenant whose durable due-owner registry the
+/// one bounded startup reconciliation reads (§5.4); `None` skips the boot
+/// pass (single-purpose test workers).
+pub fn spawn_run_completion_coordinator(
+    coordinator: Arc<RunCompletionCoordinator>,
+    wake: Arc<Notify>,
+    boot_scope_owner: Option<RunCompletionOwner>,
+) -> RunCompletionCoordinatorHandle {
+    let (cancel, mut cancelled) = watch::channel(false);
+    let handle = tokio::spawn(async move {
+        if let Some(scope_owner) = boot_scope_owner {
+            // One bounded reconciliation over the owners the durable
+            // registry says may hold pending, expired-grant, or push-owned
+            // records (§5.4). Failure degrades to wake-driven operation;
+            // notices written after boot re-mark their owners.
+            match coordinator.services.notices.due_owners(&scope_owner).await {
+                Ok(owners) => {
+                    for owner in owners {
+                        coordinator.services.wake_owner(&owner);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "ironclaw::reborn::run_completions",
+                        error = %error,
+                        "boot due-owner reconciliation failed; continuing wake-driven",
+                    );
+                }
+            }
+        }
+        loop {
+            let next_deadline = coordinator.tick_once(Utc::now()).await;
+            let sleep_for = match next_deadline {
+                Some(deadline) => (deadline - Utc::now())
+                    .to_std()
+                    .unwrap_or(Duration::from_millis(0)),
+                None => IDLE_FALLBACK,
+            };
+            tokio::select! {
+                _ = cancelled.changed() => return,
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(sleep_for) => {}
+            }
+        }
+    });
+    RunCompletionCoordinatorHandle { cancel, handle }
+}

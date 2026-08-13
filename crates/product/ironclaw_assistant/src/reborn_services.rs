@@ -344,6 +344,10 @@ use ironclaw_product_contracts::notification_setup::{
     NOTIFICATION_SETUP_DISABLE_COMMAND_ID, NOTIFICATION_SETUP_ENABLE_COMMAND_ID,
     NOTIFICATION_SETUP_STATUS_VIEW,
 };
+pub(crate) use ironclaw_product_contracts::run_completions::{
+    RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID, RUN_COMPLETION_INTENT_COMMAND_ID,
+    RUN_COMPLETION_THREAD_READ_COMMAND_ID,
+};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -2514,6 +2518,7 @@ pub struct RebornServices<
     project_service: Option<Arc<dyn ProjectService>>,
     inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    run_completions: Option<Arc<crate::run_completions::RunCompletionSurfaceServices>>,
     lifecycle_service: Arc<dyn LifecycleProductService>,
     automation_service: Arc<dyn AutomationProductService>,
     skills_service: Arc<dyn SkillsProductService>,
@@ -2613,6 +2618,7 @@ where
             project_service: None,
             inbound_attachment_reader: None,
             event_stream: None,
+            run_completions: None,
             lifecycle_service: Arc::new(UnsupportedLifecycleProductService::new_static(
                 "reborn_lifecycle_service_unwired",
             )),
@@ -2672,6 +2678,27 @@ where
     ) -> Self {
         self.suggestions = Some(SuggestionsServices { store, unbound });
         self
+    }
+
+    /// Wire the run-completion notification services (notice store, stream
+    /// hub, coordinator handle). Absent by default: the `RunCompletions`
+    /// selector and the notification operations answer `service_unavailable`
+    /// until composition wires them.
+    pub fn with_run_completions(
+        mut self,
+        run_completions: Arc<crate::run_completions::RunCompletionSurfaceServices>,
+    ) -> Self {
+        self.run_completions = Some(run_completions);
+        self
+    }
+
+    pub(crate) fn run_completions_or_unavailable(
+        &self,
+    ) -> Result<Arc<crate::run_completions::RunCompletionSurfaceServices>, ProductSurfaceError>
+    {
+        self.run_completions
+            .clone()
+            .ok_or_else(|| ProductSurfaceError::service_unavailable(false))
     }
 
     pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
@@ -4588,6 +4615,18 @@ where
                 let response = self.build_notification_channels_view(caller).await?;
                 views::view_page(response)
             }
+            id if id
+                == ironclaw_product_contracts::run_completions::RUN_COMPLETION_UNREAD_VIEW.id =>
+            {
+                views::parse_empty_view_params(query.params)?;
+                let run_completions = self.run_completions_or_unavailable()?;
+                let response = crate::run_completions::operations::unread_view(
+                    &run_completions,
+                    caller,
+                )
+                .await?;
+                views::view_page(response)
+            }
             id if id == NOTIFICATION_SETUP_STATUS_VIEW.id => {
                 let request = serde_json::from_value(query.params).map_err(|_| {
                     ProductSurfaceError::validation(
@@ -5621,7 +5660,12 @@ where
         ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
         ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
-        let request = decode_product_surface_stream_request(request)?;
+        let request = match decode_product_surface_stream_request(request)? {
+            DecodedStreamRequest::Thread(request) => request,
+            DecodedStreamRequest::RunCompletions { after_sequence } => {
+                return open_run_completion_subscription(self, caller, after_sequence).await;
+            }
+        };
         if self
             .event_stream
             .as_ref()
@@ -5767,21 +5811,206 @@ where
 
 fn decode_product_surface_stream_request(
     request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
-) -> Result<RebornStreamEventsRequest, ProductSurfaceError> {
-    let after_cursor = match request.after_cursor {
-        Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        })?),
-        None => None,
-    };
+) -> Result<DecodedStreamRequest, ProductSurfaceError> {
     match request.selector {
         ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } => {
-            Ok(RebornStreamEventsRequest {
+            let after_cursor = match request.after_cursor {
+                Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
+                    ProductSurfaceError::from_status(
+                        ProductSurfaceErrorCode::InvalidRequest,
+                        400,
+                        false,
+                    )
+                })?),
+                None => None,
+            };
+            Ok(DecodedStreamRequest::Thread(RebornStreamEventsRequest {
                 thread_id,
                 after_cursor,
+            }))
+        }
+        ironclaw_product_contracts::surface::ProductStreamSelector::RunCompletions => {
+            Ok(DecodedStreamRequest::RunCompletions {
+                after_sequence: match request.after_cursor {
+                    Some(cursor) => Some(parse_run_completion_cursor(&cursor)?),
+                    None => None,
+                },
             })
         }
     }
+}
+
+/// The run-completion stream's cursor namespace. Prefixed so a thread
+/// cursor can never resume a `RunCompletions` subscription (§ test plan:
+/// cursor-domain isolation).
+const RUN_COMPLETION_CURSOR_PREFIX: &str = "rc:";
+
+fn run_completion_cursor(sequence: u64) -> String {
+    format!("{RUN_COMPLETION_CURSOR_PREFIX}{sequence}")
+}
+
+fn parse_run_completion_cursor(cursor: &str) -> Result<u64, ProductSurfaceError> {
+    cursor
+        .strip_prefix(RUN_COMPLETION_CURSOR_PREFIX)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .ok_or_else(|| {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        })
+}
+
+enum DecodedStreamRequest {
+    Thread(RebornStreamEventsRequest),
+    RunCompletions { after_sequence: Option<u64> },
+}
+
+fn run_completion_store_error(
+    error: crate::run_completions::store::RunCompletionStoreError,
+) -> ProductSurfaceError {
+    use crate::run_completions::store::RunCompletionStoreError as StoreError;
+    match error {
+        StoreError::NotFound => ProductSurfaceError::not_found(),
+        StoreError::Invalid { .. } => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        }
+        StoreError::Conflict { .. } => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, true)
+        }
+        StoreError::Unavailable { reason } => {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_completions",
+                %reason,
+                "run completion store unavailable",
+            );
+            ProductSurfaceError::unavailable(true)
+        }
+    }
+}
+
+fn run_completion_stream_envelope(
+    item: &crate::run_completions::stream::SequencedCompletionEvent,
+) -> Result<ironclaw_product_contracts::surface::ProductStreamEventEnvelope, ProductSurfaceError> {
+    let cursor = ProjectionCursor::new(run_completion_cursor(item.sequence))
+        .map_err(ProductSurfaceError::internal_from)?;
+    Ok(
+        ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+            cursor,
+            event: ironclaw_product_contracts::surface::ProductStreamEvent::RunCompletion(
+                item.event.clone(),
+            ),
+        },
+    )
+}
+
+/// Open the authenticated caller's own run-completion subscription (§7.6).
+/// Authorization is the owner-scope binding itself: the selector carries no
+/// caller-selectable identity, so the caller can only ever subscribe to
+/// their own sequence.
+async fn open_run_completion_subscription<I, V>(
+    services: &RebornServices<I, V>,
+    caller: ProductSurfaceCaller,
+    after_sequence: Option<u64>,
+) -> Result<
+    ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+    ProductSurfaceError,
+>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    let Some(run_completions) = services.run_completions.clone() else {
+        return Err(ProductSurfaceError::service_unavailable(false));
+    };
+    let owner = crate::run_completions::store::RunCompletionOwner {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+    };
+    let (replay, mut live) = run_completions
+        .hub
+        .subscribe(
+            &owner,
+            after_sequence,
+            ironclaw_product_contracts::run_completions::RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
+        )
+        .await
+        .map_err(run_completion_store_error)?;
+    let events = replay
+        .iter()
+        .map(run_completion_stream_envelope)
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = replay
+        .last()
+        .map(|item| run_completion_cursor(item.sequence));
+
+    // Single-slot handoff, mirroring the thread subscription bridge: a slow
+    // browser backpressures this forwarder instead of growing a queue.
+    let (sender, receiver) = mpsc::channel(1);
+    let hub = std::sync::Arc::clone(&run_completions.hub);
+    tokio::spawn(async move {
+        loop {
+            let permit = tokio::select! {
+                _ = sender.closed() => return,
+                permit = sender.reserve() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+            };
+            match live.recv().await {
+                Ok(item) => {
+                    let response = run_completion_stream_envelope(&item).map(|envelope| {
+                        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
+                            events: vec![envelope],
+                            next_cursor: Some(run_completion_cursor(item.sequence)),
+                            subscription: None,
+                        }
+                    });
+                    let stop = response.is_err();
+                    permit.send(response);
+                    if stop {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // The bounded live buffer overflowed: rebase from the
+                    // durable unread snapshot, then keep consuming. Stable
+                    // notice IDs collapse the overlap (§7.6).
+                    let response = match hub.rebase_snapshot(&owner).await {
+                        Ok(snapshot) => {
+                            let next_cursor = snapshot
+                                .last()
+                                .map(|item| run_completion_cursor(item.sequence));
+                            snapshot
+                                .iter()
+                                .map(run_completion_stream_envelope)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map(|events| {
+                                    ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
+                                        events,
+                                        next_cursor,
+                                        subscription: None,
+                                    }
+                                })
+                        }
+                        Err(error) => Err(run_completion_store_error(error)),
+                    };
+                    let stop = response.is_err();
+                    permit.send(response);
+                    if stop {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+    Ok(
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
+            events,
+            next_cursor,
+            subscription: Some(
+                ironclaw_product_contracts::surface::ProductSurfaceEventSubscription::new(receiver),
+            ),
+        },
+    )
 }
 
 /// Project the internal thread stream batch into the typed product stream

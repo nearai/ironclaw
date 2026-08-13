@@ -58,6 +58,7 @@ pub mod memory_scheduled_ops;
 mod model_channel_delivery;
 mod notification_channel_resolution;
 mod outbound_delivery;
+pub mod run_completions;
 mod policy;
 mod process_gate_turn_view;
 mod product_surface_inbound;

@@ -45,6 +45,9 @@ pub(super) enum ProductCommandHandler {
     SuggestionsGenerate,
     SuggestionStart,
     SuggestionDismiss,
+    RunCompletionIntent,
+    RunCompletionAcknowledge,
+    RunCompletionThreadRead,
 }
 
 impl ProductCommandHandler {
@@ -92,6 +95,9 @@ impl ProductCommandHandler {
             SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
             SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
             SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
+            RUN_COMPLETION_INTENT_COMMAND_ID => Some(Self::RunCompletionIntent),
+            RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID => Some(Self::RunCompletionAcknowledge),
+            RUN_COMPLETION_THREAD_READ_COMMAND_ID => Some(Self::RunCompletionThreadRead),
             _ => None,
         }
     }
@@ -383,6 +389,42 @@ impl ProductCommandHandler {
                     .dismiss_suggestion(caller, product_command_input(input)?)
                     .await?,
             ),
+            Self::RunCompletionIntent => {
+                let request = product_command_input(input)?;
+                let run_completions = services.run_completions_or_unavailable()?;
+                command_output(
+                    crate::run_completions::operations::submit_intent(
+                        &run_completions,
+                        caller,
+                        request,
+                    )
+                    .await?,
+                )
+            }
+            Self::RunCompletionAcknowledge => {
+                let request = product_command_input(input)?;
+                let run_completions = services.run_completions_or_unavailable()?;
+                command_output(
+                    crate::run_completions::operations::acknowledge(
+                        &run_completions,
+                        caller,
+                        request,
+                    )
+                    .await?,
+                )
+            }
+            Self::RunCompletionThreadRead => {
+                let request = product_command_input(input)?;
+                let run_completions = services.run_completions_or_unavailable()?;
+                command_output(
+                    crate::run_completions::operations::thread_read(
+                        &run_completions,
+                        caller,
+                        request,
+                    )
+                    .await?,
+                )
+            }
         }
     }
 }

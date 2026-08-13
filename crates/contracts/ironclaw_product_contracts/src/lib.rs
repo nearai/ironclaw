@@ -62,6 +62,7 @@ pub mod product_wire;
 pub mod project_service;
 pub mod projection;
 pub mod prompt_source;
+pub mod run_completions;
 pub mod session_ingress;
 pub mod session_transport;
 pub mod shared_admission;
