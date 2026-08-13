@@ -15,11 +15,12 @@
  * swaps the "+ Automation" button for an "Automation scheduled" status chip.
  * `locked` (another job is running — §2A change 3) visually disables the card.
  */
+import type { ReactNode } from "react";
+
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { appChipStyle, appMeta, type SuggestedTask } from "../lib/suggested-tasks";
-import { NearProcessIndicator } from "./near-process-indicator";
 
 export function SuggestedTaskCard({
   task,
@@ -29,6 +30,7 @@ export function SuggestedTaskCard({
   onDismiss,
   scheduled = false,
   locked = false,
+  renderRunningIndicator,
 }: {
   task: SuggestedTask;
   onConnect?: () => void;
@@ -37,6 +39,7 @@ export function SuggestedTaskCard({
   onDismiss?: () => void;
   scheduled?: boolean;
   locked?: boolean;
+  renderRunningIndicator?: (label: string) => ReactNode;
 }) {
   const t = useT();
   const meta = appMeta(task.app);
@@ -118,12 +121,9 @@ export function SuggestedTaskCard({
           </Button>
         );
       case "running":
-        return (
-          <NearProcessIndicator
-            state="working"
-            label={t("chat.oobe.status.running")}
-          />
-        );
+        return renderRunningIndicator
+          ? renderRunningIndicator(t("chat.oobe.status.running"))
+          : null;
       case "completed":
         return (
           <div className="flex flex-wrap items-center gap-2">

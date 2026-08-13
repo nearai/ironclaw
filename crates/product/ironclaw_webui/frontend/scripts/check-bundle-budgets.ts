@@ -67,7 +67,18 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // Re-measured on the merged tree at 217.7 KB gzip. A 219.0 KB budget retains
 // the recovery safeguards and about 1.3 KB of explicit headroom while
 // accounting for these concurrent `main` changes.
-const CHAT_GZIP_BUDGET = 219_000;
+// The OOBE first-run suggestion surface (behind an off-by-default
+// `oobe_suggestions` session flag) is lazy-loaded from `empty-state.tsx`
+// (`React.lazy` + `Suspense`, mirroring `CommandResult`/`AttachmentPreviewModal`
+// in `message-bubble.tsx`), and its two shared dependencies that were already
+// eager elsewhere (`app/auth.ts`'s `useOobeSuggestionsEnabled` gate,
+// `NearProcessIndicator`) were hoisted to the eager parent and passed down as
+// props specifically so the lazy chunk doesn't force them into their own
+// less-efficient standalone chunks. After both hoists the eager cost is
+// irreducible: gating the lazy-import decision itself, plus the flag-read
+// hook, must live in the eager `/chat` closure. Re-measured at 219.2 KB gzip;
+// a 220.0 KB budget keeps about 0.8 KB of explicit headroom.
+const CHAT_GZIP_BUDGET = 220_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

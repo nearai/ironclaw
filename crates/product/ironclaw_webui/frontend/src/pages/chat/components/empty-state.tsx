@@ -1,7 +1,32 @@
+import React from "react";
+import { useOobeSuggestionsEnabled } from "../../../app/auth";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
-import { SuggestedTaskSurface } from "./suggested-task-surface";
+import { NearProcessIndicator } from "./near-process-indicator";
+
+// The OOBE suggestion surface is gated off by default (see
+// suggested-task-surface.tsx), and even when it renders, its cards/icons/
+// NearProcessIndicator import weight has no business padding every /chat
+// page load — so it loads as its own chunk instead, the same pattern
+// message-bubble.tsx uses for CommandResult/AttachmentPreviewModal.
+const SuggestedTaskSurface = React.lazy(() =>
+  import("./suggested-task-surface").then(({ SuggestedTaskSurface }) => ({
+    default: SuggestedTaskSurface,
+  }))
+);
+
+// Passed down to SuggestedTaskSurface -> SuggestedTaskCard as a render prop so
+// the lazy-loaded surface/card chunk doesn't need its own import of
+// NearProcessIndicator, which is already eager-reachable via
+// typing-indicator.tsx -> message-list.tsx -> chat.tsx. Importing it from both
+// an eager path and the lazy chunk would force the bundler to split it into
+// its own small standalone chunk instead of keeping it inlined where it
+// already lives. Module scope (no closure over component state) so it's a
+// stable reference across renders.
+function renderRunningIndicator(label: string) {
+  return <NearProcessIndicator state="working" label={label} />;
+}
 
 export function EmptyState({
   onSuggestion,
@@ -20,6 +45,7 @@ export function EmptyState({
   onCancel,
 }) {
   const t = useT();
+  const oobeSuggestionsEnabled = useOobeSuggestionsEnabled();
   const suggestions = [
     {
       icon: "tool",
@@ -55,10 +81,15 @@ export function EmptyState({
         </p>
       </div>
 
-      <SuggestedTaskSurface
-        onApproveTask={onApproveTask}
-        onAutomationTask={onAutomationTask}
-      />
+      {oobeSuggestionsEnabled && (
+        <React.Suspense fallback={null}>
+          <SuggestedTaskSurface
+            onApproveTask={onApproveTask}
+            onAutomationTask={onAutomationTask}
+            renderRunningIndicator={renderRunningIndicator}
+          />
+        </React.Suspense>
+      )}
 
       <div className="mt-9 w-full max-w-5xl">
         <ChatInput

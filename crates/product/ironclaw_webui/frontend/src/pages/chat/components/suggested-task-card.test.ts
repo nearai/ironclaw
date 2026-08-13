@@ -2,13 +2,20 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
-import { componentSourceForTest, findComponent } from "../../../lib/vm-component-harness";
+import { componentSourceForTest } from "../../../lib/vm-component-harness";
 
 // Same vm-harness convention as empty-state.test.ts / chat-input.test.ts: read
 // the real source, strip imports, rename the export, and stub the module's free
-// variables (Button/Icon/NearProcessIndicator and the app-meta helpers) so the
-// synthetic-JSX tree can be walked directly. `useT` returns the key, so we
-// assert on the i18n KEY each state renders — exactly what the card wires up.
+// variables (Button/Icon and the app-meta helpers) so the synthetic-JSX tree
+// can be walked directly. `useT` returns the key, so we assert on the i18n KEY
+// each state renders — exactly what the card wires up.
+//
+// The card no longer imports NearProcessIndicator itself (see
+// suggested-task-card.tsx): the "running" state now calls a
+// `renderRunningIndicator` render prop supplied by its caller, so the card
+// stays reachable from the lazy suggested-task-surface chunk without pulling
+// in NearProcessIndicator a second time (it's already eager-reachable via
+// typing-indicator.tsx -> message-list.tsx -> chat.tsx).
 function cardSourceForTest() {
   return componentSourceForTest(
     new URL("./suggested-task-card.tsx", import.meta.url),
@@ -20,7 +27,6 @@ function renderCard(task, props = {}) {
   const components = {
     Button() {},
     Icon() {},
-    NearProcessIndicator() {},
   };
   const context = {
     ...components,
@@ -81,17 +87,34 @@ test("suggested card shows Approve and never a Modify action (§2A: no Modify)",
   assert.equal(containsScalar(tree, "chat.oobe.action.connect"), false);
 });
 
-test("running card shows the branded processing indicator and no buttons", () => {
-  const { tree, components } = renderCard({ ...baseTask, state: "running" });
-  assert.ok(
-    findComponent(tree, components.NearProcessIndicator),
-    "running state reuses NearProcessIndicator",
+test("running card calls renderRunningIndicator with the running-status label and renders its result", () => {
+  // The card no longer imports NearProcessIndicator directly — it delegates
+  // the running-state UI to the caller-supplied renderRunningIndicator render
+  // prop (empty-state.tsx supplies the real NearProcessIndicator; see
+  // suggested-task-card.tsx).
+  const calls = [];
+  const renderRunningIndicator = (label) => {
+    calls.push(label);
+    return "RUNNING_INDICATOR_MARKER";
+  };
+  const { tree } = renderCard(
+    { ...baseTask, state: "running" },
+    { renderRunningIndicator },
   );
-  assert.equal(containsScalar(tree, "chat.oobe.status.running"), true);
+  assert.deepEqual(calls, ["chat.oobe.status.running"]);
+  assert.equal(containsScalar(tree, "RUNNING_INDICATOR_MARKER"), true);
   // No action buttons while a run is live — activity lives in the thread.
   assert.equal(containsScalar(tree, "chat.oobe.action.approve"), false);
   assert.equal(containsScalar(tree, "chat.oobe.action.automation"), false);
   assert.equal(containsScalar(tree, "chat.oobe.action.connect"), false);
+});
+
+test("running card renders nothing when no renderRunningIndicator is supplied", () => {
+  // Presentational default: the card stays safely inert/testable without
+  // requiring every caller to supply the prop, though the real app
+  // (empty-state.tsx) always does.
+  const { tree } = renderCard({ ...baseTask, state: "running" });
+  assert.equal(containsScalar(tree, "chat.oobe.status.running"), false);
 });
 
 test("completed card shows a Completed chip + '+ Automation' and no Revert/Modify (§2A)", () => {

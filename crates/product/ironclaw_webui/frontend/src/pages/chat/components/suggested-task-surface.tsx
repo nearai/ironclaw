@@ -1,11 +1,11 @@
 /**
- * SuggestedTaskSurface — the feature-gated landing surface that shows the OOBE
- * first-run suggestion cards above the composer (PROPOSAL §2A, dep D-F5).
+ * SuggestedTaskSurface — the landing surface that shows the OOBE first-run
+ * suggestion cards above the composer (PROPOSAL §2A, dep D-F5).
  *
- * Slice 1 is presentational: it reads the `oobe_suggestions` deployment flag and
- * renders `null` when off, so the empty-state is unchanged for real users. When
- * the flag is on it renders a STATIC in-memory demo list — no projection reads,
- * no background jobs.
+ * Gating now happens in the eager parent (`empty-state.tsx`) before this lazy
+ * chunk is even requested, so this component itself is unconditional/
+ * presentational: whenever it's mounted, it renders a STATIC in-memory demo
+ * list — no projection reads, no background jobs.
  *
  * Slice 2 wires Approve: the card's approve action submits the task's
  * `approvePrompt` through the app's existing send path (via `onApproveTask`),
@@ -20,8 +20,8 @@
  * "scheduled" chip optimistically.
  */
 import React from "react";
+import type { ReactNode } from "react";
 
-import { useOobeSuggestionsEnabled } from "../../../app/auth";
 import { useT } from "../../../lib/i18n";
 import type { SuggestedTask } from "../lib/suggested-tasks";
 import { SuggestedTaskCard } from "./suggested-task-card";
@@ -67,11 +67,12 @@ const DEMO_TASKS: SuggestedTask[] = [
 export function SuggestedTaskSurface({
   onApproveTask,
   onAutomationTask,
+  renderRunningIndicator,
 }: {
   onApproveTask?: (task: SuggestedTask) => void;
   onAutomationTask?: (task: SuggestedTask) => void;
+  renderRunningIndicator?: (label: string) => ReactNode;
 } = {}) {
-  const enabled = useOobeSuggestionsEnabled();
   const t = useT();
   // The id of the just-approved card, flipped to `running` optimistically so
   // the surface reflects the kicked-off turn immediately (live status lands in
@@ -80,7 +81,6 @@ export function SuggestedTaskSurface({
   // The id of the just-scheduled card, flipped to its "scheduled" chip
   // optimistically once "+ Automation" fires (same pattern as `runningId`).
   const [scheduledId, setScheduledId] = React.useState<string | null>(null);
-  if (!enabled) return null;
 
   return (
     <section
@@ -96,6 +96,7 @@ export function SuggestedTaskSurface({
             key={task.id}
             task={runningId === task.id ? { ...task, state: "running" } : task}
             scheduled={scheduledId === task.id}
+            renderRunningIndicator={renderRunningIndicator}
             onApprove={() => {
               setRunningId(task.id);
               onApproveTask?.(task);

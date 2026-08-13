@@ -8,10 +8,12 @@ import {
   findComponent,
 } from "../../../lib/vm-component-harness";
 
-// Same vm-harness convention: the surface's only free variables are the feature
-// hook, `useT`, and the child card, so we stub the hook to force the gate on/off
-// and assert what the surface renders. This is the flag-gating regression: the
-// surface must be inert (render null) for real users until `oobe_suggestions`.
+// Same vm-harness convention: the surface's only free variables are `useT` and
+// the child card, so we stub them and assert what the surface renders. Gating
+// on the `oobe_suggestions` flag now happens in the eager parent
+// (empty-state.tsx) before this lazy chunk is even requested — see
+// empty-state.test.ts for that coverage — so this component is unconditional/
+// presentational and always renders its content when invoked directly here.
 function surfaceSourceForTest() {
   return componentSourceForTest(
     new URL("./suggested-task-surface.tsx", import.meta.url),
@@ -20,11 +22,11 @@ function surfaceSourceForTest() {
 }
 
 function renderSurface({
-  enabled,
   runningId = null,
   scheduledId = null,
   onApproveTask,
   onAutomationTask,
+  renderRunningIndicator,
 } = {}) {
   // Capture the ids passed to `setRunningId` / `setScheduledId` so we can assert
   // the optimistic "flip" requests, and control the current `runningId` /
@@ -44,7 +46,6 @@ function renderSurface({
     ...components,
     globalThis: {},
     useT: () => (key) => key,
-    useOobeSuggestionsEnabled: () => enabled,
     React: {
       useState: () => states[stateIndex++],
     },
@@ -53,21 +54,17 @@ function renderSurface({
   const props = {};
   if (onApproveTask) props.onApproveTask = onApproveTask;
   if (onAutomationTask) props.onAutomationTask = onAutomationTask;
+  if (renderRunningIndicator) props.renderRunningIndicator = renderRunningIndicator;
   const tree = context.globalThis.__testExports.SuggestedTaskSurface(props);
   return { tree, components, setRunningIdCalls, setScheduledIdCalls };
 }
 
-test("surface renders nothing when the oobe_suggestions flag is off", () => {
-  const { tree } = renderSurface({ enabled: false });
-  assert.equal(tree, null, "the landing must be unchanged for real users when the flag is off");
-});
-
-test("surface renders the demo cards when the flag is on", () => {
-  const { tree, components } = renderSurface({ enabled: true });
+test("surface renders the demo cards", () => {
+  const { tree, components } = renderSurface();
   assert.notEqual(tree, null);
   assert.ok(
     findComponent(tree, components.SuggestedTaskCard),
-    "the flag-on surface should mount SuggestedTaskCard(s)",
+    "the surface should mount SuggestedTaskCard(s)",
   );
 });
 
@@ -77,7 +74,6 @@ test("approving a card reports the task upward AND flips that card to running", 
   // the exact task to `onApproveTask` (so the parent runs it through the send
   // path) and request the optimistic flip via setRunningId(task.id).
   const first = renderSurface({
-    enabled: true,
     onApproveTask: (task) => approved.push(task),
   });
   const card = findComponent(first.tree, first.components.SuggestedTaskCard);
@@ -94,10 +90,23 @@ test("approving a card reports the task upward AND flips that card to running", 
 
   // Pass 2: with that id marked running, the surface renders THAT card in the
   // `running` state (optimistic feedback) — activity streams in the thread.
-  const second = renderSurface({ enabled: true, runningId: props.task.id });
+  const second = renderSurface({ runningId: props.task.id });
   const runningCard = findComponent(second.tree, second.components.SuggestedTaskCard);
   const runningProps = componentProps(runningCard, second.components.SuggestedTaskCard);
   assert.equal(runningProps.task.state, "running");
+});
+
+test("surface forwards renderRunningIndicator straight through to each card", () => {
+  // Test through the caller: the surface itself has no opinion on how the
+  // running state renders — it just threads the render prop from its own
+  // caller (empty-state.tsx) down to SuggestedTaskCard, which is what
+  // actually decides what to render for the "running" state.
+  const renderRunningIndicator = (label) => `indicator:${label}`;
+  const { tree, components } = renderSurface({ renderRunningIndicator });
+
+  const card = findComponent(tree, components.SuggestedTaskCard);
+  const props = componentProps(card, components.SuggestedTaskCard);
+  assert.equal(props.renderRunningIndicator, renderRunningIndicator);
 });
 
 test("+ Automation reports the task upward AND flips that card to scheduled", () => {
@@ -107,7 +116,6 @@ test("+ Automation reports the task upward AND flips that card to scheduled", ()
   // `automationPrompt` through the send path) and request the optimistic flip
   // via setScheduledId(task.id).
   const first = renderSurface({
-    enabled: true,
     onAutomationTask: (task) => scheduled.push(task),
   });
   const card = findComponent(first.tree, first.components.SuggestedTaskCard);
@@ -124,7 +132,7 @@ test("+ Automation reports the task upward AND flips that card to scheduled", ()
 
   // Pass 2: with that id marked scheduled, the surface passes `scheduled` to
   // THAT card so it swaps the button for the "Automation scheduled" chip.
-  const second = renderSurface({ enabled: true, scheduledId: props.task.id });
+  const second = renderSurface({ scheduledId: props.task.id });
   const scheduledCard = findComponent(second.tree, second.components.SuggestedTaskCard);
   const scheduledProps = componentProps(scheduledCard, second.components.SuggestedTaskCard);
   assert.equal(scheduledProps.scheduled, true);
