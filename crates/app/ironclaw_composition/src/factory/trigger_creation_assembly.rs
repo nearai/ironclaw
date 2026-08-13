@@ -1,7 +1,6 @@
 use super::*;
 
 use ironclaw_host_api::{execution_policy::TurnExecutionPolicy, resource::ResourceScope};
-use ironclaw_triggers::TriggerRecordValidationKind;
 use ironclaw_turns::TurnError;
 
 #[async_trait::async_trait]
@@ -109,13 +108,15 @@ impl TriggerCreateHook for TriggerCreatorPairingHook {
         scope: &ResourceScope,
         policy: &TurnExecutionPolicy,
     ) -> Result<(), TriggerError> {
-        let preflight =
-            self.execution_preflight
-                .get()
-                .ok_or_else(|| TriggerError::InvalidRecord {
-                    kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
-                    reason: "structured trigger validation is not ready".to_string(),
-                })?;
+        // An unbound preflight is a composition wiring fault, not a defect in
+        // the caller's contract — `Backend` (like double binding above), never
+        // `InvalidRecord`, which would tell the caller to fix a valid contract.
+        let preflight = self
+            .execution_preflight
+            .get()
+            .ok_or_else(|| TriggerError::Backend {
+                reason: "trigger execution preflight is not bound".to_string(),
+            })?;
         preflight.validate(scope, policy).await
     }
 

@@ -670,14 +670,16 @@ where
         Ok(plan)
     }
 
-    /// Resolves required skills through the same visibility, trust,
-    /// prerequisite, ambiguity, and context-budget checks used at execution,
-    /// without mutating the run's activation plan.
-    pub async fn validate_required_skills(
+    /// Single source of truth for required-skill resolution. Creation-time
+    /// preflight (`validate_required_skills`) and run-time enforcement
+    /// (`selected_candidates`) must apply the same predicate: two copies can
+    /// drift, and drift means a trigger that passes creation then fails every
+    /// fire.
+    async fn resolve_required_skill_selection(
         &self,
         run_context: &LoopRunContext,
         skill_names: &[String],
-    ) -> Result<(), SkillActivationSelectionError> {
+    ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
         let candidate_set = self
             .load_named_activation_candidate_set(run_context, skill_names)
             .await?;
@@ -692,7 +694,20 @@ where
                 reason: selection.feedback.join("; "),
             });
         }
-        Ok(())
+        Ok(selection)
+    }
+
+    /// Resolves required skills through the same visibility, trust,
+    /// prerequisite, ambiguity, and context-budget checks used at execution,
+    /// without mutating the run's activation plan.
+    pub async fn validate_required_skills(
+        &self,
+        run_context: &LoopRunContext,
+        skill_names: &[String],
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.resolve_required_skill_selection(run_context, skill_names)
+            .await
+            .map(|_| ())
     }
 
     pub fn clear_accepted_message(
@@ -744,20 +759,9 @@ where
             })
             .unwrap_or_default();
         if !required_names.is_empty() {
-            let candidate_set = self
-                .load_named_activation_candidate_set(run_context, &required_names)
+            let selection = self
+                .resolve_required_skill_selection(run_context, &required_names)
                 .await?;
-            let selection = select_named_skill_activations(
-                &required_names,
-                &candidate_set.candidates,
-                &self.config,
-                &candidate_set.satisfied_setup_markers,
-            )?;
-            if selection.activations.len() != required_names.len() {
-                return Err(SkillActivationSelectionError::RequiredSkillUnavailable {
-                    reason: selection.feedback.join("; "),
-                });
-            }
             let plan =
                 self.merge_active_plan(run_context, activation_plan_for_candidates(selection))?;
             if capture_plan {

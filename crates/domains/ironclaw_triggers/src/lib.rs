@@ -395,14 +395,11 @@ impl TriggerRecord {
             });
         }
         if let Some(spec) = &self.execution_spec {
+            // The persisted prompt (rendered at creation) is authoritative and
+            // deliberately NOT compared against a re-render: `validate()` runs
+            // on stored records before every fire, so requiring equality with
+            // the current template would brick them on any template edit.
             spec.validate()?;
-            if spec.render_prompt() != self.prompt {
-                return Err(TriggerError::InvalidRecord {
-                    kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
-                    reason: "structured trigger prompt must match its rendered execution spec"
-                        .to_string(),
-                });
-            }
         }
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
             return Err(TriggerError::InvalidRecord {

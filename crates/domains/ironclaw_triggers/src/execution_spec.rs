@@ -80,12 +80,47 @@ impl TriggerExecutionSpec {
             .map(|criterion| format!("- {criterion}"))
             .collect::<Vec<_>>()
             .join("\n");
-        PROMPT_TEMPLATE
-            .replace("{{goal}}", &self.goal)
-            .replace("{{success_criteria}}", &criteria)
-            .replace("{{output_instructions}}", &self.output_instructions)
-            .replace("{{no_result_text}}", &self.no_result_text)
+        render_template(
+            PROMPT_TEMPLATE,
+            &[
+                ("{{goal}}", self.goal.as_str()),
+                ("{{success_criteria}}", criteria.as_str()),
+                ("{{output_instructions}}", self.output_instructions.as_str()),
+                ("{{no_result_text}}", self.no_result_text.as_str()),
+            ],
+        )
     }
+}
+
+/// Substitutes every placeholder in one pass over the template, so text
+/// inserted for one field is never rescanned for other placeholders — a goal
+/// containing the literal `{{success_criteria}}` must stay verbatim.
+fn render_template(template: &str, substitutions: &[(&str, &str)]) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut rest = template;
+    while !rest.is_empty() {
+        let mut earliest: Option<(usize, &str, &str)> = None;
+        for (token, value) in substitutions {
+            if let Some(index) = rest.find(token)
+                && earliest.is_none_or(|(best, _, _)| index < best)
+            {
+                earliest = Some((index, token, value));
+            }
+        }
+        match earliest {
+            Some((index, token, value)) => {
+                // safety: `str::find` returns a match-start byte index, which is always a char boundary.
+                rendered.push_str(&rest[..index]); // safety: index from `str::find` is a char boundary
+                rendered.push_str(value);
+                rest = &rest[index + token.len()..];
+            }
+            None => {
+                rendered.push_str(rest);
+                break;
+            }
+        }
+    }
+    rendered
 }
 
 fn validate_text(label: &str, value: &str, max_bytes: usize) -> Result<(), TriggerError> {

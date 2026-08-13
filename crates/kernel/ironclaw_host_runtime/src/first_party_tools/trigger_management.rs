@@ -180,13 +180,14 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Deliberately no default body: every hook must make an explicit
+    /// preflight decision, so a compatibility path can never silently persist
+    /// an unvalidated execution policy.
     async fn validate_execution_policy(
         &self,
-        _scope: &ResourceScope,
-        _policy: &TurnExecutionPolicy,
-    ) -> Result<(), TriggerError> {
-        Ok(())
-    }
+        scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError>;
 
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
@@ -196,6 +197,26 @@ struct NoopTriggerCreateHook;
 
 #[async_trait]
 impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // This compatibility path has no preflight service. An empty policy
+        // carries nothing to validate; a restrictive one must fail closed —
+        // persisting it would arm capability/skill restrictions nothing has
+        // vouched for, and the fired run would only discover that at 3am.
+        if policy.allowed_capability_ids.is_some() || !policy.required_skills.is_empty() {
+            return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
+                reason: "execution policy restrictions are not supported on this runtime path: \
+                         no structured-trigger preflight is available to validate them"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Ok(())
     }

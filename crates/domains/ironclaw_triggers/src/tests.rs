@@ -38,6 +38,55 @@ fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
 }
 
 #[test]
+fn structured_execution_spec_renders_placeholders_in_one_pass() {
+    // A field value that itself contains a placeholder token must be inserted
+    // verbatim — sequential replacement would rewrite text belonging to the
+    // earlier field with the later field's value.
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Report on {{success_criteria}} drift".to_string(),
+        success_criteria: vec!["INJECTED".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "Nothing to report".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    };
+
+    let rendered = spec.render_prompt();
+    assert!(
+        rendered.contains("Report on {{success_criteria}} drift"),
+        "goal text must stay verbatim; rendered: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches("INJECTED").count(),
+        1,
+        "criteria must render exactly once; rendered: {rendered}"
+    );
+}
+
+#[test]
+fn stored_structured_prompt_survives_template_revisions() {
+    // `validate()` runs on stored records before every fire. The persisted
+    // prompt was rendered by whatever template revision was current at
+    // creation, so a record whose prompt no longer matches today's re-render
+    // must stay valid — anything stricter bricks every persisted structured
+    // trigger on a template edit.
+    let mut record = sample_record(TriggerId::new(), tenant("tenant-a"), ts(1_704_070_800));
+    record.execution_spec = Some(TriggerExecutionSpec {
+        version: 1,
+        goal: "Identify yesterday's failed payments.".to_string(),
+        success_criteria: vec!["Include every failed payment exactly once.".to_string()],
+        output_instructions: "Return a Markdown table.".to_string(),
+        no_result_text: "No failed payments were found.".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    });
+    record.prompt = "prompt rendered by an older template revision".to_string();
+
+    record
+        .validate()
+        .expect("persisted prompt is authoritative across template revisions");
+}
+
+#[test]
 fn structured_execution_spec_rejects_duplicate_policy_references() {
     let capability = CapabilityId::new("stripe.list_payments").expect("capability id");
     let skill = RequiredSkill::new("payment-operations").expect("required skill");

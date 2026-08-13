@@ -3993,6 +3993,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Arc::clone(&services.shared_extension_registry),
             skill_activation_source.clone(),
             default_resolved_run_profile.clone(),
+            // Mirrors the runner's decorator-attach condition: bridge ids only
+            // exist on fired runs when disclosure is enabled.
+            resolved_tool_disclosure.is_enabled(),
         )))
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("structured trigger preflight could not be bound: {error}"),

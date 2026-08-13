@@ -2,6 +2,26 @@ use chrono::{Datelike, TimeZone};
 
 use super::*;
 
+/// Accept-all preflight for tests that pin persistence/round-trip behavior of
+/// restrictive policies, which `NoopTriggerCreateHook` now fails closed on.
+#[derive(Debug)]
+struct AcceptAllTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for AcceptAllTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        Ok(())
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
 fn execution_contract(goal: impl Into<String>) -> Value {
     let goal = goal.into();
     json!({
@@ -276,7 +296,7 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
 
     let output = create_trigger(
         &repository,
-        &NoopTriggerCreateHook,
+        &AcceptAllTriggerCreateHook,
         &scope,
         input,
         Utc::now(),
@@ -293,6 +313,51 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
     let spec = record.execution_spec.as_ref().expect("stored contract");
     assert_eq!(record.prompt, spec.render_prompt());
     assert!(record.prompt.contains("## Success criteria"));
+}
+
+#[tokio::test]
+async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
+    // The compatibility registration path (`NoopTriggerCreateHook`) has no
+    // preflight service; a contract carrying capability/skill restrictions
+    // must fail closed at creation instead of persisting unvalidated
+    // restrictions that every fired run would then trip over.
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("preflightless-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+        },
+        "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+    });
+
+    create_trigger(
+        &repository,
+        &NoopTriggerCreateHook,
+        &scope,
+        input,
+        Utc::now(),
+    )
+    .await
+    .expect_err("restrictive policy without a preflight service must be rejected");
+
+    let records = repository
+        .list_triggers(scope.tenant_id.clone())
+        .await
+        .expect("list records");
+    assert!(
+        records.is_empty(),
+        "a rejected restrictive policy must not persist a trigger"
+    );
 }
 
 #[test]

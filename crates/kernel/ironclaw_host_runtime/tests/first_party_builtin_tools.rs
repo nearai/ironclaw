@@ -35,6 +35,7 @@ use ironclaw_host_api::{
         OriginGatePolicy, PermissionMode, UNGATED_LOOP_RUN_CAPABILITIES,
     },
     dispatch::{DispatchFailureDetail, DispatchInputIssueCode},
+    execution_policy::TurnExecutionPolicy,
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse, RuntimeHttpSavedBody,
@@ -45,7 +46,7 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
-    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate},
+    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate, ResourceScope},
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
 };
@@ -9431,6 +9432,15 @@ impl PersistedRecordTriggerCreateHook {
 
 #[async_trait]
 impl TriggerCreateHook for PersistedRecordTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // Accept-all: this double pins the after-persist path only.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let persisted = self
             .repository
@@ -9451,6 +9461,15 @@ struct FailingTriggerCreateHook;
 
 #[async_trait]
 impl TriggerCreateHook for FailingTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // Accept-all: this double pins the after-persist failure path.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Err(TriggerError::Backend {
             reason: "hook unavailable".to_string(),

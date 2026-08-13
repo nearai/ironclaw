@@ -17,6 +17,11 @@ pub(super) struct StructuredTriggerExecutionPreflight {
     registry: Arc<SharedExtensionRegistry>,
     skills: Option<Arc<ComposedSelectableSkillContextSource>>,
     resolved_run_profile: ResolvedRunProfile,
+    /// Whether the runner will attach the tool-disclosure bridge decorator to
+    /// fired runs (`ToolDisclosureMode::is_enabled()`). When it will not, a
+    /// synthetic `ironclaw.tool_*` bridge id must fail preflight — accepting
+    /// it would arm an allowlist whose only entries never exist at fire time.
+    bridge_capabilities_enabled: bool,
 }
 
 impl StructuredTriggerExecutionPreflight {
@@ -24,11 +29,13 @@ impl StructuredTriggerExecutionPreflight {
         registry: Arc<SharedExtensionRegistry>,
         skills: Option<Arc<ComposedSelectableSkillContextSource>>,
         resolved_run_profile: ResolvedRunProfile,
+        bridge_capabilities_enabled: bool,
     ) -> Self {
         Self {
             registry,
             skills,
             resolved_run_profile,
+            bridge_capabilities_enabled,
         }
     }
 }
@@ -43,13 +50,15 @@ impl TriggerExecutionPolicyPreflight for StructuredTriggerExecutionPreflight {
         if let Some(allowed) = &policy.allowed_capability_ids {
             let registry = self.registry.snapshot();
             for capability_id in allowed {
+                // Fail closed: a capability with no visibility record is not
+                // model-visible; assuming the permissive default here would
+                // admit an allowlist entry that validation cannot vouch for.
                 let registered_and_visible = registry.get_capability(capability_id).is_some()
-                    && registry
-                        .capability_visibility(capability_id)
-                        .unwrap_or(CapabilityVisibility::Model)
-                        == CapabilityVisibility::Model;
-                let synthetic_bridge = ironclaw_loop_host::bridge_capability_ids()
-                    .any(|bridge_id| bridge_id == *capability_id);
+                    && registry.capability_visibility(capability_id)
+                        == Some(CapabilityVisibility::Model);
+                let synthetic_bridge = self.bridge_capabilities_enabled
+                    && ironclaw_loop_host::bridge_capability_ids()
+                        .any(|bridge_id| bridge_id == *capability_id);
                 if !registered_and_visible && !synthetic_bridge {
                     return Err(invalid_reference(format!(
                         "capability {capability_id} is not available on the model-visible surface"
