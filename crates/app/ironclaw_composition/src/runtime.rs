@@ -39,7 +39,7 @@ use ironclaw_assistant::{
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
     RunStateApprovalInteractionReadModel,
 };
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog, RuntimeEvent};
+use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventSink, RuntimeEvent};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::turn::{
@@ -220,6 +220,7 @@ struct RuntimeStoreParts {
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     thread_service: Arc<dyn SessionThreadService>,
     event_log: Arc<dyn DurableEventLog>,
+    runtime_event_sink: Arc<dyn EventSink>,
     audit_log: Arc<dyn DurableAuditLog>,
     resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
@@ -250,6 +251,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
     let budget_gate_store = Arc::clone(&services.budget_gate_store);
     let broadcast_budget_event_sink = Arc::clone(&services.broadcast_budget_event_sink);
     let event_log = Arc::clone(&services.event_log);
+    let runtime_event_sink = Arc::clone(&services.runtime_event_sink);
     let audit_log = Arc::clone(&services.audit_log);
     let admin_secret_provisioner = Arc::clone(&services.admin_secret_provisioner);
     let project_service = Arc::clone(&services.project_service);
@@ -285,6 +287,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         loop_checkpoint_store,
         thread_service,
         event_log,
+        runtime_event_sink,
         audit_log,
         resource_governor,
         budget_gate_store,
@@ -524,6 +527,8 @@ pub enum RebornRuntimeError {
     SkillExecution(String),
     #[error("user sandbox shutdown failed: {0}")]
     UserSandboxShutdown(#[source] RuntimeProcessError),
+    #[error("runtime event flush failed: {0}")]
+    RuntimeEventFlush(String),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -711,7 +716,7 @@ pub struct RebornRuntime {
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
     interaction_service_test_parts: Option<InteractionServiceTestParts>,
-    webui_event_log: Arc<dyn DurableEventLog>,
+    runtime_event_sink: Arc<dyn EventSink>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     #[cfg(feature = "test-support")]
@@ -2484,6 +2489,10 @@ impl RebornRuntime {
                 .await
                 .map_err(RebornRuntimeError::UserSandboxShutdown)?;
         }
+        self.runtime_event_sink
+            .flush()
+            .await
+            .map_err(|error| RebornRuntimeError::RuntimeEventFlush(error.to_string()))?;
         Ok(())
     }
 
@@ -2928,8 +2937,8 @@ impl RebornRuntime {
                 reason: format!("loop-run capability id: {reason}"),
             }
         })?;
-        self.webui_event_log
-            .append(RuntimeEvent::loop_cancelled(
+        self.runtime_event_sink
+            .emit(RuntimeEvent::loop_cancelled(
                 ResourceScope {
                     tenant_id: scope.tenant_id.clone(),
                     user_id: self.actor_user_id.clone(),
@@ -2942,7 +2951,6 @@ impl RebornRuntime {
                 capability_id,
             ))
             .await
-            .map(|_| ())
             .map_err(|error| RebornRuntimeError::TurnCoordinator(error.to_string()))
     }
 
@@ -3186,6 +3194,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         loop_checkpoint_store,
         thread_service,
         event_log,
+        runtime_event_sink,
         audit_log,
         resource_governor,
         budget_gate_store,
@@ -3399,9 +3408,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: error.to_string(),
         })?;
-    let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
-        DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
-    );
+    let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
+        Arc::new(DurableLoopHostMilestoneSink::new(
+            Arc::clone(&runtime_event_sink),
+            milestone_scope,
+        ));
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
@@ -4558,7 +4569,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         auth_interaction_service,
         #[cfg(any(test, feature = "test-support"))]
         interaction_service_test_parts,
-        webui_event_log: event_log,
+        runtime_event_sink,
         default_run_profile_id,
         send_locks: Mutex::new(HashMap::new()),
         #[cfg(feature = "test-support")]

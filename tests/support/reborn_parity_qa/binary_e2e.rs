@@ -798,8 +798,12 @@ impl RebornBinaryE2EHarness {
         let milestone_sink =
             Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
+        let runtime_event_sink: Arc<dyn ironclaw_event_log::EventSink> =
+            Arc::new(ironclaw_event_log::DurableEventSink::new(
+                Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_event_log::DurableEventLog>,
+            ));
         let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
-            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_event_log::DurableEventLog>,
+            runtime_event_sink,
             DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)?,
         ));
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =

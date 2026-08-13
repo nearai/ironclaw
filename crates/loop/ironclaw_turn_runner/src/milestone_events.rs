@@ -1,7 +1,11 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use async_trait::async_trait;
-use ironclaw_event_log::{DurableEventLog, EventError, RuntimeEvent, RuntimeEventId};
+use ironclaw_event_log::{EventError, EventSink, RuntimeEvent, RuntimeEventId};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
@@ -19,6 +23,7 @@ const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
 const HOOK_CAPABILITY_ID: &str = "loop.hook";
 const RECOVERY_CAPABILITY_ID: &str = "loop.recovery";
 const RECOVERY_EVENT_ID_DOMAIN: &[u8] = b"ironclaw:loop-recovery-event:v1";
+const MAX_MODEL_CALL_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 fn recovery_event_id(run_id: TurnRunId, sequence: u64) -> RuntimeEventId {
     // Purpose: stable logical deduplication across the event-append/checkpoint
@@ -152,17 +157,47 @@ impl DurableLoopHostMilestoneScope {
 /// their owning stores and never enter runtime events.
 #[derive(Clone)]
 pub struct DurableLoopHostMilestoneSink {
-    event_log: Arc<dyn DurableEventLog>,
+    event_sink: Arc<dyn EventSink>,
     scope: DurableLoopHostMilestoneScope,
+    model_started_at: Arc<Mutex<HashMap<TurnRunId, Instant>>>,
 }
 
 impl DurableLoopHostMilestoneSink {
-    pub fn new(event_log: Arc<dyn DurableEventLog>, scope: DurableLoopHostMilestoneScope) -> Self {
-        Self { event_log, scope }
+    pub fn new(event_sink: Arc<dyn EventSink>, scope: DurableLoopHostMilestoneScope) -> Self {
+        Self {
+            event_sink,
+            scope,
+            model_started_at: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    pub fn event_log(&self) -> Arc<dyn DurableEventLog> {
-        Arc::clone(&self.event_log)
+    pub fn event_sink(&self) -> Arc<dyn EventSink> {
+        Arc::clone(&self.event_sink)
+    }
+
+    fn note_model_started(&self, run_id: TurnRunId) {
+        match self.model_started_at.lock() {
+            Ok(mut started) => {
+                started.insert(run_id, Instant::now());
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(run_id, Instant::now());
+            }
+        }
+    }
+
+    fn take_model_duration_ms(&self, run_id: TurnRunId) -> u64 {
+        let started = match self.model_started_at.lock() {
+            Ok(mut started) => started.remove(&run_id),
+            Err(poisoned) => poisoned.into_inner().remove(&run_id),
+        };
+        started
+            .map(|started| {
+                u64::try_from(started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX)
+                    .min(MAX_MODEL_CALL_DURATION_MS)
+            })
+            .unwrap_or(0)
     }
 
     fn resource_scope(
@@ -177,7 +212,7 @@ impl std::fmt::Debug for DurableLoopHostMilestoneSink {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("DurableLoopHostMilestoneSink")
-            .field("event_log", &"<durable_event_log>")
+            .field("event_sink", &"<event_sink>")
             .field("scope", &self.scope)
             .finish()
     }
@@ -192,10 +227,9 @@ impl LoopHostMilestoneSink for DurableLoopHostMilestoneSink {
         let Some(event) = self.runtime_event_for_milestone(&milestone)? else {
             return Ok(());
         };
-        self.event_log
-            .append(event)
+        self.event_sink
+            .emit(event)
             .await
-            .map(|_| ())
             .map_err(durable_event_error)
     }
 }
@@ -208,16 +242,24 @@ impl DurableLoopHostMilestoneSink {
         let scope = self.resource_scope(milestone)?;
         let event = match &milestone.kind {
             LoopHostMilestoneKind::ModelStarted { .. } => {
-                RuntimeEvent::model_started(scope, capability_id(MODEL_CAPABILITY_ID)?)
+                self.note_model_started(milestone.run_id);
+                return Ok(None);
             }
             LoopHostMilestoneKind::ModelCompleted { .. } => {
-                RuntimeEvent::model_completed(scope, capability_id(MODEL_CAPABILITY_ID)?)
+                RuntimeEvent::model_completed_with_duration(
+                    scope,
+                    capability_id(MODEL_CAPABILITY_ID)?,
+                    self.take_model_duration_ms(milestone.run_id),
+                )
             }
-            LoopHostMilestoneKind::ModelFailed { reason_kind } => RuntimeEvent::model_failed(
-                scope,
-                capability_id(MODEL_CAPABILITY_ID)?,
-                reason_kind.as_str(),
-            ),
+            LoopHostMilestoneKind::ModelFailed { reason_kind } => {
+                RuntimeEvent::model_failed_with_duration(
+                    scope,
+                    capability_id(MODEL_CAPABILITY_ID)?,
+                    reason_kind.as_str(),
+                    self.take_model_duration_ms(milestone.run_id),
+                )
+            }
             LoopHostMilestoneKind::CapabilityInvoked {
                 activity_id,
                 capability_id,
@@ -407,9 +449,7 @@ fn durable_event_error(error: EventError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_event_log::{
-        EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEventKind,
-    };
+    use ironclaw_event_log::{EventSink, InMemoryEventSink, RuntimeEventKind};
     use ironclaw_host_api::{
         ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
         result_meta::FailureKind,
@@ -455,14 +495,25 @@ mod tests {
     }
 
     fn projector_for(thread_id: ThreadId, run_id: TurnRunId) -> DurableLoopHostMilestoneSink {
-        let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+        projector_with_events(thread_id, run_id).0
+    }
+
+    fn projector_with_events(
+        thread_id: ThreadId,
+        run_id: TurnRunId,
+    ) -> (DurableLoopHostMilestoneSink, Arc<InMemoryEventSink>) {
+        let recorded = Arc::new(InMemoryEventSink::new());
+        let event_sink: Arc<dyn EventSink> = recorded.clone();
         let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
             &fixture_thread_scope(),
             thread_id,
             run_id,
         )
         .expect("durable milestone scope requires owner user — fixture supplies one");
-        DurableLoopHostMilestoneSink::new(event_log, milestone_scope)
+        (
+            DurableLoopHostMilestoneSink::new(event_sink, milestone_scope),
+            recorded,
+        )
     }
 
     #[test]
@@ -672,10 +723,7 @@ mod tests {
             },
         ] {
             let (mut milestone, thread_id, run_id) = fixture_milestone(kind);
-            let sink = projector_for(thread_id, run_id);
-            let valid_scope = sink
-                .resource_scope(&milestone)
-                .expect("fixture milestone matches sink scope");
+            let (sink, recorded) = projector_with_events(thread_id, run_id);
             milestone.scope.tenant_id = TenantId::new("tenant-foreign").unwrap();
 
             let error = sink
@@ -684,18 +732,8 @@ mod tests {
                 .expect_err("scope mismatch must reject capability milestone");
             assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
 
-            let replay = sink
-                .event_log()
-                .read_after_cursor(
-                    &EventStreamKey::from_scope(&valid_scope),
-                    &ReadScope::any(),
-                    None,
-                    10,
-                )
-                .await
-                .expect("read event log after rejected publish");
             assert!(
-                replay.entries.is_empty(),
+                recorded.events().is_empty(),
                 "scope-mismatched capability milestone must not append an event"
             );
         }
@@ -753,5 +791,59 @@ mod tests {
             Some("fail_closed")
         );
         assert_eq!(event.hook_id.as_deref(), Some(HOOK_HEX_ID));
+    }
+
+    #[tokio::test]
+    async fn model_attempt_persists_only_one_bounded_terminal_event() {
+        for (terminal_kind, expected_kind) in [
+            (
+                LoopHostMilestoneKind::ModelCompleted {
+                    effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new(
+                        "test-model",
+                    )
+                    .unwrap(),
+                },
+                RuntimeEventKind::ModelCompleted,
+            ),
+            (
+                LoopHostMilestoneKind::ModelFailed {
+                    reason_kind: AgentLoopHostErrorKind::Unavailable,
+                },
+                RuntimeEventKind::ModelFailed,
+            ),
+        ] {
+            let (started, thread_id, run_id) =
+                fixture_milestone(LoopHostMilestoneKind::ModelStarted {
+                    requested_model_profile_id: None,
+                });
+            let mut terminal = started.clone();
+            terminal.kind = terminal_kind;
+            let recorded = Arc::new(InMemoryEventSink::new());
+            let event_sink: Arc<dyn EventSink> = recorded.clone();
+            let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+                &fixture_thread_scope(),
+                thread_id,
+                run_id,
+            )
+            .expect("fixture scope");
+            let sink = DurableLoopHostMilestoneSink::new(event_sink, milestone_scope);
+
+            sink.publish_loop_milestone(started)
+                .await
+                .expect("model start is tracked in memory");
+            sink.publish_loop_milestone(terminal)
+                .await
+                .expect("model terminal event is emitted");
+
+            let events = recorded.events();
+            assert_eq!(events.len(), 1, "ModelStarted must not be persisted");
+            assert_eq!(events[0].kind, expected_kind);
+            assert!(
+                events[0]
+                    .duration_ms
+                    .is_some_and(|duration| duration <= MAX_MODEL_CALL_DURATION_MS),
+                "terminal model event must carry a bounded duration"
+            );
+        }
     }
 }
