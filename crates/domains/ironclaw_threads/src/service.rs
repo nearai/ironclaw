@@ -28,6 +28,13 @@ pub trait SessionThreadService: Send + Sync {
         request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError>;
 
+    /// Accept an inbound transcript row without product-routing metadata.
+    ///
+    /// An implementation that delegates this method to
+    /// [`Self::accept_inbound_message_with_replay_metadata`] must override that
+    /// method too. The default metadata method delegates default metadata back
+    /// here for legacy compatibility, so delegating only this method creates a
+    /// mutual-recursion trap.
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,
@@ -35,6 +42,10 @@ pub trait SessionThreadService: Send + Sync {
 
     /// Accept an inbound transcript row together with product-routing metadata
     /// that must be committed atomically and returned on idempotent replay.
+    /// Backends supporting non-default metadata must override this method. A
+    /// backend that implements [`Self::accept_inbound_message`] by delegating
+    /// here must also override this method; otherwise default metadata recurses
+    /// back through the legacy method indefinitely.
     async fn accept_inbound_message_with_replay_metadata(
         &self,
         request: AcceptInboundMessageRequest,

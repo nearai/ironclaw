@@ -3755,6 +3755,48 @@ async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
 }
 
 #[tokio::test]
+async fn submit_turn_replay_preserves_model_resolved_at_webui_acceptance() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::Unavailable {
+            reason: "injected first submission failure".to_string(),
+        },
+    ));
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Ok(Some("model-a".to_string())));
+    let services =
+        RebornServices::new(threads, coordinator.clone()).with_llm_config_service(policy.clone());
+    create_thread_for(&services, caller(), "thread-model-replay").await;
+    let request = || {
+        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            "client_action_id": "send-model-replay",
+            "thread_id": "thread-model-replay",
+            "content": "hello from webui"
+        }))
+        .expect("request")
+    };
+
+    services
+        .submit_turn(caller(), request())
+        .await
+        .expect_err("the injected first coordinator submission must fail");
+
+    // Model policy changes after the transcript row was accepted. The retry
+    // must submit the resolved model stored at acceptance, not resolve current
+    // policy again or fall back to the request's empty model hint.
+    policy.resolve_next_model_as(Ok(Some("model-b".to_string())));
+    services
+        .submit_turn(caller(), request())
+        .await
+        .expect("idempotent WebUI replay succeeds");
+
+    assert_eq!(
+        coordinator.last_requested_model().as_deref(),
+        Some("model-a")
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_rejects_disallowed_model_before_message_side_effects() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());

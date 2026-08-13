@@ -140,6 +140,16 @@ struct InboundIdempotencyRecord {
     external_event_id: String,
     thread_id: ThreadId,
     message_id: ThreadMessageId,
+    /// Present on records written by the recoverable fallback protocol. This
+    /// lets a retry reject an idempotency-key collision before a transcript
+    /// row exists, without persisting raw message content in this record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor_id: Option<String>,
+    /// SHA-256 of the complete acceptance request. The fingerprint is only a
+    /// recovery guard; transcript content remains authoritative in the message
+    /// record and is never copied into the idempotency index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_fingerprint: Option<String>,
     #[serde(default)]
     replay_metadata: InboundMessageReplayMetadata,
 }
@@ -1124,7 +1134,7 @@ where
             scope,
             requested_thread_id,
             requested_actor_id,
-            record,
+            &record,
         )
         .await
         .map(Some)
@@ -1135,11 +1145,11 @@ where
         scope: &ThreadScope,
         requested_thread_id: &ThreadId,
         requested_actor_id: &str,
-        record: InboundIdempotencyRecord,
+        record: &InboundIdempotencyRecord,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         if &record.thread_id != requested_thread_id {
             return Err(SessionThreadError::IdempotentReplayThreadMismatch {
-                stored_thread_id: record.thread_id,
+                stored_thread_id: record.thread_id.clone(),
                 requested_thread_id: requested_thread_id.clone(),
             });
         }
@@ -1167,8 +1177,20 @@ where
             message_id: record.message_id,
             sequence: existing.sequence,
             idempotent_replay: true,
-            replay_metadata: record.replay_metadata,
+            replay_metadata: record.replay_metadata.clone(),
         })
+    }
+
+    async fn idempotency_record_from_path(
+        &self,
+        scope: &ThreadScope,
+        path: &ScopedPath,
+    ) -> Result<Option<InboundIdempotencyRecord>, SessionThreadError> {
+        self.filesystem
+            .get(&scope.to_resource_scope(), path)
+            .await?
+            .map(|versioned| deserialize::<InboundIdempotencyRecord>(&versioned.entry.body))
+            .transpose()
     }
 
     /// Reserve a per-thread message sequence without rewriting the thread
@@ -1512,6 +1534,7 @@ where
         request: AcceptInboundMessageRequest,
         replay_metadata: InboundMessageReplayMetadata,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        let request_fingerprint = inbound_acceptance_fingerprint(&request)?;
         let AcceptInboundMessageRequest {
             scope,
             thread_id,
@@ -1541,15 +1564,50 @@ where
         // (scope, source_binding_id, external_event_id) tuple, so a
         // same-binding/event from a different scope hashes to a different
         // key (and we only see records under the current MountView).
+        let mut pending_idempotency = None;
         if let Some(path) = &idempotency_path
-            && let Some(accepted) = self
-                .accepted_message_from_idempotency_path(&scope, &thread_id, &actor_id, path)
-                .await?
+            && let Some(record) = self.idempotency_record_from_path(&scope, path).await?
         {
-            return Ok(accepted);
+            match self
+                .accepted_message_from_idempotency_record(&scope, &thread_id, &actor_id, &record)
+                .await
+            {
+                Ok(accepted) => return Ok(accepted),
+                Err(SessionThreadError::UnknownMessage { message_id })
+                    if message_id == record.message_id =>
+                {
+                    let Some(stored_actor_id) = record.actor_id.as_deref() else {
+                        return Err(SessionThreadError::Backend(
+                            "inbound idempotency record references a missing message".to_string(),
+                        ));
+                    };
+                    if stored_actor_id != actor_id {
+                        return Err(SessionThreadError::IdempotentReplayActorMismatch {
+                            stored_actor_id: stored_actor_id.to_string(),
+                            requested_actor_id: actor_id.clone(),
+                        });
+                    }
+                    if record.request_fingerprint.as_deref() != Some(request_fingerprint.as_str()) {
+                        return Err(SessionThreadError::Backend(
+                            "inbound idempotency retry payload does not match its recovery intent"
+                                .to_string(),
+                        ));
+                    }
+                    pending_idempotency = Some(record);
+                }
+                Err(error) => return Err(error),
+            }
         }
 
-        let message_id = ThreadMessageId::new();
+        let resuming_pending_idempotency = pending_idempotency.is_some();
+        let message_id = pending_idempotency
+            .as_ref()
+            .map(|record| record.message_id)
+            .unwrap_or_else(ThreadMessageId::new);
+        let replay_metadata = pending_idempotency
+            .as_ref()
+            .map(|record| record.replay_metadata.clone())
+            .unwrap_or(replay_metadata);
         let (content_text, attachments) = content.into_parts();
         // Derived before `content_text` moves into the message record; seeds
         // the sidebar label in the post-accept activity touch below.
@@ -1587,6 +1645,8 @@ where
                     external_event_id: idempotency_key.external_event_id.clone(),
                     thread_id: thread_id.clone(),
                     message_id,
+                    actor_id: Some(actor_id.clone()),
+                    request_fingerprint: Some(request_fingerprint.clone()),
                     replay_metadata: replay_metadata.clone(),
                 };
                 let entry = Self::idempotency_entry(&idem_record)?;
@@ -1595,8 +1655,10 @@ where
                 None
             };
 
-        let sequence = match self
-            .try_write_new_message_transactionally(
+        let transactional_write = if resuming_pending_idempotency {
+            TransactionalMessageWrite::Unsupported
+        } else {
+            self.try_write_new_message_transactionally(
                 &scope,
                 &thread_id,
                 &mut message,
@@ -1605,7 +1667,8 @@ where
                     .map(|(path, entry)| (path, entry)),
             )
             .await?
-        {
+        };
+        let sequence = match transactional_write {
             TransactionalMessageWrite::Written => message.sequence,
             TransactionalMessageWrite::IdempotencyAlreadyAccepted => {
                 let path = idempotency_path.as_ref().ok_or_else(|| {
@@ -1626,24 +1689,26 @@ where
                 return Ok(accepted);
             }
             TransactionalMessageWrite::Unsupported => {
+                // Claim the idempotency key before the transcript write. If a
+                // later operation fails, the record is a durable recovery
+                // intent carrying the original routing metadata and a
+                // content-free request fingerprint. A matching retry resumes
+                // with the same message id and model rather than duplicating
+                // the message or resolving current policy again.
+                if !resuming_pending_idempotency && let Some((path, entry)) = &idempotency_write {
+                    self.filesystem
+                        .put(
+                            &scope.to_resource_scope(),
+                            path,
+                            entry.clone(),
+                            CasExpectation::Absent,
+                        )
+                        .await?;
+                }
                 let sequence = self.reserve_sequence(&scope, &thread_id).await?;
                 message.sequence = sequence;
                 self.write_new_message(&scope, &thread_id, &message, "message")
                     .await?;
-
-                // Non-transactional backends keep the legacy best-effort
-                // shape: the message is authoritative, and the idempotency
-                // record accelerates later replays when it can be written.
-                if let Some((path, entry)) = idempotency_write {
-                    self.filesystem
-                        .put(
-                            &scope.to_resource_scope(),
-                            &path,
-                            entry,
-                            CasExpectation::Any,
-                        )
-                        .await?;
-                }
                 sequence
             }
         };
@@ -1687,7 +1752,7 @@ where
             thread_id,
             message_id,
             sequence,
-            idempotent_replay: false,
+            idempotent_replay: resuming_pending_idempotency,
             replay_metadata,
         })
     }
@@ -1724,13 +1789,23 @@ where
         else {
             return Ok(None);
         };
-        let message = self
+        let Some(message) = self
             .read_message_versioned(&record.scope, &record.thread_id, record.message_id)
             .await?
             .map(|(message, _)| message)
-            .ok_or(SessionThreadError::UnknownMessage {
+        else {
+            // A recoverable fallback intent is written before its transcript
+            // row. It is not an accepted replay yet; returning None lets the
+            // product acceptance path validate and resume the original
+            // request. Legacy records without a recovery fingerprint still
+            // surface corruption rather than being treated as pending.
+            if record.request_fingerprint.is_some() {
+                return Ok(None);
+            }
+            return Err(SessionThreadError::UnknownMessage {
                 message_id: record.message_id,
-            })?;
+            });
+        };
         Ok(Some(AcceptedInboundMessageReplay {
             scope: record.scope,
             thread_id: record.thread_id,
@@ -2987,6 +3062,40 @@ struct InboundIdempotencyKey {
     scope: ThreadScope,
     source_binding_id: String,
     external_event_id: String,
+}
+
+fn inbound_acceptance_fingerprint(
+    request: &AcceptInboundMessageRequest,
+) -> Result<String, SessionThreadError> {
+    #[derive(Serialize)]
+    struct FingerprintInput<'a> {
+        scope: &'a ThreadScope,
+        thread_id: &'a ThreadId,
+        actor_id: &'a str,
+        source_binding_id: &'a Option<String>,
+        reply_target_binding_id: &'a Option<String>,
+        external_event_id: &'a Option<String>,
+        content: &'a MessageContent,
+    }
+
+    let payload = serde_json::to_vec(&FingerprintInput {
+        scope: &request.scope,
+        thread_id: &request.thread_id,
+        actor_id: &request.actor_id,
+        source_binding_id: &request.source_binding_id,
+        reply_target_binding_id: &request.reply_target_binding_id,
+        external_event_id: &request.external_event_id,
+        content: &request.content,
+    })
+    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    let digest = Sha256::digest(payload);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}")
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    }
+    Ok(output)
 }
 
 fn idempotency_record_key(key: &InboundIdempotencyKey) -> Result<String, SessionThreadError> {

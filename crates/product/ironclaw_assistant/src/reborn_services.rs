@@ -75,8 +75,9 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceValidationCode,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
+    InboundMessageReplayMetadata, MessageContent, MessageStatus,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_triggers::{AutomationName, AutomationNameError};
@@ -3905,6 +3906,7 @@ where
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
                     actor_id: actor.user_id.as_str().to_string(),
+                    resolved_model: replay.replay_metadata.resolved_model,
                     source_binding_id: replay
                         .source_binding_id
                         .unwrap_or_else(|| replay_source_binding_id.clone()),
@@ -3949,21 +3951,27 @@ where
             };
             let accepted = self
                 .thread_service
-                .accept_inbound_message(AcceptInboundMessageRequest {
-                    scope: thread_scope.clone(),
-                    thread_id: scope.thread_id.clone(),
-                    actor_id: actor.user_id.as_str().to_string(),
-                    source_binding_id: Some(source_binding_id.clone()),
-                    reply_target_binding_id: Some(source_binding_id.clone()),
-                    external_event_id: Some(external_event_id),
-                    content: message_content,
-                })
+                .accept_inbound_message_with_replay_metadata(
+                    AcceptInboundMessageRequest {
+                        scope: thread_scope.clone(),
+                        thread_id: scope.thread_id.clone(),
+                        actor_id: actor.user_id.as_str().to_string(),
+                        source_binding_id: Some(source_binding_id.clone()),
+                        reply_target_binding_id: Some(source_binding_id.clone()),
+                        external_event_id: Some(external_event_id),
+                        content: message_content,
+                    },
+                    InboundMessageReplayMetadata {
+                        resolved_model: requested_model.clone(),
+                    },
+                )
                 .await
                 .map_err(map_thread_error)?;
             AcceptedWebUiMessage {
                 thread_id: accepted.thread_id,
                 message_id: accepted.message_id,
                 actor_id: actor.user_id.as_str().to_string(),
+                resolved_model: accepted.replay_metadata.resolved_model,
                 source_binding_id: source_binding_id.clone(),
                 reply_target_binding_id: source_binding_id.clone(),
             }
@@ -3979,7 +3987,7 @@ where
         let product_context =
             ironclaw_turns::product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
-            requested_model,
+            requested_model: handoff.resolved_model.clone(),
             scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
@@ -5882,6 +5890,7 @@ struct AcceptedWebUiMessage {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
     actor_id: String,
+    resolved_model: Option<String>,
     source_binding_id: String,
     reply_target_binding_id: String,
 }

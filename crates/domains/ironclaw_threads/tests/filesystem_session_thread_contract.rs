@@ -2225,6 +2225,182 @@ async fn filesystem_accepted_inbound_replay_preserves_resolved_model_metadata() 
 }
 
 #[tokio::test]
+async fn filesystem_fallback_idempotency_failure_precedes_message_persistence() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-fallback-idempotency-failure",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("fallback-idempotency-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fallback-idempotency-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-fallback-idempotency-failure".into()),
+        reply_target_binding_id: Some("reply-fallback-idempotency-failure".into()),
+        external_event_id: Some("event-fallback-idempotency-failure".into()),
+        content: MessageContent::text("hello"),
+    };
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::Unsupported),
+    );
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/idempotency/")
+            .nth(1)
+            .backend("idempotency intent failed"),
+    );
+
+    service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .expect_err("the failed idempotency intent must fail acceptance");
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.messages.is_empty(),
+        "fallback must not persist a message before its recovery intent"
+    );
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-b")
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn filesystem_fallback_resumes_intent_with_original_model_after_message_failure() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-fallback-message-failure",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("fallback-message-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fallback-message-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-fallback-message-failure".into()),
+        reply_target_binding_id: Some("reply-fallback-message-failure".into()),
+        external_event_id: Some("event-fallback-message-failure".into()),
+        content: MessageContent::text("hello"),
+    };
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::Unsupported),
+    );
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .nth(1)
+            .backend("message write failed"),
+    );
+
+    service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .expect_err("the injected message failure must fail acceptance");
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-fallback-message-failure".into(),
+            external_event_id: "event-fallback-message-failure".into(),
+        })
+        .await
+        .expect("pending recovery intent is not a failed accepted replay");
+    assert!(
+        replay.is_none(),
+        "a recovery intent without a transcript row must fall through to acceptance resume"
+    );
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(accepted.idempotent_replay);
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+}
+
+#[tokio::test]
 async fn filesystem_store_rejects_cross_actor_duplicate_external_event_replay() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-a", "alice");
