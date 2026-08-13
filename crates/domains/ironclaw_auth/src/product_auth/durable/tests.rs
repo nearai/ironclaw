@@ -979,6 +979,9 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         })
         .await
         .unwrap();
+    // A callback can land on another worker after the start request returned.
+    // Both services share only durable filesystem and secret-store state.
+    let callback_worker = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
     let claim = OAuthCallbackClaimRequest {
         flow_id: flow.id,
         opaque_state_hash: state_hash("state"),
@@ -986,7 +989,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         pkce_verifier_hash: pkce_hash("pkce"),
     };
 
-    let claimed = service
+    let claimed = callback_worker
         .claim_oauth_callback(&scope, claim.clone())
         .await
         .unwrap();
@@ -1002,8 +1005,11 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .await
         .expect_err("in-flight callback claim must be one-shot");
     assert_eq!(second_claim, AuthProductError::FlowAlreadyTerminal);
+    // Completion may move again after a restart; the callback claim contains
+    // every field needed to finish without process-local flow state.
+    let completion_worker = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
-    let completed = service
+    let completed = completion_worker
         .complete_oauth_callback(
             &scope,
             OAuthCallbackInput {
