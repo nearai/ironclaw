@@ -311,8 +311,12 @@ fn caller() -> ProductSurfaceCaller {
 }
 
 fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
+    caller_for_tenant_and_user("tenant-alpha", user_id)
+}
+
+fn caller_for_tenant_and_user(tenant_id: &str, user_id: &str) -> ProductSurfaceCaller {
     ProductSurfaceCaller::new(
-        TenantId::new("tenant-alpha").expect("tenant"),
+        TenantId::new(tenant_id).expect("tenant"),
         UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
@@ -6661,6 +6665,11 @@ async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin
         WebUiV2Capabilities::default(),
         caller_for_user("user-beta"),
     );
+    let other_tenant_router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        caller_for_tenant_and_user("tenant-beta", "user-alpha"),
+    );
 
     let get_response = router
         .clone()
@@ -6723,6 +6732,18 @@ async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin
         .expect("oneshot");
     assert_eq!(read_json(other_caller_get).await, serde_json::json!({}));
 
+    let other_tenant_get = other_tenant_router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(read_json(other_tenant_get).await, serde_json::json!({}));
+
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let reset_response = router
         .clone()
@@ -6761,6 +6782,7 @@ async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin
     assert_eq!(
         view_ids,
         vec![
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
             USER_MODEL_PREFERENCE_VIEW.id.to_string(),
             USER_MODEL_PREFERENCE_VIEW.id.to_string(),
             USER_MODEL_PREFERENCE_VIEW.id.to_string(),
