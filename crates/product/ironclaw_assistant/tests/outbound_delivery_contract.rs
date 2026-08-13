@@ -1,4 +1,6 @@
 // arch-exempt: large_file, mechanical OutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
+use ironclaw_extension_contracts::channel_adapter::{ChannelDelivery, ChannelReply};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -22,11 +24,11 @@ use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveryDefaultScope, OutboundDeliveryAttempt, OutboundError,
-    OutboundPolicyService, OutboundStateStore, OutboundStateStorePort, ReplyTargetBindingClaim,
-    ReplyTargetBindingValidator, RunNotificationContext, RunNotificationEventKind,
-    RunNotificationOrigin, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
-    ThreadProjectionAccessRequest, VersionedCommunicationPreferenceRecord,
-    WriteCommunicationPreferenceRequest,
+    OutboundPolicyService, OutboundPushCandidate, OutboundStateStore, OutboundStateStorePort,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunNotificationContext,
+    RunNotificationEventKind, RunNotificationOrigin, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_threads::{AttachmentKind, AttachmentRef, ThreadScope};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
@@ -199,8 +201,10 @@ fn delivery_request(scope: TurnScope) -> ironclaw_outbound::PrepareCommunication
             modality: CommunicationModality::Text,
             intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                 event_kind: RunNotificationEventKind::FinalReplyReady,
-                origin: RunNotificationOrigin::RunScopedTarget {
-                    target: validated_reply_target(),
+                origin: RunNotificationOrigin::LiveSourceRoute {
+                    source_route: ironclaw_outbound::SourceRouteContext {
+                        reply_target_binding_ref: validated_reply_target(),
+                    },
                 },
             }),
         },
@@ -244,14 +248,19 @@ use ironclaw_assistant::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
 };
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
-    VerifiedInbound,
+    ChannelError, DeliveryReport, OutboundEnvelope, PartDeliveryOutcome,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
+use ironclaw_product_contracts::outbound::{
+    FinalReplyView, ProductOutboundEnvelope as ProjectionEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget as ProjectionTarget, ProductProjectionItem, ProductProjectionState,
+    ProjectionCursor,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::test_support::fakes::FakeProjectionStream;
 
 struct CoordinatorDenyAllEgress;
 
@@ -277,6 +286,7 @@ struct ScriptedChannelAdapter {
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
+    delivery_sends: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedChannelAdapter {
@@ -291,7 +301,13 @@ impl ScriptedChannelAdapter {
             observed_status: Mutex::new(Vec::new()),
             store,
             scope,
+            delivery_sends: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn delivery_sends(&self) -> usize {
+        self.delivery_sends
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn deliver_calls(&self) -> usize {
@@ -305,18 +321,10 @@ impl ScriptedChannelAdapter {
     fn observed_statuses(&self) -> Vec<ironclaw_outbound::OutboundDeliveryStatus> {
         self.observed_status.lock().expect("status lock").clone()
     }
-}
 
-#[async_trait]
-impl ChannelAdapter for ScriptedChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-        Ok(InboundOutcome::Ignore)
-    }
-
-    async fn deliver(
+    async fn send_scripted(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         let attempts = self
             .store
@@ -337,13 +345,42 @@ impl ChannelAdapter for ScriptedChannelAdapter {
             .lock()
             .expect("reports lock")
             .pop_front()
-            .unwrap_or_else(|| Err(ChannelError::Unsupported))
+            .unwrap_or(Err(ChannelError::Unsupported))
+    }
+}
+
+#[async_trait]
+impl ChannelReply for ScriptedChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        // Reply and delivery share one mechanism for this double, as they do
+        // for a conversational vendor; the axis is the coordinator's choice.
+        let _ = egress;
+        self.send_scripted(envelope).await
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for ScriptedChannelAdapter {
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.delivery_sends
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.send_scripted(envelope).await
     }
 }
 
 struct StaticChannelResolver {
     adapter: Arc<ScriptedChannelAdapter>,
     unavailable: bool,
+    reply_transport: Option<ironclaw_extension_contracts::channel::ReplyTransport>,
+    requires_enrollment: bool,
 }
 
 impl ChannelDeliveryResolver for StaticChannelResolver {
@@ -354,8 +391,12 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
         Some(ResolvedChannelDelivery {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(CoordinatorDenyAllEgress),
+            reply_transport: self.reply_transport,
+            requires_enrollment: self.requires_enrollment,
+            declared_egress_hosts: Vec::new(),
         })
     }
 }
@@ -387,12 +428,13 @@ impl DeliveryReplyContextSource for FixedReplyContext {
         extension_id: &ExtensionId,
         installation_id: &AdapterInstallationId,
         _conversation_fingerprint: &str,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, ironclaw_product_contracts::delivery::DeliveryReplyContextError>
+    {
         self.asked.lock().expect("lock").push((
             extension_id.as_str().to_string(),
             installation_id.as_str().to_string(),
         ));
-        Some(self.bytes.clone())
+        Ok(Some(self.bytes.clone()))
     }
 }
 
@@ -408,14 +450,33 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("inst-ordered")
                 .expect("valid installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(CoordinatorDenyAllEgress),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+            declared_egress_hosts: Vec::new(),
         })
     }
 }
 
 struct OrderedReplyContext {
     phase: Arc<AtomicU8>,
+}
+
+struct FailingReplyContext;
+
+#[async_trait]
+impl DeliveryReplyContextSource for FailingReplyContext {
+    async fn reply_context(
+        &self,
+        _extension_id: &ExtensionId,
+        _installation_id: &AdapterInstallationId,
+        _conversation_fingerprint: &str,
+    ) -> Result<Option<Vec<u8>>, ironclaw_product_contracts::delivery::DeliveryReplyContextError>
+    {
+        Err(ironclaw_product_contracts::delivery::DeliveryReplyContextError)
+    }
 }
 
 #[async_trait]
@@ -425,9 +486,10 @@ impl DeliveryReplyContextSource for OrderedReplyContext {
         _extension_id: &ExtensionId,
         _installation_id: &AdapterInstallationId,
         _conversation_fingerprint: &str,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, ironclaw_product_contracts::delivery::DeliveryReplyContextError>
+    {
         assert_eq!(self.phase.swap(2, Ordering::SeqCst), 1);
-        None
+        Ok(None)
     }
 }
 
@@ -624,8 +686,11 @@ fn coordinator_over_recording_reply_lookups(
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
         }),
         Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -680,6 +745,69 @@ fn coordinated_final_reply<'a>(
         extension_id,
         thread_scope,
     }
+}
+
+fn bind_final_reply_projection(coordinator: &DeliveryCoordinator, run_id: TurnRunId, cursor: &str) {
+    bind_text_and_completed_projection(coordinator, run_id, cursor, true);
+}
+
+fn bind_text_and_completed_projection(
+    coordinator: &DeliveryCoordinator,
+    run_id: TurnRunId,
+    cursor: &str,
+    finalized: bool,
+) {
+    let stream = Arc::new(FakeProjectionStream::new());
+    stream.push(ProjectionEnvelope::new(
+        ironclaw_host_api::product_adapter::ProductAdapterId::new("webui_v2")
+            .expect("valid adapter id"),
+        AdapterInstallationId::new("webui_v2.local").expect("valid installation id"),
+        ProjectionTarget::new(validated_reply_target(), notice_source_conversation(), None),
+        ProjectionCursor::new(cursor).expect("valid projection cursor"),
+        ProductOutboundPayload::ProjectionUpdate {
+            state: ProductProjectionState::new(
+                "thread-product-outbound",
+                vec![
+                    ProductProjectionItem::Text {
+                        id: "durable-final-reply".to_string(),
+                        run_id: Some(run_id),
+                        body: "final reply".to_string(),
+                        finalized,
+                    },
+                    ProductProjectionItem::RunStatus {
+                        run_id,
+                        status: "completed".to_string(),
+                        failure_category: None,
+                        failure_summary: None,
+                        retryable: None,
+                    },
+                ],
+            )
+            .expect("valid durable final-reply projection"),
+        },
+    ));
+    assert!(coordinator.bind_projection_stream(stream as Arc<dyn ProjectionStream>));
+}
+
+fn bind_legacy_direct_final_reply_projection(
+    coordinator: &DeliveryCoordinator,
+    run_id: TurnRunId,
+    cursor: &str,
+) {
+    let stream = Arc::new(FakeProjectionStream::new());
+    stream.push(ProjectionEnvelope::new(
+        ironclaw_host_api::product_adapter::ProductAdapterId::new("webui_v2")
+            .expect("valid adapter id"),
+        AdapterInstallationId::new("webui_v2.local").expect("valid installation id"),
+        ProjectionTarget::new(validated_reply_target(), notice_source_conversation(), None),
+        ProjectionCursor::new(cursor).expect("valid projection cursor"),
+        ProductOutboundPayload::FinalReply(FinalReplyView {
+            turn_run_id: run_id,
+            text: "volatile final reply".to_string(),
+            generated_at: Utc::now(),
+        }),
+    ));
+    assert!(coordinator.bind_projection_stream(stream as Arc<dyn ProjectionStream>));
 }
 
 async fn coordinate_workspace_reply(
@@ -750,23 +878,23 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-100")],
         })],
     ));
     let (coordinator, reply_context) = coordinator_over_recording_reply_lookups(&store, &adapter);
 
+    let thread_scope = project_thread_scope();
+    let request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    let run_id = request.delivery.turn_run_id.expect("run id");
+    bind_final_reply_projection(&coordinator, run_id, "cursor:verified-final");
     let outcome = coordinator
-        .deliver(
-            &policy,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
-        )
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
         .await
         .expect("delivery drives");
 
     let CoordinatedDeliveryOutcome::Delivered {
-        attempt,
+        attempt: _,
         conversation,
         vendor_message_refs,
     } = outcome
@@ -788,10 +916,6 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
     assert_eq!(
         envelopes[0].reply_context.as_deref(),
         Some(b"vendor-reply-ctx".as_slice())
-    );
-    assert_eq!(
-        envelopes[0].delivery_attempt_id,
-        attempt.delivery_id.to_string()
     );
     assert_eq!(
         envelopes[0].target.thread_anchor.as_deref(),
@@ -838,6 +962,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-dm")],
         })],
     ));
@@ -906,6 +1031,7 @@ async fn coordinator_rejected_policy_decision_does_not_reach_the_adapter() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-should-not-happen")],
         })],
     ));
@@ -946,9 +1072,11 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
         scope.clone(),
         vec![
             Ok(DeliveryReport {
+                prune_registrations: Vec::new(),
                 parts: vec![retryable_part()],
             }),
             Ok(DeliveryReport {
+                prune_registrations: Vec::new(),
                 parts: vec![sent("ts-200")],
             }),
         ],
@@ -978,6 +1106,110 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
 }
 
 #[tokio::test]
+async fn streaming_channel_rejects_legacy_direct_final_reply_as_durable_evidence() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+    let thread_scope = project_thread_scope();
+    let request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    let run_id = request.delivery.turn_run_id.expect("run id");
+    bind_legacy_direct_final_reply_projection(&coordinator, run_id, "cursor:volatile-final");
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("missing durable proof is a classified outcome");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Unknown,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
+async fn streaming_channel_rejects_live_text_even_when_completed_is_co_batched() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+    let thread_scope = project_thread_scope();
+    let request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    let run_id = request.delivery.turn_run_id.expect("run id");
+    bind_text_and_completed_projection(&coordinator, run_id, "cursor:live-text", false);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("missing durable proof is a classified outcome");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Unknown,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
 async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
     let scope = scope();
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -991,18 +1223,21 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-300"), retryable_part()],
         })],
     ));
     let coordinator = coordinator_over(&store, &adapter);
 
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    request.parts.push(
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+            "second part".to_string(),
+        ),
+    );
     let outcome = coordinator
-        .deliver(
-            &policy,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
-        )
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
         .await
         .expect("delivery drives");
 
@@ -1024,6 +1259,94 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
 }
 
 #[tokio::test]
+async fn malformed_adapter_report_cardinality_is_terminal_unknown_without_retry() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-only-one-proof")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    request.parts.push(
+        ironclaw_extension_contracts::channel_adapter::OutboundPart::Text(
+            "second part".to_string(),
+        ),
+    );
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("malformed report settles without retry");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Unknown,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1, "ambiguous egress cannot retry");
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Unknown
+    );
+}
+
+#[tokio::test]
+async fn chunked_adapter_report_with_more_outcomes_than_parts_is_delivered() {
+    // Slack and Telegram fan one long text part out as several vendor chunks
+    // and push one PartDeliveryOutcome per chunk (the adapter conformance
+    // suite legalizes outcomes >= parts). Regression: the coordinator
+    // required exact equality, settling fully delivered chunked replies as
+    // Unknown/Failed — a model-visible failure inviting a duplicate resend of
+    // a message every recipient already received.
+    let (result, adapter, store, scope) = coordinate_workspace_reply(
+        &NO_PROJECT_FILESYSTEM,
+        "one long reply that the vendor splits into two chunks",
+        Vec::new(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-chunk-1"), sent("ts-chunk-2")],
+        })],
+    )
+    .await;
+
+    let outcome = result.expect("chunked send delivers");
+    match outcome {
+        CoordinatedDeliveryOutcome::Delivered {
+            vendor_message_refs,
+            ..
+        } => assert_eq!(
+            vendor_message_refs,
+            vec!["ts-chunk-1".to_string(), "ts-chunk-2".to_string()],
+            "every chunk's provider evidence rides the outcome"
+        ),
+        other => panic!("chunked send must settle Delivered, got {other:?}"),
+    }
+    assert_eq!(adapter.deliver_calls(), 1);
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
 async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_file("/workspace/report.pdf", 3);
@@ -1038,6 +1361,7 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
             3,
         )],
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text"), retryable_part()],
         })],
     )
@@ -1091,6 +1415,7 @@ async fn coordinator_preserves_text_and_materializes_only_durable_attachment_ref
             workspace_attachment_ref("data", "/workspace/data.csv", "data.csv", "text/csv", 4),
         ],
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text"), sent("file-report"), sent("file-data")],
         })],
     )
@@ -1133,6 +1458,7 @@ async fn coordinator_does_not_materialize_workspace_path_mentioned_only_in_prose
         "The report remains at /workspace/report.pdf.",
         Vec::new(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text")],
         })],
     )
@@ -1165,6 +1491,7 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text"), sent("ts-file")],
         })],
     ));
@@ -1178,6 +1505,7 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
         Arc::new(OrderedReplyContext {
             phase: Arc::clone(&phase),
         }),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 1,
             backoff: std::time::Duration::ZERO,
@@ -1211,6 +1539,59 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
         CoordinatedDeliveryOutcome::Delivered { .. }
     ));
     assert_eq!(phase.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn reply_context_storage_failure_stops_before_adapter_egress() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+        }),
+        Arc::new(FailingReplyContext),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let error = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect_err("reply context storage failure must fail closed");
+
+    assert!(matches!(
+        error,
+        CoordinatedDeliveryError::ReplyContextUnavailable
+    ));
+    assert_eq!(adapter.deliver_calls(), 0, "adapter must not be called");
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("list attempts");
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed,
+    );
 }
 
 #[tokio::test]
@@ -1529,6 +1910,9 @@ async fn coordinator_rejects_stat_and_read_path_mismatches() {
 /// vendor egress succeeded, but the confirmation row never committed.
 struct TerminalDeliveredWriteFailingStore {
     inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    /// Simulates a send worker committing `Delivered` after recovery's list
+    /// snapshot but before its guarded `Sending -> Unknown` transition.
+    complete_before_recovery: bool,
 }
 
 #[async_trait]
@@ -1597,6 +1981,17 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
         &self,
         request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
     ) -> Result<bool, OutboundError> {
+        if self.complete_before_recovery {
+            self.inner
+                .update_delivery_status(ironclaw_outbound::UpdateDeliveryStatusRequest {
+                    delivery_id: request.delivery_id,
+                    scope: request.scope.clone(),
+                    status: ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+                    updated_at: Utc::now(),
+                    failure_kind: None,
+                })
+                .await?;
+        }
         self.inner
             .recover_interrupted_delivery_attempt(request)
             .await
@@ -1641,6 +2036,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-777")],
         })],
     ));
@@ -1648,12 +2044,16 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
     let coordinator = DeliveryCoordinator::new(
         Arc::new(TerminalDeliveredWriteFailingStore {
             inner: Arc::clone(&store),
+            complete_before_recovery: false,
         }) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
         }),
         reply_context as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -1708,6 +2108,7 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-400")],
         })],
     ));
@@ -1750,6 +2151,78 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
 }
 
 #[tokio::test]
+async fn coordinator_recovery_never_overwrites_a_concurrently_delivered_attempt() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: None,
+            target: validated_reply_target(),
+            kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new("projection:recovery-race")
+                .expect("projection ref"),
+            requires_reply_target_revalidation: false,
+        },
+        status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+        attempted_at: Utc::now(),
+        failure_kind: None,
+    };
+    store
+        .record_delivery_attempt(attempt.clone())
+        .await
+        .expect("seed interrupted attempt");
+
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::new(TerminalDeliveredWriteFailingStore {
+            inner: Arc::clone(&store),
+            complete_before_recovery: true,
+        }) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter,
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    assert_eq!(
+        coordinator
+            .recover_interrupted_deliveries(scope.clone())
+            .await
+            .expect("recovery scans"),
+        0,
+        "a terminal row won by the send worker is not counted as recovered"
+    );
+    let persisted = store
+        .load_delivery_attempt(scope, attempt.delivery_id)
+        .await
+        .expect("attempt loads")
+        .expect("attempt exists");
+    assert_eq!(
+        persisted.status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+        "stale recovery must not overwrite the concurrently committed result"
+    );
+}
+
+#[tokio::test]
 async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
     let scope = scope();
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -1769,8 +2242,11 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy::default(),
     );
 
@@ -1826,6 +2302,102 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
     }
 }
 
+/// Regression pin (unified-channel-model §5, review finding): `deliver_notice`
+/// skips EVERY notice-class intent for a streaming channel — unlike `deliver`,
+/// which carves out notification-routed sends. The asymmetry is intentional:
+/// notice-class intents are source-routed to the originating conversation,
+/// which for a streaming channel is the durable projection stream the client
+/// already renders from, and the vendor-message operations in this class have
+/// no counterpart there. The sends that must reach a closed tab are
+/// policy-class and travel through `deliver`'s notification path, which this
+/// test also pins in the same breath so the two can never drift apart.
+#[tokio::test]
+async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-notice")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    // Every notice-class intent is source-routed and therefore has no adapter
+    // target. The projection owner may render equivalent UI state, but the
+    // delivery coordinator must not fabricate a cursor for it.
+    for intent in [
+        DeliveryIntent::Working,
+        DeliveryIntent::Cleanup,
+        DeliveryIntent::Reaction,
+        DeliveryIntent::FailureNotice,
+        DeliveryIntent::ConnectionStatus,
+        DeliveryIntent::CommandFeedback,
+        DeliveryIntent::ConnectRequired,
+    ] {
+        let mut request = working_notice(scope.clone(), "vendorx");
+        request.intent = intent;
+        let outcome = coordinator
+            .deliver_notice(request)
+            .await
+            .expect("a streaming skip is a clean outcome, not an error");
+        assert!(
+            matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery),
+            "{intent:?} has no adapter delivery on a streaming source route, got {outcome:?}"
+        );
+    }
+    assert_eq!(
+        adapter.deliver_calls(),
+        0,
+        "no source-routed notice may reach the adapter on a streaming channel"
+    );
+
+    // ...while the policy-class notification path still delivers, so a user
+    // with the tab closed keeps receiving background-run notices.
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let thread_scope = project_thread_scope();
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_notification(scope.clone(), "vendorx", &thread_scope),
+        )
+        .await
+        .expect("notification-routed send drives");
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }),
+        "a notification-routed send must still reach a streaming channel, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.delivery_sends(),
+        1,
+        "and it must ride the adapter's notification send"
+    );
+}
+
 #[tokio::test]
 async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
     let scope = scope();
@@ -1834,6 +2406,7 @@ async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-900")],
         })],
     ));
@@ -1971,6 +2544,7 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Sent {
                 vendor_message_ref: None,
             }],
@@ -2003,11 +2577,9 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
 }
 
 #[tokio::test]
-async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery() {
+async fn coordinator_does_not_auto_recover_unfenced_sending_attempts() {
     let scope = scope();
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    // Durable shape a crash leaves behind: an attempt stuck in `Sending`
-    // from a PREVIOUS process lifetime.
     let stray = OutboundDeliveryAttempt {
         delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
         scope: scope.clone(),
@@ -2019,7 +2591,7 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
             turn_run_id: None,
             target: validated_reply_target(),
             kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
-            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new("projection:stray")
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new("projection:live-send")
                 .expect("projection ref"),
             requires_reply_target_revalidation: false,
         },
@@ -2030,32 +2602,31 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
     store
         .record_delivery_attempt(stray.clone())
         .await
-        .expect("seed stray attempt");
-
+        .expect("seed sending attempt");
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
-            parts: vec![sent("ts-950")],
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-new")],
         })],
     ));
-    let coordinator = coordinator_over(&store, &adapter);
-    coordinator
+
+    coordinator_over(&store, &adapter)
         .deliver_notice(working_notice(scope.clone(), "vendorx"))
         .await
-        .expect("notice delivers");
+        .expect("new notice delivers");
 
-    let attempts = store.list_delivery_attempts(scope).await.unwrap();
-    let recovered = attempts
-        .iter()
-        .find(|attempt| attempt.delivery_id == stray.delivery_id)
-        .expect("stray attempt still present");
-    // OUT-6: found in Sending from a prior lifetime → Unknown, never resent.
+    let persisted = store
+        .load_delivery_attempt(scope, stray.delivery_id)
+        .await
+        .expect("load succeeds")
+        .expect("sending attempt remains");
     assert_eq!(
-        recovered.status,
-        ironclaw_outbound::OutboundDeliveryStatus::Unknown
+        persisted.status,
+        ironclaw_outbound::OutboundDeliveryStatus::Sending,
+        "without a durable owner lease, another coordinator must not guess that a send crashed"
     );
-    assert_eq!(adapter.deliver_calls(), 1, "only the new notice was sent");
 }
 
 #[tokio::test]
@@ -2072,8 +2643,11 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy::default(),
     );
 
@@ -2165,6 +2739,7 @@ async fn codec_resolver_enforces_the_dm_rule_from_the_codec_verdict() {
             Arc::clone(&store),
             scope.clone(),
             vec![Ok(DeliveryReport {
+                prune_registrations: Vec::new(),
                 parts: vec![sent("ts-dm")],
             })],
         ));
@@ -2226,5 +2801,729 @@ async fn codec_resolver_enforces_the_dm_rule_from_the_codec_verdict() {
                 "an OAuth URL must never reach a vendor adapter for a non-DM target"
             );
         }
+    }
+}
+
+// ─── Streaming reply-mode gate ──────────────────────────────────────────────
+//
+// A `streaming` channel's conversation replies ride the durable projection
+// stream (the SSE/WebSocket path IS the reply sink); the batched coordinator
+// path must never double-deliver them. Notification-class sends
+// (`ModelDelivery`, `BackgroundRunNotice`) still flow so the channel's
+// `notifications` capability works.
+
+#[tokio::test]
+async fn streaming_channel_conversation_reply_skips_batched_delivery() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-100")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let thread_scope = project_thread_scope();
+    let request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    let run_id = request.delivery.turn_run_id.expect("run id");
+    bind_final_reply_projection(&coordinator, run_id, "cursor:verified-final");
+    let outcome = coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
+        .await
+        .expect("streaming skip is a clean outcome, not an error");
+
+    assert!(
+        matches!(
+            outcome,
+            CoordinatedDeliveryOutcome::StreamDelivered { ref cursor, .. }
+                if cursor == "cursor:verified-final"
+        ),
+        "a streaming channel must record the real projection cursor, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        0,
+        "the adapter must never be reached for a streaming conversation reply"
+    );
+}
+
+#[tokio::test]
+async fn streaming_channel_still_receives_notification_class_deliveries() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-200")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    request.intent = DeliveryIntent::ModelDelivery;
+    request.delivery.resolution_request.intent =
+        ironclaw_outbound::CommunicationDeliveryIntent::RequestedOutbound(
+            ironclaw_outbound::RequestedOutboundContext {
+                requested_target: validated_reply_target(),
+                requested_kind: ironclaw_outbound::RequestedOutboundKind::ProductMessage,
+            },
+        );
+    let outcome = coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
+        .await
+        .expect("notification-class delivery drives");
+
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }),
+        "notification-class sends must flow to a streaming channel, got {outcome:?}"
+    );
+    assert_eq!(adapter.deliver_calls(), 1);
+}
+
+/// Regression pin (unified-channel-model §5/§7a): a gate prompt whose ROUTE
+/// is a notification target (`RunNotification` + non-live-source origin) is a
+/// notification even though its `DeliveryIntent` is conversation-shaped. The
+/// streaming gate keys on the route, not the intent — skipping this send
+/// would silently drop blocked-fire pushes for a streaming channel, the exact
+/// break `blocked_fire_pushes_web_app_notice_to_enrolled_browser` caught.
+#[tokio::test]
+async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-300")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_notification(scope.clone(), "vendorx", &thread_scope);
+    // Conversation-shaped intent, notification-shaped route: the gate prompt
+    // for a background fire, pushed to the creator's notification channel.
+    request.intent = DeliveryIntent::GatePrompt;
+    let outcome = coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
+        .await
+        .expect("notification-routed gate prompt drives");
+
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }),
+        "a notification-routed gate prompt must flow to a streaming channel, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.delivery_sends(),
+        1,
+        "the notification route must ride the adapter's notification send"
+    );
+}
+
+// ─── §7a adapter dispatch: notifications ride ChannelDelivery ──────────────
+
+fn coordinated_notification<'a>(
+    scope: TurnScope,
+    extension_id: &'a str,
+    thread_scope: &'a ThreadScope,
+) -> CoordinatedDeliveryRequest<'a> {
+    let mut request = coordinated_final_reply(scope.clone(), extension_id, thread_scope);
+    request.intent = DeliveryIntent::BackgroundRunNotice;
+    request.delivery.resolution_request.intent =
+        ironclaw_outbound::CommunicationDeliveryIntent::RunNotification(
+            ironclaw_outbound::RunNotificationContext {
+                event_kind: ironclaw_outbound::RunNotificationEventKind::RunBlocked,
+                origin: ironclaw_outbound::RunNotificationOrigin::RunScopedTarget {
+                    target: validated_reply_target(),
+                },
+            },
+        );
+    request
+}
+
+#[tokio::test]
+async fn notification_class_delivery_rides_the_adapters_notification_send() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-300")],
+        })],
+    ));
+    let (coordinator, _reply_context) = coordinator_over_recording_reply_lookups(&store, &adapter);
+
+    let thread_scope = project_thread_scope();
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_notification(scope.clone(), "vendorx", &thread_scope),
+        )
+        .await
+        .expect("notification delivers");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(
+        adapter.delivery_sends(),
+        1,
+        "a run notification must ride ChannelDelivery::deliver"
+    );
+}
+
+#[tokio::test]
+async fn enrollment_required_without_registrations_records_no_target_without_egress() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: true,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_notification(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("no enrolled target is a clean outcome");
+
+    assert!(matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery));
+    assert_eq!(adapter.delivery_sends(), 0, "no adapter call is evidence");
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("list attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::NoTarget,
+        "absence of a target is not provider-confirmed delivery"
+    );
+}
+
+#[tokio::test]
+async fn enrollment_required_ownerless_delivery_records_no_target_without_egress() {
+    let scope = TurnScope::new_with_owner(
+        TenantId::new("tenant-product-outbound").expect("valid tenant"),
+        Some(AgentId::new("agent-product-outbound").expect("valid agent")),
+        Some(ProjectId::new("project-product-outbound").expect("valid project")),
+        ThreadId::new("thread-ownerless-outbound").expect("valid thread"),
+        None,
+    );
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: true,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_notification(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("ownerless enrollment-required delivery has no target");
+
+    assert!(matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery));
+    assert_eq!(adapter.delivery_sends(), 0, "no adapter call is evidence");
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("list attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::NoTarget,
+    );
+}
+
+#[tokio::test]
+async fn conversation_reply_rides_the_adapters_ordinary_delivery() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![sent("ts-301")],
+        })],
+    ));
+    let (coordinator, _reply_context) = coordinator_over_recording_reply_lookups(&store, &adapter);
+
+    let thread_scope = project_thread_scope();
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &thread_scope),
+        )
+        .await
+        .expect("final reply delivers");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(
+        adapter.delivery_sends(),
+        0,
+        "a conversation reply must ride the ordinary delivery, not the notification send"
+    );
+}
+
+// ── §8: the generic notification-setup surface over host-owned registrations ─
+//
+// The block that stood here drove `AdapterChannelNotificationSetupService`
+// against a scripted adapter, pinning that the service passed the caller's
+// identity and the channel-opaque payload through verbatim. Those adapter
+// methods are gone (design §8), and the two properties split:
+//
+//   * The caller's identity is still never reinterpreted — the scope is built
+//     from `ProductSurfaceCaller` alone, pinned below.
+//   * The opaque payload is now stored host-side and parsed only at delivery,
+//     pinned in `ironclaw_auth::delivery_registrations` (storage bounds, the
+//     endpoint allowlist, the forward migration) and in the web-app package's
+//     `registration_parsing_contract` (interpretation).
+//
+// What is genuinely THIS layer's, and therefore what is tested here, is the
+// pre-storage endpoint admission: the surface must refuse an endpoint the
+// channel's own `[[channel.egress]]` does not declare, before anything is
+// written. Without that check enrollment is an SSRF primitive.
+
+struct EnrollmentResolver {
+    requires_enrollment: Option<bool>,
+    declared_hosts: Option<Vec<String>>,
+}
+
+impl ChannelDeliveryResolver for EnrollmentResolver {
+    fn resolve_channel_delivery(
+        &self,
+        extension_id: &str,
+    ) -> Option<ironclaw_product_contracts::delivery::ResolvedChannelDelivery> {
+        Some(
+            ironclaw_product_contracts::delivery::ResolvedChannelDelivery {
+                extension_id: ExtensionId::new(extension_id).ok()?,
+                installation_id: AdapterInstallationId::new("enrollment-test").ok()?,
+                reply: None,
+                delivery: None,
+                egress: Arc::new(CoordinatorDenyAllEgress),
+                reply_transport: None,
+                requires_enrollment: self.requires_enrollment?,
+                declared_egress_hosts: self.declared_hosts.clone()?,
+            },
+        )
+    }
+}
+
+#[derive(Default)]
+struct RecordingRegistrations {
+    enrolled: Mutex<Vec<String>>,
+    listed: Mutex<Vec<ironclaw_extension_contracts::channel_adapter::DeliveryRegistration>>,
+    removed: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_product_contracts::delivery::DeliveryRegistrationService for RecordingRegistrations {
+    async fn list(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+    ) -> Result<
+        Vec<ironclaw_extension_contracts::channel_adapter::DeliveryRegistration>,
+        ironclaw_product_contracts::delivery::DeliveryRegistrationError,
+    > {
+        Ok(self.listed.lock().expect("listed lock").clone())
+    }
+
+    async fn enroll(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        request: ironclaw_product_contracts::delivery::DeliveryRegistrationRequest,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryRegistration,
+        ironclaw_product_contracts::delivery::DeliveryRegistrationError,
+    > {
+        self.enrolled
+            .lock()
+            .expect("enrolled lock")
+            .push(request.endpoint.clone());
+        let registration = ironclaw_extension_contracts::channel_adapter::DeliveryRegistration {
+            registration_id: "reg-1".to_string(),
+            endpoint: request.endpoint,
+            document: request.document,
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+        };
+        self.listed
+            .lock()
+            .expect("listed lock")
+            .push(registration.clone());
+        Ok(registration)
+    }
+
+    async fn remove(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        registration_id: &str,
+    ) -> Result<bool, ironclaw_product_contracts::delivery::DeliveryRegistrationError> {
+        self.removed
+            .lock()
+            .expect("removed lock")
+            .push(registration_id.to_string());
+        self.listed
+            .lock()
+            .expect("listed lock")
+            .retain(|registration| registration.registration_id != registration_id);
+        Ok(true)
+    }
+
+    async fn prune(
+        &self,
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        _registration_ids: &[String],
+    ) -> Result<usize, ironclaw_product_contracts::delivery::DeliveryRegistrationError> {
+        Ok(0)
+    }
+}
+
+fn setup_caller() -> ironclaw_product_contracts::surface::ProductSurfaceCaller {
+    ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("tenant1").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("user1").expect("user"),
+        None,
+        None,
+    )
+}
+
+fn enrollment_service(
+    requires_enrollment: Option<bool>,
+    declared_hosts: Option<Vec<String>>,
+    registrations: Arc<RecordingRegistrations>,
+) -> ironclaw_assistant::RegistrationChannelNotificationSetupService {
+    ironclaw_assistant::RegistrationChannelNotificationSetupService::new(
+        Arc::new(EnrollmentResolver {
+            requires_enrollment,
+            declared_hosts,
+        }),
+        registrations,
+        Arc::new(ironclaw_assistant::NoDeliveryClientBootstrap),
+    )
+}
+
+struct FailingDeliveryClientBootstrap;
+
+impl ironclaw_assistant::DeliveryClientBootstrap for FailingDeliveryClientBootstrap {
+    fn bootstrap(
+        &self,
+        _extension_id: &str,
+    ) -> Result<Option<serde_json::Value>, ironclaw_assistant::DeliveryClientBootstrapError> {
+        Err(ironclaw_assistant::DeliveryClientBootstrapError)
+    }
+}
+
+fn enrollment_payload(endpoint: &str) -> serde_json::Value {
+    serde_json::json!({ "endpoint": endpoint, "keys": { "p256dh": "a", "auth": "b" } })
+}
+
+#[tokio::test]
+async fn notification_status_surfaces_bootstrap_failure_as_retryable_unavailability() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+
+    let service = ironclaw_assistant::RegistrationChannelNotificationSetupService::new(
+        Arc::new(EnrollmentResolver {
+            requires_enrollment: Some(true),
+            declared_hosts: Some(vec!["push.declared.example".to_string()]),
+        }),
+        Arc::new(RecordingRegistrations::default()),
+        Arc::new(FailingDeliveryClientBootstrap),
+    );
+
+    let error = service
+        .status(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
+                extension_id: "vendorx".to_string(),
+            },
+        )
+        .await
+        .expect_err("bootstrap failure must not be hidden as missing bootstrap data");
+
+    assert_eq!(
+        error.kind,
+        ironclaw_product_contracts::surface::ProductSurfaceErrorKind::ServiceUnavailable
+    );
+    assert!(error.retryable);
+}
+
+/// THE security-critical check, at the surface that performs it: an endpoint
+/// the channel does not declare must be refused BEFORE storage. Every hostile
+/// shape here would otherwise make the host POST wherever the submitter named.
+#[tokio::test]
+async fn enrollment_refuses_an_undeclared_endpoint_before_storage() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+
+    let registrations = Arc::new(RecordingRegistrations::default());
+    let service = enrollment_service(
+        Some(true),
+        Some(vec!["push.declared.example".to_string()]),
+        Arc::clone(&registrations),
+    );
+
+    for hostile in [
+        "https://evil.example/send/x",
+        "http://push.declared.example/send/x",
+        "https://push.declared.example@evil.example/send/x",
+        "https://push.declared.example.evil.example/send/x",
+    ] {
+        let error = service
+            .enable(
+                setup_caller(),
+                ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                    extension_id: "vendorx".to_string(),
+                    payload: enrollment_payload(hostile),
+                },
+            )
+            .await
+            .expect_err("an undeclared endpoint must be refused");
+        assert_eq!(
+            error.kind,
+            ironclaw_product_contracts::surface::ProductSurfaceErrorKind::Validation,
+            "{hostile}"
+        );
+    }
+
+    assert!(
+        registrations.enrolled.lock().expect("lock").is_empty(),
+        "nothing may be written for a refused endpoint"
+    );
+}
+
+#[tokio::test]
+async fn enrollment_stores_a_declared_endpoint_with_its_opaque_document() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+
+    let registrations = Arc::new(RecordingRegistrations::default());
+    let service = enrollment_service(
+        Some(true),
+        Some(vec!["push.declared.example".to_string()]),
+        Arc::clone(&registrations),
+    );
+    service
+        .enable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "vendorx".to_string(),
+                payload: enrollment_payload("https://push.declared.example/send/ok"),
+            },
+        )
+        .await
+        .expect("a declared endpoint enrolls");
+    assert_eq!(
+        *registrations.enrolled.lock().expect("lock"),
+        vec!["https://push.declared.example/send/ok".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn disable_resolves_the_edge_endpoint_to_the_canonical_host_registration_id() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+
+    let registrations = Arc::new(RecordingRegistrations::default());
+    registrations.listed.lock().expect("listed lock").push(
+        ironclaw_extension_contracts::channel_adapter::DeliveryRegistration {
+            registration_id: "host-registration-7".to_string(),
+            endpoint: "https://push.declared.example/send/old".to_string(),
+            document: r#"{"keys":{"p256dh":"a","auth":"b"}}"#.to_string(),
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+        },
+    );
+    let service = enrollment_service(
+        Some(true),
+        Some(vec!["push.declared.example".to_string()]),
+        Arc::clone(&registrations),
+    );
+
+    service
+        .disable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "vendorx".to_string(),
+                payload: enrollment_payload("https://push.declared.example/send/old"),
+            },
+        )
+        .await
+        .expect("the edge endpoint resolves to its stored canonical id");
+
+    assert_eq!(
+        *registrations.removed.lock().expect("removed lock"),
+        vec!["host-registration-7".to_string()]
+    );
+}
+
+/// A channel the deployment does not know must not become an oracle for which
+/// channels exist, and one with no declared egress can enroll nothing.
+#[tokio::test]
+async fn unknown_and_egressless_channels_fail_closed() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+
+    for (requires_enrollment, declared_hosts) in [
+        (None, Some(vec!["push.declared.example".to_string()])),
+        (Some(true), None),
+    ] {
+        let service = enrollment_service(
+            requires_enrollment,
+            declared_hosts,
+            Arc::new(RecordingRegistrations::default()),
+        );
+        let error = service
+            .enable(
+                setup_caller(),
+                ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                    extension_id: "vendorx".to_string(),
+                    payload: enrollment_payload("https://push.declared.example/send/x"),
+                },
+            )
+            .await
+            .expect_err("neither an unknown nor an egressless channel may enroll");
+        assert_eq!(
+            error.kind,
+            ironclaw_product_contracts::surface::ProductSurfaceErrorKind::NotFound,
+            "both paths must be indistinguishable: {requires_enrollment:?}"
+        );
     }
 }

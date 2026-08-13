@@ -71,7 +71,7 @@ owner, and a deleted one fails until its entry goes.
 | `model-catalog` | Facts about **models**: what an endpoint lists, and which models see images, generate images, or think natively | Provider identity or routing | `models.rs`, `reasoning_models.rs`, `vision_models.rs`, `image_models.rs` |
 | `recording` | Trace capture and replay, and binding recorded tool arguments to earlier results | Live provider behavior | `recording.rs`, `trace_binding.rs` |
 | `transcription` | The `TranscriptionProvider` trait and its implementations — a **different trait** from `LlmProvider`, sharing only transports | Anything implementing `LlmProvider` | `transcription/mod.rs`, `transcription/chat_completions.rs`, `transcription/openai.rs` |
-| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs` |
+| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs`, `anthropic_oauth/tests.rs` |
 
 Four placement calls worth stating, because each is a file whose *shape*
 suggests one owner and whose *purpose* is another:
@@ -336,6 +336,29 @@ prefixes like `"openai/gpt-4o"` stripped; `None` for unknowns → `default_cost(
 Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 (a plain import alias, **not** a re-export — see the relocation note in
 `.claude/rules/type-placement.md`).
+
+## Anthropic Prompt Caching
+
+Both Anthropic transports emit explicit `cache_control` breakpoints when
+`cache_retention` (env: `ANTHROPIC_CACHE_RETENTION`) is not `none` (#6984):
+
+- **OAuth transport** (`anthropic_oauth.rs`, `apply_cache_breakpoints`): system
+  prompt block, last tool definition, and the last content block of the last
+  message, all carrying the retention TTL (`{"type":"ephemeral"}` for short,
+  `+ "ttl":"1h"` for long).
+- **API-key transport** (`rig_adapter.rs`, `build_rig_request` +
+  `create_anthropic_from_registry`): the top-level automatic-caching marker,
+  an explicit marker on the last tool (moved into rig's raw
+  `additional_params.tools`, which rig appends after typed tools), and — for
+  `short` only — rig's typed system/last-message breakpoints
+  (`CompletionModel::prompt_caching`). `long` must not enable the typed
+  breakpoints: rig's markers cannot carry a TTL, and a 5m block marker with a
+  1h automatic marker is an API error (TTL conflict on the last block).
+
+All markers within a request share one TTL, satisfying Anthropic's
+longer-TTL-first ordering rule. Models without cache support (claude-2 era)
+downgrade to `none` via `supports_prompt_cache`. Wire shape is pinned by
+capture-server tests in both files.
 
 ## rig_adapter.rs Details
 

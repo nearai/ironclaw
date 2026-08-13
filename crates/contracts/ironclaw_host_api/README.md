@@ -88,6 +88,6 @@ cargo test -p ironclaw_architecture_tests       # boundary + seal + ceiling gate
   guidance; `CLAUDE.md` points here).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.1.1;
-  `docs/reborn/target-architecture/families/contracts.md`.
-- Frozen contract docs: `docs/reborn/contracts/host-api.md`,
+  `docs/internal/reborn/target-architecture/families/contracts.md`.
+- Frozen contract docs: `docs/internal/reborn/contracts/host-api.md`,
   `kernel-boundary.md`, `capability-access.md`.

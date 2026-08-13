@@ -587,14 +587,12 @@ function applyProjectionItems({
         if (runId && promptRunIdRef?.current === runId) {
           promptRunIdRef.current = null;
         }
-        // Reborn's projection bridge does not currently emit `Text` items
-        // for assistant replies, nor `capability_display_preview` items in
-        // the projection state — both the assistant reply and the rich tool
-        // input/output cards live only in the thread timeline. Reload the
-        // timeline on EVERY terminal status (not only success) so a failed,
-        // cancelled, or recovery-required run still recovers the tool
-        // previews for the tools that completed before it terminated. The
-        // reload preserves the client-side `err-*` failure bubble.
+        // A successful terminal projection can carry the finalized transcript
+        // text, but the thread timeline remains authoritative for history and
+        // rich tool input/output cards. Reload on EVERY terminal status so a
+        // failed, cancelled, or recovery-required run also recovers the tool
+        // previews for tools that completed before it terminated. The reload
+        // preserves the client-side `err-*` failure bubble.
         settleRun(
           settledRunsRef,
           onRunSettled,
@@ -626,8 +624,9 @@ function applyProjectionItems({
       // history. Text can stream while the run is still active or arrive in the same
       // projection snapshot as a still-blocked gate; run_status remains the source of
       // truth for clearing pendingGate/processing.
-      const messageId = `text-${item.text.id}`;
       const textRunId = item.text.run_id || null;
+      const finalizedText = item.text.finalized === true;
+      const messageId = `${finalizedText ? "msg" : "text"}-${item.text.id}`;
       if (
         textRunId &&
         FAILURE_RUN_STATUSES.has(batchRunStatusByRunId.get(textRunId))
@@ -662,9 +661,18 @@ function applyProjectionItems({
           return phaseAware;
         }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
-        const existing = phaseAware.findIndex(
+        let existing = phaseAware.findIndex(
           (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
         );
+        if (existing < 0 && finalizedText) {
+          existing = phaseAware.findLastIndex(
+            (message) =>
+              message?.role === "assistant" &&
+              message.turnRunId === textRunId &&
+              message.isFinalReply === false &&
+              message.content === (item.text.body || ""),
+          );
+        }
         const next = {
           ...(existing >= 0 ? phaseAware[existing] : {}),
           id: messageId,
@@ -672,8 +680,8 @@ function applyProjectionItems({
           content: item.text.body || "",
           timestamp: phaseAware[existing]?.timestamp || new Date().toISOString(),
           turnRunId: phaseAware[existing]?.turnRunId || textRunId,
-          isFinalReply: false,
-          isStreaming: true,
+          isFinalReply: finalizedText,
+          isStreaming: !finalizedText,
         };
         if (existing >= 0) {
           const copy = [...phaseAware];

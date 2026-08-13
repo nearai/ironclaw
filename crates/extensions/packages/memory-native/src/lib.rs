@@ -34,4 +34,6 @@ pub use repo::{
 };
 pub use safety::DefaultPromptWriteSafetyPolicy;
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
-pub use service::NativeMemoryService;
+pub use service::{
+    MEMORY_GUIDANCE, MEMORY_GUIDANCE_ASSETS, MEMORY_GUIDANCE_DOC_REF, NativeMemoryService,
+};

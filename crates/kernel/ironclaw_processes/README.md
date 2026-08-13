@@ -97,4 +97,4 @@ cargo test -p ironclaw_architecture_tests   # after dependency/API changes
 
 - [`AGENTS.md`](./AGENTS.md) — working rules and guardrails.
 - [`../AGENTS.md`](../AGENTS.md) — the kernel family.
-- `docs/reborn/contracts/processes.md`; PROPOSAL §6.5.7 and §12.13 D-S.
+- `docs/internal/reborn/contracts/processes.md`; PROPOSAL §6.5.7 and §12.13 D-S.

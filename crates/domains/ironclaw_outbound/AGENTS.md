@@ -4,8 +4,8 @@ Orientation (what this crate is, surface, deps, tests) lives in
 [`README.md`](./README.md); the family boundary in
 [`../AGENTS.md`](../AGENTS.md). This file is the canonical crate-local rules —
 consolidated 2026-08-05 from the former `CLAUDE.md` guardrails (now a pointer)
-per `docs/reborn/guidance-conventions.md` rule 1.
-`docs/reborn/contracts/events-projections.md` is the source of truth for
+per `docs/internal/reborn/guidance-conventions.md` rule 1.
+`docs/internal/reborn/contracts/events-projections.md` is the source of truth for
 outbound egress/subscription policy.
 
 ## Rules
@@ -20,7 +20,9 @@ outbound egress/subscription policy.
   inputs/outputs, secrets, host paths, or backend error details (the store
   tests pin that backend error detail never leaks).
 - External push targets are candidates only; the outbound policy service must
-  call the reply-target validator before every delivery attempt.
+  call the reply-target validator before every new delivery attempt. A replay
+  of an already-recorded stable delivery identity returns the authoritative
+  row without starting a new attempt or revalidating a target.
 - `OutboundResolutionEngine` is the read-only candidate selector above
   `OutboundPolicyService`; it resolves typed delivery requests into
   `CommunicationDeliveryCandidate` or `NoDelivery`, but never validates

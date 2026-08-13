@@ -70,6 +70,7 @@ async def _open_stubbed_approval_thread(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -380,7 +381,7 @@ async def test_reborn_legacy_pending_approval_blocks_send_without_error_message(
             body=json.dumps({"error": "send should stay locally blocked"}),
         )
 
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await _emit_approval_gate(page, allow_always=False, gate_ref="gate-block-send")
@@ -484,7 +485,7 @@ async def test_reborn_legacy_pending_approval_does_not_block_other_thread(
             ),
         )
 
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_B_ID}/messages", handle_send_b)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send_b)
 
     try:
         await _emit_approval_gate(page, allow_always=False, gate_ref="gate-thread-a")

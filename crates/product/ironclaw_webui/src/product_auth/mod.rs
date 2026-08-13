@@ -659,7 +659,7 @@ pub type ProductAuthRouteMount = SplitRouteMount;
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
 // tool calls and must not surface raw secrets through the model-visible
-// tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
+// tool-dispatch path. Contract: `docs/internal/reborn/contracts/auth-product.md`.
 // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
 pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
     let public = Router::new()

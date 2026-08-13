@@ -163,6 +163,24 @@ export async function importSettings(
 export function fetchLlmProviders() {
   return apiFetch("/api/webchat/v2/llm/providers");
 }
+export function fetchUserModelCatalog() {
+  return apiFetch("/api/webchat/v2/llm/models");
+}
+export function fetchUserModelPreference() {
+  return apiFetch("/api/webchat/v2/llm/model-preference");
+}
+export function setUserModelPolicy(payload) {
+  return apiFetch("/api/webchat/v2/llm/model-policy", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+export function setUserModelPreference(model) {
+  return apiFetch("/api/webchat/v2/llm/model-preference", {
+    method: "PUT",
+    body: JSON.stringify({ model }),
+  });
+}
 export function upsertLlmProvider(payload) {
   const { clientActionId: callerClientActionId, ...request } = payload;
   return apiFetch("/api/webchat/v2/llm/providers", {

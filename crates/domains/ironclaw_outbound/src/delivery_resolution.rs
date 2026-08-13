@@ -1,22 +1,7 @@
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 
-/// Delivery resolution target categories used by the outbound resolver.
-///
-/// Translation note: these domain kinds lower into the existing
-/// `OutboundPushKind`/`PrepareOutboundDeliveryRequest` path at the outbound
-/// policy boundary. `ApprovalPrompt` and `AuthPrompt` stay on the
-/// run-notification side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommunicationDeliveryKind {
-    FinalReply,
-    ProgressUpdate,
-    DeliveryStatus,
-    ApprovalPrompt,
-    AuthPrompt,
-    ModelDelivery,
-}
+use crate::OutboundPushKind;
 
 /// Narrow intent for explicitly requested outbound delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +20,7 @@ pub struct CommunicationDeliveryResolutionRequest {
 }
 
 impl CommunicationDeliveryResolutionRequest {
-    pub fn delivery_kind(&self) -> CommunicationDeliveryKind {
+    pub fn delivery_kind(&self) -> OutboundPushKind {
         self.intent.delivery_kind()
     }
 }
@@ -48,7 +33,7 @@ pub enum CommunicationDeliveryIntent {
 }
 
 impl CommunicationDeliveryIntent {
-    pub fn delivery_kind(&self) -> CommunicationDeliveryKind {
+    pub fn delivery_kind(&self) -> OutboundPushKind {
         match self {
             Self::RequestedOutbound(context) => context.delivery_kind(),
             Self::RunNotification(context) => context.delivery_kind(),
@@ -63,10 +48,10 @@ pub struct RequestedOutboundContext {
 }
 
 impl RequestedOutboundContext {
-    pub fn delivery_kind(&self) -> CommunicationDeliveryKind {
+    pub fn delivery_kind(&self) -> OutboundPushKind {
         match self.requested_kind {
-            RequestedOutboundKind::ProductMessage => CommunicationDeliveryKind::FinalReply,
-            RequestedOutboundKind::DeliveryStatus => CommunicationDeliveryKind::DeliveryStatus,
+            RequestedOutboundKind::ProductMessage => OutboundPushKind::FinalReply,
+            RequestedOutboundKind::DeliveryStatus => OutboundPushKind::DeliveryStatus,
         }
     }
 }
@@ -78,7 +63,7 @@ pub struct RunNotificationContext {
 }
 
 impl RunNotificationContext {
-    pub fn delivery_kind(&self) -> CommunicationDeliveryKind {
+    pub fn delivery_kind(&self) -> OutboundPushKind {
         self.event_kind.delivery_kind()
     }
 }
@@ -121,20 +106,20 @@ pub enum RunNotificationEventKind {
     /// An explicit model-initiated delivery (`builtin.outbound_deliver`).
     /// Behaves like `FinalReplyReady` everywhere the compiler forces a
     /// choice (resolution/target planning), but keeps its own
-    /// `CommunicationDeliveryKind::ModelDelivery` so attempts stay
+    /// `OutboundPushKind::ModelDelivery` so attempts stay
     /// distinguishable in the durable audit trail and per-run accounting.
     ModelDelivery,
 }
 
 impl RunNotificationEventKind {
-    pub fn delivery_kind(self) -> CommunicationDeliveryKind {
+    pub fn delivery_kind(self) -> OutboundPushKind {
         match self {
-            Self::FinalReplyReady => CommunicationDeliveryKind::FinalReply,
-            Self::ProgressUpdate => CommunicationDeliveryKind::ProgressUpdate,
-            Self::ApprovalNeeded | Self::RunBlocked => CommunicationDeliveryKind::ApprovalPrompt,
-            Self::AuthRequired => CommunicationDeliveryKind::AuthPrompt,
-            Self::DeliveryStatus => CommunicationDeliveryKind::DeliveryStatus,
-            Self::ModelDelivery => CommunicationDeliveryKind::ModelDelivery,
+            Self::FinalReplyReady => OutboundPushKind::FinalReply,
+            Self::ProgressUpdate => OutboundPushKind::Progress,
+            Self::ApprovalNeeded | Self::RunBlocked => OutboundPushKind::GateRequired,
+            Self::AuthRequired => OutboundPushKind::AuthPrompt,
+            Self::DeliveryStatus => OutboundPushKind::DeliveryStatus,
+            Self::ModelDelivery => OutboundPushKind::ModelDelivery,
         }
     }
 }
@@ -201,7 +186,7 @@ pub struct DeliveryTargetCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommunicationDeliveryCandidate {
     pub target: ReplyTargetBindingRef,
-    pub kind: CommunicationDeliveryKind,
+    pub kind: OutboundPushKind,
 }
 
 /// Result of resolving a communication request.
@@ -250,10 +235,7 @@ mod tests {
         let decoded: CommunicationDeliveryResolutionRequest =
             from_str(&json).expect("deserialize requested outbound request");
         assert_eq!(decoded, request);
-        assert_eq!(
-            decoded.delivery_kind(),
-            CommunicationDeliveryKind::FinalReply
-        );
+        assert_eq!(decoded.delivery_kind(), OutboundPushKind::FinalReply);
     }
 
     #[test]
@@ -274,10 +256,7 @@ mod tests {
         let decoded: CommunicationDeliveryResolutionRequest =
             from_str(&json).expect("deserialize run notification request");
         assert_eq!(decoded, request);
-        assert_eq!(
-            decoded.delivery_kind(),
-            CommunicationDeliveryKind::ApprovalPrompt
-        );
+        assert_eq!(decoded.delivery_kind(), OutboundPushKind::GateRequired);
     }
 
     #[test]
@@ -313,43 +292,43 @@ mod tests {
     fn run_notification_event_kind_delivery_kind_maps_all_variants() {
         assert_eq!(
             RunNotificationEventKind::FinalReplyReady.delivery_kind(),
-            CommunicationDeliveryKind::FinalReply
+            OutboundPushKind::FinalReply
         );
         assert_eq!(
             RunNotificationEventKind::ProgressUpdate.delivery_kind(),
-            CommunicationDeliveryKind::ProgressUpdate
+            OutboundPushKind::Progress
         );
         assert_eq!(
             RunNotificationEventKind::ApprovalNeeded.delivery_kind(),
-            CommunicationDeliveryKind::ApprovalPrompt
+            OutboundPushKind::GateRequired
         );
         assert_eq!(
             RunNotificationEventKind::AuthRequired.delivery_kind(),
-            CommunicationDeliveryKind::AuthPrompt
+            OutboundPushKind::AuthPrompt
         );
         assert_eq!(
             RunNotificationEventKind::RunBlocked.delivery_kind(),
-            CommunicationDeliveryKind::ApprovalPrompt
+            OutboundPushKind::GateRequired
         );
         assert_eq!(
             RunNotificationEventKind::DeliveryStatus.delivery_kind(),
-            CommunicationDeliveryKind::DeliveryStatus
+            OutboundPushKind::DeliveryStatus
         );
         assert_eq!(
             RunNotificationEventKind::ModelDelivery.delivery_kind(),
-            CommunicationDeliveryKind::ModelDelivery
+            OutboundPushKind::ModelDelivery
         );
     }
 
     #[test]
     fn outbound_translation_enums_round_trip_all_variants() {
         for value in [
-            CommunicationDeliveryKind::FinalReply,
-            CommunicationDeliveryKind::ProgressUpdate,
-            CommunicationDeliveryKind::DeliveryStatus,
-            CommunicationDeliveryKind::ApprovalPrompt,
-            CommunicationDeliveryKind::AuthPrompt,
-            CommunicationDeliveryKind::ModelDelivery,
+            OutboundPushKind::FinalReply,
+            OutboundPushKind::Progress,
+            OutboundPushKind::DeliveryStatus,
+            OutboundPushKind::GateRequired,
+            OutboundPushKind::AuthPrompt,
+            OutboundPushKind::ModelDelivery,
         ] {
             assert_json_round_trip(value);
         }
@@ -397,7 +376,7 @@ mod tests {
     fn communication_delivery_candidate_round_trips() {
         let candidate = CommunicationDeliveryCandidate {
             target: reply_ref("reply:candidate"),
-            kind: CommunicationDeliveryKind::DeliveryStatus,
+            kind: OutboundPushKind::DeliveryStatus,
         };
 
         let json = to_string(&candidate).expect("serialize delivery candidate");
@@ -411,7 +390,7 @@ mod tests {
         assert_json_serializes(CommunicationDeliveryResolution::candidate(
             CommunicationDeliveryCandidate {
                 target: reply_ref("reply:candidate"),
-                kind: CommunicationDeliveryKind::FinalReply,
+                kind: OutboundPushKind::FinalReply,
             },
         ));
         assert_json_serializes(CommunicationDeliveryResolution::NoDelivery {

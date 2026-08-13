@@ -4,24 +4,51 @@ use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily};
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::{
-    DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy, DefaultRecoveryStrategy,
+    BoundedParallelBatchPolicyStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy,
+    DefaultRecoveryStrategy,
 };
 
 mod subagent;
 
-pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
+pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent, subagent_with_tool_batch_strategy};
 
-/// Replay-relevant fingerprint of the default family composition, with the
-/// two override-able knobs substituted in.
+/// Capability batch strategy selection, owned by the family layer.
+///
+/// [`ToolBatchStrategy::HostBatch`] selects the existing host-batch/default
+/// strategy; [`ToolBatchStrategy::BoundedParallel`] opts a family into the
+/// bounded fan-out strategy. Only the planner's batch slot is re-composed —
+/// the executor is never touched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolBatchStrategy {
+    /// The existing host-batch/default strategy.
+    #[default]
+    HostBatch,
+    /// Bounded parallel fan-out for batches whose capability descriptors
+    /// all permit parallel execution.
+    BoundedParallel,
+}
+
+/// Replay-relevant fingerprint of the default family composition, with its
+/// override-able knobs substituted in.
 ///
 /// [`DEFAULT_FAMILY_DIGEST`] is the BLAKE3-256 of this fingerprint at the
 /// production defaults; override-built families hash the same fingerprint
 /// with their resolved values so a family's [`ComponentIdentity`] digest
 /// always identifies the configuration it actually runs with
 /// (see `family.rs` component-identity contract).
-fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts: u32) -> String {
+fn default_family_fingerprint(
+    iteration_limit: u32,
+    model_availability_attempts: u32,
+    tool_batch_strategy: ToolBatchStrategy,
+) -> String {
+    let batch_strategy = match tool_batch_strategy {
+        ToolBatchStrategy::HostBatch => "DefaultBatchPolicyStrategy(exclusive_sequential)",
+        ToolBatchStrategy::BoundedParallel => {
+            "BoundedParallelBatchPolicyStrategy(parallel_unless_exclusive,bounded_fanout=4)"
+        }
+    };
     format!(
-        "ironclaw_agent_loop.default_family.v2:\
+        "ironclaw_agent_loop.default_family.v3:\
         family_id=default;\
         identity=component_identity_v1;\
         planner=DefaultPlanner;\
@@ -30,11 +57,11 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),\
         capability:DefaultCapabilityStrategy(all),\
         model:DefaultModelStrategy(primary_or_fallback_index),\
-        batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
+        batch:{batch_strategy},\
         gate:DefaultGateHandlingStrategy(block),\
         recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
-        stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
+        stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
         budget:DefaultBudgetStrategy(iteration_limit={iteration_limit},wall_clock_limit=none)"
     )
@@ -46,8 +73,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xca, 0xbb, 0x66, 0x61, 0xe4, 0xfd, 0xb4, 0x81, 0x12, 0x15, 0xc9, 0xde, 0x1d, 0x18, 0x68, 0xc3,
-    0x58, 0xf7, 0x9e, 0x51, 0xa7, 0x91, 0xd5, 0x75, 0xde, 0xe3, 0x7f, 0x96, 0x25, 0xbc, 0xf1, 0xda,
+    0xe6, 0xf2, 0x33, 0x91, 0xb3, 0xa9, 0xe1, 0x10, 0x10, 0xbc, 0x43, 0x24, 0x65, 0x80, 0xd5, 0x74,
+    0x6b, 0xd6, 0xe3, 0xd5, 0xed, 0xd9, 0xe1, 0x70, 0xb1, 0x85, 0xfe, 0x30, 0x05, 0x5c, 0x99, 0xec,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -67,8 +94,8 @@ pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
     default_with_overrides(FamilyOverrides::default().set_iteration_limit(iteration_limit))
 }
 
-/// Optional overrides for the default family's replay-relevant knobs. `None`
-/// keeps the production default for that knob.
+/// Optional overrides for the default family's replay-relevant knobs.
+/// Unset values preserve the production defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FamilyOverrides {
     /// Hard iteration ceiling; defaults to [`DEFAULT_ITERATION_BACKSTOP`].
@@ -76,6 +103,8 @@ pub struct FamilyOverrides {
     /// Availability-class model retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`).
     pub model_availability_attempts: Option<u32>,
+    /// Capability batch strategy; defaults to the host-batch strategy.
+    pub tool_batch_strategy: ToolBatchStrategy,
 }
 
 impl FamilyOverrides {
@@ -88,10 +117,15 @@ impl FamilyOverrides {
         self.model_availability_attempts = Some(attempts);
         self
     }
+
+    pub fn with_tool_batch_strategy(mut self, strategy: ToolBatchStrategy) -> Self {
+        self.tool_batch_strategy = strategy;
+        self
+    }
 }
 
-/// The default loop family with optional iteration-limit and model
-/// availability-retry overrides.
+/// The default loop family with optional budget, recovery, and capability
+/// batch-strategy overrides.
 ///
 /// The availability override shrinks (or deepens) how long the loop rides out
 /// provider outages before aborting — test harnesses that script provider
@@ -101,7 +135,7 @@ impl FamilyOverrides {
 /// Overrides are replay-relevant configuration, so an overridden composition
 /// carries a configuration-specific [`ComponentIdentity`] digest derived from
 /// the resolved values; only the pure-default composition keeps the static
-/// [`DEFAULT_FAMILY_DIGEST`], so existing replay identities are unchanged.
+/// [`DEFAULT_FAMILY_DIGEST`].
 pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     if overrides == FamilyOverrides::default() {
         return default();
@@ -115,6 +149,7 @@ pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     let digest = ComponentDigest::from_blake3(default_family_fingerprint(
         iteration_limit,
         max_model_availability_attempts,
+        overrides.tool_batch_strategy,
     ));
     let planner = DefaultPlanner::compose_default()
         .with_version(ComponentIdentity::new("default", digest))
@@ -126,6 +161,12 @@ pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
             max_model_availability_attempts,
             ..DefaultRecoveryStrategy::default()
         }));
+    let planner = match overrides.tool_batch_strategy {
+        ToolBatchStrategy::HostBatch => planner,
+        ToolBatchStrategy::BoundedParallel => {
+            planner.with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
+        }
+    };
     let id = planner.id().clone();
     let version = planner.version().clone();
 
@@ -158,12 +199,31 @@ mod tests {
     }
 
     #[test]
+    fn tool_batch_strategy_override_selects_family_strategy_without_changing_executor() {
+        let baseline = default();
+        let parallel = default_with_overrides(
+            FamilyOverrides::default().with_tool_batch_strategy(ToolBatchStrategy::BoundedParallel),
+        );
+
+        assert_eq!(
+            baseline.planner().batch().execution_mode(),
+            crate::strategies::CapabilityBatchExecutionMode::HostBatch
+        );
+        assert_eq!(
+            parallel.planner().batch().execution_mode(),
+            crate::strategies::CapabilityBatchExecutionMode::BoundedParallel
+        );
+        assert_ne!(parallel.version().digest, baseline.version().digest);
+    }
+
+    #[test]
     fn default_family_digest_matches_blake3_fingerprint() {
         assert_eq!(
             DEFAULT_FAMILY_DIGEST,
             ComponentDigest::from_blake3(default_family_fingerprint(
                 DEFAULT_ITERATION_BACKSTOP,
                 DefaultRecoveryStrategy::default().max_model_availability_attempts,
+                ToolBatchStrategy::HostBatch,
             ))
         );
     }
@@ -205,9 +265,21 @@ mod tests {
                 .set_iteration_limit(DEFAULT_ITERATION_BACKSTOP)
                 .set_model_availability_attempts(
                     DefaultRecoveryStrategy::default().max_model_availability_attempts,
-                ),
+                )
+                .with_tool_batch_strategy(ToolBatchStrategy::HostBatch),
         );
         assert_eq!(explicit_defaults.version().digest, DEFAULT_FAMILY_DIGEST);
+
+        // The bounded-parallel strategy is replay-relevant: it changes the
+        // identity from the static host-batch one, deterministically.
+        let bounded = default_with_overrides(
+            FamilyOverrides::default().with_tool_batch_strategy(ToolBatchStrategy::BoundedParallel),
+        );
+        let bounded_again = default_with_overrides(
+            FamilyOverrides::default().with_tool_batch_strategy(ToolBatchStrategy::BoundedParallel),
+        );
+        assert_ne!(bounded.version().digest, DEFAULT_FAMILY_DIGEST);
+        assert_eq!(bounded.version().digest, bounded_again.version().digest);
     }
 
     #[tokio::test]

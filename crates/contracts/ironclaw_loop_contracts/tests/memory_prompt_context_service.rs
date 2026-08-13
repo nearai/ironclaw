@@ -36,8 +36,10 @@ async fn empty_service_returns_empty_vec() {
     let result = service
         .load_memory_snippets(test_request("tenant-a", "user-x"))
         .await;
-    let snippets = result.expect("empty service should not fail");
-    assert!(snippets.is_empty());
+    let load = result.expect("empty service should not fail");
+    assert!(load.snippets.is_empty());
+    // "No memory backend wired" is not a retrieval failure.
+    assert!(!load.is_degraded());
 }
 
 #[tokio::test]

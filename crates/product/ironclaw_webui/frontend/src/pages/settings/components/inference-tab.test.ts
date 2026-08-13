@@ -42,6 +42,8 @@ function renderInferenceModule() {
     Badge: component("Badge"),
     Card: component("Card"),
     ProviderManagement: component("ProviderManagement"),
+    ModelSelectionPolicyEditor: component("ModelSelectionPolicyEditor"),
+    UserModelPreferenceSelector: component("UserModelPreferenceSelector"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
     html,
@@ -69,6 +71,7 @@ function renderInferenceModule() {
 test("Inference tab omits unsupported operator-config fields", () => {
   const { context, exports } = renderInferenceModule();
   const rendered = exports.InferenceTab({
+    isAdmin: true,
     settings: {},
     gatewayStatus: null,
     onSave: () => {},
@@ -86,5 +89,39 @@ test("Inference tab omits unsupported operator-config fields", () => {
     findComponentNodes(rendered, context.ProviderManagement).length,
     1,
     "LLM provider management should remain visible"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
+    1,
+    "admins need a UI to enable the tenant model allowlist"
+  );
+});
+
+test("Inference tab gives non-admin users model preference without provider controls", () => {
+  const { context, exports } = renderInferenceModule();
+  const rendered = exports.InferenceTab({
+    isAdmin: false,
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "",
+  });
+
+  assert.equal(
+    findComponentNodes(rendered, context.UserModelPreferenceSelector).length,
+    1,
+    "ordinary users should receive the caller-scoped model selector"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.ProviderManagement).length,
+    0,
+    "ordinary users must not receive operator provider controls"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
+    0,
+    "ordinary users must not receive tenant policy controls"
   );
 });

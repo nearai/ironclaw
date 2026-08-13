@@ -781,6 +781,78 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     );
 }
 
+/// Regression guard for issue #7246: the agent fabricated automation status
+/// ("your BTC digest is running and sending to Telegram") while the Automations
+/// page showed none. `builtin.trigger_list` IS the model's read path for that
+/// state, so its model-visible description must (a) bridge the user vocabulary
+/// ("automation", "routine") to the trigger capability id and (b) carry the
+/// grounding rule: call it before asserting routine/automation existence or
+/// status, never answer from memory. Driven through the production
+/// `visible_capabilities` surface assembly, not the constant.
+#[tokio::test]
+async fn builtin_trigger_list_surface_grounds_automation_status_claims() {
+    let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let trigger_list = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == TRIGGER_LIST_CAPABILITY_ID)
+        .expect("trigger_list must appear in surface");
+
+    let description = &trigger_list.descriptor.description;
+    // Vocabulary bridge: users ask about "automations" (the Automations page)
+    // and "routines"; the capability id says "trigger". Without all three in
+    // the description the model does not map status questions to this tool.
+    assert!(
+        description.contains("routine"),
+        "trigger_list description must use the routine vocabulary: {description}"
+    );
+    assert!(
+        description.contains("automation"),
+        "trigger_list description must use the automation vocabulary: {description}"
+    );
+    // Grounding rule tied to the specific fabrication (issue #7246), mirroring
+    // the outbound targets-list pattern: state the positive check-before-assert
+    // rule, not generic caution.
+    assert!(
+        description.contains("Call this before"),
+        "trigger_list description must instruct calling it before status claims: {description}"
+    );
+    assert!(
+        description.contains("never report routine or automation status from"),
+        "trigger_list description must forbid answering status from memory: {description}"
+    );
+    // Empty-state grounding: no rows means no automations exist — say so.
+    assert!(
+        description.contains("empty"),
+        "trigger_list description must ground the empty result as 'no routines': {description}"
+    );
+
+    // The same grounding must survive into the model-visible input schema root
+    // description (the trigger_create schema already carries steering there).
+    let schema = &trigger_list.descriptor.parameters_schema;
+    let schema_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_list schema must describe the listing as authoritative state");
+    assert!(
+        schema_description.contains("authoritative"),
+        "trigger_list schema description must declare the response authoritative: {schema_description}"
+    );
+    assert!(
+        schema_description.contains("routine") && schema_description.contains("automation"),
+        "trigger_list schema description must bridge routine/automation vocabulary: {schema_description}"
+    );
+}
+
 #[tokio::test]
 async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
     let runtime = runtime_with_policy(network_denied_policy());
@@ -2070,15 +2142,19 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
         .unwrap();
     }
 
-    let empty = invoke_with_context(
+    // #7474 review: `limit: 0` used to succeed with an empty list while 101
+    // routines exist — exactly the false-absence result the trigger_list
+    // description forbids the model to fabricate. It is now rejected as
+    // invalid input (schema declares `minimum: 1`), so an empty `triggers`
+    // array is always proof of absence.
+    invoke_with_context(
         &runtime,
         TRIGGER_LIST_CAPABILITY_ID,
         json!({ "limit": 0 }),
         context.clone(),
     )
     .await
-    .unwrap();
-    assert_eq!(empty["triggers"], json!([]));
+    .expect_err("a zero limit must be rejected, not answered with an empty list");
 
     let listed = invoke_with_context(
         &runtime,

@@ -64,7 +64,7 @@ REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
 # since the WS7 family move, which keeps the
 # package name and only renames the directory — PROPOSAL §5.1). Keying on the
 # path meant a move turned the whole gate into a crash or, worse, a shrunken
-# scan. See docs/reborn/target-architecture/CHECKLIST.md WS10.
+# scan. See docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 SHIPPING_PACKAGE_NAME = "ironclaw"
 
 
@@ -634,7 +634,7 @@ def shipping_reborn_source_roots(metadata: dict) -> list[pathlib.Path]:
     (``crates/<family>/ironclaw_*``): fewer files scanned, panics in the moved
     crates unreviewed, and the gate still green for any crate that happened to
     carry no baseline entries. See
-    docs/reborn/target-architecture/CHECKLIST.md WS10.
+    docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 
     Fail-closed: every reachable workspace member must resolve to a crate
     directory *and* contribute at least one production target root. A member

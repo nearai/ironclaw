@@ -3,7 +3,7 @@
 //! The policy-approved render orchestration (`prepare_and_render_product_outbound`)
 //! and its request/outcome/error types that once lived here were retired with
 //! the `ProductAdapter` contract in P7b (DEL-5). The live outbound path renders
-//! through `ChannelAdapter::deliver` driven by
+//! through [`ChannelDelivery::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver) driven by
 //! [`crate::DeliveryCoordinator`]. What remains is the trusted-metadata type
 //! and the lookup-only resolver trait the coordinator resolves reply targets
 //! through, plus the shared workflow-error → delivery-failure classifier the

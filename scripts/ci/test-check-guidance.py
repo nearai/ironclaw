@@ -85,6 +85,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.write("CLAUDE.md", "Read `docs/guide.md` and `crates/core/ironclaw_alpha/README.md`.\n")
         self.symlink("crates/core/CLAUDE.md", "AGENTS.md")
         self.write("docs/guide.md", "scanned like every docs/ page\n")
+        # Navigation defines the published surface the scan must cover.
+        self.write("docs/docs.json", '{"navigation": {"pages": ["guide"]}}\n')
         self.write(
             ".claude/rules/alpha.md",
             '---\npaths:\n  - "crates/**/*.rs"\n---\n# Alpha rule\n',
@@ -137,7 +139,7 @@ class GuidanceGateTests(unittest.TestCase):
         tracked: list[str] | None = None,
         known_missing: tuple | None = (),
         alias_exceptions: dict[str, str] | None = None,
-        reincluded: tuple[str, ...] = (),
+        internal_guidance: tuple[str, ...] = (),
     ) -> tuple[int, str]:
         listing = self.root / "tracked-files.txt"
         listing.write_text(
@@ -151,11 +153,9 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
-            mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
-            # Fixtures opt in to re-included corpora per test: the production
-            # tuple names real-repo pages, and the liveness refusal would
-            # otherwise fire on every fixture that lacks them.
-            mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", reincluded),
+            # Fixtures opt in per test; the production tuple names real-repo
+            # pages the fixture tree lacks.
+            mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", internal_guidance),
             mock.patch.object(
                 GATE,
                 "ALIAS_REAL_FILE_EXCEPTIONS",
@@ -545,8 +545,7 @@ class GuidanceGateTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
-                mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
-                mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", ()),
+                mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", ()),
                 mock.patch.object(GATE, "KNOWN_MISSING", ()),
                 mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
                 contextlib.redirect_stderr(stderr),
@@ -637,27 +636,28 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("docs/zh/index.md", output)
 
     def test_docs_historical_archives_are_excluded_but_contracts_are_not(self) -> None:
-        """Dated archives describe the tree as it stood when written — they
-        are excluded as classes. The living contract corpus under
-        docs/reborn/contracts/ is scanned."""
+        """docs/internal/ archives are excluded; the living contract corpus
+        inside is scanned."""
         self.build_fixture()
         self.write(
             "docs/internal/plans/2026-01-01-old-plan.md",
             "We will edit `crates/core/ironclaw_gone/src/lib.rs`.\n",
         )
         self.write(
-            "docs/reborn/target-architecture/CHECKLIST.md",
+            "docs/internal/reborn/target-architecture/CHECKLIST.md",
             "Milestone: `crates/core/ironclaw_gone/src/lib.rs`.\n",
         )
         self.write(
-            "docs/reborn/contracts/example.md",
+            "docs/internal/reborn/contracts/example.md",
             "Pinned by `crates/core/ironclaw_gone/tests/contract.rs`.\n",
         )
-        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
         self.assertEqual(code, 1)
         self.assertNotIn("2026-01-01-old-plan.md", output)
         self.assertNotIn("CHECKLIST.md", output)
-        self.assertIn("docs/reborn/contracts/example.md", output)
+        self.assertIn("docs/internal/reborn/contracts/example.md", output)
         self.assertIn("crates/core/ironclaw_gone/tests/contract.rs", output)
 
     def test_docs_unterminated_fence_refuses(self) -> None:
@@ -696,63 +696,82 @@ class GuidanceGateTests(unittest.TestCase):
                 self.assertIn("unterminated", output)
                 self.assertIn(name, output)
 
-    def test_reincluded_corpus_links_are_repo_claims(self) -> None:
-        """The re-included corpora are never published, so their relative
-        markdown links are repo-path claims, not Mintlify site routes —
-        renaming a contract file must not leave cross-references dangling
-        with the gate green."""
+    def test_internal_spec_links_are_repo_claims(self) -> None:
+        """Internal spec pages are never published, so their relative links
+        are repo-path claims, not site routes."""
         self.build_fixture()
-        self.write("docs/reborn/contracts/kernel.md", "A real sibling.\n")
+        self.write("docs/internal/reborn/contracts/kernel.md", "A real sibling.\n")
         self.write(
-            "docs/reborn/contracts/index.md",
+            "docs/internal/reborn/contracts/index.md",
             "See [kernel](kernel.md) and [renamed](renamed-away.md).\n",
         )
-        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
         self.assertEqual(code, 1)
         self.assertNotIn("kernel.md`", output)
         self.assertIn("renamed-away.md", output)
 
-    def test_reincluded_prefix_matching_no_pages_refuses(self) -> None:
-        """A stale re-included prefix (the corpus moved) must refuse instead
-        of silently dropping the gate's best-signal files from the scan."""
+    def test_internal_guidance_prefix_matching_no_pages_refuses(self) -> None:
+        """A stale spec prefix (the corpus moved) must refuse, not silently
+        drop the pages from the scan."""
         self.build_fixture()
-        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
         self.assertEqual(code, 1)
         self.assertIn("matched no tracked", output)
-        self.assertIn("docs/reborn/contracts/", output)
+        self.assertIn("docs/internal/reborn/contracts/", output)
 
-    def test_docs_floor_refuses_when_docs_branch_breaks(self) -> None:
-        """The aggregate floors sit below the guidance-only remainder, so the
-        docs surface silently falling out of discovery needs its own refusal."""
+    def test_nav_coverage_refuses_when_docs_discovery_breaks(self) -> None:
+        """A broken docs discovery filter refuses on the first nav page the
+        scan no longer covers."""
         self.build_fixture()
-        listing = self.root / "tracked-files.txt"
-        listing.write_text(
-            "\n".join(t for t in self.tracked() if t != "tracked-files.txt") + "\n",
-            encoding="utf-8",
-        )
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
-            mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
-            mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
-            mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
-            mock.patch.object(GATE, "MIN_DOCS_FILES", 5),
-            mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", ()),
-            mock.patch.object(
-                GATE, "ALIAS_REAL_FILE_EXCEPTIONS", dict(self.ROOT_ALIAS_EXCEPTION)
-            ),
-            mock.patch.object(GATE, "KNOWN_MISSING", ()),
-            mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
-            contextlib.redirect_stderr(stderr),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            crate_tree.reset_inventory_cache()
-            code = GATE.main(
-                ["--repo-root", str(self.root), "--tracked-files", str(listing)]
-            )
-        crate_tree.reset_inventory_cache()
+        with mock.patch.object(GATE, "DOCS_PREFIX", "docz/"):
+            code, output = self.run_gate()
         self.assertEqual(code, 1)
-        self.assertIn("docs branch of discovery broke", stderr.getvalue())
+        self.assertIn("navigation publishes pages the reference scan", output)
+        self.assertIn("guide", output)
+
+    def test_nav_page_without_scanned_source_refuses(self) -> None:
+        """A nav entry with no scanned source file is published prose the
+        gate is not checking."""
+        self.build_fixture()
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide", "ghost-page"]}}\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("ghost-page", output)
+
+    def test_openapi_nav_pseudo_pages_are_not_coverage_claims(self) -> None:
+        """Generated endpoint entries ("GET /users") have no source file
+        and are skipped."""
+        self.build_fixture()
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide", "GET /users"]}}\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_unreadable_docs_json_refuses(self) -> None:
+        """Missing, unparseable, or page-less docs.json refuses — never a
+        vacuous pass."""
+        self.build_fixture()
+        self.write("docs/docs.json", "{not json\n")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read docs/docs.json", output)
+        (self.root / "docs/docs.json").unlink()
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read docs/docs.json", output)
+        self.write("docs/docs.json", '{"navigation": {"pages": []}}\n')
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("names no source-backed pages", output)
 
     def test_missing_tracked_files_override_refuses(self) -> None:
         stderr = io.StringIO()

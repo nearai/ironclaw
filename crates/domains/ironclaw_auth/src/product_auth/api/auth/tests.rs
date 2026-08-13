@@ -716,13 +716,234 @@ async fn lifecycle_dispatch_fence_failure_stays_retryable() {
     let result = services.dispatch_completed_continuation(completed).await;
 
     assert!(
-        matches!(result, Err(AuthProductError::BackendUnavailable)),
-        "failed durable lifecycle fence must keep continuation retryable; got: {result:?}"
+        matches!(
+            &result,
+            Err(failure) if matches!(failure.error, AuthProductError::BackendUnavailable)
+                && !failure.terminalized_lifecycle
+        ),
+        "failed durable lifecycle fence must keep continuation retryable (and must not \
+         report a terminalized flow — the credential was not revoked); got: {result:?}"
     );
     assert_eq!(
         fail_calls.load(Ordering::SeqCst),
         1,
         "terminal lifecycle dispatch failure must attempt exactly one fence write"
+    );
+}
+
+#[tokio::test]
+async fn terminal_lifecycle_dispatch_failure_reports_terminalized_for_binding_rollback() {
+    // The successfully-terminalized arm: the fence write lands and the
+    // extension credential is revoked. The failure must carry
+    // `terminalized_lifecycle: true` — the OAuth callback path uses exactly
+    // that fact to roll the provider identity binding back instead of
+    // committing it, because committing would show the user "connected" with
+    // no usable credential (the state the binding transaction exists to
+    // prevent).
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn terminal_record(status: AuthFlowStatus) -> AuthFlowRecord {
+        let now = chrono::Utc::now();
+        AuthFlowRecord {
+            requested_scopes: Vec::new(),
+            id: AuthFlowId::new(),
+            scope: test_auth_product_scope(),
+            kind: AuthFlowKind::IntegrationCredential,
+            status,
+            provider: AuthProviderId::new("github").expect("provider"),
+            requester_extension: None,
+            challenge: None,
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: crate::LifecyclePackageRef::new("github-extension")
+                    .expect("package ref"),
+            },
+            credential_account_id: Some(CredentialAccountId::new()),
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            authorization_code_hash: None,
+            error: None,
+            continuation_emitted_at: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        }
+    }
+
+    struct FencingFlowManager {
+        fail_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthFlowManager for FencingFlowManager {
+        async fn create_flow(
+            &self,
+            _request: NewAuthFlow,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call create_flow")
+        }
+
+        async fn get_flow(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+        ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+            unreachable!("terminalize test does not call get_flow")
+        }
+
+        async fn claim_oauth_callback(
+            &self,
+            _scope: &AuthProductScope,
+            _request: OAuthCallbackClaimRequest,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call claim_oauth_callback")
+        }
+
+        async fn complete_oauth_callback(
+            &self,
+            _scope: &AuthProductScope,
+            _input: OAuthCallbackInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call complete_oauth_callback")
+        }
+
+        async fn complete_credential_selection(
+            &self,
+            _scope: &AuthProductScope,
+            _input: crate::CredentialSelectionInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call complete_credential_selection")
+        }
+
+        async fn complete_manual_token(
+            &self,
+            _scope: &AuthProductScope,
+            _input: crate::ManualTokenCompletionInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call complete_manual_token")
+        }
+
+        async fn cancel_manual_token(
+            &self,
+            _scope: &AuthProductScope,
+            _interaction_id: AuthInteractionId,
+        ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+            unreachable!("terminalize test does not call cancel_manual_token")
+        }
+
+        async fn fail_oauth_callback(
+            &self,
+            _scope: &AuthProductScope,
+            _input: OAuthCallbackFailureInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call fail_oauth_callback")
+        }
+
+        async fn cancel_flow(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call cancel_flow")
+        }
+
+        async fn mark_continuation_dispatched(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _emitted_at: Timestamp,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("terminalize test does not call mark_continuation_dispatched")
+        }
+
+        async fn fail_completed_continuation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _error: crate::AuthErrorCode,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.fail_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(terminal_record(AuthFlowStatus::Failed))
+        }
+    }
+
+    struct CountingCleanup {
+        cleanup_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretCleanupService for CountingCleanup {
+        async fn cleanup_for_lifecycle(
+            &self,
+            request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, AuthProductError> {
+            assert_eq!(
+                request.action,
+                crate::SecretCleanupAction::Uninstall,
+                "terminal lifecycle failure revokes via the uninstall action"
+            );
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(SecretCleanupReport::default())
+        }
+    }
+
+    struct TerminalLifecycleDispatcher;
+
+    #[async_trait::async_trait]
+    impl RebornAuthContinuationDispatcher for TerminalLifecycleDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Err(AuthProductError::LifecycleActivationFailed)
+        }
+
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            unreachable!("terminalize test does not dispatch canceled continuations")
+        }
+    }
+
+    let fail_calls = Arc::new(AtomicUsize::new(0));
+    let cleanup_calls = Arc::new(AtomicUsize::new(0));
+    let double = Arc::new(SharedAuthTestDouble);
+    let services = RebornProductAuthServices::new(
+        Arc::new(FencingFlowManager {
+            fail_calls: Arc::clone(&fail_calls),
+        }) as Arc<dyn AuthFlowManager>,
+        double.clone() as Arc<dyn AuthInteractionService>,
+        double.clone() as Arc<dyn CredentialSetupService>,
+        double.clone() as Arc<dyn CredentialAccountService>,
+        double.clone() as Arc<dyn AuthProviderClient>,
+        Arc::new(CountingCleanup {
+            cleanup_calls: Arc::clone(&cleanup_calls),
+        }),
+        Arc::new(TerminalLifecycleDispatcher),
+    );
+
+    let result = services
+        .dispatch_completed_continuation(terminal_record(AuthFlowStatus::Completed))
+        .await;
+
+    assert!(
+        matches!(
+            &result,
+            Err(failure) if failure.terminalized_lifecycle
+                && matches!(failure.error, AuthProductError::LifecycleActivationFailed)
+        ),
+        "a fenced terminal lifecycle failure must report terminalized so the \
+         callback rolls the identity binding back; got: {result:?}"
+    );
+    assert_eq!(fail_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        cleanup_calls.load(Ordering::SeqCst),
+        1,
+        "the extension credential is revoked exactly once"
     );
 }
 

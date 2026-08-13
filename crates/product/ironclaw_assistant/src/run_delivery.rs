@@ -8,7 +8,7 @@
 //! for every channel, so it lives here, once, and speaks only in
 //! [`DeliveryIntent`]s through the [`DeliveryCoordinator`]. Vendor mechanics
 //! (rendering, splitting, API selection) stay behind each extension's
-//! `ChannelAdapter::deliver`.
+//! [`ChannelDelivery::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver).
 //!
 //! Two components:
 //! - [`RunDeliveryObserver`] — the live source-route path: watches the run an
@@ -27,7 +27,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ironclaw_extension_contracts::channel_adapter::OutboundPart;
+use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ReactionAction, RunReaction};
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
@@ -52,6 +52,7 @@ use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
 
 mod gate_routes;
+pub mod notifications;
 mod observer;
 pub(crate) mod prompts;
 mod triggered;
@@ -87,6 +88,12 @@ pub struct RunDeliverySettings {
     /// are recorded as `Skipped` rather than spawning an unbounded waiting
     /// task.
     pub max_pending_deliveries: NonZeroUsize,
+    /// How long a run may run before the working indicator is refreshed to a
+    /// "still working" nudge, so the user knows it hasn't stalled.
+    pub first_nudge_after: Duration,
+    /// Gap before the SECOND nudge; each subsequent gap doubles (e.g. 30s, then
+    /// +1m, +2m, +4m …) so a very long run backs off instead of spamming.
+    pub renudge_interval: Duration,
 }
 
 impl Default for RunDeliverySettings {
@@ -96,6 +103,8 @@ impl Default for RunDeliverySettings {
             max_wait: DEFAULT_RUN_DELIVERY_MAX_WAIT,
             max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
+            first_nudge_after: Duration::from_secs(30),
+            renudge_interval: Duration::from_secs(60),
         }
     }
 }
@@ -469,6 +478,61 @@ impl RunDeliveryServices {
                 target: "ironclaw::reborn::run_delivery",
                 %error,
                 "failed to retract channel prompt/status message"
+            );
+        }
+    }
+
+    /// Best-effort run-lifecycle reaction on the message that triggered the
+    /// run (its `reply_target_message_id`) — 👀 while working, ⚠️ when it needs
+    /// the user, ✅ done, ❌ failed. A conversation with no reply target (nothing
+    /// to react to) is a no-op, and any delivery failure is swallowed: a
+    /// reaction must never fail the run. `seq` is a per-run monotonic id so each
+    /// transition is a distinct, idempotent delivery — a retried loop replays the
+    /// same seq and dedupes, while a genuine re-transition gets a fresh one.
+    pub(crate) async fn react_to_source(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+        conversation: &ExternalConversationRef,
+        reaction: RunReaction,
+        action: ReactionAction,
+        seq: u64,
+    ) {
+        let Some(source_ref) = conversation.reply_target_message_id() else {
+            return;
+        };
+        let action_key = match action {
+            ReactionAction::Add => "add",
+            ReactionAction::Remove => "remove",
+        };
+        let reaction_key = match reaction {
+            RunReaction::Working => "working",
+            RunReaction::Done => "done",
+            RunReaction::NeedsInput => "needs-input",
+            RunReaction::Failed => "failed",
+        };
+        if let Err(error) = self
+            .coordinator
+            .deliver_notice(NoticeDeliveryRequest {
+                intent: DeliveryIntent::Reaction,
+                scope,
+                turn_run_id: Some(run_id),
+                conversation: conversation.clone(),
+                thread_anchor: None,
+                parts: vec![OutboundPart::React {
+                    vendor_message_ref: source_ref.to_string(),
+                    reaction,
+                    action,
+                }],
+                extension_id: &self.extension_id,
+                notice_ref: format!("{run_id}:{seq}:{action_key}-{reaction_key}"),
+            })
+            .await
+        {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_delivery",
+                %error,
+                "channel reaction delivery failed (best-effort)"
             );
         }
     }

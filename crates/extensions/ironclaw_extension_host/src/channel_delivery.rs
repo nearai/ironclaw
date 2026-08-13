@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_product_contracts::delivery::{
-    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
+    ChannelDeliveryResolver, DeliveryReplyContextError, DeliveryReplyContextSource,
+    ResolvedChannelDelivery,
 };
 
 use crate::egress::{ChannelEgressTransport, DeclaredChannelEgress, PolicyEnforcedChannelEgress};
@@ -87,6 +88,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                         .collect()
                 })
                 .unwrap_or_default();
+            let declared_egress_hosts = declared.iter().map(|egress| egress.host.clone()).collect();
             let egress = Arc::new(PolicyEnforcedChannelEgress::new(
                 extension.extension_id.clone(),
                 extension.extension_id.clone(),
@@ -99,16 +101,30 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             // be indistinguishable from a copy-paste of the line above.
             let (extension_id, installation_id) =
                 delivery_identity(&extension.extension_id, &extension.extension_id)?;
+            let reply_transport = extension
+                .resolved
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.reply_transport());
+            let requires_enrollment = extension
+                .resolved
+                .channel
+                .as_ref()
+                .is_some_and(|channel| channel.requires_enrollment());
             return Some(ResolvedChannelDelivery {
                 extension_id,
                 installation_id,
-                adapter: Arc::clone(&extension.adapter),
+                reply: extension.surfaces.reply.clone(),
+                delivery: extension.surfaces.delivery.clone(),
                 egress,
+                reply_transport,
+                requires_enrollment,
+                declared_egress_hosts,
             });
         }
         let snapshot = self.watch.current();
         let extension = snapshot.extension(extension_id)?;
-        let adapter = extension.channel.clone()?;
+        let surfaces = extension.channel.clone();
         let declared: Vec<DeclaredChannelEgress> = extension
             .resolved
             .channel
@@ -121,6 +137,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                     .collect()
             })
             .unwrap_or_default();
+        let declared_egress_hosts = declared.iter().map(|egress| egress.host.clone()).collect();
         let egress = Arc::new(PolicyEnforcedChannelEgress::new(
             extension.extension_id.clone(),
             extension.installation_id.clone(),
@@ -129,11 +146,25 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
         ));
         let (extension_id, installation_id) =
             delivery_identity(&extension.extension_id, &extension.installation_id)?;
+        let reply_transport = extension
+            .resolved
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.reply_transport());
+        let requires_enrollment = extension
+            .resolved
+            .channel
+            .as_ref()
+            .is_some_and(|channel| channel.requires_enrollment());
         Some(ResolvedChannelDelivery {
             extension_id,
             installation_id,
-            adapter,
+            reply: surfaces.reply.clone(),
+            delivery: surfaces.delivery.clone(),
             egress,
+            reply_transport,
+            requires_enrollment,
+            declared_egress_hosts,
         })
     }
 }
@@ -158,7 +189,7 @@ impl DeliveryReplyContextSource for IngressReplyContextSource {
         extension_id: &ExtensionId,
         installation_id: &AdapterInstallationId,
         conversation_fingerprint: &str,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, DeliveryReplyContextError> {
         self.store
             .get(&ReplyContextKey {
                 extension_id: extension_id.as_str().to_string(),
@@ -166,8 +197,17 @@ impl DeliveryReplyContextSource for IngressReplyContextSource {
                 conversation: conversation_fingerprint.to_string(),
             })
             .await
-            .ok()
-            .flatten()
+            .map_err(|error| {
+                // The port error is a sanitized unit — log the bound store
+                // cause here or the whole reply-context read path is
+                // diagnostics-free when the store is down.
+                tracing::warn!(
+                    extension_id = %extension_id,
+                    %error,
+                    "reply-context store read failed"
+                );
+                DeliveryReplyContextError
+            })
     }
 }
 

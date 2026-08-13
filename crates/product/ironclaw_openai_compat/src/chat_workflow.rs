@@ -558,6 +558,7 @@ fn chat_surface_submit_request(
     attachments: Vec<InboundAttachment>,
 ) -> ProductSubmitTurnRequest {
     ProductSubmitTurnRequest {
+        extension_id: None,
         client_action_id: Some(public_id.as_str().to_string()),
         thread_id: Some(public_id.as_str().to_string()),
         content: Some(user_message_payload.text),
@@ -781,6 +782,7 @@ mod tests {
         let ack = ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
             active_run_id: TurnRunId::new(),
+            busy: None,
         };
         let err = accepted_ack_from_ack(ack).unwrap_err();
         assert_eq!(err.status_code(), 429);
@@ -792,6 +794,7 @@ mod tests {
         let ack = ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
             active_run_id: None,
+            busy: None,
         };
         let err = accepted_ack_from_ack(ack).unwrap_err();
         assert_eq!(err.status_code(), 429);

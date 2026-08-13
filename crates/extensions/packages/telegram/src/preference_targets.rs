@@ -45,7 +45,9 @@ impl PreferenceTargetCodec for TelegramPreferenceTargetCodec {
         request: PreferenceTargetEncodeRequest<'_>,
     ) -> Option<ReplyTargetBindingRef> {
         let (chat_id, topic_id) = conversation_target(request.conversation)?;
-        (chat_id < 0).then(|| build_reply_target_binding(chat_id, topic_id, None))
+        (chat_id < 0)
+            .then(|| build_reply_target_binding(chat_id, topic_id, None))
+            .flatten()
     }
 
     fn encode_personal_direct_message_target(
@@ -58,7 +60,7 @@ impl PreferenceTargetCodec for TelegramPreferenceTargetCodec {
         if chat_id <= 0 || actor_id != chat_id || topic_id.is_some() {
             return None;
         }
-        Some(build_reply_target_binding(chat_id, None, None))
+        build_reply_target_binding(chat_id, None, None)
     }
 }
 
@@ -88,7 +90,8 @@ fn decode_preference_target(target: &ReplyTargetBindingRef) -> Option<TelegramRe
     // The protocol parser accepts all `i64` spellings. Preference refs use
     // one canonical spelling so equivalent ids cannot acquire distinct
     // durable keys (`+42`, `042`, and `42`).
-    if build_reply_target_binding(decoded.chat_id, decoded.topic_id, None) != *target {
+    if build_reply_target_binding(decoded.chat_id, decoded.topic_id, None).as_ref() != Some(target)
+    {
         return None;
     }
     Some(decoded)

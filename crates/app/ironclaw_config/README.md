@@ -69,5 +69,5 @@ cargo test -p ironclaw_architecture_tests
 ## See also
 
 Working rules: `AGENTS.md` · family rules: `crates/app/AGENTS.md` · design
-record: `docs/reborn/target-architecture/families/app.md` (§6.10.3) +
+record: `docs/internal/reborn/target-architecture/families/app.md` (§6.10.3) +
 PROPOSAL §12.2 (the compatibility constraint).

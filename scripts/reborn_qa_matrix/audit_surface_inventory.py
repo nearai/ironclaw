@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # `crates/ironclaw_webui` / `crates/ironclaw_openai_compat` paths, so
 # the target-architecture family move (crates/<family>/ironclaw_*,
 # PROPOSAL §5) cannot make this audit silently extract zero surfaces.
-# See docs/reborn/target-architecture/CHECKLIST.md WS10.
+# See docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(ROOT / "scripts" / "ci" / "lib"))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
 

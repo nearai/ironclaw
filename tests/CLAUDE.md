@@ -50,8 +50,8 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Auth / credentials / OAuth | 3 | 7 | ✓ | ✓ (heaviest) |
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 2 | 3 | ✓ | ✓ |
-| Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
-| Memory & workspace | 5 | 2 | — | ✓ |
+| Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
+| Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
@@ -62,13 +62,15 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **55** flat integration bins (49 in
+Totals: **55** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**869** test functions).
+**102** Python scenario files (**869** test functions) registered in the active
+Reborn coverage map below. Section 6 separately inventories retained and legacy
+Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (51)
+## 3. Group scenarios — `tests/integration/group_*/` (55)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -116,7 +118,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (6)
+### 3.4 Memory — `group_memory/` (9)
 
 | The user can… | Evidence |
 |---|---|
@@ -125,7 +127,10 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
-| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's — through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
+| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
+| Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
+| Ask about a stored fact in their OWN words rather than the words it was saved in, and still have it recalled — the paraphrase shares only some of the saved sentence's terms and adds one it never contained (#7185) | `scenario_paraphrased_prompt_recall_libsql.rs` |
+| Tell from the run itself that memory retrieval BROKE rather than simply having nothing to say — the two used to be the same silent empty section (#7185/#7275) | `scenario_memory_retrieval_failure_is_visible.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -143,7 +148,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 |---|---|
 | List, install, and remove a skill, with each step visible from a different conversation | `scenario_install_list_remove.rs` |
 
-### 3.7 Triggers & automations — `group_triggers/` (10)
+### 3.7 Triggers & automations — `group_triggers/` (11)
 
 | The user can… | Evidence |
 |---|---|
@@ -153,6 +158,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a scheduled run chain through *two* approval prompts and still be recognised as a scheduled run | `scenario_triggered_chained_gate.rs` |
 | See "waiting on you" on an automation whose run is parked, and see it clear when the run ends | `scenario_triggered_gate_hold_visible.rs` |
 | Trust that a scheduled run can't create/remove/pause its own automations | `scenario_trigger_self_create_denied.rs` |
+| Have a scheduled run that repeatedly asks the absent user a question fail truthfully after two bounded nudges while retaining every rejected reply | `scenario_scheduled_final_output.rs` |
 | Create an automation whose create input carries no delivery-routing field at all | `scenario_trigger_create_has_no_delivery_target_field.rs` |
 | See and rename their automations in the WebUI, backed by the real trigger store | `scenario_webui_automations_list.rs`, `scenario_webui_automations_rename.rs` |
 
@@ -169,8 +175,9 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
-| The exact prompt + tool surface sent to the model is snapshot-pinned per iteration | `golden_payload.rs` |
-| Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
+| A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
+| A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
+| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
@@ -183,14 +190,16 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
-| User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
+| User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
-| With a large tool catalog, bridged mode and the production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools | `tool_disclosure.rs` |
+| Ordinary authentication vocabulary in verified and locally imported tool descriptions survives prompt construction without denying the turn | `extension_visibility.rs::prompt_description_auth_vocabulary_survives_at_the_real_turn_seam` |
+| With a large tool catalog, progressive-disclosure modes and the `namespaces` production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools; a complete search signature invokes directly, while incomplete or explicitly inspected results fall back through `tool_describe` | `tool_disclosure.rs` |
 | Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
 | Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
+| A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
 | Creating a project through chat persists it | `project_create.rs` |
@@ -238,7 +247,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Scheduled-origin runs carry their origin into persisted state | `triggered_submit.rs` |
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
-| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-push` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_push_enrollment_and_notification_channel_round_trip_through_production_facade` |
+| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
 One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
@@ -255,7 +264,7 @@ channel-delivery journeys (two-lane model):
 | Have a conditional fire that calls no delivery tool produce zero outbound attempts | `conditional_fire_with_no_delivery_call_produces_zero_attempts` |
 | Get blocked-fire notices fanned out to every notification channel, first approve wins | `blocked_fire_fans_out_and_first_approve_wins` |
 | Keep a blocked fire app-only when the notification-channel set is empty | `empty_notification_set_keeps_blocked_fire_in_app_only` |
-| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_push_notice_to_enrolled_browser` |
+| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_app_notice_to_enrolled_browser` |
 | Have a dead browser subscription (push service answers `410 Gone`) pruned after one notice attempt | `gone_push_subscription_is_pruned_after_notice_attempt` |
 
 ---
@@ -310,7 +319,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,141 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,143 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -408,6 +417,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
+| As an admin, publish the active provider's allowlist/default from Settings; then, as a non-admin member, choose a long-name allowed model, verify the selector stacks at narrow width and right-aligns at wide width without overflow, and have that preference reach future provider requests across chats without changing another member's workspace-default routing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_settings_model_preference_reaches_provider` |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
 | Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |

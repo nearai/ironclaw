@@ -39,13 +39,13 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
-    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -1867,6 +1867,108 @@ async fn filesystem_preview_append_retries_converge_on_one_message() {
 }
 
 #[tokio::test]
+async fn filesystem_context_limit_counts_only_model_visible_messages() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-visible-window", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-visible-window");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-visible-window").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("original task"),
+        })
+        .await
+        .unwrap();
+
+    // Capability previews are durable transcript rows but are never model
+    // context. The limit therefore applies after removing them, just as it
+    // does in the in-memory implementation.
+    for index in 0..70 {
+        service
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-visible-window".into(),
+                preview: preview_envelope(InvocationId::new()),
+            })
+            .await
+            .unwrap();
+        service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-visible-window".into(),
+                result_ref: format!("result:visible-window-{index}"),
+                safe_summary: ToolResultSafeSummary::new(format!("result {index}")).unwrap(),
+                provider_call: Some(provider_call_reference(&format!("call-{index}"))),
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 128,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 71);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+    assert_eq!(context.messages[0].content, "original task");
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::CapabilityDisplayPreview)
+    );
+    assert!(context.recent_window_truncation.is_none());
+
+    let truncated = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        truncated
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![139, 141]
+    );
+    let boundary = truncated
+        .recent_window_truncation
+        .expect("omitted visible messages must produce an exact watermark");
+    assert_eq!(boundary.omitted_through_sequence, 137);
+    assert_eq!(
+        boundary.omitted_through_kind,
+        MessageKind::ToolResultReference
+    );
+}
+
+#[tokio::test]
 async fn filesystem_transactional_accept_concurrent_duplicate_replays_existing_message() {
     let backend = Arc::new(TransactionalRaceBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-accept-race", "alice");
@@ -1952,6 +2054,67 @@ async fn filesystem_transactional_accept_concurrent_duplicate_replays_existing_m
         follow_up.sequence, 2,
         "losing duplicate accept must not reserve a durable sequence"
     );
+}
+
+#[tokio::test]
+async fn filesystem_fallback_accept_concurrent_duplicate_replays_existing_message() {
+    let backend = Arc::new(FallbackRaceBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-fallback-accept-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let request_scope = scope("fallback-accept-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fallback-accept-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("binding-fallback-accept-race".into()),
+        reply_target_binding_id: None,
+        external_event_id: Some("event-fallback-accept-race".into()),
+        content: MessageContent::text("same payload"),
+    };
+
+    let left = service.accept_inbound_message_with_replay_metadata(
+        request.clone(),
+        InboundMessageReplayMetadata {
+            resolved_model: Some("model-a".into()),
+        },
+    );
+    let right = service.accept_inbound_message_with_replay_metadata(
+        request,
+        InboundMessageReplayMetadata {
+            resolved_model: Some("model-a".into()),
+        },
+    );
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("first concurrent fallback accept converges");
+    let right = right.expect("second concurrent fallback accept converges");
+
+    assert_eq!(left.message_id, right.message_id);
+    assert_eq!(left.sequence, right.sequence);
+    assert!(left.idempotent_replay || right.idempotent_replay);
+    assert_eq!(
+        left.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+    assert_eq!(left.replay_metadata, right.replay_metadata);
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, left.message_id);
 }
 
 /// Regression for the ScopedFilesystem migration: two stores share one
@@ -2054,6 +2217,248 @@ async fn filesystem_session_thread_service_isolates_two_tenants_with_same_user_p
         replay.is_none(),
         "tenant B must NOT replay tenant A's inbound idempotency record"
     );
+}
+
+#[tokio::test]
+async fn filesystem_accepted_inbound_replay_preserves_resolved_model_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-model-replay", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("model-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-model-replay").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id,
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-model-replay".into()),
+        reply_target_binding_id: Some("reply-model-replay".into()),
+        external_event_id: Some("event-model-replay".into()),
+        content: MessageContent::text("hello"),
+    };
+
+    service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let duplicate = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.idempotent_replay);
+    assert_eq!(
+        duplicate.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope,
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-model-replay".into(),
+            external_event_id: "event-model-replay".into(),
+        })
+        .await
+        .unwrap()
+        .expect("accepted replay");
+    assert_eq!(
+        replay.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+}
+
+#[tokio::test]
+async fn filesystem_fallback_idempotency_failure_precedes_message_persistence() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-fallback-idempotency-failure",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("fallback-idempotency-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fallback-idempotency-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-fallback-idempotency-failure".into()),
+        reply_target_binding_id: Some("reply-fallback-idempotency-failure".into()),
+        external_event_id: Some("event-fallback-idempotency-failure".into()),
+        content: MessageContent::text("hello"),
+    };
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::Unsupported),
+    );
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/idempotency/")
+            .nth(1)
+            .backend("idempotency intent failed"),
+    );
+
+    service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .expect_err("the failed idempotency intent must fail acceptance");
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.messages.is_empty(),
+        "fallback must not persist a message before its recovery intent"
+    );
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-b")
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn filesystem_fallback_resumes_intent_with_original_model_after_message_failure() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-fallback-message-failure",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("fallback-message-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fallback-message-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-fallback-message-failure".into()),
+        reply_target_binding_id: Some("reply-fallback-message-failure".into()),
+        external_event_id: Some("event-fallback-message-failure".into()),
+        content: MessageContent::text("hello"),
+    };
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::Unsupported),
+    );
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .nth(1)
+            .backend("message write failed"),
+    );
+
+    service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .expect_err("the injected message failure must fail acceptance");
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-fallback-message-failure".into(),
+            external_event_id: "event-fallback-message-failure".into(),
+        })
+        .await
+        .expect("pending recovery intent is not a failed accepted replay");
+    assert!(
+        replay.is_none(),
+        "a recovery intent without a transcript row must fall through to acceptance resume"
+    );
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(accepted.idempotent_replay);
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
 }
 
 #[tokio::test]
@@ -4302,6 +4707,22 @@ struct TransactionalRaceBackend {
     idempotency_get_count: AtomicUsize,
 }
 
+struct FallbackRaceBackend {
+    inner: InMemoryBackend,
+    begin_barrier: Barrier,
+    begin_count: AtomicUsize,
+}
+
+impl FallbackRaceBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            begin_barrier: Barrier::new(2),
+            begin_count: AtomicUsize::new(0),
+        }
+    }
+}
+
 struct ConcurrentToolResultWriteBackend {
     inner: InMemoryBackend,
     tool_result_get_barrier: Barrier,
@@ -4626,6 +5047,79 @@ impl RootFilesystem for TransactionalRaceBackend {
             _guard: guard,
             staged_puts: HashMap::new(),
         }))
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for FallbackRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        if self.begin_count.fetch_add(1, Ordering::SeqCst) < 2 {
+            self.begin_barrier.wait().await;
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::BeginTxn,
+            });
+        }
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
     }
 }
 
@@ -5130,13 +5624,34 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
         .await
         .unwrap();
 
-    // Summary spans [1..3] covering the Draft at seq 2.  Must be suppressed.
+    // Push the Draft outside the first durable page selected for a 16-message
+    // context window. The summary still intersects that recent page, so a
+    // backend that validates summaries only against the first raw tail would
+    // incorrectly surface it.
+    for sequence in 4..=20 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(format!("filler {sequence}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Summary spans [1..4] covering the Draft at seq 2. Its terminal sequence
+    // is present in the first durable page, but its start and the Draft are
+    // not; pagination must continue far enough to validate the complete range.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
-            end_sequence: 3,
+            end_sequence: 4,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
@@ -5155,11 +5670,22 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
 
     assert_eq!(
         context.messages.len(),
-        2,
+        16,
         "summary must be suppressed for draft-spanning range"
     );
-    assert_eq!(context.messages[0].content, "first");
-    assert_eq!(context.messages[1].content, "third");
+    assert!(
+        context
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Summary)
+    );
+    assert_eq!(context.messages[0].content, "filler 5");
+    assert_eq!(context.messages[15].content, "filler 20");
+    let truncation = context
+        .recent_window_truncation
+        .expect("the omitted fourth user message is the exact truncation boundary");
+    assert_eq!(truncation.omitted_through_sequence, 4);
+    assert_eq!(truncation.omitted_through_kind, MessageKind::User);
 }
 
 // Real thread store backend that fails only the summary-artifact write, so all

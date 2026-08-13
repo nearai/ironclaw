@@ -393,7 +393,7 @@ do
   fi
 done
 
-# WS10 (docs/reborn/target-architecture/CHECKLIST.md): the WebUI frontend
+# WS10 (docs/internal/reborn/target-architecture/CHECKLIST.md): the WebUI frontend
 # directory the crates/prepare/frontend stages build must be resolved through
 # the shared crate inventory (scripts/ci/crate-dir.sh), never a literal
 # `crates/ironclaw_webui/frontend` path that the family move (PROPOSAL §5) can

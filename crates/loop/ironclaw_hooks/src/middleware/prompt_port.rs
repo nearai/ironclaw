@@ -448,6 +448,7 @@ mod tests {
                 messages: Vec::new(),
                 surface_version: None,
                 compaction_message_index: Vec::new(),
+                recent_window_truncation: None,
                 instruction_fingerprint: None,
                 identity_message_count: 0,
                 instruction_snippet_count: 0,

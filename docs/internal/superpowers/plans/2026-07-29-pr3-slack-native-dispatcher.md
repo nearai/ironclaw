@@ -26,7 +26,7 @@
 - `crates/ironclaw_assistant/src/commands.rs` — prefix-aware help; `run_delivery/observer.rs` — prefix threading.
 - `crates/ironclaw_extension_host/src/channel_host.rs` — assembly read (~1030); `channel_host/e2e_tests.rs` — journeys.
 - `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml` — `command_prefix`.
-- `docs/reborn/setup-slack-for-reborn-binary.md`, `docs/channels/slack.mdx` — registration.
+- `docs/internal/reborn/setup-slack-for-reborn-binary.md`, `docs/channels/slack.mdx` — registration.
 
 ---
 
@@ -101,7 +101,7 @@
 ### Task 4: Registration docs (+ fix the stale mdx paths while touching)
 
 **Files:**
-- Modify: `docs/reborn/setup-slack-for-reborn-binary.md`, `docs/channels/slack.mdx`
+- Modify: `docs/internal/reborn/setup-slack-for-reborn-binary.md`, `docs/channels/slack.mdx`
 
 - [ ] **Step 1:** `setup-slack-for-reborn-binary.md`: new "Slash Command" subsection beside "Event Subscriptions" (register ONE command `/ironclaw`, description `Run IronClaw commands`, usage hint `status | model <name> | help`, Request URL = the SAME events URL — one URL serves both surfaces); add `slash_commands:` to the YAML manifest sketch after `event_subscriptions`; verification-checklist line (`/ironclaw status` replies in the bot DM); troubleshooting entry (slash outside the DM is rejected by design; `dispatch_failed` = missing registration/URL); references link `https://docs.slack.dev/interactivity/implementing-slash-commands/`.
 - [ ] **Step 2:** `slack.mdx`: `features.slash_commands` array in the JSON manifest; a note in the URLs table that the events URL now serves Events API + slash commands; a step note about registering `/ironclaw`; FIX the pre-existing stale paths in this file while touching it (`/webhooks/slack/events` → `/webhooks/extensions/slack/events`; `oauth/slack_personal/callback` → `oauth/slack/callback`) and say so in the commit body.

@@ -33,7 +33,8 @@ mod stop;
 
 pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
 pub(crate) use batch::{
-    BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, DefaultBatchPolicyStrategy,
+    BatchPolicy, BatchPolicyStrategy, BoundedParallelBatchPolicyStrategy,
+    CapabilityBatchExecutionMode, CapabilityCallSummary, DefaultBatchPolicyStrategy,
 };
 pub(crate) use budget::{BudgetStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};

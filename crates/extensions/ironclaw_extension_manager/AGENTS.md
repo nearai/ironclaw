@@ -64,7 +64,7 @@ structural rather than effort:
 
 ## The `ironclaw_assistant` dependency is residue, not the design
 
-`docs/reborn/target-architecture/families/extensions.md` gives this crate
+`docs/internal/reborn/target-architecture/families/extensions.md` gives this crate
 `product_contracts` + `extension_contracts` + `extension_registry` +
 `extension_host`. It also depends on `ironclaw_assistant` today, in exactly seven
 files, and every one is a **product DTO, a capability-id constant, or one of

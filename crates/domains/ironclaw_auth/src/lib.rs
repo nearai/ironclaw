@@ -13,6 +13,7 @@ mod account_state;
 mod channel_connection;
 mod cleanup;
 mod credential;
+pub mod delivery_registrations;
 pub mod domain;
 mod engine;
 mod error;
@@ -48,6 +49,9 @@ pub use credential::{
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
     binding_scope_owns_account,
+};
+pub use delivery_registrations::{
+    DeliveryRegistrationPaths, FilesystemDeliveryRegistrationStore, validate_registration_endpoint,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
 pub use engine::admission::{
@@ -95,8 +99,8 @@ pub use oauth::{
     opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 pub use product_auth::api::auth::{
-    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
+    OAuthProviderIdentityBindingAction, OAuthProviderIdentityBindingTransaction,
+    OAuthProviderIdentityCheck, OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
     RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,

@@ -21,8 +21,8 @@ const COPY = {
   "common.cancel": "Cancel",
   "common.delete": "Delete",
   "common.save": "Save",
-  "missions.action.pause": "Pause",
-  "missions.action.resume": "Resume",
+  "automations.action.pause": "Pause",
+  "automations.action.resume": "Resume",
 };
 
 function sourceForTest() {
@@ -218,6 +218,8 @@ test("AutomationDetailPanel exposes stable lifecycle action selectors", () => {
   assert.ok(actionButton, "pause action button should render");
   assert.equal(actionButton["data-automation-id"], "automation-alpha");
   assert.equal(actionButton["data-automation-action"], "pause");
+  assert.equal(actionButton["aria-label"], "Pause: Daily status");
+  assert.equal(actionButton.title, "Pause: Daily status");
 
   rendered = harness.render({
     automation: { ...automation(), state: "paused" },
@@ -228,6 +230,8 @@ test("AutomationDetailPanel exposes stable lifecycle action selectors", () => {
   assert.ok(actionButton, "resume action button should render");
   assert.equal(actionButton["data-automation-id"], "automation-alpha");
   assert.equal(actionButton["data-automation-action"], "resume");
+  assert.equal(actionButton["aria-label"], "Resume: Daily status");
+  assert.equal(actionButton.title, "Resume: Daily status");
 });
 
 test("AutomationDetailPanel deletes only after confirming the shared dialog", () => {

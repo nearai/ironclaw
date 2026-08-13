@@ -102,7 +102,7 @@ phase separation, and malicious worker metadata.
 ## Process and shell execution: real OS isolation, per tenant
 
 Motivated by issue #6170 (a shipped cross-tenant file-disclosure via `shell`).
-The current process boundary is defined by `docs/reborn/contracts/processes.md`
+The current process boundary is defined by `docs/internal/reborn/contracts/processes.md`
 and the owning host-runtime/process-sandbox crates.
 
 - **The virtual filesystem does not contain a subprocess.** `ScopedFilesystem` /

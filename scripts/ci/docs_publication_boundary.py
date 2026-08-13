@@ -18,11 +18,10 @@ This check fails when a docs/ page is in neither bucket:
 It also fails when navigation references a page whose source file does not
 exist, because that ships a broken public page.
 
-The fence list itself is frozen: all new internal material goes under
+The fence list itself is frozen: all internal material goes under
 docs/internal/, which is already fenced. .mintignore entries outside
-FROZEN_MINTIGNORE_PATTERNS are rejected — the legacy directories in that
-set are kept until they are consolidated into internal/, and entries may
-only ever be removed.
+FROZEN_MINTIGNORE_PATTERNS are rejected, and entries may only ever be
+removed.
 
 Only the .mintignore syntax this repo uses is supported (comments, blank
 lines, `dir/` patterns, glob patterns, literal file names). Negation
@@ -59,16 +58,14 @@ OPENAPI_PAGE_RE = re.compile(
 
 HIDDEN_FRONTMATTER_RE = re.compile(r"^hidden:\s*true\s*$")
 
-# docs/.mintignore may only ever shrink. internal/ is the one growing home for
-# internal docs; reborn/ is the last legacy location, kept until its
-# load-bearing consumers (architecture tests reading contract files, the
-# reborn-e2e scope filters) can move with it.
+# docs/.mintignore may only ever shrink. internal/ is the one home for
+# internal docs; reborn/ (the last legacy location) was consolidated into
+# internal/reborn/ together with its load-bearing consumers.
 FROZEN_MINTIGNORE_PATTERNS = frozenset(
     {
         "drafts/",
         "*.draft.mdx",
         "internal/",
-        "reborn/",
     }
 )
 

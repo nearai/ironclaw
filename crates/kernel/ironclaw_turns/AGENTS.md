@@ -6,10 +6,10 @@
   This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/turns-agent-loop.md`
-- `docs/reborn/contracts/turn-persistence.md`
-- `docs/reborn/contracts/turn-runner.md`
-- `docs/reborn/contracts/loop-exit.md`
+- `docs/internal/reborn/contracts/turns-agent-loop.md`
+- `docs/internal/reborn/contracts/turn-persistence.md`
+- `docs/internal/reborn/contracts/turn-runner.md`
+- `docs/internal/reborn/contracts/loop-exit.md`
 
 ## What This Crate Owns
 

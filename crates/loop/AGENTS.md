@@ -104,9 +104,9 @@ against host-minted evidence before anything durable commits.
 
 ## Sources
 
-`docs/reborn/target-architecture/families/loop.md` · PROPOSAL §6.7.1–6.7.4,
+`docs/internal/reborn/target-architecture/families/loop.md` · PROPOSAL §6.7.1–6.7.4,
 §8, §12.13 D-S · gates: `crates/app/ironclaw_architecture_tests/tests/`
 (`reborn_dependency_boundaries.rs`, `reborn_loop_port_location_scan.rs`,
 `reborn_runner_sheds.rs`, `reborn_same_layer_edge_inventory.rs`,
 `reborn_composition_boundaries.rs`) · conventions:
-`docs/reborn/guidance-conventions.md`.
+`docs/internal/reborn/guidance-conventions.md`.

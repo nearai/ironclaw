@@ -1352,6 +1352,18 @@ impl SecretStorePort for SecretDisappearsAfterPreflight {
         self.inner.put(scope, handle, material, expires_at).await
     }
 
+    async fn put_if_absent(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner
+            .put_if_absent(scope, handle, material, expires_at)
+            .await
+    }
+
     async fn metadata(
         &self,
         scope: &ResourceScope,

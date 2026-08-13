@@ -59,7 +59,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_assistant::{RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings};
 use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{InboundOutcome, VerifiedInbound};
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
@@ -395,7 +394,7 @@ fn delivery_run_services(
 #[allow(clippy::too_many_arguments)]
 async fn preresolve_vendor_turn_scope(
     binding_service: &Arc<dyn ProductBindingResolver>,
-    adapter: &dyn ChannelAdapter,
+    adapter: &dyn ironclaw_extension_contracts::channel_adapter::ChannelIngress,
     adapter_id: &str,
     installation_id: &str,
     non_secret_config: &[(String, String)],
@@ -409,15 +408,28 @@ async fn preresolve_vendor_turn_scope(
     // admission path will.
     can_reply_in_threads: bool,
 ) -> (TurnScope, ironclaw_host_api::ids::UserId) {
+    let ingress_egress =
+        ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer::new(
+            Arc::new(
+                |_| ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                    status: 503,
+                    body: Vec::new(),
+                },
+            ),
+        );
     let outcome = adapter
-        .inbound(VerifiedInbound {
-            extension_id: adapter_id,
-            installation_id,
-            config: non_secret_config,
-            body: body.as_bytes(),
-            headers: &[],
-            can_reply_in_threads,
-        })
+        .receive(
+            VerifiedInbound {
+                extension_id: adapter_id,
+                installation_id,
+                config: non_secret_config,
+                body: body.as_bytes(),
+                headers: &[],
+                can_reply_in_threads,
+            },
+            &ingress_egress,
+        )
+        .await
         .expect("the vendor body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
         panic!("the vendor body must normalize to messages");
@@ -446,7 +458,10 @@ async fn preresolve_vendor_turn_scope(
     let envelope =
         ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("inbound envelope");
     let binding = binding_service
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("vendor conversation binding resolves");
     (
@@ -591,6 +606,9 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
                 "mpim:read",
                 "users:read",
                 "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
             ],
         )
         .await
@@ -1751,15 +1769,17 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // The model is deliberately paused so the generic observer must surface
     // a working indicator through the real Telegram adapter before the final
     // reply exists.
+    // The model is paused, so the first `/sendMessage` AFTER the baseline is the
+    // working indicator (its copy varies per run, so match on the call, not the
+    // words — content is pinned in the assistant's prompt unit test). Selecting
+    // past the baseline avoids matching earlier pairing-feedback traffic.
     for _ in 0..200 {
-        if inbound
+        let send_message_count = inbound
             .captured_network_requests_for_test()
             .iter()
-            .any(|request| {
-                request.url.ends_with("/sendMessage")
-                    && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
-            })
-        {
+            .filter(|request| request.url.ends_with("/sendMessage"))
+            .count();
+        if send_message_count > send_message_count_before_rejected_update {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1767,10 +1787,8 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let requests = inbound.captured_network_requests_for_test();
     let working = requests
         .iter()
-        .find(|request| {
-            request.url.ends_with("/sendMessage")
-                && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
-        })
+        .filter(|request| request.url.ends_with("/sendMessage"))
+        .nth(send_message_count_before_rejected_update)
         .expect("a running Telegram turn must post the generic working indicator");
     let working_body: serde_json::Value =
         serde_json::from_slice(&working.body).expect("working sendMessage body is JSON");
@@ -2078,12 +2096,13 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // ── Channel attachment journey (relocated from the composition-resident
     // attachment_journey_tests): a document update on the production mount
     // fetches bytes through the manifest's path-constrained `getFile` +
-    // `/file/bot{token}/` egress AFTER durable admission, lands them through
+    // `/file/bot{token}/` egress inside adapter receive and before durable admission,
+    // lands them through
     // the canonical project-filesystem authority, and starts a byte-free turn
     // whose transcript message carries `/workspace/attachments/...` refs. A
-    // transient provider failure releases the ledger attempt (503) so the
-    // vendor retry refetches; a duplicate replay after success does no
-    // vendor I/O and does not reland.
+    // transient provider failure occurs before admission (503), so the vendor
+    // retry refetches; a duplicate replay after success refetches before the
+    // product idempotency check but does not reland.
     let attachment_body = json!({
         "update_id": 502,
         "message": {
@@ -2105,6 +2124,17 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // This private DM is a distinct provider conversation from the earlier
     // supergroup topic. Resolve and register its own model scope so the
     // transcript assertion cannot accidentally read the topic thread.
+    let attachment_scope_body = json!({
+        "update_id": 500,
+        "message": {
+            "message_id": 11,
+            "date": 1710000299,
+            "text": "prepare attachment scope",
+            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+            "chat": {"id": 8675309, "type": "private"}
+        }
+    })
+    .to_string();
     let (attachment_scope, attachment_actor_user_id) = preresolve_vendor_turn_scope(
         &telegram_binding_service,
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
@@ -2115,7 +2145,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             "itest_delivery_bot".to_string(),
         )],
         &evidence,
-        &attachment_body,
+        &attachment_scope_body,
         false,
     )
     .await;
@@ -2138,9 +2168,9 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             .count()
     };
 
-    // First delivery: the scripted transient `getFile` failure must release
-    // the ledger attempt and surface a retryable 503 to the vendor — never a
-    // durable acceptance.
+    // First delivery: the scripted transient `getFile` failure occurs inside
+    // adapter receive and surfaces a retryable 503 to the vendor — never a
+    // durable admission attempt.
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
@@ -2158,7 +2188,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     );
     ingress.drain().await;
 
-    // Vendor redelivery: the fresh ledger attempt refetches — `getFile` on
+    // Vendor redelivery refetches before admission — `getFile` on
     // the exact declared path and the download through the manifest's
     // `/file/bot{token}/` prefix, both with the token injected host-side —
     // then admission commits and the turn starts byte-free.
@@ -2238,7 +2268,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     assert_eq!(
         attachment_messages.len(),
         1,
-        "the retry and the duplicate must not reland the attachment"
+        "the failed receive and successful retry must produce one landed attachment"
     );
     let storage_key = attachment_messages[0].attachments[0]
         .storage_key
@@ -2249,8 +2279,9 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "unexpected storage key {storage_key}"
     );
 
-    // Duplicate replay after durable success: acknowledged without any
-    // vendor I/O.
+    // Duplicate replay after durable success still completes adapter receive
+    // before the product idempotency check. It therefore refetches, but the
+    // durable replay must neither rerun nor reland the attachment.
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
@@ -2266,13 +2297,31 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let requests = inbound.captured_network_requests_for_test();
     assert_eq!(
         get_file_urls(&requests),
-        2,
-        "duplicate replay must not refetch"
+        3,
+        "duplicate replay completes the adapter-owned lookup before dedupe"
     );
     assert_eq!(
         download_urls(&requests),
+        2,
+        "duplicate replay completes the adapter-owned download before dedupe"
+    );
+    let history = inbound
+        .thread_service_for_test()
+        .expect("group thread service")
+        .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+            scope: thread_scope_for_turn(&attachment_scope),
+            thread_id: attachment_scope.thread_id.clone(),
+        })
+        .await
+        .expect("vendor thread history after duplicate");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| !message.attachments.is_empty())
+            .count(),
         1,
-        "duplicate replay must not redownload"
+        "a duplicate replay may refetch transient bytes but must not reland them"
     );
 
     // ── Outbound half: a final reply in a NEW conversation (same paired
@@ -3144,9 +3193,19 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let bodies = race_bodies();
-        if anchored_count(&bodies, RACE_REPLY, 618) == 1
-            && anchored_count(&bodies, "is thinking", 618) == 1
-        {
+        // The working indicator is the race-chat message anchored to 618 that is
+        // not the final reply (its copy varies per run, so it can't be matched by
+        // literal — content is pinned in the assistant's prompt unit test).
+        let working_indicator_anchored_to_618 = bodies
+            .iter()
+            .filter(|body| {
+                body["reply_to_message_id"].as_i64() == Some(618)
+                    && !body["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(RACE_REPLY))
+            })
+            .count();
+        if anchored_count(&bodies, RACE_REPLY, 618) == 1 && working_indicator_anchored_to_618 == 1 {
             assert_eq!(
                 anchored_count(&bodies, "still working on a previous message", 619),
                 1,

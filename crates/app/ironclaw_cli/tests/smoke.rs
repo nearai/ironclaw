@@ -707,7 +707,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         storage.secret_master_key_env.as_deref(),
         Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
     );
-    assert_eq!(storage.pool_max_size, Some(2));
+    assert_eq!(storage.pool_max_size, Some(8));
 
     let policy = parsed
         .policy
@@ -4864,10 +4864,27 @@ fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Resul
         .ok_or_else(|| format!("create-thread response missing thread_id: {created_json}"))?
         .to_string();
 
-    let message_body =
-        format!(r#"{{"content":"hi","client_action_id":"smoke-send-message-{label}"}}"#);
+    // The unified channel model routes browser sends through the generic
+    // session-inbound route, keyed by the extension id `GET /session`
+    // advertises — the same discovery the SPA performs.
+    let session_request = format!(
+        "GET /api/webchat/v2/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+    );
+    let session = http_response(port, &session_request, "session probe")?;
+    let session_json: serde_json::Value =
+        serde_json::from_str(&session.body).map_err(|error| format!("session body: {error}"))?;
+    let session_channel = session_json["session_channel_extension_id"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("session response missing session_channel_extension_id: {session_json}")
+        })?
+        .to_string();
+
+    let message_body = format!(
+        r#"{{"content":"hi","thread_id":"{thread_id}","client_action_id":"smoke-send-message-{label}"}}"#
+    );
     let send_request = format!(
-        "POST /api/webchat/v2/threads/{thread_id}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
+        "POST /api/webchat/v2/channels/{session_channel}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
         message_body.len()
     );
     let sent = http_response(port, &send_request, "send message")?;
@@ -7002,6 +7019,37 @@ heartbeat_interval_secs = 0
     assert!(
         stderr.contains("heartbeat_interval_secs") && stderr.contains("greater than 0"),
         "stderr should explain heartbeat interval rejection; got: {stderr}"
+    );
+}
+
+#[test]
+fn run_rejects_runner_heartbeat_interval_past_the_lease_ttl_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[runner]
+heartbeat_interval_secs = 60
+"#,
+    )
+    .expect("write config");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "-m", "ping"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    assert!(
+        !output.status.success(),
+        "a heartbeat interval past the lease TTL bound must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("heartbeat_interval_secs") && stderr.contains("must not exceed"),
+        "stderr should explain the lease-TTL bound rejection; got: {stderr}"
     );
 }
 

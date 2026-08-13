@@ -52,6 +52,14 @@ pub struct AdminConfigurationField {
     pub secret: bool,
     #[serde(default)]
     pub required: bool,
+    /// Operator-facing help text rendered under the form input; empty when
+    /// the manifest declares none.
+    #[serde(default)]
+    pub description: String,
+    /// Declares a runtime credential handle without exposing it through the
+    /// operator configuration surface. The host initializer owns its value.
+    #[serde(default)]
+    pub host_managed: bool,
 }
 
 /// One reusable operator form. Equal group ids must carry equal descriptors.

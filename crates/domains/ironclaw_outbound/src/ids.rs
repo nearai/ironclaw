@@ -116,6 +116,33 @@ impl OutboundDeliveryId {
             serde_json::to_vec(&identity).map_err(|_| crate::OutboundError::Serialization)?;
         Ok(Self(Uuid::new_v5(&POLICY_DELIVERY_NAMESPACE, &serialized)))
     }
+
+    /// Derive the stable identity for a host-recorded projection fact that
+    /// does not pass through policy preparation (source notices and stream
+    /// projection commits). Replaying the same scoped fact addresses the same
+    /// attempt instead of manufacturing another delivered audit row.
+    pub fn for_projection_fact(
+        scope: &ironclaw_host_api::turn::TurnScope,
+        target: &ironclaw_host_api::turn::ReplyTargetBindingRef,
+        projection_ref: &ProjectionUpdateRef,
+    ) -> Result<Self, crate::OutboundError> {
+        #[derive(Serialize)]
+        struct ProjectionFactIdentity<'a> {
+            scope: &'a ironclaw_host_api::turn::TurnScope,
+            target: &'a ironclaw_host_api::turn::ReplyTargetBindingRef,
+            projection_ref: &'a ProjectionUpdateRef,
+        }
+
+        const PROJECTION_FACT_NAMESPACE: Uuid =
+            Uuid::from_u128(0x9c88e1ac_170e_583a_9a50_e42d95d79b1f);
+        let serialized = serde_json::to_vec(&ProjectionFactIdentity {
+            scope,
+            target,
+            projection_ref,
+        })
+        .map_err(|_| crate::OutboundError::Serialization)?;
+        Ok(Self(Uuid::new_v5(&PROJECTION_FACT_NAMESPACE, &serialized)))
+    }
 }
 
 impl Default for OutboundDeliveryId {

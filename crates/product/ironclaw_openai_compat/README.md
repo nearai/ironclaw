@@ -75,4 +75,4 @@ cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hol
 
 Working rules (wire contract, workflows, DTO policy): `AGENTS.md` · family
 rules: `crates/product/AGENTS.md` · design record:
-`docs/reborn/target-architecture/families/product.md` (§6.9.3).
+`docs/internal/reborn/target-architecture/families/product.md` (§6.9.3).

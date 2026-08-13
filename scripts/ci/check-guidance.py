@@ -8,7 +8,7 @@ routed readers to `crates/<crate>/…` paths that stopped existing when crates
 moved into family directories. A misled agent does not complain the way a
 misled human does — it silently produces a bad change — so guidance drift is a
 correctness bug, and the detectable classes belong in CI
-(`docs/reborn/guidance-conventions.md` closes with "the guidance half is this
+(`docs/internal/reborn/guidance-conventions.md` closes with "the guidance half is this
 convention's job"; this gate is that job's mechanical part).
 
 Five claims are checked, all against **git-tracked** state so local build
@@ -19,20 +19,12 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      `AGENTS.md`/`CLAUDE.md`, every `AGENTS.md`/`CLAUDE.md`/`CONTRACT.md`/
      `README.md` under `crates/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
-     directory. Every `.md`/`.mdx` under `docs/` — the public Mintlify tree,
-     the `zh/` locale mirror, and the living corpora named in
-     `DOCS_REINCLUDED_PREFIXES` (the contract corpus, the extension-runtime
-     spec pages, guidance-conventions.md) — is scanned the same way, but on
-     published pages for **backticked inline paths only**: markdown link
-     targets there are Mintlify site paths (extensionless page routes,
-     site-absolute `/using/cli` forms), a different namespace than the
-     tracked tree, so the link extractor is off by design rather than
-     suppressed case-by-case. The re-included corpora are the exception:
-     they are fenced out of publication, so their relative markdown links
-     are repo-path claims and are checked like any guidance file's. The
-     dated archives (`docs/internal/`, the non-reincluded parts of
-     `docs/reborn/`) are excluded as classes — see `DOCS_EXCLUDED_PREFIXES`
-     below.
+     directory. Published `docs/` pages (everything outside `docs/internal/`,
+     `zh/` mirror included) are scanned for backticked paths only — their
+     markdown links are Mintlify site routes, not repo paths. The
+     `docs/internal/` archive is excluded as a class, except the living spec
+     pages in `INTERNAL_GUIDANCE_PREFIXES`, which are scanned as full
+     guidance files (never published, so their links are repo-path claims).
   2. **Rule triggers are live.** Every `paths:` glob in a rule's (or skill's)
      frontmatter must match at least one tracked file. A rule whose glob
      matches nothing is a rule that never loads — the exact
@@ -120,8 +112,9 @@ content owner adds the `✎` / `path-ok` marker those lines should carry.
 
 The gate fails closed on its own errors — unreadable file, unterminated or
 unparseable frontmatter, broken crate discovery, an extraction pass that finds
-almost nothing (floor constants below) — because "the checker crashed" must
-never be reported as "the guidance is fine".
+almost nothing (floor constants below), a docs.json navigation page missing
+from the docs scan — because "the checker crashed" must never be reported as
+"the guidance is fine".
 
     python3 scripts/ci/check-guidance.py           # verify
     python3 scripts/ci/check-guidance.py --json    # machine-readable report
@@ -142,41 +135,35 @@ import re
 import subprocess
 import sys
 
-_LIB = pathlib.Path(__file__).resolve().parent / "lib"
-sys.path.insert(0, str(_LIB))
+_CI = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(_CI / "lib"))
+sys.path.insert(0, str(_CI))
 
 import crate_tree  # noqa: E402  (scripts/ci/lib — the one discovery rule)
+
+# Owns the Mintlify navigation model; the docs-coverage check reuses it.
+import docs_publication_boundary  # noqa: E402  (scripts/ci)
 
 ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
-# The docs tree — published Mintlify pages and the zh/ locale mirror — plus
-# the living corpora re-included from the fenced trees below. The scan is
-# against the git tree, not the publication set, so `.mintignore` plays no
-# part here. The fenced historical archives are excluded as *classes*, not
-# per-file: dated plans, ADRs, research notes, superpowers specs, and
-# design-era checklists describe the tree as it stood when they were written
-# (measured 2026-08-07: 705 of 709 dangling docs references sat in
-# docs/internal/ and the non-contract parts of docs/reborn/) — forcing them
-# to track today's tree would either rewrite history or drown KNOWN_MISSING,
-# and both destroy the signal this gate exists for. Re-included prefixes are
-# the *living* exceptions inside those classes — pages the tree still cites
-# as currently authoritative: the contract corpus, the extension-runtime
-# spec pages (overview.md is named canonical by contracts/extensions.md;
-# standard-operations.md is the live vocabulary the extension-surfaces skill
-# routes to — their design-era siblings checklist.md and implementation.md
-# stay archival), and the guidance-conventions page that canonically
-# describes this gate. Each prefix must match at least one tracked page or
-# discovery refuses: a silent zero-match (the corpus moved) is the gate
-# going dark on its best-signal files.
+# The docs scan reads the git tree, not the publication set (`.mintignore`
+# plays no part). docs/internal/ is excluded as a class: its dated plans and
+# ADRs describe the tree as it stood when written (measured 2026-08-07: 705
+# of 709 dangling docs references sat there).
 DOCS_PREFIX = "docs/"
-DOCS_EXCLUDED_PREFIXES = ("docs/internal/", "docs/reborn/")
-DOCS_REINCLUDED_PREFIXES = (
-    "docs/reborn/contracts/",
-    "docs/reborn/extension-runtime/overview.md",
-    "docs/reborn/extension-runtime/standard-operations.md",
-    "docs/reborn/guidance-conventions.md",
+DOCS_EXCLUDED_PREFIX = "docs/internal/"
+# Living spec pages inside the archive, still cited as authoritative, so
+# they get the full guidance treatment — links included, since they are
+# never published. The extension-runtime siblings checklist.md and
+# implementation.md stay archival. Each prefix must match a tracked page or
+# discovery refuses (a zero-match means the corpus moved).
+INTERNAL_GUIDANCE_PREFIXES = (
+    "docs/internal/reborn/contracts/",
+    "docs/internal/reborn/extension-runtime/overview.md",
+    "docs/internal/reborn/extension-runtime/standard-operations.md",
+    "docs/internal/reborn/guidance-conventions.md",
 )
 
 CORRECTION_GLYPH = "✎"
@@ -196,7 +183,7 @@ NON_PATH_IDENTIFIERS = frozenset(
     }
 )
 
-# The `CLAUDE.md` alias rule (docs/reborn/guidance-conventions.md, "How the
+# The `CLAUDE.md` alias rule (docs/internal/reborn/guidance-conventions.md, "How the
 # files actually load"): beside the root `AGENTS.md` and every `AGENTS.md`
 # under `crates/`, a `CLAUDE.md` symlink — index mode `120000`, target exactly
 # this string — keeps Claude Code auto-injection and AGENTS.md-reading tools
@@ -234,16 +221,14 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # its measured value: low enough that legitimate consolidation never trips
 # it, high enough that a parser or discovery pass silently degrading to a
 # handful of hits refuses instead of passing — a floor of 1 catches only
-# total loss, not the degraded-but-nonzero shape. The docs/ surface gets its
-# own floor (measured 2026-08-07: ~127 docs files in scope) because the
-# aggregate floors sit below the guidance-only remainder — without it, the
-# docs branch of discovery silently breaking would pass on guidance alone,
-# which is exactly the silent-degradation shape floors exist to refuse.
+# total loss, not the degraded-but-nonzero shape. The docs surface has no
+# count floor: `check_docs_nav_coverage` validates it against docs.json
+# navigation instead, and the internal spec prefixes have their own
+# zero-match refusal.
 MIN_GUIDANCE_FILES = 180
 MIN_PATH_REFERENCES = 1100
 MIN_RULE_GLOBS = 20
 MIN_ALIAS_PAIRS = 40
-MIN_DOCS_FILES = 60
 
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -460,21 +445,72 @@ def discover_guidance(tree: Tree) -> list[str]:
             path.startswith(DOCS_PREFIX)
             and path.endswith((".md", ".mdx"))
             and (
-                not path.startswith(DOCS_EXCLUDED_PREFIXES)
-                or path.startswith(DOCS_REINCLUDED_PREFIXES)
+                not path.startswith(DOCS_EXCLUDED_PREFIX)
+                or path.startswith(INTERNAL_GUIDANCE_PREFIXES)
             )
         ):
             docs.append(path)
-    for prefix in DOCS_REINCLUDED_PREFIXES:
+    for prefix in INTERNAL_GUIDANCE_PREFIXES:
         if not any(path.startswith(prefix) for path in docs):
             raise GuidanceError(
-                f"re-included docs prefix {prefix!r} matched no tracked "
+                f"living internal spec prefix {prefix!r} matched no tracked "
                 "pages — the corpus moved or was renamed, and leaving the "
                 "prefix stale would silently drop it from the scan. Update "
-                "DOCS_REINCLUDED_PREFIXES (and DOCS_EXCLUDED_PREFIXES) to "
-                "the new location."
+                "INTERNAL_GUIDANCE_PREFIXES to the new location."
             )
     return docs
+
+
+def check_docs_nav_coverage(repo_root: pathlib.Path, docs: list[str]) -> int:
+    """Every page docs.json navigation publishes must be in the scan.
+
+    Validates docs discovery against the published surface itself instead of
+    a count floor: a broken filter refuses on the first missing nav page.
+    OpenAPI pseudo-pages ("GET /users") have no source file and are skipped,
+    matching docs_publication_boundary.py. Zero covered pages also refuses —
+    an empty navigation would validate nothing.
+    """
+    docs_json = repo_root / "docs" / "docs.json"
+    try:
+        manifest = json.loads(docs_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GuidanceError(
+            f"cannot read docs/docs.json ({error}) — the published-page set "
+            "cannot be derived, so docs discovery cannot be validated."
+        ) from error
+    scanned = frozenset(docs)
+    covered = 0
+    uncovered: list[str] = []
+    for page in sorted(
+        docs_publication_boundary.collect_nav_pages(manifest.get("navigation", {}))
+    ):
+        if docs_publication_boundary.OPENAPI_PAGE_RE.match(page):
+            continue
+        if any(
+            f"docs/{page}{suffix}" in scanned
+            for suffix in docs_publication_boundary.PAGE_SUFFIXES
+        ):
+            covered += 1
+        else:
+            uncovered.append(page)
+    if uncovered:
+        shown = ", ".join(uncovered[:10])
+        more = f" (and {len(uncovered) - 10} more)" if len(uncovered) > 10 else ""
+        raise GuidanceError(
+            f"docs.json navigation publishes pages the reference scan does "
+            f"not cover: {shown}{more}. Either the docs branch of discovery "
+            "broke (fix DOCS_PREFIX/DOCS_EXCLUDED_PREFIX) or a navigation "
+            "entry has no tracked source file (docs_publication_boundary.py "
+            "fails on that too); refusing rather than leaving published "
+            "prose unchecked."
+        )
+    if covered == 0:
+        raise GuidanceError(
+            "docs.json navigation names no source-backed pages — the "
+            "coverage check has nothing to validate docs discovery against; "
+            "refusing rather than passing vacuously."
+        )
+    return covered
 
 
 def _read_guidance(path: pathlib.Path) -> str:
@@ -628,13 +664,14 @@ def extract_references(
     # Under docs/, markdown link targets are Mintlify site routes
     # (extensionless page paths, `/using/cli` site-absolute forms) — a
     # different namespace than the tracked tree, so the link extractor is off
-    # there by design. Backticked repo paths remain checked. The re-included
-    # contract corpus is the exception: it is fenced out of publication
-    # (never a site route), and its relative links (`](kernel-boundary.md)`)
-    # are genuine repo-path claims — renaming one contract file would leave
-    # every cross-reference dangling with the gate green.
+    # there by design. Backticked repo paths remain checked. The living
+    # internal spec pages are the exception: they are fenced out of
+    # publication (never a site route), and their relative links
+    # (`](kernel-boundary.md)`) are genuine repo-path claims — renaming one
+    # contract file would leave every cross-reference dangling with the gate
+    # green.
     include_links = not doc.startswith(DOCS_PREFIX) or doc.startswith(
-        DOCS_REINCLUDED_PREFIXES
+        INTERNAL_GUIDANCE_PREFIXES
     )
     previous_spans: list[str] = []
     for number, line, markers in _reference_lines(text, doc):
@@ -980,7 +1017,7 @@ def check_family_tables(
                 problems.append(
                     f"  crates/{family}/ has crates but no tracked {family_agents} — "
                     "every family carries its boundary document "
-                    "(docs/reborn/guidance-conventions.md)"
+                    "(docs/internal/reborn/guidance-conventions.md)"
                 )
                 rows_by_family[family] = []
             else:
@@ -1009,7 +1046,7 @@ def check_family_tables(
         if f"{crate.directory}/README.md" not in tree.files:
             problems.append(
                 f"  {crate.directory} has no tracked README.md — the convention "
-                "requires one per crate (docs/reborn/guidance-conventions.md), "
+                "requires one per crate (docs/internal/reborn/guidance-conventions.md), "
                 "and crates/AGENTS.md states every crate has one"
             )
     return problems, tabled
@@ -1065,7 +1102,7 @@ def check_claude_aliases(
                 "AGENTS.md at the root and under crates/ carries a "
                 "`CLAUDE.md -> AGENTS.md` symlink alias so Claude Code "
                 "auto-injection and AGENTS.md readers see the same bytes "
-                "(docs/reborn/guidance-conventions.md). Restore it: "
+                "(docs/internal/reborn/guidance-conventions.md). Restore it: "
                 f"`ln -s AGENTS.md {alias} && git add {alias}`"
             )
         elif alias not in symlinks:
@@ -1128,13 +1165,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
+        # All scanned docs/ files; published-surface health is nav_pages_covered.
         docs_files = sum(1 for doc in docs if doc.startswith(DOCS_PREFIX))
-        if docs_files < MIN_DOCS_FILES:
-            raise GuidanceError(
-                f"discovered only {docs_files} docs/ files in scope (floor is "
-                f"{MIN_DOCS_FILES}). The docs branch of discovery broke; "
-                "refusing rather than passing on the guidance-only remainder."
-            )
+        nav_covered = check_docs_nav_coverage(repo_root, docs)
         crates = load_crates(repo_root)
         reference_problems, warnings, references = check_references(
             repo_root, docs, tree, crates
@@ -1150,6 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "guidance_files": len(docs),
         "docs_files": docs_files,
+        "nav_pages_covered": nav_covered,
         "path_references": references,
         "rule_globs": globs_checked,
         "crates_tabled": crates_tabled,
@@ -1182,6 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "guidance: OK "
         f"({len(docs)} guidance files, {references} path references verified, "
+        f"{nav_covered} published docs pages nav-covered, "
         f"{globs_checked} frontmatter globs live, {crates_tabled} crates tabled "
         f"in their family AGENTS.md with README.md present, "
         f"{aliases_verified} CLAUDE.md aliases verified, "

@@ -693,7 +693,7 @@ capture grep -Eq -- "diff .*--unified=0" "${work}/git-argv.log"
 check_rc "the gate still generates the diff with zero context" 0
 
 echo "▶ discovery is tree-shape-agnostic and fails closed"
-# The WS10 failure mode (docs/reborn/target-architecture/CHECKLIST.md, #6963):
+# The WS10 failure mode (docs/internal/reborn/target-architecture/CHECKLIST.md, #6963):
 # with the old `crates/ironclaw_*/src/**` keying, every case below reported
 # "no Reborn production lines added" and exited 0 — a green gate that measured
 # nothing. Coverage numbers here are deliberately identical to the flat-tree

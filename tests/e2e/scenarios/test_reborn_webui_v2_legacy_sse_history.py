@@ -84,6 +84,7 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -211,6 +212,7 @@ async def test_reborn_legacy_sse_error_reconnect_resumes_after_last_cursor(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -321,6 +323,7 @@ async def test_reborn_legacy_usage_event_does_not_render_message_badge(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -421,6 +424,7 @@ async def test_reborn_legacy_stale_replay_timeline_refresh_dedupes_messages(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -540,6 +544,7 @@ async def test_reborn_legacy_late_projection_text_dedupes_history_response(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -658,6 +663,7 @@ async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

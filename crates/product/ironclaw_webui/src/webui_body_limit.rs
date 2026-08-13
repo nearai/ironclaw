@@ -2,7 +2,8 @@
 //! surface.
 //!
 //! `crate::webui_v2::webui_v2_routes()` carries a [`BodyLimitPolicy`]
-//! per route (16 KiB for `create_thread`, 14 MiB for `send_message`, 4
+//! per route (16 KiB for `create_thread`, 14 MiB for the session-channel
+//! message route, 4
 //! KiB for `cancel_run`/`resolve_gate`, `NoBody` for the read /
 //! streaming routes). The v2 crate's CONTRACT.md designates enforcement
 //! as host-composition responsibility; this module is that enforcement.
@@ -272,15 +273,16 @@ mod tests {
             descriptors.len(),
             "every descriptor produced a RouteBodyLimit entry",
         );
-        // Locks in the descriptor contract: send_message must be 14 MiB
-        // (text + base64 inline attachments), get_timeline and
+        // Locks in the descriptor contract: the session-channel message
+        // route (the browser send path after the unified channel model) must
+        // be 14 MiB (text + base64 inline attachments), get_timeline and
         // stream_events must be NoBody. A regression that flips these
         // would trip here before reaching production.
         let send = state
             .routes
             .iter()
-            .find(|r| r.route_id == "webui.v2.send_message")
-            .expect("send_message route");
+            .find(|r| r.route_id == "webui.v2.session_channel_message")
+            .expect("session_channel_message route");
         assert!(matches!(
             send.policy,
             ResolvedBodyPolicy::Limited { max_bytes } if max_bytes == 14 * 1024 * 1024,

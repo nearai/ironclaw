@@ -203,16 +203,68 @@ impl From<AuthProductError> for RebornAuthProductError {
 /// Stable sanitized callback failure safe for route rendering.
 pub type RebornOAuthCallbackError = RebornAuthProductError;
 
-/// Compensating action returned by a provider-identity hook that committed
-/// durable state (e.g. the Slack identity binding) before the flow completes.
-/// Awaited only when `complete_oauth_callback` fails after the hook
-/// succeeded; dropped unpolled on the success path. Infallible by contract —
-/// implementations log their own failures.
-pub type OAuthProviderIdentityBindingRollback = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// One infallible action attached to a provider-identity binding transaction.
+/// Implementations report best-effort failures through their own telemetry.
+pub type OAuthProviderIdentityBindingAction = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Commit/rollback work for durable state written by a provider-identity hook.
+///
+/// The auth engine rolls the binding back if OAuth completion fails. Once the
+/// callback is durably complete, it awaits the post-commit work instead. This
+/// prevents channel provisioning from escaping into an untracked task or
+/// running for a binding the callback later rolls back.
+pub struct OAuthProviderIdentityBindingTransaction {
+    after_commit: OAuthProviderIdentityBindingAction,
+    rollback: OAuthProviderIdentityBindingAction,
+}
+
+/// Failure of the post-completion continuation dispatch, carrying whether the
+/// flow was durably terminalized (a terminal lifecycle-activation failure:
+/// flow fenced, extension credential revoked). The callback path needs that
+/// fact to pick the identity-binding compensation: a retryable failure keeps
+/// the credential independently valid — the binding commits — while a
+/// terminalized one revoked it, so the binding must roll back or the user is
+/// shown "connected" with no usable credential.
+#[derive(Debug)]
+struct ContinuationDispatchFailure {
+    error: AuthProductError,
+    terminalized_lifecycle: bool,
+}
+
+impl ContinuationDispatchFailure {
+    fn retryable(error: AuthProductError) -> Self {
+        Self {
+            error,
+            terminalized_lifecycle: false,
+        }
+    }
+}
+
+impl OAuthProviderIdentityBindingTransaction {
+    pub fn new(
+        after_commit: OAuthProviderIdentityBindingAction,
+        rollback: OAuthProviderIdentityBindingAction,
+    ) -> Self {
+        Self {
+            after_commit,
+            rollback,
+        }
+    }
+
+    pub async fn commit(self) {
+        self.after_commit.await;
+    }
+
+    pub async fn rollback(self) {
+        self.rollback.await;
+    }
+}
+
 pub type OAuthProviderIdentityCheckFuture = Pin<
     Box<
-        dyn Future<Output = Result<Option<OAuthProviderIdentityBindingRollback>, AuthProductError>>
-            + Send,
+        dyn Future<
+                Output = Result<Option<OAuthProviderIdentityBindingTransaction>, AuthProductError>,
+            > + Send,
     >,
 >;
 pub type OAuthProviderIdentityCheck =
@@ -1102,6 +1154,8 @@ impl RebornProductAuthServices {
         mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         let mut provider_identity = None;
+        let mut identity_binding_transaction: Option<OAuthProviderIdentityBindingTransaction> =
+            None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
@@ -1159,12 +1213,9 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
-                    let mut identity_binding_rollback: Option<
-                        OAuthProviderIdentityBindingRollback,
-                    > = None;
                     if let Some(check) = provider_identity_check.take() {
                         match check(exchange.provider_identity.clone()).await {
-                            Ok(rollback) => identity_binding_rollback = rollback,
+                            Ok(transaction) => identity_binding_transaction = transaction,
                             Err(error) => {
                                 let error_code = error.code();
                                 if let Err(cleanup_error) = self
@@ -1250,8 +1301,8 @@ impl RebornProductAuthServices {
                             // completed-flow replay path never re-runs the
                             // hook — undo it so a failed completion cannot
                             // leave "connected with no usable credential".
-                            if let Some(rollback) = identity_binding_rollback.take() {
-                                rollback.await;
+                            if let Some(transaction) = identity_binding_transaction.take() {
+                                transaction.rollback().await;
                             }
                             return Err(error.into());
                         }
@@ -1277,12 +1328,39 @@ impl RebornProductAuthServices {
             }
         };
 
-        if should_dispatch_continuation {
-            completed = self
-                .dispatch_completed_continuation(completed)
-                .await
-                .map_err(RebornOAuthCallbackError::from)?;
-        }
+        let completion = if should_dispatch_continuation {
+            self.dispatch_completed_continuation(completed).await
+        } else {
+            Ok(completed)
+        };
+        completed = match completion {
+            Ok(completed) => {
+                if let Some(transaction) = identity_binding_transaction.take() {
+                    transaction.commit().await;
+                }
+                completed
+            }
+            Err(failure) => {
+                if let Some(transaction) = identity_binding_transaction.take() {
+                    if failure.terminalized_lifecycle {
+                        // The terminal lifecycle failure revoked the flow's
+                        // credential — committing the binding here would show
+                        // "connected" with no usable credential, the exact
+                        // state this transaction exists to prevent.
+                        transaction.rollback().await;
+                    } else {
+                        // Retryable dispatch failure: the callback is durably
+                        // complete and the credential remains independently
+                        // valid, so the binding stands (the completed-flow
+                        // replay path never re-runs the hook — rolling back
+                        // here would lose the binding for a flow whose
+                        // continuation succeeds on retry).
+                        transaction.commit().await;
+                    }
+                }
+                return Err(RebornOAuthCallbackError::from(failure.error));
+            }
+        };
 
         Ok(RebornOAuthCallbackResponse {
             flow_id: completed.id,
@@ -1390,7 +1468,7 @@ impl RebornProductAuthServices {
                 .dispatch_completed_continuation(record)
                 .await
                 .map(|reconciled| reconciled.status)
-                .map_err(RebornOAuthCallbackError::from);
+                .map_err(|failure| RebornOAuthCallbackError::from(failure.error));
         }
         Ok(record.status)
     }
@@ -1639,7 +1717,7 @@ impl RebornProductAuthServices {
         };
         self.dispatch_completed_continuation(completed)
             .await
-            .map_err(RebornManualTokenError::from)?;
+            .map_err(|failure| RebornManualTokenError::from(failure.error))?;
 
         Ok(RebornManualTokenSubmitResponse {
             account_id: result.account_id,
@@ -1718,7 +1796,7 @@ impl RebornProductAuthServices {
     async fn dispatch_completed_continuation(
         &self,
         completed: AuthFlowRecord,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<AuthFlowRecord, ContinuationDispatchFailure> {
         if completed.continuation_emitted_at.is_some() {
             return Ok(completed);
         }
@@ -1731,7 +1809,9 @@ impl RebornProductAuthServices {
         // covers every return path below (success, terminalized failure, and the
         // retryable non-lifecycle failure).
         let Some(_lease) = self.acquire_continuation_dispatch_lease(completed.id) else {
-            return Err(AuthProductError::BackendUnavailable);
+            return Err(ContinuationDispatchFailure::retryable(
+                AuthProductError::BackendUnavailable,
+            ));
         };
         let emitted_at = Utc::now();
         let event = AuthContinuationEvent {
@@ -1762,6 +1842,7 @@ impl RebornProductAuthServices {
             // Non-lifecycle continuations (setup-only, turn-gate resume, …) stay
             // retryable: their credential is independently useful and the caller
             // may re-drive the same flow.
+            let mut terminalized_lifecycle = false;
             if !is_retryable_auth_error(dispatch_error_code)
                 && matches!(
                     &completed.continuation,
@@ -1769,7 +1850,9 @@ impl RebornProductAuthServices {
                 )
             {
                 self.terminalize_failed_lifecycle_activation(&completed, dispatch_error_code)
-                    .await?;
+                    .await
+                    .map_err(ContinuationDispatchFailure::retryable)?;
+                terminalized_lifecycle = true;
             }
             let error = match error {
                 AuthProductError::TokenExchangeFailed
@@ -1777,11 +1860,15 @@ impl RebornProductAuthServices {
                 | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
                 error => error,
             };
-            return Err(error);
+            return Err(ContinuationDispatchFailure {
+                error,
+                terminalized_lifecycle,
+            });
         }
         self.flow_manager
             .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
             .await
+            .map_err(ContinuationDispatchFailure::retryable)
     }
 
     /// Fence a terminally-failed lifecycle activation.

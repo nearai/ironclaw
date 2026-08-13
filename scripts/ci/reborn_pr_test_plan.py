@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # frontend diffs stop routing to the Code Style lane, and the planner reports
 # "no Reborn test surface changed" for a WebUI change — silently, since
 # nothing else covers that lane. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
 
@@ -197,6 +197,10 @@ QA_HARNESS_PREFIXES = (
     # every downstream Reborn lane. Same class as the `.claude/` gap this row
     # already records.
     "scripts/reborn_qa_matrix/",
+    # The tool-discovery benchmark is a manual live-model harness. It records
+    # QA evidence across disclosure modes and catalog sizes; no Reborn Rust
+    # lane invokes it.
+    "scripts/tool_discovery_benchmark/",
     # The live Telegram release smoke harness (`run_smoke.py` + config +
     # README): run by hand against a real bot, referenced by no workflow, never
     # by a `Tests (Reborn)` lane. Unclassified until 2026-08-06, when PR
@@ -430,6 +434,15 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
+    #   * `preflight-gates.sh` is the local pre-push gate gauntlet proposed by
+    #     the 2026-08 gate audit (docs/internal/gate-audit-2026-08.md §4.3);
+    #     referenced by no workflow, so no lane can be selected for it.
+    "scripts/preflight-gates.sh",
+    #   * `check-boundaries.sh` was DELETED by the same audit (measured broken
+    #     on a clean tree, run by nothing). The entry stays so the deletion
+    #     diff — and any revert — classifies instead of tripping the
+    #     fail-closed arm; the audit's own PR was the first to hit it.
+    "scripts/check-boundaries.sh",
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,
     #     driven by its own lane rather than by a crate/integration selection.
     "scripts/test-mutation-audit.sh",
@@ -484,15 +497,46 @@ PR_STATIC_CONTROL_PATHS = {
     # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
     # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
     # and owns the image build, not the entrypoint's behaviour. `docker/` stays
-    # per-file, never a prefix: `docker/reborn/config.*.toml` and
-    # `docker/process-sandbox-entrypoint.sh` have no owning lane and must keep
-    # refusing.)
+    # per-file, never a prefix: it mixes classes, and the shipped runtime
+    # configs beside this script belong to a Rust lane instead — see
+    # `DOCKER_RUNTIME_CONFIG_OWNERS` below. `docker/process-sandbox-entrypoint.sh`
+    # has no owning lane and must keep refusing.)
     "docker/reborn/entrypoint.sh",
+}
+# Shipped container configs a Reborn Rust test parses and asserts on, mapped to
+# the test source that owns them. They are NOT static control: the membership
+# rule for that set is "no Reborn test lane reads the file", and
+# `ironclaw_cli`'s `smoke` test reads both of these — it parses each through
+# `ironclaw_config::RebornConfigFile::parse_text` and pins the resulting
+# profile, storage backend and policy (`docker_reborn_production_config_uses_postgres_storage`
+# and its local-config sibling). Calling them prose would silently under-select
+# the one lane that can catch a broken production config.
+#
+# Both were unclassified until 2026-08-11, when #7471's Postgres pool change
+# edited `config.production.toml` and the fail-closed arm failed
+# `Detect Reborn test scope`, cascading into the whole `Tests (Reborn)`
+# roll-up. Classified as the pair they are, rather than one per red run —
+# the same lesson the repo-root metadata block above records.
+#
+# The two `config.hosted-single-tenant*.toml` siblings were undecided until
+# the docs/internal/reborn consolidation (2026-08-12) touched their reader,
+# `tests/dockerfile_runtime_home.rs`, and hit this planner's fail-closed arm.
+# That PR gave the reader a lane — `_root_test_partitions()` and
+# `run-reborn-root-partition.sh` both inventory it alongside
+# `support_unit_tests.rs` — so the configs now map to it: a root-test owner
+# selects its root partition, a crate-test owner selects its exact crate
+# target (both arms below).
+DOCKER_RUNTIME_CONFIG_OWNERS = {
+    "docker/reborn/config.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.production.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
+    "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
+SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -646,18 +690,18 @@ def _bound_pr_buckets(
 
 
 def _root_test_partitions() -> dict[str, int]:
-    support_tests = (
-        ["support_unit_tests"]
-        if (ROOT / "tests/support_unit_tests.rs").is_file()
-        else []
-    )
+    extra_tests = [
+        name
+        for name in ("dockerfile_runtime_home", "support_unit_tests")
+        if (ROOT / f"tests/{name}.rs").is_file()
+    ]
     names = sorted(
         [
             path.stem
             for path in (ROOT / "tests").glob("reborn_*.rs")
             if path.is_file()
         ]
-        + support_tests
+        + extra_tests
     )
     return {f"tests/{name}.rs": index % 4 for index, name in enumerate(names)}
 
@@ -775,6 +819,8 @@ def build_plan(
     run_qa_replay = True
     run_sandbox_docker = False
     qa_evidence_changed = False
+    nextest_config_changed = False
+    shared_reborn_action_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
@@ -812,14 +858,42 @@ def build_plan(
             # under-select). Unclassified until 2026-08-10, when deleting the
             # dead `live_tests::zizmor_scan*` overrides failed the whole
             # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
-            return _full_plan(
-                "nextest runner config changed; this PR runs the exhaustive plan",
-                canonical_packages,
-            )
+            nextest_config_changed = True
+            continue
+        if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
+            # Every `Tests (Reborn)` job installs the compiler cache through
+            # this local action. No narrow lane can exercise a change to it
+            # safely, so use the exhaustive plan just as we do for shared
+            # nextest configuration. Keep other `.github/actions/**` paths
+            # fail-closed until their consumers are mapped deliberately.
+            shared_reborn_action_changed = True
+            continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
+            continue
+        if path in DOCKER_RUNTIME_CONFIG_OWNERS:
+            owner = DOCKER_RUNTIME_CONFIG_OWNERS[path]
+            if owner in root_inventory:
+                root_partitions.add(root_inventory[owner])
+                reasons.append(f"shipped container config parsed by {owner}: {path}")
+                continue
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"container config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"shipped container config parsed by {owner}: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated workflow owns: {path}")
@@ -1055,6 +1129,17 @@ def build_plan(
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
             raise ValueError(f"unmapped test or CI path: {path}")
         raise ValueError(f"unclassified pull-request path: {path}")
+
+    if nextest_config_changed:
+        return _full_plan(
+            "nextest runner config changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
+    if shared_reborn_action_changed:
+        return _full_plan(
+            "shared sccache action changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
 
     canonical_set = set(canonical_packages)
     changed_packages = production_packages | direct_test_packages
