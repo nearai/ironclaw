@@ -4,10 +4,9 @@
 //! code included — a tutorial code block is where the drift lived), and that
 //! the tool-building tutorial names the current schema version and
 //! `origin_gate_matrix`. Scope is the published tree: `docs/` minus the
-//! `.mintignore` fence, mirrored here as constants — that file is frozen
-//! (remove-only, enforced by `scripts/ci/docs_publication_boundary.py`), so
-//! the mirror cannot silently widen. Fenced areas may legitimately name the
-//! retired literal.
+//! `.mintignore` fence, parsed from the authoritative file so a removed
+//! fence entry widens this scan with it. Fenced areas may legitimately name
+//! the retired literal.
 
 use std::path::{Path, PathBuf};
 
@@ -15,9 +14,41 @@ use ironclaw_extension_registry::MANIFEST_SCHEMA_VERSION_V3;
 
 const RETIRED_SCHEMA_LITERAL: &str = "reborn.extension_manifest.v2";
 
-/// Mirror of the frozen `docs/.mintignore` fence.
-const FENCED_PREFIXES: &[&str] = &["internal/", "drafts/"];
-const FENCED_SUFFIX: &str = ".draft.mdx";
+/// The publication fence, parsed from `docs/.mintignore`.
+struct Fence {
+    dir_prefixes: Vec<String>,
+    suffixes: Vec<String>,
+}
+
+/// Only the syntax the repo's `.mintignore` actually uses (`dir/` and
+/// `*.suffix`); anything else fails rather than being silently skipped.
+fn parse_fence(docs_root: &Path) -> Fence {
+    let path = docs_root.join(".mintignore");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut fence = Fence {
+        dir_prefixes: Vec::new(),
+        suffixes: Vec::new(),
+    };
+    for line in text.lines() {
+        let pattern = line.trim();
+        if pattern.is_empty() || pattern.starts_with('#') {
+            continue;
+        }
+        if let Some(suffix) = pattern.strip_prefix("*.") {
+            fence.suffixes.push(format!(".{suffix}"));
+        } else if pattern.ends_with('/') && !pattern.contains(['*', '!']) {
+            fence.dir_prefixes.push(pattern.to_string());
+        } else {
+            panic!("docs/.mintignore pattern {pattern:?} uses syntax this test does not model");
+        }
+    }
+    assert!(
+        !fence.dir_prefixes.is_empty(),
+        "docs/.mintignore names no fenced directories — the fence moved or emptied"
+    );
+    fence
+}
 
 /// Fail-closed floor: ~130 published pages exist today. A walk that visits
 /// fewer than this many means the walker broke, not that the docs shrank.
@@ -37,6 +68,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn published_pages(docs_root: &Path) -> Vec<PathBuf> {
+    let fence = parse_fence(docs_root);
     let mut pages = Vec::new();
     let mut stack = vec![docs_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -49,7 +81,7 @@ fn published_pages(docs_root: &Path) -> Vec<PathBuf> {
                 .expect("path under docs root")
                 .to_string_lossy()
                 .replace('\\', "/");
-            if FENCED_PREFIXES.iter().any(|prefix| {
+            if fence.dir_prefixes.iter().any(|prefix| {
                 relative == prefix.trim_end_matches('/') || relative.starts_with(prefix)
             }) {
                 continue;
@@ -57,7 +89,10 @@ fn published_pages(docs_root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 stack.push(path);
             } else if (relative.ends_with(".md") || relative.ends_with(".mdx"))
-                && !relative.ends_with(FENCED_SUFFIX)
+                && !fence
+                    .suffixes
+                    .iter()
+                    .any(|suffix| relative.ends_with(suffix))
             {
                 pages.push(path);
             }
@@ -74,7 +109,7 @@ fn published_docs_never_mention_the_retired_v2_schema() {
     assert!(
         pages.len() >= MIN_SCANNED_PAGES,
         "walked only {} published pages (floor is {MIN_SCANNED_PAGES}); the \
-         walker or the fence mirror broke — refusing to verify almost nothing",
+         walker or the fence parse broke — refusing to verify almost nothing",
         pages.len(),
     );
 

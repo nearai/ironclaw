@@ -1,8 +1,9 @@
 //! Doc-fact contract: `docs/using/cli.mdx` tracks the real command surface.
 //!
-//! Pins both directions at subcommand granularity: every visible subcommand
-//! from `--help` has a doc table row (any visible alias form counts), and
-//! every documented command exists in the binary. Flag-level coverage is
+//! Pins both directions: every visible subcommand from `--help` has a doc
+//! table row (any visible alias form counts), and every documented command
+//! path — nested commands included — exists in the binary
+//! (`ironclaw <path> --help` must succeed). Flag-level coverage is
 //! deliberately out of scope (flags churn too fast; recorded as a
 //! follow-up), and there is no zh mirror of this page.
 
@@ -77,10 +78,11 @@ fn help_subcommands() -> BTreeSet<String> {
     commands
 }
 
-/// The first command word of every `` `ironclaw <words>` `` table row in the
-/// doc. Fenced usage examples are not rows and are not extracted.
-fn documented_commands(doc: &str) -> Vec<String> {
-    let mut words = Vec::new();
+/// The leading command words of every `` `ironclaw <words>` `` table row in
+/// the doc — the full path up to the first flag or placeholder. Fenced usage
+/// examples are not rows and are not extracted.
+fn documented_command_paths(doc: &str) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
     for line in doc.lines() {
         let Some(rest) = line.trim_start().strip_prefix("| `ironclaw ") else {
             continue;
@@ -88,13 +90,18 @@ fn documented_commands(doc: &str) -> Vec<String> {
         let Some(command_text) = rest.split('`').next() else {
             continue;
         };
-        if let Some(first) = command_text.split_whitespace().next()
-            && first.chars().all(|c| c.is_ascii_lowercase() || c == '-')
-        {
-            words.push(first.to_string());
+        let words: Vec<String> = command_text
+            .split_whitespace()
+            .take_while(|word| {
+                !word.starts_with('-') && word.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            })
+            .map(str::to_string)
+            .collect();
+        if !words.is_empty() {
+            paths.push(words);
         }
     }
-    words
+    paths
 }
 
 fn alias_forms(subcommand: &str) -> Vec<&str> {
@@ -113,7 +120,7 @@ fn cli_reference_documents_every_subcommand_and_no_retired_ones() {
     let doc = std::fs::read_to_string(&doc_path).expect("read docs/using/cli.mdx");
 
     let real = help_subcommands();
-    let documented = documented_commands(&doc);
+    let documented = documented_command_paths(&doc);
     assert!(
         documented.len() >= MIN_DOC_COMMAND_ROWS,
         "extracted only {} `ironclaw <command>` rows from {} (floor is {}); \
@@ -123,14 +130,14 @@ fn cli_reference_documents_every_subcommand_and_no_retired_ones() {
         MIN_DOC_COMMAND_ROWS,
     );
 
-    let documented_set: BTreeSet<&str> = documented.iter().map(String::as_str).collect();
-
+    let documented_first_words: BTreeSet<&str> =
+        documented.iter().map(|path| path[0].as_str()).collect();
     let undocumented: Vec<&String> = real
         .iter()
         .filter(|subcommand| {
             !alias_forms(subcommand)
                 .iter()
-                .any(|form| documented_set.contains(form))
+                .any(|form| documented_first_words.contains(form))
         })
         .collect();
     assert!(
@@ -139,14 +146,22 @@ fn cli_reference_documents_every_subcommand_and_no_retired_ones() {
          `| `ironclaw <command>` | ... |` row for each (any visible alias form counts)",
     );
 
-    let known_forms: BTreeSet<&str> = real
-        .iter()
-        .flat_map(|subcommand| alias_forms(subcommand))
-        .collect();
-    let retired: Vec<&&str> = documented_set
-        .iter()
-        .filter(|word| !known_forms.contains(**word))
-        .collect();
+    // Every documented path must exist in the binary, nested commands
+    // included: `ironclaw <path> --help` succeeds only for real commands.
+    let unique_paths: BTreeSet<&[String]> = documented.iter().map(Vec::as_slice).collect();
+    let mut retired = Vec::new();
+    for path in unique_paths {
+        let output = Command::new(env!("CARGO_BIN_EXE_ironclaw"))
+            .env_clear()
+            .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+            .args(path.iter())
+            .arg("--help")
+            .output()
+            .expect("spawn ironclaw <path> --help");
+        if !output.status.success() {
+            retired.push(path.join(" "));
+        }
+    }
     assert!(
         retired.is_empty(),
         "docs/using/cli.mdx documents commands the binary does not have: {retired:?} — \
@@ -174,9 +189,20 @@ fn visible_alias_table_matches_the_binary() {
             .unwrap_or_else(|| {
                 panic!("VISIBLE_ALIASES names `{primary}`, which `--help` does not list")
             });
+        // Exact tokens from `[aliases: a, b]` — substring matching would let
+        // a removed `hub` ride on the remaining `iron-hub`.
+        let listed: BTreeSet<&str> = line
+            .split_once("[aliases:")
+            .map(|(_, rest)| rest.trim_end().trim_end_matches(']'))
+            .unwrap_or_else(|| {
+                panic!("`--help` lists no `[aliases: ...]` on the `{primary}` line: {line}")
+            })
+            .split(',')
+            .map(str::trim)
+            .collect();
         for alias in *aliases {
             assert!(
-                line.contains(alias),
+                listed.contains(alias),
                 "`--help` does not list visible alias `{alias}` on the `{primary}` line; \
                  update VISIBLE_ALIASES to match src/commands/mod.rs: {line}"
             );

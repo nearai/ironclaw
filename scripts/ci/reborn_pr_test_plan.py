@@ -72,9 +72,9 @@ DOC_FACT_PUBLISHED_SWEEP = (
     "docs_manifest_schema_version",
 )
 DOCS_PREFIX = "docs/"
-# Mirror of the fence in `docs_manifest_schema_version.rs` (itself mirroring
-# the frozen `docs/.mintignore`): fenced trees are unpublished, so no cargo
-# test reads them and they keep the prose classification below.
+# Mirror of the `docs/.mintignore` fence (which the Rust sweep parses
+# directly): fenced trees are unpublished, so no cargo test reads them and
+# they keep the prose classification below.
 DOCS_FENCED_PREFIXES = ("docs/internal/", "docs/drafts/")
 DOCS_FENCED_SUFFIX = ".draft.mdx"
 

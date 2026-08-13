@@ -103,15 +103,31 @@ async fn every_documented_request_field_is_accepted() {
         .map(|field| field.trim().to_string())
         .collect();
 
+    let workflow = Arc::new(FakeProductSurface::new());
+    let router = test_router(workflow.clone());
+
+    // `previous_response_id` is resolved at create, so its sample must be a
+    // real prior response, seeded through the same router.
+    let seed = router
+        .clone()
+        .oneshot(response_create_request(
+            json!({"model": "default", "input": "seed"}),
+        ))
+        .await
+        .expect("seed response");
+    assert_eq!(seed.status(), StatusCode::OK);
+    let seed_id = json_body(seed).await["id"]
+        .as_str()
+        .expect("seed response id")
+        .to_string();
+
     let samples: BTreeMap<&str, Value> = [
         ("model", json!("default")),
         ("input", json!("hello")),
         ("stream", json!(false)),
         ("temperature", json!(1.0)),
         ("instructions", json!("be brief")),
-        // A resumable prior response id shape; not resolved during create
-        // validation, so any well-formed ref is enough here.
-        ("previous_response_id", Value::Null),
+        ("previous_response_id", json!(seed_id)),
         ("metadata", json!({"k": "v"})),
         ("tools", json!([])),
         ("tool_choice", Value::Null),
@@ -129,18 +145,14 @@ async fn every_documented_request_field_is_accepted() {
                  test — add one (and make sure the router really accepts it)"
             )
         });
-        // Fields whose only universally-accepted sample is "absent"
-        // (conditionally-rejected fields, and refs that must resolve) stay
-        // out of the request body; their acceptance-as-a-field is proven by
-        // the dedicated tests below.
+        // Conditionally-rejected fields stay out; the dedicated tests below
+        // prove their acceptance with external tools wired.
         if sample.is_null() || conditional.iter().any(|c| c == field) {
             continue;
         }
         body.insert(field.to_string(), sample.clone());
     }
 
-    let workflow = Arc::new(FakeProductSurface::new());
-    let router = test_router(workflow.clone());
     let response = router
         .oneshot(response_create_request(Value::Object(body)))
         .await
@@ -150,7 +162,7 @@ async fn every_documented_request_field_is_accepted() {
         StatusCode::OK,
         "a request carrying every documented field must be accepted"
     );
-    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.accepted_count(), 2);
 }
 
 /// `tool_choice` behaves like `tools`: 400 on the plain router, accepted
