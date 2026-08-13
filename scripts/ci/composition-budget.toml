@@ -161,24 +161,34 @@ observed_date = "2026-08-08"
 # working slack, and this file's loc_tolerance keeps doing that job here.
 # History: 40747 -> 40811 (#7157 acting-user scope helper), then two features
 # merged on top on 2026-08-08/09, each service-graph assembly only:
-#  - web-push channel assembly (`assemble_web_push`: subscription-store
+#  - web-app channel assembly (`assemble_web_app`: subscription-store
 #    construction, runtime-slot install, VAPID seeding + read-back, manifest
 #    push-host extraction, binding-borne outbound-target-provider registration).
 #  - skills stack top layer (#7171): skill-bundle staging, host-reachability
 #    root map, process-alias host-workdir wiring.
-# Re-measured on the MERGED tree (web-push + skills) with
-# `bash scripts/ci/check-composition-budget.sh` -> 41509 (base 40811 + web-push
+# Re-measured on the MERGED tree (web-app + skills) with
+# `bash scripts/ci/check-composition-budget.sh` -> 41509 (base 40811 + web-app
 # assembly + #7171 skills assembly; the deltas are additive on the merged tree).
 # Re-measured 41509 -> 41582 on 2026-08-10 after merging main into
 # implement-issue-6896-fix: #7131's run-failure settlement observer adds its
 # production wiring and inline regression coverage to the current main tree.
 # Measured with --print; set to current rather than hidden in tolerance.
+# 41582 -> 41751 (2026-08-11, channel capability contract): assembly now
+# carries the host-owned delivery-registration store, client-bootstrap port,
+# generic notification-setup service, and the split ingress/reply/delivery
+# bindings. The behavior lives in ironclaw_auth/assistant/extension_host;
+# composition only constructs and threads their implementations. Measured on
+# the pre-main-sync tree with this gate.
 # Re-seeded 41582 -> 41810 on 2026-08-11 for #7471's merged tree. The dedicated
 # process-journal PostgreSQL pool adds service-graph assembly needed to keep
 # lease heartbeats independent of data-plane saturation; concurrent mainline
 # composition growth consumed the prior tolerance before this branch merged.
 # Measured by the Fast deterministic checks gate on the GitHub merge commit and
 # recorded explicitly rather than weakening or bypassing the absolute bound.
+# Union re-measured at 41942 after merging #7471 into the channel-capability
+# branch: the two assembly deltas are disjoint (journal pool/filesystem versus
+# channel registrations/capability bindings). Set to the merged-tree count;
+# do not spend the working tolerance to hide either reviewed change.
 # Union re-measured 41810 -> 41820 on 2026-08-12 (#7373 refresh merge of
 # main): the audit branch's chain (40804 @ 2026-08-08) and main's chain
 # (41810 @ #7471) fold; measured on the merged tree with this gate's
@@ -193,7 +203,11 @@ observed_date = "2026-08-08"
 # The gate's NUDGE fired at 283 LOC of slack; this locks the improvement in rather
 # than banking it as headroom. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh`.
-loc_ceiling = 41533
+# Union re-measured on 2026-08-12 after merging main (#7365's composition
+# eviction + #7373 re-equalization) into the unified-channel branch: main
+# evicted the memory-save guidance while this branch added the channel
+# registration/capability assembly; the merged tree is measured, not summed.
+loc_ceiling = 41780
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -204,7 +218,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41533
+loc_observed = 41780
 loc_observed_date = "2026-08-12"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -249,12 +263,33 @@ loc_observed_date = "2026-08-12"
 # only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
 # two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
 # count exactly, no slack.
+# 816 -> 818 (2026-08-11, unified channel model): the session-inbound lane's
+# two inverted ports wired at assembly — the `SessionChannelDirectory`
+# (declared in product_contracts, implemented by extension_host over the
+# deployment registry) and the durable session-inbound `IdempotencyLedger` —
+# plus the generic `ChannelNotificationSetupService`, offset by the deleted
+# `WebPushComposition` handle family. Observed on the merged branch: 833;
+# 818 + 15 tolerance = 833 — equal to the observed count exactly, no slack.
+# 818 -> 822 (2026-08-11, host-owned delivery registrations): four net
+# governed carrier/assembly sites for two genuine multi-implementation seams,
+# `DeliveryRegistrationService` (filesystem production + fakes) and
+# `DeliveryClientBootstrap` (slot-backed production + rejecting default).
+# Observed here: 837; 822 + 15 tolerance = 837, exactly, with no hidden slack.
+# 822 -> 823 (2026-08-12, channel-owned startup initialization): one generic
+# binding-held `FirstPartyChannelInitializer` seam lets binary-linked packages
+# initialize their own secret material without extension-specific composition
+# branches. The initialization context borrows the existing secret-store port,
+# so this records only the real multi-implementation initializer boundary.
+# Observed after splitting its inline tests out of production mass: 838.
 # 2026-08-12 (#7373 refresh merge): union re-measured — the merged tree
 # reports 831 governed sites, exactly the effective ceiling above, i.e. the
 # gate was live at ZERO headroom (the recurrence class §3.2 of the gate
 # audit names). Re-equalized 816 -> 831 per this file's re-capture
 # instruction, restoring the designed 15-site window. The WS0 record (827)
 # stays within the effective ceiling (846).
-arc_dyn_ceiling = 831
+# Union re-measured on 2026-08-12 after merging main into the unified-channel
+# branch (both sides re-equalized on their own trees: 838 here, 831 on main);
+# measured on the merged tree, keeping the designed 15-site window.
+arc_dyn_ceiling = 823
 arc_dyn_tolerance = 15
-arc_dyn_observed = 831
+arc_dyn_observed = 838

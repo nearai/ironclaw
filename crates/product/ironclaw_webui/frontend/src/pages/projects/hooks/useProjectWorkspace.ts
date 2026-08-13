@@ -2,7 +2,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import {
   fetchProjectDetail,
-  fetchProjectMissions,
   fetchProjectThreads,
   fetchProjectWidgets,
 } from "../lib/projects-api";
@@ -16,13 +15,6 @@ export function useProjectWorkspace(projectId) {
     queryFn: () => fetchProjectDetail(projectId),
     enabled,
     refetchInterval: enabled ? 7000 : false,
-  });
-
-  const missionsQuery = useQuery({
-    queryKey: ["project-missions", projectId],
-    queryFn: () => fetchProjectMissions(projectId),
-    enabled,
-    refetchInterval: enabled ? 5000 : false,
   });
 
   const threadsQuery = useQuery({
@@ -42,7 +34,6 @@ export function useProjectWorkspace(projectId) {
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["projects-overview"] });
     queryClient.invalidateQueries({ queryKey: ["project-detail", projectId] });
-    queryClient.invalidateQueries({ queryKey: ["project-missions", projectId] });
     queryClient.invalidateQueries({ queryKey: ["project-threads", projectId] });
     queryClient.invalidateQueries({ queryKey: ["project-widgets", projectId] });
   }, [projectId, queryClient]);
@@ -51,12 +42,11 @@ export function useProjectWorkspace(projectId) {
     // `fetchProjectDetail` returns the page-shaped project object directly
     // (not wrapped in `{ project }`), matching `fetchProjectsOverview` entries.
     project: projectQuery.data || null,
-    missions: missionsQuery.data?.missions || [],
     threads: threadsQuery.data?.threads || [],
     widgets: widgetsQuery.data || [],
-    isLoading: enabled && (projectQuery.isLoading || missionsQuery.isLoading || threadsQuery.isLoading),
-    isRefreshing: projectQuery.isFetching || missionsQuery.isFetching || threadsQuery.isFetching || widgetsQuery.isFetching,
-    error: projectQuery.error || missionsQuery.error || threadsQuery.error || widgetsQuery.error || null,
+    isLoading: enabled && (projectQuery.isLoading || threadsQuery.isLoading),
+    isRefreshing: projectQuery.isFetching || threadsQuery.isFetching || widgetsQuery.isFetching,
+    error: projectQuery.error || threadsQuery.error || widgetsQuery.error || null,
     invalidate,
   };
 }

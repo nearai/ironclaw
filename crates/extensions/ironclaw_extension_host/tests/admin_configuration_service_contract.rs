@@ -42,6 +42,14 @@ async fn save_before_install_stages_secrets_and_returns_a_redacted_group_view() 
     assert_eq!(state.fields[0].value.as_deref(), Some("client-a"));
     assert!(state.fields[0].provided);
     assert_eq!(
+        state.fields[0].description, "The OAuth client identifier from the provider console.",
+        "the manifest-declared field help text must reach the redacted view"
+    );
+    assert!(
+        state.fields[1].description.is_empty(),
+        "a field without declared help text renders an empty description"
+    );
+    assert_eq!(
         state.fields[1].value, None,
         "secret material must be redacted"
     );
@@ -427,6 +435,56 @@ async fn unknown_duplicate_missing_and_oversized_values_fail_closed() {
     assert_eq!(oversized, AdminConfigurationServiceError::ValueTooLarge);
 }
 
+#[tokio::test]
+async fn host_managed_credential_handles_are_not_operator_configuration() {
+    let store =
+        FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
+    let descriptor = ExtensionAdminConfigurationDescriptor {
+        group_id: group_id(),
+        display_name: "Example provider".to_string(),
+        description: String::new(),
+        fields: vec![
+            AdminConfigurationField {
+                handle: SecretHandle::new("generated_signing_key").unwrap(),
+                label: "Generated signing key".to_string(),
+                secret: true,
+                required: false,
+                description: String::new(),
+                host_managed: true,
+            },
+            AdminConfigurationField {
+                handle: SecretHandle::new("region").unwrap(),
+                label: "Region".to_string(),
+                secret: false,
+                required: false,
+                description: String::new(),
+                host_managed: false,
+            },
+        ],
+    };
+    let service =
+        AdminConfigurationService::new(store, Arc::new(SecretStore::ephemeral()), vec![descriptor])
+            .expect("descriptor catalog");
+    let scope = sample_scope("tenant-a", "operator");
+
+    let groups = service.list(&scope).await.expect("list");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].fields.len(), 1);
+    assert_eq!(groups[0].fields[0].handle.as_str(), "region");
+
+    let error = service
+        .replace(
+            &scope,
+            &group_id(),
+            &idempotency_key("host-managed-is-not-editable"),
+            0,
+            vec![submitted_value("generated_signing_key", "operator-value")],
+        )
+        .await
+        .expect_err("an operator cannot replace host-managed material");
+    assert_eq!(error, AdminConfigurationServiceError::UnknownField);
+}
+
 fn service() -> (
     AdminConfigurationService<InMemoryBackend, SecretStore<InMemoryBackend>>,
     Arc<SecretStore<InMemoryBackend>>,
@@ -450,12 +508,16 @@ fn descriptor() -> ExtensionAdminConfigurationDescriptor {
                 label: "Client ID".to_string(),
                 secret: false,
                 required: true,
+                description: "The OAuth client identifier from the provider console.".to_string(),
+                host_managed: false,
             },
             AdminConfigurationField {
                 handle: SecretHandle::new("client_secret").unwrap(),
                 label: "Client secret".to_string(),
                 secret: true,
                 required: true,
+                description: String::new(),
+                host_managed: false,
             },
         ],
     }
@@ -525,6 +587,18 @@ impl SecretStorePort for WriteThenFailSecretStore {
         Err(SecretStoreError::StoreUnavailable {
             reason: "injected ambiguous failure".to_string(),
         })
+    }
+
+    async fn put_if_absent(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner
+            .put_if_absent(scope, handle, material, expires_at)
+            .await
     }
 
     async fn metadata(

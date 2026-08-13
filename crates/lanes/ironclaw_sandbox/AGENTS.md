@@ -110,9 +110,9 @@ through `SandboxCommandTransport`; the script-runtime lane remains separate.
 
 - Fast local check: `cargo test -p ironclaw_sandbox`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
-- Contracts: `docs/reborn/contracts/scripts.md`,
-  `docs/reborn/contracts/runtime-workflows.md`,
-  `docs/reborn/contracts/network.md`
+- Contracts: `docs/internal/reborn/contracts/scripts.md`,
+  `docs/internal/reborn/contracts/runtime-workflows.md`,
+  `docs/internal/reborn/contracts/network.md`
 
 ## See also
 

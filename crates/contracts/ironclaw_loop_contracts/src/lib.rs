@@ -11,7 +11,7 @@
 //!
 //! `ironclaw_agent_loop`'s rule that it depends on contracts-layer crates and
 //! nothing else is satisfiable entirely through this crate — that is the point
-//! of it existing. See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.4 and
+//! of it existing. See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.4 and
 //! `families/contracts.md`.
 //!
 //! Prompt bundle APIs are host-managed: drivers request a bounded bundle of

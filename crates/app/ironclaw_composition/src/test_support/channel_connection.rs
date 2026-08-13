@@ -205,7 +205,7 @@ impl ChannelConnectionTestBundle {
             },
             AuthSurface::Callback,
         );
-        let rollback = bind_channel_identities_for_callback(
+        let transaction = bind_channel_identities_for_callback(
             &self.identity_binding,
             provider,
             &callback_scope,
@@ -213,12 +213,9 @@ impl ChannelConnectionTestBundle {
         )
         .await
         .map_err(|error| format!("channel identity bind rejected: {error:?}"))?;
-        match rollback {
-            // Dropping the rollback without running it models the successful
-            // callback completion (production only awaits it when completion
-            // fails after the bind).
-            Some(rollback) => {
-                drop(rollback);
+        match transaction {
+            Some(transaction) => {
+                transaction.commit().await;
                 Ok(())
             }
             None => Err(format!(

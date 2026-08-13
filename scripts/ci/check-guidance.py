@@ -8,7 +8,7 @@ routed readers to `crates/<crate>/…` paths that stopped existing when crates
 moved into family directories. A misled agent does not complain the way a
 misled human does — it silently produces a bad change — so guidance drift is a
 correctness bug, and the detectable classes belong in CI
-(`docs/reborn/guidance-conventions.md` closes with "the guidance half is this
+(`docs/internal/reborn/guidance-conventions.md` closes with "the guidance half is this
 convention's job"; this gate is that job's mechanical part).
 
 Five claims are checked, all against **git-tracked** state so local build
@@ -153,7 +153,7 @@ NON_PATH_IDENTIFIERS = frozenset(
     }
 )
 
-# The `CLAUDE.md` alias rule (docs/reborn/guidance-conventions.md, "How the
+# The `CLAUDE.md` alias rule (docs/internal/reborn/guidance-conventions.md, "How the
 # files actually load"): beside the root `AGENTS.md` and every `AGENTS.md`
 # under `crates/`, a `CLAUDE.md` symlink — index mode `120000`, target exactly
 # this string — keeps Claude Code auto-injection and AGENTS.md-reading tools
@@ -877,7 +877,7 @@ def check_family_tables(
                 problems.append(
                     f"  crates/{family}/ has crates but no tracked {family_agents} — "
                     "every family carries its boundary document "
-                    "(docs/reborn/guidance-conventions.md)"
+                    "(docs/internal/reborn/guidance-conventions.md)"
                 )
                 rows_by_family[family] = []
             else:
@@ -906,7 +906,7 @@ def check_family_tables(
         if f"{crate.directory}/README.md" not in tree.files:
             problems.append(
                 f"  {crate.directory} has no tracked README.md — the convention "
-                "requires one per crate (docs/reborn/guidance-conventions.md), "
+                "requires one per crate (docs/internal/reborn/guidance-conventions.md), "
                 "and crates/AGENTS.md states every crate has one"
             )
     return problems, tabled
@@ -962,7 +962,7 @@ def check_claude_aliases(
                 "AGENTS.md at the root and under crates/ carries a "
                 "`CLAUDE.md -> AGENTS.md` symlink alias so Claude Code "
                 "auto-injection and AGENTS.md readers see the same bytes "
-                "(docs/reborn/guidance-conventions.md). Restore it: "
+                "(docs/internal/reborn/guidance-conventions.md). Restore it: "
                 f"`ln -s AGENTS.md {alias} && git add {alias}`"
             )
         elif alias not in symlinks:

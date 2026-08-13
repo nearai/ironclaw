@@ -1,12 +1,12 @@
 //! The channel-rendered **auth prompt** view family.
 //!
-//! `ChannelAdapter`'s own `OutboundPart::AuthPrompt` carries an
-//! [`AuthPromptView`], and both shipped channel packages call
-//! [`render_channel_auth_prompt`] from `deliver` — so this family crosses the
+//! The channel output traits' `OutboundPart::AuthPrompt` carries an
+//! [`AuthPromptView`], and both shipped message-channel packages call
+//! [`render_channel_auth_prompt`] from their send methods — so this family crosses the
 //! host↔extension membrane and belongs on this side of it, not in
 //! `ironclaw_product_contracts`. PROPOSAL §6.1.3 lists "auth/approval
 //! prompt-view DTOs" together; at this base only the **auth** half is named by
-//! an adapter signature. The approval half (`ApprovalPrompt*View`) is reached
+//! a channel capability signature. The approval half (`ApprovalPrompt*View`) is reached
 //! only by product and WebUI and stays in `product_contracts::outbound`.
 //!
 //! `AuthPromptContextView` moved with the rest of the family rather than

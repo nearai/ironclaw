@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # frontend diffs stop routing to the Code Style lane, and the planner reports
 # "no Reborn test surface changed" for a WebUI change — silently, since
 # nothing else covers that lane. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
 
@@ -473,19 +473,25 @@ PR_STATIC_CONTROL_PATHS = {
 # roll-up. Classified as the pair they are, rather than one per red run —
 # the same lesson the repo-root metadata block above records.
 #
-# The two `config.hosted-single-tenant*.toml` siblings are deliberately absent:
-# their reader is `tests/dockerfile_runtime_home.rs`, which is not in
-# `_root_test_partitions()` (that inventory covers `tests/reborn_*.rs` only), so
-# no lane here can be selected for them. They keep refusing until that is
-# decided.
+# The two `config.hosted-single-tenant*.toml` siblings were undecided until
+# the docs/internal/reborn consolidation (2026-08-12) touched their reader,
+# `tests/dockerfile_runtime_home.rs`, and hit this planner's fail-closed arm.
+# That PR gave the reader a lane — `_root_test_partitions()` and
+# `run-reborn-root-partition.sh` both inventory it alongside
+# `support_unit_tests.rs` — so the configs now map to it: a root-test owner
+# selects its root partition, a crate-test owner selects its exact crate
+# target (both arms below).
 DOCKER_RUNTIME_CONFIG_OWNERS = {
     "docker/reborn/config.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
     "docker/reborn/config.production.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
+    "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
+SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -639,18 +645,18 @@ def _bound_pr_buckets(
 
 
 def _root_test_partitions() -> dict[str, int]:
-    support_tests = (
-        ["support_unit_tests"]
-        if (ROOT / "tests/support_unit_tests.rs").is_file()
-        else []
-    )
+    extra_tests = [
+        name
+        for name in ("dockerfile_runtime_home", "support_unit_tests")
+        if (ROOT / f"tests/{name}.rs").is_file()
+    ]
     names = sorted(
         [
             path.stem
             for path in (ROOT / "tests").glob("reborn_*.rs")
             if path.is_file()
         ]
-        + support_tests
+        + extra_tests
     )
     return {f"tests/{name}.rs": index % 4 for index, name in enumerate(names)}
 
@@ -769,6 +775,7 @@ def build_plan(
     run_sandbox_docker = False
     qa_evidence_changed = False
     nextest_config_changed = False
+    shared_reborn_action_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
@@ -808,6 +815,14 @@ def build_plan(
             # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
             nextest_config_changed = True
             continue
+        if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
+            # Every `Tests (Reborn)` job installs the compiler cache through
+            # this local action. No narrow lane can exercise a change to it
+            # safely, so use the exhaustive plan just as we do for shared
+            # nextest configuration. Keep other `.github/actions/**` paths
+            # fail-closed until their consumers are mapped deliberately.
+            shared_reborn_action_changed = True
+            continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
@@ -815,6 +830,10 @@ def build_plan(
             continue
         if path in DOCKER_RUNTIME_CONFIG_OWNERS:
             owner = DOCKER_RUNTIME_CONFIG_OWNERS[path]
+            if owner in root_inventory:
+                root_partitions.add(root_inventory[owner])
+                reasons.append(f"shipped container config parsed by {owner}: {path}")
+                continue
             package = next(
                 (
                     name
@@ -1062,6 +1081,11 @@ def build_plan(
     if nextest_config_changed:
         return _full_plan(
             "nextest runner config changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
+    if shared_reborn_action_changed:
+        return _full_plan(
+            "shared sccache action changed; this PR runs the exhaustive plan",
             canonical_packages,
         )
 

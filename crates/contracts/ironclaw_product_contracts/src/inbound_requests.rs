@@ -70,6 +70,13 @@ impl std::fmt::Debug for ProductInboundAttachment {
 /// Browser body for WebUI send-message mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProductSubmitTurnRequest {
+    /// The session channel extension this submission enters through — the
+    /// path parameter of the generic session-inbound route. `None` for
+    /// transports that predate channel-parameterized session inbound (the
+    /// OpenAI-compatible API), which submit under the legacy session surface
+    /// identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

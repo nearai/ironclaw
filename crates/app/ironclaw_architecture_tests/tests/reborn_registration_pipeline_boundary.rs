@@ -30,7 +30,7 @@
 //! owns, the crate excluded from its own scan — used to be keyed to the literal
 //! flat `crates/<name>/` tree shape. The target architecture moves crates into
 //! family directories (`crates/<family>/ironclaw_*`,
-//! `docs/reborn/target-architecture/PROPOSAL.md` §5), and at the first family
+//! `docs/internal/reborn/target-architecture/PROPOSAL.md` §5), and at the first family
 //! `git mv` all three stop resolving at once: `workspace_root()` walked up a
 //! fixed two levels and landed on `crates/`, so the scan found no directory,
 //! visited **zero files**, and reported success. Green while enforcing nothing
@@ -132,7 +132,7 @@ fn registration_concepts_stay_inside_the_registration_pipeline() {
         Err(error) => panic!(
             "registration-pipeline boundary gate could not measure the tree: {error}\n\n\
              This gate refuses to report success on a scan it cannot vouch for. See \
-             docs/reborn/target-architecture/CHECKLIST.md (WS0 blocking prerequisite) and #6963."
+             docs/internal/reborn/target-architecture/CHECKLIST.md (WS0 blocking prerequisite) and #6963."
         ),
     };
 

@@ -4,7 +4,7 @@ Orientation (what this crate is, surface, deps, tests) lives in
 [`README.md`](./README.md); the family boundary in
 [`../AGENTS.md`](../AGENTS.md). This file is the canonical crate-local rules —
 consolidated 2026-08-05 from the former `CLAUDE.md` guardrails (now a pointer)
-per `docs/reborn/guidance-conventions.md` rule 1.
+per `docs/internal/reborn/guidance-conventions.md` rule 1.
 
 ## Invariants
 

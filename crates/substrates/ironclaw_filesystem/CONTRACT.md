@@ -10,7 +10,7 @@ engine state, settings, …) lives behind a single set of ops: `put` / `get` /
 
 This supersedes the earlier "bytes mount; structured records stay typed"
 boundary. The current rule is codified in
-`docs/reborn/contracts/filesystem.md` and `docs/reborn/contracts/storage-placement.md`.
+`docs/internal/reborn/contracts/filesystem.md` and `docs/internal/reborn/contracts/storage-placement.md`.
 
 ## What this crate owns
 

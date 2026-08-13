@@ -57,8 +57,8 @@ One production implementation of each store, built on the filesystem fabric.
   per lease — `SecretStore::consume` after an explicit scoped lease.
 - **No raw material in any output:** metadata, errors, debug, events,
   snapshots, and docs never carry secret values.
-- **`put` is a trusted primitive** for setup/composition/storage code, not a
-  runtime/plugin API.
+- **`put` and atomic `put_if_absent` are trusted primitives** for
+  setup/composition/storage code, not runtime/plugin APIs.
 - **Isolation is scoped:** tenant/user/agent/project isolation is preserved;
   no global handle lookup unless an explicit admin-scoped API is introduced
   later.
@@ -79,8 +79,8 @@ cargo test -p ironclaw_architecture_tests   # boundary rules
 ## See also
 
 Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
-`docs/reborn/contracts/secrets.md`,
-`docs/reborn/contracts/storage-placement.md`,
-`docs/reborn/contracts/kernel-boundary.md`. (The crate's working rules were
+`docs/internal/reborn/contracts/secrets.md`,
+`docs/internal/reborn/contracts/storage-placement.md`,
+`docs/internal/reborn/contracts/kernel-boundary.md`. (The crate's working rules were
 folded into the Invariants above on 2026-08-06; this README is the crate-local
 home.)

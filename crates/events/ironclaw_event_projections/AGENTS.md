@@ -8,8 +8,8 @@ and the one-way pipeline rule: [`../AGENTS.md`](../AGENTS.md).
 
 - Read `README.md` for what the crate is; read `Cargo.toml` for actual
   dependencies and feature shape.
-- Contract docs that outrank intuition: `docs/reborn/contracts/events.md`,
-  `docs/reborn/contracts/events-projections.md`; neighbors:
+- Contract docs that outrank intuition: `docs/internal/reborn/contracts/events.md`,
+  `docs/internal/reborn/contracts/events-projections.md`; neighbors:
   `crates/events/ironclaw_event_log/AGENTS.md`,
   `crates/events/ironclaw_event_streams/AGENTS.md`.
 

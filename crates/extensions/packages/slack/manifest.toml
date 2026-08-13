@@ -181,10 +181,19 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "Slack messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 commands = ["model", "status", "new", "stop", "interrupt"]
+
+# For a conversational vendor the two axes happen to share one mechanism — a
+# message in the conversation — which is exactly why the reply/delivery
+# distinction stayed invisible until a streaming channel existed. They are
+# still declared separately: `message` twice is a coincidence of transport,
+# not one concept.
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.connection]
 provider = "slack"
@@ -285,7 +294,6 @@ response_body_limit_bytes = 262144
 supports_markdown = true
 supports_threads = true
 can_reply_in_threads = true
-max_message_chars = 40000
 command_prefix = "/ironclaw "
 
 # ---- auth surface: recipe data, zero extension code ------------------------

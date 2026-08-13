@@ -118,7 +118,7 @@ def _reject_ambiguous_crate_keys(directories):
             "cannot distinguish — two crates would merge into one bucket and one "
             "floor:\n  " + "\n  ".join(collisions) + "\nRename one, or give this "
             "gate a key that survives the collision. Refusing to report a merged "
-            "number (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+            "number (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
         )
 
 

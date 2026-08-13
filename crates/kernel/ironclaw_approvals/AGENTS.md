@@ -6,9 +6,9 @@
   This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/approvals.md`
-- `docs/reborn/contracts/run-state.md`
-- `docs/reborn/contracts/capability-access.md`
+- `docs/internal/reborn/contracts/approvals.md`
+- `docs/internal/reborn/contracts/run-state.md`
+- `docs/internal/reborn/contracts/capability-access.md`
 
 ## What This Crate Owns
 

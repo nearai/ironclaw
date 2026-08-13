@@ -12,6 +12,7 @@ use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId
 use ironclaw_product_contracts::inbound::{
     ProductInboundEnvelope, ProductRejection, UserMessagePayload,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
 use crate::error::ProductSurfaceFailure;
 
@@ -31,6 +32,9 @@ pub struct BeforeInboundPolicyRequest {
     pub source_binding_key: SourceBindingKey,
     /// Stable, workflow-validated partition key for policy-side rate limits.
     pub rate_limit_key: SourceBindingKey,
+    /// Authenticated product caller for the session lane. Webhook policies
+    /// receive `None` and continue to rely on verified external identity.
+    pub session_caller: Option<ProductSurfaceCaller>,
     pub user_message: UserMessagePayload,
 }
 
@@ -48,6 +52,7 @@ impl BeforeInboundPolicyRequest {
             external_conversation_ref: envelope.external_conversation_ref().clone(),
             source_binding_key: source_binding_key.clone(),
             rate_limit_key: source_binding_key,
+            session_caller: envelope.session_caller().cloned(),
             user_message: user_message.clone(),
         })
     }

@@ -298,7 +298,7 @@ Expected: PASS.
 
 **Files:**
 
-- Modify: `docs/reborn/contracts/extensions.md`
+- Modify: `docs/internal/reborn/contracts/extensions.md`
 - Modify: `CHANGELOG.md`
 
 **Step 1: Update the extension contract**

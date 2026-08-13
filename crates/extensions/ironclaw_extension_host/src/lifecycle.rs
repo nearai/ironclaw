@@ -36,6 +36,29 @@ pub trait DrainController: Send + Sync {
     async fn drain(&self, extension_id: &str, deadline: Duration) -> Result<(), HookError>;
 }
 
+/// Which half of the declarative ingress-wiring pair to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngressWiring {
+    Register,
+    Deregister,
+}
+
+impl IngressWiring {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Register => "ingress registration",
+            Self::Deregister => "ingress deregistration",
+        }
+    }
+}
+
+/// Vendor-side ingress-wiring failure, redacted before it reaches a record.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum ChannelWiringError {
+    #[error("{reason}")]
+    Failed { reason: String },
+}
+
 /// Typed removal/drain hook failures.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HookError {
@@ -223,40 +246,25 @@ impl ExtensionHost {
                     return Err(LifecycleError::Conflict(conflict));
                 }
 
-                // Vendor wiring: channel.activate(). Failure aborts with
-                // nothing published.
-                if let Some(channel) = &active.channel {
-                    let egress = self.deps.egress.egress_for_channel(
-                        extension_id,
-                        &record.installation_id,
-                        record
-                            .resolved
-                            .channel
-                            .as_ref()
-                            .map(|channel| channel.egress.as_slice())
-                            .unwrap_or(&[]),
-                    );
-                    let ctx = ironclaw_extension_contracts::channel_adapter::ChannelContext {
-                        extension_id: &record.extension_id,
-                        installation_id: &record.installation_id,
-                        config: &record.config,
-                    };
-                    if let Err(error) = with_deadline(
-                        self.deps.hook_deadline,
-                        channel.activate(&ctx, egress.as_ref()),
-                    )
+                // Vendor-side ingress registration. This used to be
+                // `channel.activate()`; it is now the manifest's
+                // `[channel.ingress.registration]` recipe run generically,
+                // through the same restricted egress with the same host-side
+                // credential injection. Failure aborts with nothing published,
+                // exactly as before.
+                if let Err(error) = self
+                    .run_ingress_registration(&record, IngressWiring::Register)
                     .await
-                    {
-                        self.persist_state(
-                            &record,
-                            InstallationState::Failed,
-                            Some(redact(&error.to_string())),
-                        )
-                        .await?;
-                        return Err(LifecycleError::ActivationHook {
-                            reason: redact(&error.to_string()),
-                        });
-                    }
+                {
+                    self.persist_state(
+                        &record,
+                        InstallationState::Failed,
+                        Some(redact(&error.to_string())),
+                    )
+                    .await?;
+                    return Err(LifecycleError::ActivationHook {
+                        reason: redact(&error.to_string()),
+                    });
                 }
 
                 // Persist Active, then publish exactly one new generation.
@@ -284,6 +292,21 @@ impl ExtensionHost {
         let mut guard = self.lifecycle_lock.lock().await;
         let record = self.require_installed(extension_id).await?;
         self.publish_with(&mut guard, extension_id, None).await?;
+        // Vendor-side ingress DEregistration — formerly `channel.cleanup()`.
+        // Idempotent and best-effort by contract: the extension is already
+        // unpublished, so a vendor that cannot be reached must not strand the
+        // deactivation. It is logged and the next activation overwrites the
+        // registration anyway.
+        if let Err(error) = self
+            .run_ingress_registration(&record, IngressWiring::Deregister)
+            .await
+        {
+            tracing::debug!(
+                extension_id,
+                error = %error,
+                "ingress deregistration failed; deactivation continues"
+            );
+        }
         let _ = self
             .deps
             .drain
@@ -292,6 +315,61 @@ impl ExtensionHost {
         self.persist_state(&record, InstallationState::Installed, None)
             .await?;
         Ok(())
+    }
+
+    /// Run one half of the declarative ingress-wiring pair.
+    ///
+    /// Absence of the section is a no-op, which is what "default no-op" used
+    /// to mean when these were trait methods — minus the trait surface. A
+    /// channel whose events URL is configured in the vendor's own console
+    /// (or which has no webhook at all) simply declares neither.
+    async fn run_ingress_registration(
+        &self,
+        record: &InstallationRecord,
+        wiring: IngressWiring,
+    ) -> Result<(), ChannelWiringError> {
+        let Some(channel) = record.resolved.channel.as_ref() else {
+            return Ok(());
+        };
+        let Some(ingress) = channel.ingress.as_ref() else {
+            return Ok(());
+        };
+        let recipe = match wiring {
+            IngressWiring::Register => ingress.registration.as_ref(),
+            IngressWiring::Deregister => ingress.deregistration.as_ref(),
+        };
+        let Some(recipe) = recipe else {
+            return Ok(());
+        };
+        // Resolve by method + path, never list order. A recipe with zero or
+        // multiple matching targets is ambiguous authority and fails closed.
+        let target = crate::channel_vendor_calls::resolve_vendor_call_target(
+            recipe,
+            channel.egress.as_slice(),
+        )
+        .map_err(|error| ChannelWiringError::Failed {
+            reason: error.to_string(),
+        })?;
+        let egress = self.deps.egress.egress_for_channel(
+            &record.extension_id,
+            &record.installation_id,
+            channel.egress.as_slice(),
+        );
+        with_deadline(
+            self.deps.hook_deadline,
+            crate::channel_vendor_calls::run_vendor_call(
+                recipe,
+                &target.host,
+                target.credential_handle.as_ref(),
+                &record.config,
+                egress.as_ref(),
+                wiring.label(),
+            ),
+        )
+        .await
+        .map_err(|error| ChannelWiringError::Failed {
+            reason: error.to_string(),
+        })
     }
 
     /// Drop an installation record. This is the live removal path: the
@@ -371,11 +449,10 @@ impl ExtensionHost {
         }
         if let Some(channel) = &resolved.channel
             && let Some(ingress) = &channel.ingress
+            && let Some(route_suffix) = &ingress.route_suffix
         {
-            let route = crate::ingress::canonical_ingress_path(
-                &record.extension_id,
-                ingress.route_suffix.as_str(),
-            );
+            let route =
+                crate::ingress::canonical_ingress_path(&record.extension_id, route_suffix.as_str());
             if self.deps.reserved_ingress_routes.contains(&route) {
                 return Err(LifecycleError::Conflict(SnapshotConflict::ReservedRoute {
                     route,
