@@ -96,6 +96,34 @@ test("approving a card reports the task upward AND flips that card to running", 
   assert.equal(runningProps.task.state, "running");
 });
 
+test("only the running card stays unlocked — every other card locks (§2A change 3)", () => {
+  // No job running yet: nothing is locked.
+  const idle = renderSurface();
+  const idleCard = findComponent(idle.tree, idle.components.SuggestedTaskCard);
+  const idleProps = componentProps(idleCard, idle.components.SuggestedTaskCard);
+  assert.equal(idleProps.locked, false, "no card locks when nothing is running");
+  const cardTaskId = idleProps.task.id;
+
+  // A DIFFERENT card is running: this card must lock (disable connect/approve/
+  // automation — no queuing a second job while one is active).
+  const otherRunning = renderSurface({ runningId: "a-different-task-id" });
+  const otherProps = componentProps(
+    findComponent(otherRunning.tree, otherRunning.components.SuggestedTaskCard),
+    otherRunning.components.SuggestedTaskCard,
+  );
+  assert.notEqual(otherProps.task.id, "a-different-task-id");
+  assert.equal(otherProps.locked, true, "every other card locks while one job runs");
+
+  // THIS card is the one running: it must stay unlocked so its own
+  // running/completed state remains interactive (e.g. still dismissible).
+  const selfRunning = renderSurface({ runningId: cardTaskId });
+  const selfProps = componentProps(
+    findComponent(selfRunning.tree, selfRunning.components.SuggestedTaskCard),
+    selfRunning.components.SuggestedTaskCard,
+  );
+  assert.equal(selfProps.locked, false, "the acting card itself never locks");
+});
+
 test("surface forwards renderRunningIndicator straight through to each card", () => {
   // Test through the caller: the surface itself has no opinion on how the
   // running state renders — it just threads the render prop from its own

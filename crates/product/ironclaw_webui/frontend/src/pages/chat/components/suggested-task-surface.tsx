@@ -97,6 +97,11 @@ export function SuggestedTaskSurface({
             task={runningId === task.id ? { ...task, state: "running" } : task}
             scheduled={scheduledId === task.id}
             renderRunningIndicator={renderRunningIndicator}
+            // §2A change 3: only one suggested job may run at a time — every
+            // OTHER card disables (no queuing, no concurrent approve/connect/
+            // automation) while one is active. The acting card itself stays
+            // interactive so its own running/completed state still reads.
+            locked={runningId !== null && runningId !== task.id}
             onApprove={() => {
               setRunningId(task.id);
               onApproveTask?.(task);
