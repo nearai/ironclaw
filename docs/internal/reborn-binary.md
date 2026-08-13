@@ -387,6 +387,25 @@ Expected fields include:
 - `v1_state: not-used`
 - `driver_registry: initialized`
 
+When one or more of `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `http_proxy`,
+`https_proxy`, or `all_proxy` are set to a non-empty value, `doctor` also reports a
+`host_mediated_ambient_proxy` check. A variable that is set but empty does not
+trigger the check; this non-empty rule is `doctor`'s own presence-detection logic,
+not behavior mirrored from the host-mediated transport. The transport does not
+parse these variables at all: it disables ambient proxy discovery outright. The
+check reports only that ambient proxy configuration is present; it
+never emits proxy URLs, credentials, or other environment-variable values. When
+none of those variables are set to a non-empty value, the check is omitted.
+`NO_PROXY` and `no_proxy` specify proxy bypass rules, not
+proxy endpoints, so they are deliberately excluded; they are irrelevant to the
+host-mediated transport because it disables ambient proxy discovery.
+
+The diagnostic reflects the host-mediated network behavior established by
+#7027: `ReqwestNetworkTransport` ignores ambient proxy discovery so an approved,
+pinned destination remains authoritative. It does not imply support for an
+explicit proxy configuration. LLM-provider clients and sandbox egress have
+separate proxy policies and are outside this check.
+
 ### `hooks list` — disabled
 
 Same treatment as `channels list` above: the Reborn hook registry is not

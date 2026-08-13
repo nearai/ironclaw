@@ -27,6 +27,13 @@ impl DoctorCommand {
 }
 
 fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
+    build_doctor_dto_with_ambient_proxy_presence(context, context.ambient_proxy_present())
+}
+
+fn build_doctor_dto_with_ambient_proxy_presence(
+    context: &RebornCliContext,
+    ambient_proxy_present: bool,
+) -> DoctorDto {
     let mut checks = Vec::new();
 
     let report = RebornDoctorReport::from_config(context.boot_config().clone());
@@ -58,6 +65,15 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
 
     let providers_path = context.boot_config().home().providers_file_path();
     checks.push(check_providers_file(&providers_path));
+
+    if ambient_proxy_present {
+        checks.push(DoctorCheck {
+            name: "host_mediated_ambient_proxy".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Skip,
+            detail: "ambient proxy variables are configured but ignored by host-mediated ReqwestNetworkTransport so approved pinned destinations remain authoritative; LLM clients and sandbox egress use separate proxy policies".to_string(),
+        });
+    }
 
     let snapshot = reborn_runtime_readiness_snapshot();
 
@@ -201,6 +217,30 @@ mod tests {
     use super::*;
     use crate::context::RebornCliContext;
 
+    const HOST_MEDIATED_PROXY_CHECK: &str = "host_mediated_ambient_proxy";
+    const HOST_MEDIATED_PROXY_DETAIL: &str = "ambient proxy variables are configured but ignored by host-mediated ReqwestNetworkTransport so approved pinned destinations remain authoritative; LLM clients and sandbox egress use separate proxy policies";
+    const AMBIENT_PROXY_ENV_VARS: [&str; 6] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ];
+
+    fn cleared_ambient_proxy_env() -> Vec<crate::runtime::test_env::EnvGuard> {
+        AMBIENT_PROXY_ENV_VARS
+            .into_iter()
+            .map(crate::runtime::test_env::EnvGuard::clear)
+            .collect()
+    }
+
+    fn render_doctor_text(dto: &DoctorDto) -> String {
+        let mut output = Vec::new();
+        dto.render_text_to(&mut output).expect("render doctor text");
+        String::from_utf8(output).expect("doctor text is UTF-8")
+    }
+
     #[test]
     fn doctor_dto_builds_with_defaults() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -221,6 +261,156 @@ mod tests {
             dto.checks
                 .iter()
                 .any(|c| c.category == CheckCategory::Drivers)
+        );
+    }
+
+    #[test]
+    fn doctor_reports_ignored_ambient_proxy_without_leaking_values() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        // The diagnostic builder deliberately receives only presence state.
+        // Proxy values therefore cannot cross into either rendering surface.
+        let dto = build_doctor_dto_with_ambient_proxy_presence(&context, true);
+        let check = dto
+            .checks
+            .iter()
+            .find(|check| check.name == HOST_MEDIATED_PROXY_CHECK)
+            .expect("configured ambient proxy variables must produce one stable diagnostic");
+
+        assert_eq!(check.category, CheckCategory::Core);
+        assert_eq!(check.outcome, CheckOutcome::Skip);
+        assert_eq!(check.detail, HOST_MEDIATED_PROXY_DETAIL);
+
+        let text = render_doctor_text(&dto);
+        let json = serde_json::to_string(&dto).expect("serialize doctor JSON");
+        for output in [&text, &json] {
+            assert!(
+                output.contains(HOST_MEDIATED_PROXY_CHECK),
+                "diagnostic identity missing from output: {output}"
+            );
+            assert!(
+                output.contains("host-mediated ReqwestNetworkTransport"),
+                "output must identify the affected transport boundary: {output}"
+            );
+            assert!(
+                output.contains("LLM clients") && output.contains("sandbox egress"),
+                "output must distinguish LLM and sandbox proxy policy: {output}"
+            );
+            for sensitive_fragment in [
+                "proxy-password",
+                "proxy-token",
+                "proxy.internal",
+                "18443",
+                "secret-path",
+            ] {
+                assert!(
+                    !output.contains(sensitive_fragment),
+                    "proxy configuration fragment leaked into output: {sensitive_fragment}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_omits_ambient_proxy_diagnostic_when_unconfigured() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_doctor_dto_with_ambient_proxy_presence(&context, false);
+        let text = render_doctor_text(&dto);
+        let json = serde_json::to_string(&dto).expect("serialize doctor JSON");
+
+        assert!(
+            dto.checks
+                .iter()
+                .all(|check| check.name != HOST_MEDIATED_PROXY_CHECK),
+            "an absent ambient proxy configuration must not produce a warning"
+        );
+        assert!(!text.contains(HOST_MEDIATED_PROXY_CHECK));
+        assert!(!json.contains(HOST_MEDIATED_PROXY_CHECK));
+    }
+
+    #[test]
+    fn doctor_uses_proxy_presence_captured_when_cli_context_is_resolved() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _cleared_proxy_env = cleared_ambient_proxy_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::runtime::test_env::EnvGuard::set(
+            "HOME",
+            temp.path().to_str().expect("temporary HOME must be UTF-8"),
+        );
+        let reborn_home = temp.path().join("reborn-home");
+        let _reborn_home = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_HOME",
+            reborn_home
+                .to_str()
+                .expect("temporary Reborn home must be UTF-8"),
+        );
+
+        let absent_context =
+            RebornCliContext::resolve_from_env().expect("absent-proxy context must resolve");
+        let present_context = {
+            let _http_proxy = crate::runtime::test_env::EnvGuard::set(
+                "HTTP_PROXY",
+                "http://context-boundary-sentinel.invalid:18443/secret-path",
+            );
+            RebornCliContext::resolve_from_env().expect("present-proxy context must resolve")
+        };
+        assert!(
+            std::env::var_os("HTTP_PROXY").is_none(),
+            "the proxy variable must be absent before either context is rendered"
+        );
+
+        let absent_dto = build_doctor_dto(&absent_context);
+        assert!(
+            absent_dto
+                .checks
+                .iter()
+                .all(|check| check.name != HOST_MEDIATED_PROXY_CHECK),
+            "a context resolved without ambient proxy configuration must omit the diagnostic"
+        );
+
+        let present_dto = build_doctor_dto(&present_context);
+        assert!(
+            present_dto
+                .checks
+                .iter()
+                .any(|check| check.name == HOST_MEDIATED_PROXY_CHECK),
+            "a context resolved while an ambient proxy variable was present must retain the diagnostic after the process environment changes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_treats_non_utf8_proxy_value_as_present() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _cleared_proxy_env = cleared_ambient_proxy_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::runtime::test_env::EnvGuard::set(
+            "HOME",
+            temp.path().to_str().expect("temporary HOME must be UTF-8"),
+        );
+        let reborn_home = temp.path().join("reborn-home");
+        let _reborn_home = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_HOME",
+            reborn_home
+                .to_str()
+                .expect("temporary Reborn home must be UTF-8"),
+        );
+
+        // A non-empty, non-UTF-8 value is a real ambient proxy setting and
+        // must be treated as present, not silently coerced to "absent" the
+        // way an `Err(_)` from `std::env::var` would be.
+        let invalid = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let _http_proxy = crate::runtime::test_env::EnvGuard::set_os("HTTP_PROXY", &invalid);
+
+        let context =
+            RebornCliContext::resolve_from_env().expect("non-UTF-8 proxy context must resolve");
+        let dto = build_doctor_dto(&context);
+        assert!(
+            dto.checks
+                .iter()
+                .any(|check| check.name == HOST_MEDIATED_PROXY_CHECK),
+            "a non-UTF-8 but non-empty proxy variable must still be reported as present"
         );
     }
 
