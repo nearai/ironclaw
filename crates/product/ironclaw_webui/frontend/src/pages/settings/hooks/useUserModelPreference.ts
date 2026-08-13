@@ -37,6 +37,7 @@ export function useUserModelPreference() {
     model: preferenceQuery.data?.model || null,
     isLoading: catalogQuery.isLoading || preferenceQuery.isLoading,
     isSaving: mutation.isPending,
+    preferenceReadFailed: preferenceQuery.isError,
     error: mutation.error || catalogQuery.error || preferenceQuery.error || null,
     setModel: (model) => mutation.mutate(model || null),
   };

@@ -69,12 +69,15 @@ function setInputValue(input, value) {
 test("admin can enable selection from the active model and a manually added model", async () => {
   const savedCatalog = {
     selection_enabled: true,
-    workspace_default: "mock-model",
-    models: ["mock-model", "e2e-selected-model"],
+    workspace_default: "canonical-model",
+    models: ["canonical-model"],
   };
   requests.setPolicy.mockResolvedValue(savedCatalog);
   const rendered = await renderEditor(providerState());
   try {
+    rendered.queryClient.setQueryData(["llm-providers"], {
+      user_model_policy: null,
+    });
     const activeModel = rendered.container.querySelector<HTMLInputElement>(
       '[data-testid="settings-model-policy-model-mock-model"]'
     );
@@ -112,6 +115,17 @@ test("admin can enable selection from the active model and a manually added mode
       rendered.queryClient.getQueryData(["user-model-catalog"]),
       savedCatalog
     );
+    assert.deepEqual(rendered.queryClient.getQueryData(["llm-providers"]), {
+      user_model_policy: {
+        provider_id: "openai_compatible",
+        workspace_default: "canonical-model",
+        allowed_models: ["canonical-model"],
+      },
+    });
+    const canonicalModel = rendered.container.querySelector<HTMLInputElement>(
+      '[data-testid="settings-model-policy-model-canonical-model"]'
+    );
+    assert.equal(canonicalModel?.checked, true);
     assert.match(
       rendered.container.querySelector('[data-testid="settings-model-policy-status"]')
         ?.textContent ?? "",

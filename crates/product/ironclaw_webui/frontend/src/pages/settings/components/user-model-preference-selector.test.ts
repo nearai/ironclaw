@@ -96,3 +96,98 @@ test("model preference selector contains long model names inside its card", () =
   assert.match(props.buttonClassName, /\boverflow-hidden\b/);
   assert.match(props.menuClassName, /\bw-full\b/);
 });
+
+test("stale model preference can be reset when selection policy is unavailable", () => {
+  const SelectMenu = "SelectMenu";
+  const staleModel = "provider-a/retired-model";
+  const exports = runVmModuleForTest(
+    "./user-model-preference-selector.tsx",
+    ["UserModelPreferenceSelector"],
+    {
+      Card: "Card",
+      SelectMenu,
+      html,
+      useT: () => (key, params = {}) =>
+        key === "llm.followWorkspaceDefault"
+          ? `Workspace default (${params.model})`
+          : key === "llm.unavailableModel"
+            ? `Unavailable (${params.model})`
+            : key,
+      useUserModelPreference: () => ({
+        catalog: {
+          selection_enabled: false,
+          workspace_default: null,
+          models: [],
+        },
+        model: staleModel,
+        isLoading: false,
+        isSaving: false,
+        error: null,
+        setModel: () => {},
+      }),
+    },
+    import.meta.url
+  );
+
+  const rendered = exports.UserModelPreferenceSelector();
+  const selectNode = findComponentNode(rendered, SelectMenu);
+  assert.ok(selectNode, "expected model selector");
+  const props = componentProps(selectNode, SelectMenu);
+
+  assert.equal(
+    props.disabled,
+    false,
+    "the reset option must remain usable when a stale preference exists"
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(props.options)), [
+    {
+      value: "",
+      label: "Workspace default (inference.none)",
+    },
+    {
+      value: staleModel,
+      label: `Unavailable (${staleModel})`,
+      disabled: true,
+      tone: "warning",
+    },
+  ]);
+});
+
+test("model preference selector blocks writes when the preference read fails", () => {
+  const SelectMenu = "SelectMenu";
+  const exports = runVmModuleForTest(
+    "./user-model-preference-selector.tsx",
+    ["UserModelPreferenceSelector"],
+    {
+      Card: "Card",
+      SelectMenu,
+      html,
+      useT: () => (key) => key,
+      useUserModelPreference: () => ({
+        catalog: {
+          selection_enabled: true,
+          workspace_default: "model-a",
+          models: ["model-a"],
+        },
+        model: null,
+        isLoading: false,
+        isSaving: false,
+        preferenceReadFailed: true,
+        error: new Error("preference read failed"),
+        setModel: () => {},
+      }),
+    },
+    import.meta.url
+  );
+
+  const rendered = exports.UserModelPreferenceSelector();
+  const selectNode = findComponentNode(rendered, SelectMenu);
+  assert.ok(selectNode, "expected model selector");
+  const props = componentProps(selectNode, SelectMenu);
+
+  assert.equal(
+    props.disabled,
+    true,
+    "a failed preference read must prevent an uninformed overwrite"
+  );
+});

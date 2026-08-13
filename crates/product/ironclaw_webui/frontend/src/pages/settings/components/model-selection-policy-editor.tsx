@@ -84,14 +84,15 @@ export function ModelSelectionPolicyEditor({ providerState }) {
               ...snapshot,
               user_model_policy: {
                 provider_id: providerState.activeProviderId,
-                workspace_default: request.workspace_default,
-                allowed_models: request.allowed_models,
+                workspace_default:
+                  catalog.workspace_default ?? request.workspace_default,
+                allowed_models: catalog.models ?? request.allowed_models,
               },
             }
           : snapshot
       );
-      setAllowedModels(catalog.models || request.allowed_models);
-      setWorkspaceDefault(catalog.workspace_default || request.workspace_default);
+      setAllowedModels(catalog.models ?? request.allowed_models);
+      setWorkspaceDefault(catalog.workspace_default ?? request.workspace_default);
       setStatus({ tone: "success", text: t("llm.policyEnabled") });
     },
     onError: (error) => {

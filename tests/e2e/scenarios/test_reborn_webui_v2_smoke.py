@@ -30,6 +30,7 @@ import re
 import sys
 import uuid
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from urllib.parse import parse_qs, quote, urlparse
 
 import aiohttp
@@ -1458,6 +1459,247 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         )
 
 
+async def _restore_model_selection_policy(operator, reborn_v2_server: str) -> None:
+    response = await operator.put(
+        f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
+        json={
+            "workspace_default": "mock-model",
+            "allowed_models": ["mock-model"],
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+
+
+async def _delete_model_preference_member(
+    operator, reborn_v2_server: str, member_id: str
+) -> None:
+    response = await operator.delete(
+        f"{reborn_v2_server}/api/webchat/v2/admin/users/{member_id}",
+        timeout=10,
+    )
+    response.raise_for_status()
+
+
+async def _reset_model_preference(reborn_v2_server: str, token: str) -> None:
+    async with httpx.AsyncClient(headers=reborn_bearer_headers(token)) as member:
+        response = await member.put(
+            f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
+            json={"model": None},
+            timeout=10,
+        )
+        response.raise_for_status()
+
+
+async def _wait_for_model_selector_layout(selector, description, *, wide: bool) -> None:
+    layout = selector.locator("xpath=../..")
+    last_boxes = None
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                selector_box = await selector.bounding_box()
+                description_box = await description.bounding_box()
+                layout_box = await layout.bounding_box()
+                last_boxes = (selector_box, description_box, layout_box)
+                if selector_box and description_box and layout_box:
+                    if wide:
+                        settled = selector_box["y"] < (
+                            description_box["y"] + description_box["height"]
+                        ) and abs(
+                            selector_box["x"]
+                            + selector_box["width"]
+                            - layout_box["x"]
+                            - layout_box["width"]
+                        ) <= 1
+                    else:
+                        settled = selector_box["y"] >= (
+                            description_box["y"] + description_box["height"]
+                        ) and abs(selector_box["x"] - layout_box["x"]) <= 1 and abs(
+                            selector_box["width"] - layout_box["width"]
+                        ) <= 1
+                    if settled:
+                        return
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        mode = "wide" if wide else "narrow"
+        raise AssertionError(
+            f"the selector did not settle into the {mode} layout: {last_boxes}"
+        ) from None
+
+
+async def _publish_model_selection_policy(
+    page, operator, cleanup, reborn_v2_server: str, selected_model: str
+) -> None:
+    await page.goto(
+        f"{reborn_v2_server}/settings/inference?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    await page.wait_for_selector(SEL_V2["settings_model_policy_editor"], timeout=15000)
+    await page.locator(SEL_V2["settings_model_policy_model_input"]).fill(
+        selected_model
+    )
+    await page.locator(SEL_V2["settings_model_policy_add_model"]).click()
+    async with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/api/webchat/v2/llm/model-policy")
+    ) as response_info:
+        await page.locator(SEL_V2["settings_model_policy_save"]).click()
+    response = await response_info.value
+    assert response.ok, f"model policy save failed with {response.status}"
+    cleanup.push_async_callback(
+        _restore_model_selection_policy, operator, reborn_v2_server
+    )
+    await expect(page.locator(SEL_V2["settings_model_policy_status"])).to_contain_text(
+        "Model selection enabled", timeout=15000
+    )
+
+
+async def _create_model_preference_member(
+    operator,
+    cleanup,
+    reborn_v2_server: str,
+    *,
+    display_name: str,
+    email: str,
+) -> tuple[str, str]:
+    response = await operator.post(
+        f"{reborn_v2_server}/api/webchat/v2/admin/users",
+        json={"display_name": display_name, "email": email, "role": "member"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    body = response.json()
+    member_id = body["user"]["user_id"]
+    token = body["api_token"]
+    cleanup.push_async_callback(
+        _delete_model_preference_member, operator, reborn_v2_server, member_id
+    )
+    cleanup.push_async_callback(_reset_model_preference, reborn_v2_server, token)
+    return member_id, token
+
+
+async def _open_model_preference_page(
+    page, reborn_v2_server: str, token: str, path: str, ready_selector: str
+) -> None:
+    separator = "&" if "?" in path else "?"
+    encoded_token = quote(token, safe="")
+    await page.goto(f"{reborn_v2_server}{path}{separator}token={encoded_token}")
+    await page.wait_for_selector(ready_selector, timeout=15000)
+
+
+async def _choose_model_preference(
+    page, reborn_v2_server: str, token: str, selected_model: str
+) -> None:
+    await _open_model_preference_page(
+        page,
+        reborn_v2_server,
+        token,
+        "/settings/inference",
+        SEL_V2["settings_model_selector"],
+    )
+    await expect(page.get_by_role("button", name="Add provider")).to_have_count(0)
+    await expect(page.locator(SEL_V2["settings_model_policy_editor"])).to_have_count(0)
+    selector = page.locator(SEL_V2["settings_model_selector"])
+    button = selector.get_by_role("button")
+    await expect(button).to_be_enabled(timeout=15000)
+    await button.click()
+    await page.get_by_role("option", name=selected_model, exact=True).click()
+    await expect(button).to_contain_text(selected_model)
+    description = page.get_by_text(
+        "Used for future messages in all conversations.", exact=True
+    )
+    await _wait_for_model_selector_layout(selector, description, wide=False)
+    await page.set_viewport_size({"width": 1440, "height": 720})
+    await _wait_for_model_selector_layout(selector, description, wide=True)
+
+
+async def _wait_for_model_preference(member, reborn_v2_server: str, model) -> None:
+    observed = object()
+    async with asyncio.timeout(15):
+        while observed != model:
+            response = await member.get(
+                f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
+                timeout=5,
+            )
+            response.raise_for_status()
+            observed = response.json().get("model")
+            if observed != model:
+                await asyncio.sleep(0.1)
+
+
+async def _assert_model_preference_permissions(
+    default_member, default_page, reborn_v2_server: str, token: str, selected_model: str
+) -> None:
+    await _wait_for_model_preference(default_member, reborn_v2_server, None)
+    providers = await default_member.get(
+        f"{reborn_v2_server}/api/webchat/v2/llm/providers", timeout=5
+    )
+    assert providers.status_code == 403
+    policy = await default_member.put(
+        f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
+        json={
+            "workspace_default": selected_model,
+            "allowed_models": [selected_model],
+        },
+        timeout=5,
+    )
+    assert policy.status_code == 403
+    await _open_model_preference_page(
+        default_page,
+        reborn_v2_server,
+        token,
+        "/settings/inference",
+        SEL_V2["settings_model_selector"],
+    )
+    button = default_page.locator(SEL_V2["settings_model_selector"]).get_by_role(
+        "button"
+    )
+    await expect(button).to_contain_text("mock-model")
+    await expect(button).not_to_contain_text(selected_model)
+
+
+async def _send_model_preference_turn(
+    member, page, reborn_v2_server: str, token: str, prompt: str
+) -> None:
+    thread_id = await _create_thread(member, reborn_v2_server)
+    await _open_model_preference_page(
+        page,
+        reborn_v2_server,
+        token,
+        f"/chat/{thread_id}",
+        SEL_V2["chat_composer"],
+    )
+    composer = page.locator(SEL_V2["chat_composer"])
+    await composer.fill(prompt)
+    await composer.press("Enter")
+    await _wait_for_assistant_message(member, reborn_v2_server, thread_id)
+
+
+async def _assert_model_preference_provider_requests(
+    member,
+    mock_llm_server: str,
+    selected_prompt: str,
+    default_prompt: str,
+    selected_model: str,
+) -> None:
+    response = await member.get(f"{mock_llm_server}/__mock/chat_requests", timeout=10)
+    response.raise_for_status()
+    requests = response.json().get("requests", [])
+    selected = [
+        request
+        for request in requests
+        if selected_prompt in json.dumps(request.get("messages", []))
+    ]
+    default = [
+        request
+        for request in requests
+        if default_prompt in json.dumps(request.get("messages", []))
+    ]
+    assert selected, "the preferred-model turn never reached the mock provider"
+    assert selected[-1].get("model") == selected_model, selected[-1]
+    assert default, "the second member's default-model turn never reached the mock provider"
+    assert default[-1].get("model") == "mock-model", default[-1]
+
+
 async def test_reborn_v2_settings_model_preference_reaches_provider(
     reborn_v2_server,
     reborn_v2_browser,
@@ -1470,320 +1712,81 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
     selected_prompt = f"settings selected model routing {uuid.uuid4()}"
     default_prompt = f"settings default model routing {uuid.uuid4()}"
     suffix = uuid.uuid4().hex[:8]
-    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as operator:
+    async with httpx.AsyncClient(
+        headers=reborn_bearer_headers()
+    ) as operator, AsyncExitStack() as cleanup:
         admin_context = await reborn_v2_browser.new_context(
             viewport={"width": 1280, "height": 720}
         )
+        cleanup.push_async_callback(admin_context.close)
         admin_page = await admin_context.new_page()
-        try:
-            await admin_page.goto(
-                f"{reborn_v2_server}/settings/inference?token={REBORN_V2_AUTH_TOKEN}"
-            )
-            await admin_page.wait_for_selector(
-                SEL_V2["settings_model_policy_editor"], timeout=15000
-            )
-            model_input = admin_page.locator(
-                SEL_V2["settings_model_policy_model_input"]
-            )
-            await model_input.fill(selected_model)
-            await admin_page.locator(
-                SEL_V2["settings_model_policy_add_model"]
-            ).click()
-            await admin_page.locator(SEL_V2["settings_model_policy_save"]).click()
-            await expect(
-                admin_page.locator(SEL_V2["settings_model_policy_status"])
-            ).to_contain_text("Model selection enabled", timeout=15000)
-        finally:
-            await admin_context.close()
-
-        selected_created = await operator.post(
-            f"{reborn_v2_server}/api/webchat/v2/admin/users",
-            json={
-                "display_name": f"Selected Model E2E {suffix}",
-                "email": f"selected-model-{suffix}@example.com",
-                "role": "member",
-            },
-            timeout=15,
+        await _publish_model_selection_policy(
+            admin_page, operator, cleanup, reborn_v2_server, selected_model
         )
-        selected_created.raise_for_status()
-        selected_member_id = selected_created.json()["user"]["user_id"]
-        selected_member_token = selected_created.json()["api_token"]
-        default_created = await operator.post(
-            f"{reborn_v2_server}/api/webchat/v2/admin/users",
-            json={
-                "display_name": f"Default Model E2E {suffix}",
-                "email": f"default-model-{suffix}@example.com",
-                "role": "member",
-            },
-            timeout=15,
+        _, selected_token = await _create_model_preference_member(
+            operator,
+            cleanup,
+            reborn_v2_server,
+            display_name=f"Selected Model E2E {suffix}",
+            email=f"selected-model-{suffix}@example.com",
         )
-        default_created.raise_for_status()
-        default_member_id = default_created.json()["user"]["user_id"]
-        default_member_token = default_created.json()["api_token"]
+        _, default_token = await _create_model_preference_member(
+            operator,
+            cleanup,
+            reborn_v2_server,
+            display_name=f"Default Model E2E {suffix}",
+            email=f"default-model-{suffix}@example.com",
+        )
         reset = await operator.post(
-            f"{mock_llm_server}/__mock/chat_requests/reset",
-            timeout=10,
+            f"{mock_llm_server}/__mock/chat_requests/reset", timeout=10
         )
         reset.raise_for_status()
-
-        async with httpx.AsyncClient(
-            headers=reborn_bearer_headers(selected_member_token)
-        ) as selected_member, httpx.AsyncClient(
-            headers=reborn_bearer_headers(default_member_token)
-        ) as default_member:
-            selected_context = await reborn_v2_browser.new_context(
-                viewport={"width": 1100, "height": 720}
-            )
-            selected_page = await selected_context.new_page()
-            default_context = await reborn_v2_browser.new_context(
-                viewport={"width": 1280, "height": 720}
-            )
-            default_page = await default_context.new_page()
-
-            async def open_member_page(
-                page, token: str, path: str, ready_selector: str
-            ) -> None:
-                separator = "&" if "?" in path else "?"
-                encoded_token = quote(token, safe="")
-                await page.goto(
-                    f"{reborn_v2_server}{path}{separator}token={encoded_token}"
-                )
-                await page.wait_for_selector(ready_selector, timeout=15000)
-
-            try:
-                await open_member_page(
-                    selected_page,
-                    selected_member_token,
-                    "/settings/inference",
-                    SEL_V2["settings_model_selector"],
-                )
-                await expect(
-                    selected_page.get_by_role("button", name="Add provider")
-                ).to_have_count(0)
-                await expect(
-                    selected_page.locator(SEL_V2["settings_model_policy_editor"])
-                ).to_have_count(0)
-                selector = selected_page.locator(SEL_V2["settings_model_selector"])
-                button = selector.get_by_role("button")
-                await expect(button).to_be_enabled(timeout=15000)
-                await button.click()
-                await selected_page.get_by_role(
-                    "option", name=selected_model, exact=True
-                ).click()
-                await expect(button).to_contain_text(selected_model)
-                description = selected_page.get_by_text(
-                    "Used for future messages in all conversations.", exact=True
-                )
-                selector_box = await selector.bounding_box()
-                description_box = await description.bounding_box()
-                layout_box = await selector.locator("xpath=../..").bounding_box()
-                assert selector_box is not None
-                assert description_box is not None
-                assert layout_box is not None
-                assert (
-                    selector_box["y"]
-                    >= description_box["y"] + description_box["height"]
-                ), (
-                    "the selector did not stack below its description on a narrow "
-                    f"viewport: selector={selector_box}, description={description_box}"
-                )
-                assert abs(selector_box["x"] - layout_box["x"]) <= 1
-                assert abs(selector_box["width"] - layout_box["width"]) <= 1
-
-                await selected_page.set_viewport_size(
-                    {"width": 1440, "height": 720}
-                )
-                selector_box = await selector.bounding_box()
-                description_box = await description.bounding_box()
-                layout_box = await selector.locator("xpath=../..").bounding_box()
-                assert selector_box is not None
-                assert description_box is not None
-                assert layout_box is not None
-                assert (
-                    selector_box["y"]
-                    < description_box["y"] + description_box["height"]
-                ), (
-                    "the selector did not move beside its description on a wide "
-                    f"viewport: selector={selector_box}, description={description_box}"
-                )
-                assert abs(
-                    selector_box["x"]
-                    + selector_box["width"]
-                    - layout_box["x"]
-                    - layout_box["width"]
-                ) <= 1, (
-                    "the wide selector was not right-aligned inside its card: "
-                    f"selector={selector_box}, layout={layout_box}"
-                )
-
-                preference = None
-                async with asyncio.timeout(15):
-                    while preference != selected_model:
-                        response = await selected_member.get(
-                            f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
-                            timeout=5,
-                        )
-                        response.raise_for_status()
-                        preference = response.json().get("model")
-                        if preference != selected_model:
-                            await asyncio.sleep(0.1)
-
-                default_preference = await default_member.get(
-                    f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
-                    timeout=5,
-                )
-                default_preference.raise_for_status()
-                assert default_preference.json().get("model") is None
-
-                forbidden_providers = await default_member.get(
-                    f"{reborn_v2_server}/api/webchat/v2/llm/providers",
-                    timeout=5,
-                )
-                assert forbidden_providers.status_code == 403
-                forbidden_policy = await default_member.put(
-                    f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
-                    json={
-                        "workspace_default": selected_model,
-                        "allowed_models": [selected_model],
-                    },
-                    timeout=5,
-                )
-                assert forbidden_policy.status_code == 403
-
-                await open_member_page(
-                    default_page,
-                    default_member_token,
-                    "/settings/inference",
-                    SEL_V2["settings_model_selector"],
-                )
-                default_button = default_page.locator(
-                    SEL_V2["settings_model_selector"]
-                ).get_by_role("button")
-                await expect(default_button).to_contain_text("mock-model")
-                await expect(default_button).not_to_contain_text(selected_model)
-
-                selected_thread_id = await _create_thread(
-                    selected_member, reborn_v2_server
-                )
-                await open_member_page(
-                    selected_page,
-                    selected_member_token,
-                    f"/chat/{selected_thread_id}",
-                    SEL_V2["chat_composer"],
-                )
-                composer = selected_page.locator(SEL_V2["chat_composer"])
-                await composer.fill(selected_prompt)
-                await composer.press("Enter")
-                await _wait_for_assistant_message(
-                    selected_member,
-                    reborn_v2_server,
-                    selected_thread_id,
-                )
-
-                default_thread_id = await _create_thread(
-                    default_member, reborn_v2_server
-                )
-                await _send_message(
-                    default_member,
-                    reborn_v2_server,
-                    default_thread_id,
-                    default_prompt,
-                )
-                await _wait_for_assistant_message(
-                    default_member,
-                    reborn_v2_server,
-                    default_thread_id,
-                )
-
-                requests = await selected_member.get(
-                    f"{mock_llm_server}/__mock/chat_requests",
-                    timeout=10,
-                )
-                requests.raise_for_status()
-                selected_matching = [
-                    request
-                    for request in requests.json().get("requests", [])
-                    if selected_prompt in json.dumps(request.get("messages", []))
-                ]
-                default_matching = [
-                    request
-                    for request in requests.json().get("requests", [])
-                    if default_prompt in json.dumps(request.get("messages", []))
-                ]
-                assert selected_matching, (
-                    "the preferred-model turn never reached the mock provider"
-                )
-                assert selected_matching[-1].get("model") == selected_model, (
-                    selected_matching[-1]
-                )
-                assert default_matching, (
-                    "the second member's default-model turn never reached the mock provider"
-                )
-                assert default_matching[-1].get("model") == "mock-model", (
-                    default_matching[-1]
-                )
-
-                selected_preference = await selected_member.get(
-                    f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
-                    timeout=5,
-                )
-                selected_preference.raise_for_status()
-                assert selected_preference.json().get("model") == selected_model
-                default_preference = await default_member.get(
-                    f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
-                    timeout=5,
-                )
-                default_preference.raise_for_status()
-                assert default_preference.json().get("model") is None
-
-                await open_member_page(
-                    selected_page,
-                    selected_member_token,
-                    "/settings/inference",
-                    SEL_V2["settings_model_selector"],
-                )
-                await expect(
-                    selected_page.locator(
-                        SEL_V2["settings_model_selector"]
-                    ).get_by_role("button")
-                ).to_contain_text(selected_model)
-            finally:
-                test_failed = sys.exc_info()[0] is not None
-                cleanup_error = None
-                try:
-                    cleanup = await selected_member.put(
-                        f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
-                        json={"model": None},
-                        timeout=10,
-                    )
-                    cleanup.raise_for_status()
-                    default_cleanup = await default_member.put(
-                        f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
-                        json={"model": None},
-                        timeout=10,
-                    )
-                    default_cleanup.raise_for_status()
-                    policy_cleanup = await operator.put(
-                        f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
-                        json={
-                            "workspace_default": "mock-model",
-                            "allowed_models": ["mock-model"],
-                        },
-                        timeout=10,
-                    )
-                    policy_cleanup.raise_for_status()
-                    for member_id in (selected_member_id, default_member_id):
-                        removed = await operator.delete(
-                            f"{reborn_v2_server}/api/webchat/v2/admin/users/{member_id}",
-                            timeout=10,
-                        )
-                        removed.raise_for_status()
-                except httpx.HTTPError as error:
-                    cleanup_error = error
-                await selected_context.close()
-                await default_context.close()
-                if cleanup_error is not None and not test_failed:
-                    raise cleanup_error
+        selected_member = await cleanup.enter_async_context(
+            httpx.AsyncClient(headers=reborn_bearer_headers(selected_token))
+        )
+        default_member = await cleanup.enter_async_context(
+            httpx.AsyncClient(headers=reborn_bearer_headers(default_token))
+        )
+        selected_context = await reborn_v2_browser.new_context(
+            viewport={"width": 1100, "height": 720}
+        )
+        cleanup.push_async_callback(selected_context.close)
+        default_context = await reborn_v2_browser.new_context(
+            viewport={"width": 1280, "height": 720}
+        )
+        cleanup.push_async_callback(default_context.close)
+        selected_page = await selected_context.new_page()
+        default_page = await default_context.new_page()
+        await _choose_model_preference(
+            selected_page, reborn_v2_server, selected_token, selected_model
+        )
+        await _wait_for_model_preference(
+            selected_member, reborn_v2_server, selected_model
+        )
+        await _assert_model_preference_permissions(
+            default_member, default_page, reborn_v2_server, default_token, selected_model
+        )
+        await _send_model_preference_turn(
+            selected_member, selected_page, reborn_v2_server, selected_token, selected_prompt
+        )
+        default_thread_id = await _create_thread(default_member, reborn_v2_server)
+        await _send_message(default_member, reborn_v2_server, default_thread_id, default_prompt)
+        await _wait_for_assistant_message(default_member, reborn_v2_server, default_thread_id)
+        await _assert_model_preference_provider_requests(
+            selected_member, mock_llm_server, selected_prompt, default_prompt, selected_model
+        )
+        await _wait_for_model_preference(selected_member, reborn_v2_server, selected_model)
+        await _wait_for_model_preference(default_member, reborn_v2_server, None)
+        await _open_model_preference_page(
+            selected_page,
+            reborn_v2_server,
+            selected_token,
+            "/settings/inference",
+            SEL_V2["settings_model_selector"],
+        )
+        await expect(
+            selected_page.locator(SEL_V2["settings_model_selector"]).get_by_role("button")
+        ).to_contain_text(selected_model)
 
 
 async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(

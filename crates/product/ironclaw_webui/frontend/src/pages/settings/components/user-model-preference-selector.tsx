@@ -6,8 +6,15 @@ import { useUserModelPreference } from "../hooks/useUserModelPreference";
 
 export function UserModelPreferenceSelector() {
   const t = useT();
-  const { catalog, model, isLoading, isSaving, error, setModel } =
-    useUserModelPreference();
+  const {
+    catalog,
+    model,
+    isLoading,
+    isSaving,
+    preferenceReadFailed,
+    error,
+    setModel,
+  } = useUserModelPreference();
   const workspaceDefault = catalog.workspace_default || t("inference.none");
   const availableModels = catalog.models || [];
   const options = [
@@ -46,7 +53,12 @@ export function UserModelPreferenceSelector() {
             value={model || ""}
             options={options}
             onChange={setModel}
-            disabled={isLoading || isSaving || !catalog.selection_enabled}
+            disabled={
+              isLoading ||
+              isSaving ||
+              preferenceReadFailed ||
+              (!catalog.selection_enabled && !model)
+            }
             ariaLabel={t("llm.modelPreference")}
             align="right"
             className="block w-full min-w-0 max-w-full"

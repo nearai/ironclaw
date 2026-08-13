@@ -226,12 +226,16 @@ is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
 messages, 16 MiB of stored message data, or 20 MiB after redaction and log
 assembly. The endpoint is limited to six requests per caller per minute.
 
-**Operator-gating.** LLM config, operator setup/config/service-control, and
-extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
-when the authenticator advertises an operator config surface, and each handler
-still rejects with `403` when the injected `WebUiV2Capabilities` lacks
-`operator_webui_config`. Multi-user session/OIDC authenticators return
-non-operator capabilities. `webui.v2.admin.*` user management is
+**Operator-gating.** LLM provider/configuration routes (including provider
+credentials and model-policy mutation), operator setup/config/service-control,
+and extension zip-import routes are operator-wide: `webui_v2_app` mounts them
+only when the authenticator advertises an operator config surface, and each
+handler still rejects with `403` when the injected `WebUiV2Capabilities` lacks
+`operator_webui_config`. The safe LLM catalog and model-preference routes are
+normal authenticated-caller routes scoped to the caller's tenant and user;
+they expose neither provider metadata nor policy mutation. Multi-user
+session/OIDC authenticators return non-operator capabilities.
+`webui.v2.admin.*` user management is
 admin/operator-gated server-side in `ProductSurface` (`AdminUserService`,
 last-admin protection); `create_user` returns the one-time API bearer exactly
 once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
