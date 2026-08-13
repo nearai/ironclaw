@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tomllib
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +28,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # nothing else covers that lane. See
 # docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+
+# Owns the publication fence (.mintignore parsing and matching).
+import docs_publication_boundary  # noqa: E402
 
 
 @functools.lru_cache(maxsize=None)
@@ -72,25 +76,32 @@ DOC_FACT_PUBLISHED_SWEEP = (
     "docs_manifest_schema_version",
 )
 DOCS_PREFIX = "docs/"
-# Mirror of the `docs/.mintignore` fence (which the Rust sweep parses
-# directly): fenced trees are unpublished, so no cargo test reads them and
-# they keep the prose classification below.
-DOCS_FENCED_PREFIXES = ("docs/internal/", "docs/drafts/")
-DOCS_FENCED_SUFFIX = ".draft.mdx"
+DOCS_MINTIGNORE = "docs/.mintignore"
+
+
+@functools.cache
+def _publication_fence() -> list[str]:
+    """The `.mintignore` patterns, parsed from the authoritative file so a
+    removed fence entry widens the routing with the sweep it selects."""
+    text = (Path(__file__).resolve().parents[2] / DOCS_MINTIGNORE).read_text(
+        encoding="utf-8"
+    )
+    return docs_publication_boundary.parse_mintignore(text)
 
 
 def _doc_fact_selections(path: str) -> list[tuple[str, str]]:
     """(package, test target) pairs whose doc-fact tests read this path."""
     if not path.startswith(DOCS_PREFIX):
         return []
+    if path == DOCS_MINTIGNORE:
+        # A fence edit changes the sweep's scope; run it.
+        return [DOC_FACT_PUBLISHED_SWEEP]
     selections = []
     page = DOC_FACT_PAGE_TESTS.get(path)
     if page is not None:
         selections.append(page)
-    if (
-        Path(path).suffix in {".md", ".mdx"}
-        and not path.startswith(DOCS_FENCED_PREFIXES)
-        and not path.endswith(DOCS_FENCED_SUFFIX)
+    if Path(path).suffix in {".md", ".mdx"} and not docs_publication_boundary.is_ignored(
+        PurePosixPath(path[len(DOCS_PREFIX) :]), _publication_fence()
     ):
         selections.append(DOC_FACT_PUBLISHED_SWEEP)
     return selections

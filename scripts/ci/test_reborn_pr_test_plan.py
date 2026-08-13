@@ -1682,6 +1682,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ],
         )
 
+    def test_mintignore_edit_runs_the_published_sweep(self) -> None:
+        """A fence edit changes the sweep's scope, so it must run the sweep."""
+        plan = self.plan_real_owners(["docs/.mintignore"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["crate_buckets"][0]["exact_targets"],
+            [
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                }
+            ],
+        )
+
     def test_fenced_and_non_page_docs_stay_prose(self) -> None:
         """Fenced trees (unpublished, read by no cargo test) and non-Markdown
         docs files keep the prose classification."""
