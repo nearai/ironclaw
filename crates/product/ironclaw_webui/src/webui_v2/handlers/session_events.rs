@@ -18,7 +18,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use futures::SinkExt;
-use rand::RngExt as _;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -70,14 +69,13 @@ pub async fn mint_session_socket_ticket(
         // closed for callers that probe it anyway.
         return Err(ProductSurfaceError::service_unavailable(false).into());
     };
-    let nonce = mint_socket_nonce();
     let ticket = SessionSocketTicket {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
         operator_config: capabilities.operator_webui_config,
         expires_at_unix_ms: unix_now_ms().saturating_add(SESSION_SOCKET_TICKET_TTL_MS),
     };
-    store.mint(&nonce, ticket).await.map_err(|error| {
+    let nonce = store.mint(ticket).await.map_err(|error| {
         tracing::debug!(
             target: "ironclaw_webui_v2::session_socket",
             error = %error,
@@ -90,12 +88,6 @@ pub async fn mint_session_socket_ticket(
         expires_in_ms: SESSION_SOCKET_TICKET_TTL_MS,
         socket_path: super::super::descriptors::WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
     }))
-}
-
-fn mint_socket_nonce() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill(&mut bytes);
-    hex::encode(bytes)
 }
 
 fn unix_now_ms() -> u64 {

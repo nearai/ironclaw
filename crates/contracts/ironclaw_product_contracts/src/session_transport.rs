@@ -64,12 +64,17 @@ pub enum SessionSocketTicketStoreError {
 /// `Ok(None)`.
 #[async_trait]
 pub trait SessionSocketTicketStore: Send + Sync {
-    /// Store a freshly minted single-use ticket under an opaque nonce.
+    /// Store a freshly minted single-use ticket and return its opaque nonce.
+    ///
+    /// The store owns nonce generation so adapters can anchor single-use
+    /// semantics on their backend's own one-shot primitive (an in-memory map
+    /// key, a durable one-shot lease id). Nonces are random, carry no
+    /// identity or bearer material, and are safe to expose in a URL for the
+    /// seconds they live.
     async fn mint(
         &self,
-        nonce: &str,
         ticket: SessionSocketTicket,
-    ) -> Result<(), SessionSocketTicketStoreError>;
+    ) -> Result<String, SessionSocketTicketStoreError>;
 
     /// Atomically consume the nonce, returning its ticket to exactly one
     /// caller. Unknown, already-consumed, and expired nonces return

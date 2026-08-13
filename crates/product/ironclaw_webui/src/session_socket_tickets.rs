@@ -18,6 +18,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use rand::RngExt as _;
+
 use ironclaw_product_contracts::session_transport::{
     MAX_OUTSTANDING_SESSION_SOCKET_TICKETS, SessionSocketTicket, SessionSocketTicketStore,
     SessionSocketTicketStoreError,
@@ -75,9 +77,13 @@ impl InMemorySessionSocketTicketStore {
 impl SessionSocketTicketStore for InMemorySessionSocketTicketStore {
     async fn mint(
         &self,
-        nonce: &str,
         ticket: SessionSocketTicket,
-    ) -> Result<(), SessionSocketTicketStoreError> {
+    ) -> Result<String, SessionSocketTicketStoreError> {
+        let nonce = {
+            let mut bytes = [0u8; 32];
+            rand::rng().fill(&mut bytes);
+            hex::encode(bytes)
+        };
         let now = Instant::now();
         let mut entries = self.lock();
         if entries.len() >= self.max_outstanding {
@@ -100,14 +106,15 @@ impl SessionSocketTicketStore for InMemorySessionSocketTicketStore {
             }
         }
         entries.insert(
-            nonce.to_string(),
+            nonce.clone(),
             StoredTicket {
                 ticket,
                 minted_at: now,
                 expires_at: now + self.ttl,
             },
         );
-        Ok(())
+        drop(entries);
+        Ok(nonce)
     }
 
     async fn consume(
@@ -143,16 +150,16 @@ mod tests {
     #[tokio::test]
     async fn consume_returns_the_ticket_exactly_once() {
         let store = InMemorySessionSocketTicketStore::new();
-        store.mint("nonce-1", ticket("user-a")).await.expect("mint");
+        let nonce = store.mint(ticket("user-a")).await.expect("mint");
 
-        let first = store.consume("nonce-1").await.expect("consume");
+        let first = store.consume(&nonce).await.expect("consume");
         assert_eq!(
             first.as_ref().map(|ticket| ticket.user_id.as_str()),
             Some("user-a"),
             "the first consumer receives the bound caller",
         );
         assert_eq!(
-            store.consume("nonce-1").await.expect("replay consume"),
+            store.consume(&nonce).await.expect("replay consume"),
             None,
             "a replayed nonce must fail closed",
         );
@@ -166,9 +173,9 @@ mod tests {
     #[tokio::test]
     async fn expired_tickets_do_not_authenticate() {
         let store = InMemorySessionSocketTicketStore::with_bounds(Duration::from_millis(0), 1024);
-        store.mint("nonce-1", ticket("user-a")).await.expect("mint");
+        let nonce = store.mint(ticket("user-a")).await.expect("mint");
         assert_eq!(
-            store.consume("nonce-1").await.expect("consume"),
+            store.consume(&nonce).await.expect("consume"),
             None,
             "an expired ticket must not authenticate",
         );
@@ -177,29 +184,30 @@ mod tests {
     #[tokio::test]
     async fn saturation_evicts_the_oldest_nonce_instead_of_growing() {
         let store = InMemorySessionSocketTicketStore::with_bounds(Duration::from_secs(60), 2);
-        store.mint("nonce-1", ticket("user-a")).await.expect("mint");
-        store.mint("nonce-2", ticket("user-b")).await.expect("mint");
-        store.mint("nonce-3", ticket("user-c")).await.expect("mint");
+        let nonce_1 = store.mint(ticket("user-a")).await.expect("mint");
+        let nonce_2 = store.mint(ticket("user-b")).await.expect("mint");
+        let nonce_3 = store.mint(ticket("user-c")).await.expect("mint");
 
         assert_eq!(
-            store.consume("nonce-1").await.expect("consume"),
+            store.consume(&nonce_1).await.expect("consume"),
             None,
             "the oldest nonce is evicted at the cap",
         );
-        assert!(store.consume("nonce-2").await.expect("consume").is_some());
-        assert!(store.consume("nonce-3").await.expect("consume").is_some());
+        assert!(store.consume(&nonce_2).await.expect("consume").is_some());
+        assert!(store.consume(&nonce_3).await.expect("consume").is_some());
     }
 
     #[tokio::test]
     async fn concurrent_consumers_of_one_nonce_have_exactly_one_winner() {
         let store = std::sync::Arc::new(InMemorySessionSocketTicketStore::new());
-        store.mint("nonce-1", ticket("user-a")).await.expect("mint");
+        let nonce = store.mint(ticket("user-a")).await.expect("mint");
 
         let mut winners = 0;
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..16 {
             let store = std::sync::Arc::clone(&store);
-            tasks.spawn(async move { store.consume("nonce-1").await.expect("consume").is_some() });
+            let nonce = nonce.clone();
+            tasks.spawn(async move { store.consume(&nonce).await.expect("consume").is_some() });
         }
         while let Some(result) = tasks.join_next().await {
             if result.expect("task joins") {

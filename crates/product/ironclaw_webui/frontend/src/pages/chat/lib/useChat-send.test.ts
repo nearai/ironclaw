@@ -307,7 +307,7 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
   };
 
   runUseChatSource(context);
@@ -388,7 +388,7 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
   };
 
   runUseChatSource(context);
@@ -463,7 +463,7 @@ test("useChat: disconnected SSE ignores a stale active run after processing ende
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
   };
 
   runUseChatSource(context);
@@ -546,7 +546,7 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
         },
       };
     },
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -622,7 +622,7 @@ function createSendCaptureContext() {
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
   return {
     context,
@@ -786,7 +786,7 @@ test("useChat.send: target-thread send does not append into active thread", asyn
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -862,7 +862,7 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -938,7 +938,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1025,7 +1025,7 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1106,7 +1106,7 @@ test("useChat.send: request failures use safe copy in the selected language", as
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
     useT: () => zh,
   };
 
@@ -1190,7 +1190,7 @@ test("useChat.send: create-thread failure appends inline error on new chat", asy
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -1282,7 +1282,7 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1372,7 +1372,7 @@ test("useChat.retryMessage: retry removes the prior request error bubble", async
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -1466,7 +1466,7 @@ test("useChat.send: accepted send does not clear a gate received while in flight
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1556,7 +1556,7 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1661,7 +1661,7 @@ test("useChat.send: rejected busy seeds notice when active thread changed in fli
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1751,7 +1751,7 @@ test("useChat.send: rejected busy appends system notice after gate resolves in f
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1839,7 +1839,7 @@ test("useChat.send: gate received after callback creation blocks before send", a
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1929,7 +1929,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2008,7 +2008,7 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2083,7 +2083,7 @@ test("useChat.cancelRun preserves local state when the cancel request fails", as
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2158,7 +2158,7 @@ test("useChat clears transient run and gate state during thread switch render", 
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2253,7 +2253,7 @@ test("useChat.approve deny marks the current gated tool declined before resume",
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2339,7 +2339,7 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2413,7 +2413,7 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2499,7 +2499,7 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2584,7 +2584,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2689,7 +2689,7 @@ test("useChat.cancelRun completion is fenced after a committed thread switch bef
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2783,7 +2783,7 @@ test("useChat.send: connect-like prompts submit to the model", async () => {
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2846,7 +2846,7 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2953,7 +2953,7 @@ test("useChat: a channel-connected event refreshes the connection caches without
         seedThreadMessages: () => {},
         setMessages: () => {},
       }),
-      useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+      useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
     };
 
     runUseChatSource(context);
@@ -3069,7 +3069,7 @@ test("useChat: channel-connected event from extensions clears a mounted waiting 
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -3174,7 +3174,7 @@ test("useChat: channel-connected event from same chat does not duplicate the con
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -3259,7 +3259,7 @@ test("useChat: timeline Slack OAuth install guidance does not open a connection 
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -3348,7 +3348,7 @@ test("useChat: Slack-read package install guidance does not render a connection 
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -3430,7 +3430,7 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
   };
 
   runUseChatSource(context);
@@ -3541,7 +3541,7 @@ function channelConnectionContext({
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useThreadEvents: () => ({ status: "idle" }),
     window: windowObject,
   };
 }
@@ -3813,7 +3813,7 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
         seedThreadMessages: () => {},
         setMessages: () => {},
       }),
-      useSSE: () => ({ status: "idle" }),
+      useThreadEvents: () => ({ status: "idle" }),
     };
 
     runUseChatSource(context);
@@ -4563,7 +4563,7 @@ test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persi
         seedThreadMessages: () => {},
         setMessages: () => {},
       }),
-      useSSE: () => ({ status: "idle" }),
+      useThreadEvents: () => ({ status: "idle" }),
     };
 
     runUseChatSource(context);
@@ -4652,7 +4652,7 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4726,7 +4726,7 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4805,7 +4805,7 @@ test("useChat.send: admits a follow-up while a run is active and renders it queu
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4877,7 +4877,7 @@ test("useChat.send: admits a follow-up submit while a prior run is still active"
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4976,7 +4976,7 @@ test("useChat.send: created thread admits a follow-up send while its run is acti
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5081,7 +5081,7 @@ test("useChat.send: clears local busy when run settles before send response", as
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5166,7 +5166,7 @@ test("useChat.send: clears local admission when navigating away before settlemen
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5253,7 +5253,7 @@ test("useChat.send: stream error clears same-thread local admission", async () =
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5350,7 +5350,7 @@ test("useChat.send: a send to another thread is not blocked by an unsettled run 
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5435,7 +5435,7 @@ function createResolveGateContext({
       loadHistory: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
   return context;
 }
@@ -5646,7 +5646,7 @@ function createParallelSendContext({
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   return {
@@ -5812,7 +5812,7 @@ test("useChat.runCommand: shows the localized chat.commandFailed notice on a cli
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5907,7 +5907,7 @@ test("useChat.runCommand: fences the success notice to the thread it executed ag
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -6001,7 +6001,7 @@ test("useChat.runCommand: fences the failure notice to the thread it executed ag
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -6079,7 +6079,7 @@ test("useChat: opening another thread resets the run bookkeeping handed to useCh
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+    useThreadEvents: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);

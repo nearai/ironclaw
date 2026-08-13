@@ -60,7 +60,7 @@ import {
 } from "../lib/message-status";
 import { buildOptimisticMessage } from "../lib/optimistic-message";
 import { useHistory } from "./useHistory";
-import { useSSE } from "./useSSE";
+import { useThreadEvents } from "./useThreadEvents";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
@@ -465,7 +465,7 @@ export function useChat(threadId) {
     },
   });
 
-  const { status: sseStatus } = useSSE({
+  const { status: sseStatus } = useThreadEvents({
     threadId,
     onEvent: handleEvent,
     enabled: Boolean(threadId),

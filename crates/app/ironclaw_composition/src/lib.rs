@@ -56,6 +56,7 @@ mod runtime;
 mod runtime_input;
 mod runtime_mounts;
 mod sandbox;
+mod session_ticket_store;
 mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
