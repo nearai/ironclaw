@@ -107,9 +107,13 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
               )}
             >{error}</p>)}
 
+          {/* Neutral (not the app's blue-gradient primary CTA) — with the
+              gateway token form now the secondary auth path below OAuth,
+              Connect should carry the same visual weight as the OAuth
+              buttons rather than reading as the loudest control on the card. */}
           <Button
             type="submit"
-            variant="primary"
+            variant="secondary"
             fullWidth
             disabled={isSubmitting}
           >

@@ -97,3 +97,18 @@ test("login page omits the OAuth divider when no providers are configured", () =
 
   assert.doesNotMatch(serialized, /login\.oauthDivider/);
 });
+
+// The gateway token form's Connect button reads as a plain, neutral action
+// (matching the OAuth buttons' visual weight) rather than the app's primary
+// blue-gradient CTA — no longer the visually loudest element on the card.
+test("login page renders the Connect button without the primary color treatment", () => {
+  const rendered = renderLoginPage({ providers: ["google"], isLocalDev: false });
+  const serialized = JSON.stringify(rendered);
+
+  assert.match(serialized, /login\.connect/);
+  assert.doesNotMatch(
+    serialized,
+    /"variant":"primary"/,
+    "expected the Connect button not to use the primary (blue) variant",
+  );
+});
