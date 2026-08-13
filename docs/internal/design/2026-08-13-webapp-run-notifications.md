@@ -10,19 +10,26 @@
 
 When a user-visible, top-level agent run completes successfully and its final
 assistant reply is durable in thread `T`, IronClaw publishes one metadata-only,
-owner-scoped completion fact. An app-wide WebUI event stream delivers that fact
-regardless of the SPA route; browser clients offer short-lived presentation
-intents based on their actual focus, route, visibility, reply-render evidence,
-notification permission, and enrollment state. A durable server coordinator
-grants exactly one responding browser profile the highest-priority presentation
-or, when no browser can present, falls back to an authorized Web Push through
-the existing `web-app` `ChannelDelivery` surface.
+owner-scoped completion fact. A typed user-completion logical stream delivers
+that fact over one app-wide, read-only session WebSocket per authenticated page,
+regardless of the SPA route. The same socket multiplexes the existing thread
+projection streams; it does not carry product commands. Browser clients offer
+short-lived presentation intents over authenticated HTTP based on their actual
+focus, route, visibility, reply-render evidence, notification permission, and
+enrollment state. A durable server coordinator grants exactly one responding
+browser profile the highest-priority presentation or, when no browser can
+present, falls back to an authorized Web Push through the existing `web-app`
+`ChannelDelivery` surface.
 
 This is a hybrid design:
 
 - the **runtime** owns the durable completion fact;
 - the **product notification coordinator** owns replay, arbitration, read state,
   and the decision to attempt Web Push;
+- the **product event interface** owns typed logical stream selectors and
+  independent resume cursors;
+- the **WebUI session event gateway** multiplexes those streams over one
+  read-only WebSocket and renders the browser-safe wire schema;
 - the **service worker** owns same-browser multi-tab inspection and the final
   local choice between suppressing, an in-app surface, and an OS surface;
 - the **outbound policy and web-app extension** own authorization, delivery
@@ -34,6 +41,12 @@ the event/projection contract. The design prefers an occasional duplicate over
 a missed completion: presentation is at-least-once, while stable notice IDs,
 CAS transitions, a service-worker ledger, per-thread notification tags, and
 read evidence suppress ordinary replay and race duplicates.
+
+Thread creation, turn submission, cancellation, retry, gate resolution,
+notification intent, presentation acknowledgement, and read evidence all stay
+on authenticated HTTP routes backed by `ProductSurface::invoke`. The WebSocket
+accepts only bounded subscription-control frames. It is an event transport, not
+a command bus.
 
 ## 1. Product behavior
 
@@ -128,20 +141,55 @@ Important gaps remain:
   hard-coded `/automations` URL, and sends no notification tag;
 - the existing notification center polls approval state every ten seconds;
 - the current SSE route is thread-scoped and its client disconnects while the
-  page is hidden; and
+  page is hidden;
+- the generic `ProductSurfaceStreamRequest.stream_id` is an optional string
+  that the assistant facade currently interprets as exactly one thread ID;
+- product stream envelopes are erased to `serde_json::Value` and decoded back
+  into the same typed envelope at the WebUI seam;
+- SSE and the dormant per-thread WebSocket duplicate subscription/drain logic,
+  while the WebSocket serializes raw `ProductOutboundEnvelope` routing metadata
+  instead of the browser-safe `WebChatV2EventFrame` required by the WebUI
+  contract; and
 - the dormant per-thread `progress` push plan is not a production completion
   path and must not be revived for this feature.
 
 The shipped stack therefore removes the need to design cryptography,
 enrollment, endpoint storage, restricted egress, or basic click handling. The
 new work is a durable completion projection, presentation arbitration, safe
-payload rendering, and precise scoping.
+payload rendering, precise scoping, and a deeper product-event transport seam.
+
+### 2.1 Current thread streaming pipeline and assessment
+
+The current chat stream has a strong execution core:
+
+1. the SPA creates a thread and submits a turn through authenticated HTTP;
+2. the inbound product surface applies ownership, idempotency, attachment
+   bounds, and turn admission before `TurnCoordinator` schedules execution;
+3. providers emit text deltas into `ProviderStreamSink`, which accumulates and
+   sanitizes the complete text-so-far rather than forwarding raw tokens;
+4. `ModelTextDelta` milestones feed a 16 ms coalesced, process-local live
+   projection; partial text is deliberately not durable transcript state;
+5. `EventStreamManager` supplies authorization, snapshot/replay, rebase,
+   redaction validation, bounded buffering, and lag behavior;
+6. the WebUI serves the thread projection over
+   `/api/webchat/v2/threads/{thread_id}/events`; and
+7. the SPA replaces the active assistant phase with cumulative text, then
+   upgrades it when the completed-turn projection loads the exact durable
+   finalized assistant message.
+
+That split between ephemeral presentation text and a durable finalized reply is
+correct and remains unchanged. The weakness is above `EventStreamManager`:
+thread runtime, live, and turn-lifecycle sources are manually combined behind a
+shallow string selector; the WebUI erases and restores types; transport loops
+are duplicated; and React owns connection, retry, route, history, and several
+ordering races. This proposal deepens that seam rather than replacing the
+runner, model gateway, transcript, or projection machinery beneath it.
 
 ## 3. Design principles
 
 1. **A completion is a fact, not a transport event.** The process/turn journal
-   is authoritative. SSE, in-app UI, OS notifications, and Web Push only
-   project or present it.
+   is authoritative. Session events, in-app UI, OS notifications, and Web Push
+   only project or present it.
 2. **Browser state is sampled, not persisted as standing presence.** Tabs
    report focus/route/visibility only as short-lived intents for a specific
    notice. The server does not retain a general browsing-history or heartbeat
@@ -149,9 +197,9 @@ payload rendering, and precise scoping.
 3. **Display is not read.** A toast or OS notification may be presented while
    unread. Read requires exact reply-render evidence or a subsequent focused
    visit to the thread after the final reply is present.
-4. **Streams do not authorize pushes.** A missing SSE subscriber neither
-   enables nor selects Web Push. The durable arbitration state and configured
-   web-app target do.
+4. **Streams do not authorize pushes.** A missing session-event subscriber
+   neither enables nor selects Web Push. The durable arbitration state and
+   configured web-app target do.
 5. **Web-app-only is structural.** A new target capability selects only the
    `web-app` delivery target. The generic coordinator never branches on Slack,
    Telegram, or extension IDs.
@@ -160,6 +208,18 @@ payload rendering, and precise scoping.
 7. **Recovery is replay plus CAS, not polling.** One boot reconciliation and
    timer-driven due work recover pending notices. The client never polls for
    completion.
+8. **Commands stay on HTTP.** A WebSocket client may subscribe, unsubscribe,
+   resume, or exchange transport heartbeats. It may not create threads, submit
+   turns, cancel/retry runs, resolve gates, submit notification intents, mark
+   notices read, or invoke any other product mutation.
+9. **One transport does not imply one ordering.** The session WebSocket
+   multiplexes independent logical streams. Each selector retains its own
+   authorization, snapshot, replay, lag, and cursor contract; thread events and
+   user-completion events never share a synthetic global cursor.
+10. **Preserve types until browser rendering.** The product interface returns
+    typed event envelopes. One WebUI stream driver maps them to a redacted
+    browser frame and is reused by the session WebSocket and the temporary
+    legacy SSE adapter.
 
 ## 4. Presence primitives and their limits
 
@@ -175,7 +235,7 @@ intersection below.
 | `clients.matchAll({type: "window", includeUncontrolled: true})` | One service-worker registration | Which same-origin windows exist, plus each client's URL, visibility, and focus hints | Tabs in another browser profile or device; exact DOM render state |
 | `Notification.permission` | Browser profile | Whether the browser may show an OS notification | Whether a usable server enrollment exists |
 | Push registration/enrollment | User plus browser profile | Whether the host can address that browser through Web Push | That the browser is online, the app is closed, or a notification will display |
-| Completion stream connection | One authenticated page | A transport is currently attached | Notification permission, view state, or authorization to push |
+| Session event connection | One authenticated page | A transport is currently attached and may carry several logical streams | Notification permission, view state, or authorization to push |
 
 Focus and visibility are inherently racy. The design narrows the race by
 putting the final local check in the service worker immediately before a
@@ -193,8 +253,11 @@ than the platform provides.
 | Run-completion notice store | `ironclaw_assistant` | Persists product notification, arbitration, presentation, push-ownership, and read state on `ScopedFilesystem` |
 | User completion projection | event projection/stream boundary | Produces authorized, redacted snapshots and replay/live updates from the notice store |
 | Notification coordinator | `ironclaw_assistant` | Opens the intent window, ranks intents, grants one presenter, recovers expired grants, and requests push fallback |
-| Product operations | frozen `ProductSurface` methods | Streams notices; accepts intents, acknowledgements, and thread-read evidence; queries bounded unread state |
-| Tab coordinator | SPA | Elects one completion-stream leader per browser profile and reports tab state to the service worker |
+| Product event interface | `ironclaw_product_contracts` | Defines typed logical stream selectors, typed envelopes, independent opaque cursors, and the frozen `ProductSurface::stream_events` operation |
+| Product operations | frozen `ProductSurface` methods | Streams typed events; accepts intents, acknowledgements, and thread-read evidence over HTTP; queries bounded unread state |
+| Session event gateway | `ironclaw_webui` | Authenticates one app-wide WebSocket, drives logical subscriptions, enforces connection/subscription budgets, and renders browser-safe frames through one shared codec |
+| Session event client | SPA root | Owns one socket per authenticated page, reconnects it, tracks a cursor per logical subscription, and exposes transport-independent event subscriptions to route hooks |
+| Tab state reporter | SPA | Reports route, focus, visibility, and exact reply-render state to the service worker |
 | Presentation arbiter | service worker | Inspects all same-origin clients, dedupes a notice, proposes one profile-level intent, applies grants, and clears OS notifications |
 | Push policy and attempts | `ironclaw_event_streams` plus `ironclaw_outbound` | Re-authorizes projection access and target, creates a stable attempt, and preserves crash semantics |
 | Web Push renderer/transport | `web-app` `ChannelDelivery` | Maps a typed completion notice to a fixed safe payload and sends it to host-resolved registrations |
@@ -354,14 +417,21 @@ Each tab creates an opaque random `tab_id`. Each enrolled browser profile has
 an opaque `browser_instance_id` correlated host-side with its delivery
 registration; neither identifier contains account or route data.
 
-Tabs coordinate through `BroadcastChannel` and the service worker. Where Web
-Locks is available, one tab holds a `webui-run-completion-stream` lock and owns
-the app-wide SSE connection; followers wait asynchronously for the lock and
-receive notices through the channel. The leader keeps this stream attached
-while hidden, unlike the route-scoped chat stream. If leader election is not
-available, tabs may attach individually within the existing per-caller stream
-cap; service-worker dedupe preserves correctness and excess tabs degrade to
-the eventual push/unread fallback.
+Every authenticated page owns one app-root `SessionEventClient` and therefore
+at most one physical session WebSocket. A page may subscribe to its active
+thread, the owner-scoped run-completion stream, and other read-only logical
+streams without opening another connection. Tabs do not elect a shared socket
+leader: sharing one credentialed connection across tabs would add a second
+request-routing protocol and make chat delivery depend on a hidden leader.
+
+Duplicate run-completion events from several tabs are expected. Tabs coordinate
+notification presentation through `BroadcastChannel` and the service worker,
+and the worker's IndexedDB test-and-set ledger collapses them by `notice_id`.
+The server accepts at most one current intent per notice and
+`browser_instance_id`, so duplicate page connections do not become duplicate
+profile candidates. Pages beyond the per-caller connection budget degrade to
+the durable unread snapshot and Web Push fallback; they do not weaken
+arbitration correctness.
 
 On route commit, focus, blur, visibility change, reply render, and page exit,
 each tab posts a state update to the worker:
@@ -379,7 +449,8 @@ type TabNotificationState = {
 
 The worker combines these reports with a fresh `clients.matchAll` snapshot.
 It creates at most one intent per notice and browser profile. An authenticated
-page submits that intent; the worker never receives session credentials.
+page submits that intent through HTTP; the worker never receives session
+credentials and the socket never carries the mutation.
 
 ### 5.6 Intent ranking and grant application
 
@@ -404,9 +475,9 @@ tie-break makes replay deterministic without encoding product meaning in IDs.
 The server waits for the intent window before issuing a grant so a slower
 `reply_observed` intent can suppress a lower-priority notification on another
 device. A grant names exactly one `browser_instance_id`, surface, state
-revision, and expiry. Every stream client receives the grant; only the named
-worker applies it, and only if its current state revision is not newer and
-incompatible.
+revision, and expiry. Every run-completion logical subscription may receive the
+grant; only the named worker applies it, and only if its current state revision
+is not newer and incompatible.
 
 Immediately before applying a grant, the worker re-runs `clients.matchAll`:
 
@@ -417,10 +488,10 @@ Immediately before applying a grant, the worker re-runs `clients.matchAll`:
   sends read evidence; and
 - stale grants are rejected with `stale_state`, causing one re-arbitration.
 
-The client acknowledges only after the effect succeeds. This avoids the worse
-failure mode where a server suppresses fallback for a surface that never
-appeared. Lost acknowledgements may duplicate but cannot silently lose the
-notice.
+The authenticated page acknowledges over HTTP only after the worker reports
+that the effect succeeded. This avoids the failure mode where a server
+suppresses fallback for a surface that never appeared. Lost acknowledgements
+may duplicate but cannot silently lose the notice.
 
 ## 6. Definitive state, signal, and decision matrix
 
@@ -468,37 +539,89 @@ means the chosen browser profile has a usable host-owned delivery registration.
 
 ## 7. Event transport and wire contracts
 
-### 7.1 User-scoped completion stream
+### 7.1 Transport decision
 
-Today's `/threads/{thread_id}/events` stream cannot power app-wide toasts. Add
-an authenticated route:
+Do not add `/notifications/run-completions/events`, another route-specific SSE
+hook, or another string convention inside `stream_id`. Add one authenticated,
+app-wide transport:
 
 ```text
-GET /api/webchat/v2/notifications/run-completions/events
-Last-Event-ID: <opaque user-completion cursor>
+POST /api/webchat/v2/session/websocket-ticket
+GET  /api/webchat/v2/session/websocket?ticket=<single-use-ticket>
 ```
 
-The handler calls the existing frozen method:
+The POST is a WebUI-owned transport-auth operation, not a product command. It
+uses the normal bearer-authenticated HTTP stack to mint a bounded, single-use,
+15-second ticket bound to the exact `ProductSurfaceCaller`. The opaque ticket
+is random and contains no identity or bearer material. The WebSocket upgrade
+enforces the existing same-origin policy and consumes the ticket with CAS before
+accepting the socket. The long-lived session bearer never appears in the
+WebSocket URL, browser history, or proxy access log; a logged ticket is already
+consumed or expires within 15 seconds.
+
+`ironclaw_webui` host-auth owns the `WebSocketTicketStore` interface.
+Standalone composition may use its bounded in-memory adapter. A multi-replica
+deployment must wire a shared CAS adapter so mint and consume may land on
+different replicas and replay still fails closed. If that adapter is absent,
+the session bootstrap does not advertise WebSocket support and the SPA keeps
+using compatibility SSE. Tickets are transport-auth nonces, not product or
+conversation records, and may be removed after consumption/expiry.
+
+The socket is server-to-client for product data. Client-to-server frames are
+limited to `subscribe`, `unsubscribe`, and `ping`. Notification intents,
+presentation acknowledgements, thread-read evidence, thread creation, turn
+submission, cancellation, retries, gates, settings, and every other product
+mutation continue through authenticated HTTP. The WebSocket handler never
+calls `ProductSurface::invoke` or dispatches an operation ID.
+
+### 7.2 Typed product stream interface
+
+Keep the frozen three-method `ProductSurface` interface. Deepen the existing
+`stream_events` method by replacing the ambiguous optional string selector and
+JSON-erased response with typed contracts owned by
+`ironclaw_product_contracts`:
 
 ```rust
-ProductSurface::stream_events(
-    caller,
-    ProductSurfaceStreamRequest {
-        stream_id: Some("webui.run-completions.v1".into()),
-        after_cursor,
-    },
-)
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ProductStreamSelector {
+    Thread { thread_id: ThreadId },
+    RunCompletions,
+}
+
+struct ProductSurfaceStreamRequest {
+    selector: ProductStreamSelector,
+    after_cursor: Option<String>,
+}
+
+struct ProductStreamEventEnvelope {
+    cursor: ProjectionCursor,
+    event: ProductStreamEvent,
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ProductStreamEvent {
+    Thread(ProductOutboundPayload),
+    RunCompletion(RunCompletionStreamEvent),
+}
+
+struct ProductSurfaceStreamResponse {
+    events: Vec<ProductStreamEventEnvelope>,
+    next_cursor: Option<String>,
+    subscription: Option<ProductSurfaceEventSubscription>,
+}
 ```
 
-No fourth `ProductSurface` method is introduced. The exact namespaced stream
-ID cannot be confused with a thread UUID.
+`ProductOutboundEnvelope` remains the extension-delivery envelope; its adapter,
+installation, target, and delivery-attempt metadata do not cross the browser
+product-event seam. The WebUI receives typed product stream events and maps
+them exactly once into a redacted browser schema. There is no
+`serde_json::Value` encode/decode round trip.
 
-Extend the transport-neutral event stream vocabulary with a user-completion
-view/target and envelope. Authorization requires the authenticated caller's
-tenant/user to equal the owner scope. The target carries no caller-selectable
-user ID. The manager applies the same admission cap, bounded buffering,
-access-first ordering, redaction validation, lag handling, and cursor/rebase
-rules as thread streams.
+Adding another event family means adding a closed selector/event variant and
+its authorization/projection adapter, not a route or a magic string. The
+request carries no caller-selectable tenant or user identity. `Thread` resolves
+ordinary thread access; `RunCompletions` binds directly to the authenticated
+caller's owner scope.
 
 The user-completion source is the durable notice store rather than the runtime
 event-log partition. This is necessary because the current runtime stream key
@@ -506,17 +629,181 @@ is `(tenant, user, agent)` and cannot represent one caller-wide cursor across
 all agents and threads. It also gives arbitration/read transitions one ordered
 user-scoped sequence without repurposing a thread cursor.
 
+### 7.3 Session WebSocket protocol
+
+One physical socket multiplexes independent logical subscriptions. A page
+subscribes explicitly:
+
+```json
+{
+  "type": "subscribe",
+  "subscription_id": "chat-active",
+  "selector": { "kind": "thread", "thread_id": "typed-thread-id" },
+  "after_cursor": "opaque-thread-cursor-or-null"
+}
+```
+
+The app-root notification client independently subscribes to completions:
+
+```json
+{
+  "type": "subscribe",
+  "subscription_id": "run-completions",
+  "selector": { "kind": "run_completions" },
+  "after_cursor": "opaque-user-completion-cursor-or-null"
+}
+```
+
+The server acknowledges admission and sends browser-safe event frames:
+
+```json
+{
+  "schema": "webui.session_event.v1",
+  "type": "subscribed",
+  "subscription_id": "chat-active",
+  "generation": 7,
+  "cursor": "opaque-thread-cursor-or-null"
+}
+```
+
+```json
+{
+  "schema": "webui.session_event.v1",
+  "type": "event",
+  "subscription_id": "chat-active",
+  "generation": 7,
+  "cursor": "opaque-thread-cursor",
+  "event": {
+    "kind": "thread",
+    "payload": { "type": "projection_update", "state": {} }
+  }
+}
+```
+
+`subscription_id` is a bounded client correlation key, never authority or a
+resume token. The selector determines authorization and the event's cursor
+domain. Each accepted subscription receives a connection-scoped monotonically
+increasing `generation`; every event, error, and unsubscribe carries it. The
+writer drops frames from cancelled generations, and the client ignores a stale
+generation. Reusing an active ID authorizes the replacement first, then
+atomically swaps generations and cancels the old subscription. If authorization
+fails, the attempted replacement is rejected and the existing authorized
+subscription continues unchanged.
+
+There is no session-wide event cursor. The client retains one cursor per
+logical subscription:
+
+- thread cursors keep their existing composite runtime/live/turn semantics and
+  process-local live epoch;
+- the run-completion cursor is one durable owner-scoped notice sequence; and
+- reconnect resubscribes each selector from its own last delivered cursor.
+
+On lag, an old cursor, or a live-epoch mismatch, only the affected logical
+subscription rebases. A thread rebase returns durable state plus compacted
+current live state. A completion rebase returns at most 250 unread/unsettled
+notices. One slow thread must not reset notification delivery or another
+thread.
+
+### 7.4 Session event gateway and failure isolation
+
+`ironclaw_webui` adds one deep session-event module with two internal seams:
+
+- a `ProductStreamDriver` opens, resumes, drains, and cancels typed
+  `ProductSurface::stream_events` subscriptions; and
+- a `WebUiSessionEventCodec` maps typed product events into bounded,
+  redacted browser frames.
+
+The WebSocket adapter and temporary SSE adapter both use those same modules.
+Transport framing, ping/pong, socket backpressure, and connection closure stay
+outside product projection code. Selector authorization, replay, rebase,
+redaction, and lag stay behind the product stream interface.
+
+Initial hard bounds are host constants:
+
+- at most 3 session event connections per authenticated caller, preserving the
+  shipped caller connection budget;
+- at most 16 active logical subscriptions per socket;
+- at most 64 bytes per `subscription_id`;
+- at most 8 KiB per client control frame; and
+- 16 queued event batches per logical subscription and 256 across one socket,
+  drained with round-robin fairness;
+- at most 1,024 outstanding ticket nonces per host-auth store, plus a bounded
+  mint rate of 12 tickets per authenticated caller per minute; and
+- a 5-minute maximum socket lifetime, matching the shipped stream lifetime,
+  after which the client must reauthenticate over HTTP and resume each logical
+  selector independently.
+
+Rename the transport-leaking `SseCapacity` module to event-connection capacity
+when both transports share the new driver. A lagged subscription receives a
+typed terminal `subscription_error` with its last safe cursor and may rebase;
+its generation is cancelled without closing the whole socket. Per-subscription
+overflow therefore cannot starve notification delivery. Authentication expiry,
+malformed framing, or aggregate socket backpressure closes the connection and
+releases all subscriptions. Normal lifetime expiry emits a reconnect hint and
+closes the socket; the client mints a fresh ticket, which re-evaluates bearer
+validity and caller identity. Reconnect uses jittered bounded backoff and does
+not resend any product mutation.
+
+### 7.5 Thread-stream migration and compatibility
+
+The session socket initially carries the exact existing thread projection
+vocabulary. It does not change provider streaming, cumulative text phases,
+16 ms coalescing, final-reply durability, or the thread projection's ordering
+rules. The SPA moves connection/reconnect ownership from route-local `useSSE`
+to an app-root `SessionEventClient`; `useChatEvents` consumes the same typed
+thread payloads through a transport-independent subscription.
+
+During rollout:
+
+1. `/api/webchat/v2/session` advertises session-event protocol support;
+2. capable clients use `/session/websocket`;
+3. `/threads/{thread_id}/events` remains as a compatibility adapter over the
+   shared driver and codec;
+4. the existing dormant `/threads/{thread_id}/ws` route is removed rather than
+   promoted; and
+5. the per-thread SSE route is retired only after production parity and
+   rollback confidence.
+
+This migration prevents two implementations from defining event shape or
+resume behavior. The compatibility SSE adapter differs only in HTTP framing
+and `Last-Event-ID` handling.
+
+### 7.6 User-scoped completion stream
+
+`ProductStreamSelector::RunCompletions` extends the transport-neutral event
+stream vocabulary with a user-completion view/target and envelope.
+Authorization requires the authenticated caller's tenant/user to equal the
+owner scope. The target carries no caller-selectable user ID. The projection
+applies the same admission, bounded buffering, access-first ordering, redaction
+validation, lag handling, and cursor/rebase rules as thread streams.
+
 On lag or an invalid/old cursor, the stream emits a bounded rebase snapshot of
 unread and unsettled notices, then resumes from the snapshot cursor. Read old
-records remain durable and queryable but do not resurrect a toast. Live
-subscription buffers remain bounded; slow clients rebase instead of blocking
-completion commits.
+records remain durable and queryable but do not resurrect a toast. Slow clients
+rebase instead of blocking completion commits.
 
-### 7.2 Completion event
+The typed logical-stream payload is closed vocabulary:
+
+```rust
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RunCompletionStreamEvent {
+    Notice(RunCompletionNoticeEvent),
+    Grant(RunCompletionGrantEvent),
+    Clear(RunCompletionClearEvent),
+}
+```
+
+`Notice` opens or replays arbitration state. `Grant` names the one selected
+browser profile and surface. `Clear` names a notice/thread whose durable read
+transition requires every connected page and worker ledger to dismiss local
+surfaces. None of these variants is a product mutation.
+
+### 7.7 Completion event
 
 ```json
 {
   "schema": "webui.run_completion.v1",
+  "type": "notice",
   "sequence": "opaque-cursor-member",
   "notice_id": "opaque-notice-id",
   "run_id": "typed-run-id",
@@ -533,9 +820,19 @@ from the validated thread ID. It may show a thread title only by joining with
 thread data the authenticated app already fetched through ordinary access
 checks.
 
-### 7.3 Intent, grant, acknowledgement, and read operations
+### 7.8 Intent, grant, acknowledgement, and read operations
 
-All writes use `ProductSurface::invoke` operation IDs, not new trait methods:
+All writes use authenticated HTTP handlers that adapt to
+`ProductSurface::invoke` operation IDs, not new trait methods and never
+WebSocket frames:
+
+```text
+POST /api/webchat/v2/notifications/run-completions/intents
+POST /api/webchat/v2/notifications/run-completions/acknowledgements
+POST /api/webchat/v2/notifications/run-completions/thread-read
+```
+
+The product operation IDs remain:
 
 ```text
 webui.run_completion.intent.v1
@@ -566,12 +863,25 @@ Grant event:
 ```json
 {
   "schema": "webui.run_completion_grant.v1",
+  "type": "grant",
   "notice_id": "opaque-notice-id",
   "grant_id": "opaque-grant-id",
   "browser_instance_id": "opaque-browser-id",
   "state_revision": 41,
   "surface": "no_surface_watching_thread | in_app | local_os",
   "expires_at": "RFC3339 timestamp"
+}
+```
+
+Clear event:
+
+```json
+{
+  "schema": "webui.run_completion_clear.v1",
+  "type": "clear",
+  "notice_id": "opaque-notice-id",
+  "thread_id": "typed-thread-id",
+  "read_at": "RFC3339 timestamp"
 }
 ```
 
@@ -597,7 +907,7 @@ The bounded unread/rebase view uses `ProductSurface::query` with view ID:
 webui.run-completions.unread.v1
 ```
 
-### 7.4 Typed outbound completion part
+### 7.9 Typed outbound completion part
 
 Do not encode this feature as `FinalReply`, set `web-app.final_replies = true`,
 or send the answer as `OutboundPart::Text`. Add distinct typed vocabulary:
@@ -651,7 +961,7 @@ fixed copy without interpreting arbitrary text. Other adapters either never
 receive the part because their capability is false or report it unsupported in
 contract tests.
 
-### 7.5 Encrypted Web Push payload
+### 7.10 Encrypted Web Push payload
 
 ```json
 {
@@ -682,7 +992,8 @@ sequenceDiagram
     participant RT as "Turn/process journal"
     participant O as "Completion observer"
     participant C as "Notification coordinator"
-    participant S as "User completion stream"
+    participant S as "Run-completion logical stream"
+    participant P as "Authenticated page"
     participant SW as "Service worker"
     participant T as "Focused tab on T"
 
@@ -690,12 +1001,16 @@ sequenceDiagram
     O->>O: "Verify finalized reply; persist notice"
     O->>C: "Wake pending arbitration"
     C->>S: "run_completion notice"
-    S->>SW: "Leader forwards notice"
+    S->>P: "Session event"
+    P->>SW: "Forward notice"
     SW->>T: "Inspect route/focus and ask render state"
     T-->>SW: "R reply rendered"
-    SW->>C: "reply_observed intent"
+    SW-->>P: "reply_observed intent"
+    P->>C: "HTTP intent"
     C->>C: "CAS read; settle notice"
-    C-->>SW: "clear T"
+    C->>S: "clear T"
+    S-->>P: "Session event"
+    P-->>SW: "Forward clear"
     SW->>SW: "Close tagged OS notices; clear badges"
 ```
 
@@ -704,20 +1019,25 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant C as "Notification coordinator"
-    participant S as "User completion stream"
+    participant S as "Run-completion logical stream"
+    participant P as "Authenticated page"
     participant SW as "Service worker"
     participant A as "Focused tab on another route"
 
     C->>S: "run_completion notice"
-    S->>SW: "Leader forwards notice"
+    S->>P: "Session event"
+    P->>SW: "Forward notice"
     SW->>SW: "clients.matchAll; choose focused tab"
-    SW->>C: "in_app intent + state revision"
+    SW-->>P: "in_app intent + state revision"
+    P->>C: "HTTP intent"
     C->>C: "Wait intent window; choose winner"
     C->>S: "InApp grant for browser/profile"
-    S->>SW: "Forward grant"
+    S->>P: "Session event"
+    P->>SW: "Forward grant"
     SW->>SW: "Recheck clients and revision"
     SW->>A: "Show one toast and increment grouped badge"
-    A-->>C: "presented acknowledgement"
+    A-->>P: "Effect succeeded"
+    P->>C: "HTTP presented acknowledgement"
     A->>A: "Click navigates SPA to /chat/T"
 ```
 
@@ -726,23 +1046,28 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant C as "Notification coordinator"
-    participant S as "User completion stream"
+    participant S as "Run-completion logical stream"
+    participant P as "Authenticated hidden page"
     participant SW as "Service worker"
     participant B as "Background tabs"
 
     C->>S: "run_completion notice"
-    S->>SW: "Hidden leader forwards notice when scheduled"
+    S->>P: "Session event when scheduled"
+    P->>SW: "Forward notice"
     SW->>B: "clients.matchAll finds windows, none focused"
-    SW->>C: "local_os intent"
+    SW-->>P: "local_os intent"
+    P->>C: "HTTP intent"
     C->>C: "Validate selected target and enrollment"
     C->>S: "LocalOs grant for browser/profile"
-    S->>SW: "Forward grant"
+    S->>P: "Session event"
+    P->>SW: "Forward grant"
     SW->>SW: "Recheck clients; showNotification with T tag"
-    SW-->>C: "presented acknowledgement"
+    SW-->>P: "Effect succeeded"
+    P->>C: "HTTP presented acknowledgement"
     Note over SW,B: "Click focuses/navigates one existing client; never opens a duplicate"
 ```
 
-Background scheduling is not assumed reliable. If the hidden leader is
+Background scheduling is not assumed reliable. If every hidden page is
 throttled and misses the one-second intent window, the next flow supplies the
 same OS-visible result through Web Push.
 
@@ -884,8 +1209,13 @@ state. A stream or push payload never carries it as a shortcut.
 
 ### 11.2 Authorization
 
-- Completion stream requests bind tenant/user authority at authenticated
-  ingress.
+- Socket-ticket minting binds the exact authenticated caller; upgrade consumes
+  one matching unexpired nonce, and the five-minute lifetime forces periodic
+  bearer revalidation.
+- Every logical selector is independently authorized through
+  `ProductSurface::stream_events`. `RunCompletions` derives tenant/user owner
+  scope from the bound caller; `Thread` resolves ordinary thread access.
+- Client `subscription_id`, generation, and cursor values carry no authority.
 - Notice intents, acknowledgements, reads, and queries return `NotFound` for
   foreign IDs.
 - A push candidate requires projection authorization for actor, scope, and
@@ -900,7 +1230,7 @@ state. A stream or push payload never carries it as a shortcut.
 | Failure | Behavior |
 |---|---|
 | Notice persistence fails | Observer does not advance its durable cursor; replay retries |
-| Stream disconnected | Resume with `Last-Event-ID`; rebase unread/unsettled state when needed |
+| Session socket disconnected | Mint a fresh one-time ticket, reconnect, and resume each logical selector from its own cursor; rebase only affected subscriptions when needed |
 | Hidden tab throttled | No intent; authorized push fallback after the window |
 | Intent/ACK duplicated | Stable IDs and CAS return the existing outcome |
 | Grant stale | Client returns `stale_state`; one re-arbitration follows |
@@ -995,6 +1325,22 @@ responding profiles before any effect.
 The one-second latency is the deliberate cost of suppressing lower-priority
 notifications when another responding profile is already showing the reply.
 
+### 12.5 Event transport alternatives
+
+Three transport shapes were considered separately from notification
+arbitration:
+
+| Shape | Advantages | Costs / decision |
+|---|---|---|
+| Keep thread SSE and add `/notifications/run-completions/events` | Smallest immediate diff | Repeats route, hook, connection, cursor, and retry machinery; preserves the shallow string selector; rejected |
+| One session SSE carrying every event | Server-to-client semantics fit events | Dynamic thread subscriptions require reconnect/query mutation or over-delivery; independent stream failures become awkward; rejected |
+| Read-only session WebSocket with typed logical subscriptions | One connection per page, dynamic selectors, independent cursors, shared thread/notification transport | Requires a bounded control protocol and staged migration; selected |
+
+The selected socket is not the existing per-thread WebSocket implementation.
+That route is unused by the SPA, duplicates the SSE loop, authenticates with a
+long-lived bearer in the URL, and sends the wrong raw envelope. Phase 0 replaces
+it with a ticketed session gateway over the shared stream driver and codec.
+
 ## 13. AgentExecution migration
 
 The implementation must work on current `main`; it does not depend on the
@@ -1023,18 +1369,38 @@ notification routing or browser presence.
 
 ## 14. Phased implementation
 
+### Phase 0 — deepen the session event pipeline
+
+Architectural prerequisite with no notification behavior change:
+
+1. Replace `stream_id: Option<String>` and `Vec<serde_json::Value>` with the
+   typed `ProductStreamSelector` and `ProductStreamEventEnvelope` contracts.
+2. Add the shared `ProductStreamDriver` and `WebUiSessionEventCodec`; make the
+   current thread SSE handler use them without changing its browser wire shape.
+3. Add short-lived single-use socket tickets, the read-only
+   `/api/webchat/v2/session/websocket` protocol, per-connection subscription
+   budgets, independent cursor resume, failure isolation, and backpressure.
+4. Add the app-root `SessionEventClient`, migrate the active thread stream from
+   route-local `useSSE`, and prove cumulative model text plus durable final
+   reply parity through the real browser caller.
+5. Remove the dormant per-thread WebSocket route. Keep per-thread SSE as a
+   compatibility adapter and rollback path until the new transport is proven.
+
+No product mutation gains a WebSocket representation in this phase.
+
 ### Phase 1 — event-driven in-app completion notices
 
 Smallest shippable slice:
 
 1. Add the completion observer and durable notice/read store.
-2. Add the user-scoped completion projection, stream selector/route, cursor,
-   redaction, admission, and rebase snapshot.
-3. Add browser-profile stream leadership and service-worker multi-tab
-   arbitration for the focused cases.
-4. Add grouped in-app toast/badge UI, click-through, exact reply-render read
+2. Add `ProductStreamSelector::RunCompletions`, its user-scoped projection,
+   cursor, redaction, admission, and rebase snapshot; do not add a route.
+3. Add the HTTP intent, acknowledgement, and thread-read operations.
+4. Add service-worker multi-tab arbitration for the focused cases. Every tab
+   may receive the stream event; the worker dedupes per browser profile.
+5. Add grouped in-app toast/badge UI, click-through, exact reply-render read
    evidence, and clearing.
-5. Leave OS and Web Push completion delivery disabled.
+6. Leave OS and Web Push completion delivery disabled.
 
 This phase removes completion polling from the problem without touching
 notification permission or egress. The existing approval notification poller
@@ -1076,6 +1442,19 @@ production caller, not helper-only tests.
 
 ### Unit and contract
 
+- Typed selector authorization and cursor-domain tests; a thread cursor cannot
+  resume `RunCompletions`, and no selector can name another caller's user.
+- Product stream responses remain typed through the WebUI codec and never
+  expose adapter/installation/target/delivery-attempt metadata.
+- Session protocol accepts only subscribe/unsubscribe/ping, rejects operation
+  IDs and mutation-shaped frames, bounds all identifiers/frames, and isolates a
+  lagged subscription without closing healthy subscriptions.
+- Single-use socket ticket expiry, replay rejection, caller binding, and
+  same-origin upgrade enforcement.
+- Cross-replica ticket mint/consume uses one CAS winner; missing shared ticket
+  storage suppresses session-WebSocket capability advertisement.
+- The shared driver/codec produces equivalent thread event payloads through
+  session WebSocket and compatibility SSE framing.
 - Notice ID and thread-tag purpose separation and stability.
 - Store conformance on every filesystem backend: idempotent create, bounded
   CAS transitions, read/delivery orthogonality, intent ranking, grant expiry,
@@ -1089,6 +1468,13 @@ production caller, not helper-only tests.
 
 ### Reborn integration
 
+- Production-wired HTTP thread creation and turn submission followed by a
+  session `Thread` subscription streams cumulative sanitized text, preserves
+  multi-model-call phases, and ends with the exact durable finalized reply.
+- Two logical subscriptions on one socket resume independently; lag/rebase in
+  one does not advance, reset, or authorize the other.
+- Mutation attempts are exercised through their HTTP caller and no WebSocket
+  handler reaches `ProductSurface::invoke`.
 - Production-wired completed top-level turn with finalized reply creates one
   user-stream notice; subagent/detached/failed/cancelled runs do not.
 - Focused-on-thread reply evidence settles the notice and produces no outbound
@@ -1106,9 +1492,15 @@ production caller, not helper-only tests.
 
 ### Browser E2E
 
+- Create a new thread, submit a question over HTTP, observe incremental text
+  and the durable final reply over the session socket, navigate away/back, and
+  resume without duplicate assistant messages.
+- Socket disconnect, ticket refresh, reconnect, per-selector resume, one
+  selector rebase, five-minute reauthentication, hidden-page throttling, and
+  compatibility SSE fallback.
 - All core decision-matrix rows, including two tabs with one focused on `T`.
-- Duplicate SSE frames, SSE/push race, stale grants, hidden leaders, and tab
-  closure.
+- Duplicate session frames, session/push race, stale grants, hidden pages, and
+  tab closure.
 - `default`, `denied`, `granted`, unsupported, and never-prompt-on-load
   permission behavior.
 - Notification click prefers an existing `T` client, otherwise navigates one
@@ -1128,16 +1520,26 @@ production caller, not helper-only tests.
 
 ## 16. Rollout, compatibility, and rollback
 
-- No existing default changes in Phase 1: in-app notices are new product UI;
-  external delivery still requires the user's existing target selection and
-  enrollment.
+- Phase 0 is additive. The session bootstrap advertises protocol support and a
+  client chooses exactly one thread transport. Older clients keep using SSE;
+  newer clients fall back to SSE if ticket minting or socket upgrade fails.
+- Session WebSocket and compatibility SSE share one driver and browser codec,
+  so fallback does not define a second event contract. The dormant per-thread
+  WebSocket is removed because it is unused and violates the documented frame
+  shape.
+- Roll back the transport by disabling the session capability advertisement;
+  clients return to compatibility SSE without changing provider, projection,
+  transcript, or finalized-reply behavior.
+- No existing notification default changes in Phase 1: in-app notices are new
+  product UI; external delivery still requires the user's existing target
+  selection and enrollment.
 - All wire additions are versioned and additive. Capability booleans use
   `serde(default)` false.
 - New filesystem paths and indexes do not alter existing enrollment or
   outbound attempt records. Older binaries ignore them.
-- Roll back by disabling the new completion observer/stream/coordinator and
-  reverting the code. Retained notice records become inert; existing gate,
-  auth, failure, final-reply, and model-delivery behavior is unchanged.
+- Roll back notifications by disabling the new completion
+  observer/selector/coordinator. Retained notice records become inert; existing
+  gate, auth, failure, final-reply, and model-delivery behavior is unchanged.
 - A partial rollout must keep the observer, coordinator, and product stream on
   compatible versions. The service worker ignores unknown payload schemas;
   the server falls back to unread in-app state rather than sending an old
@@ -1150,6 +1552,9 @@ production caller, not helper-only tests.
 - Making the web-app target a final-reply/model-delivery target.
 - Replacing the existing gate/auth/failure notification flow.
 - Progress notifications or “agent is still working” reminders.
+- Sending product commands, notification intents, acknowledgements, read
+  evidence, or any other mutation through the WebSocket.
+- Inventing a global cursor or total order across unrelated logical streams.
 - A general-purpose user-presence service or durable focus-history store.
 - Globally atomic exactly-once notification display across offline devices.
 - Changing agent execution, scheduling, turn state, transcript storage, or the
@@ -1173,15 +1578,21 @@ production caller, not helper-only tests.
 5. **Cross-device exactness:** if product requirements later demand globally
    exactly one visual effect, design a longer two-phase device election with
    explicit leases. Do not stretch short-lived intents into standing presence.
-6. **Existing approval poller:** migrate it to an event-driven fact in a
-   separate change after completion notifications prove the user-wide stream.
+6. **Existing approval poller:** migrate it to a typed session-event selector
+   in a separate change after completion notifications prove the user-wide
+   stream. Do not add another streaming route.
 
 ## 19. Recommendation
 
-Ship the feature as a durable user-scoped completion projection plus a bounded
-intent/grant coordinator, leaving fresh multi-tab inspection and local effects
-to the service worker. Use the existing web-app delivery surface only as the
-authorized no-presenter fallback, selected structurally by an additive target
-capability and recorded through the existing outbound attempt lifecycle. Start
-with the in-app event stream, then add local OS presentation and finally Web
-Push so each phase provides user value with a contained failure surface.
+First deepen `ProductSurface::stream_events` into a typed logical-stream
+interface and ship the read-only session WebSocket over a shared WebUI stream
+driver/codec. Migrate current chat text streaming onto that transport without
+changing the HTTP command path, live-text projection, or durable finalized
+reply contract. Then ship the notification feature as a durable user-scoped
+completion selector plus a bounded intent/grant coordinator, leaving fresh
+multi-tab inspection and local effects to the service worker. Use the existing
+web-app delivery surface only as the authorized no-presenter fallback, selected
+structurally by an additive target capability and recorded through the existing
+outbound attempt lifecycle. Add in-app presentation, then local OS presentation,
+and finally Web Push so each phase provides user value with a contained failure
+surface.
