@@ -5,11 +5,11 @@ use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
-    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
-    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    ClaimDeliveryAttemptForSendRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundDeliveryId, OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
+    OutboundPushTargetRequest, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -65,10 +65,6 @@ pub trait OutboundStateStorePort: Send + Sync {
         request: LoadSubscriptionCursorRequest,
     ) -> Result<Option<ProjectionCursor>, OutboundError>;
 
-    async fn advance_subscription_cursor(
-        &self,
-        request: AdvanceSubscriptionCursorRequest,
-    ) -> Result<(), OutboundError>;
 
     async fn record_delivery_attempt(
         &self,
