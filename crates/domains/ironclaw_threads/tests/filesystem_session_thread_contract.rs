@@ -5631,3 +5631,82 @@ async fn filesystem_mark_message_submitted_is_idempotent_for_same_run() {
     assert_eq!(history.messages[0].status, MessageStatus::Submitted);
     assert_eq!(history.messages[0].turn_run_id.as_deref(), Some("run-1"));
 }
+
+/// Taxonomy baseline for detached turns (filesystem twin of the in-memory
+/// pin): a thread whose scope carries NO `owner_user_id` lands under scope
+/// axes without an `/owners/<user>` segment, so an owner-scoped listing —
+/// which reads the per-axes thread index — is structurally unable to surface
+/// it, and vice versa.
+#[tokio::test]
+async fn filesystem_list_threads_excludes_ownerless_threads_from_owner_scoped_listings() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let owned_scope = scope("taxonomy");
+    let ownerless_scope = ThreadScope {
+        owner_user_id: None,
+        ..owned_scope.clone()
+    };
+
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("t-owned-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("owned".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: ownerless_scope.clone(),
+            thread_id: Some(ThreadId::new("t-ownerless-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("ownerless".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let owner_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: owned_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let owner_ids: Vec<&str> = owner_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        owner_ids,
+        ["t-owned-001"],
+        "an owner-scoped listing must never surface ownerless threads"
+    );
+
+    let ownerless_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: ownerless_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ownerless_ids: Vec<&str> = ownerless_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ownerless_ids,
+        ["t-ownerless-001"],
+        "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
