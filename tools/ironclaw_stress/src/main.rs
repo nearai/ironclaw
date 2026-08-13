@@ -167,6 +167,15 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 4)]
     pub(crate) postgres_pool_size: usize,
 
+    /// Idle seconds captured after the single-turn DB write measurement.
+    #[arg(long, default_value_t = 300)]
+    pub(crate) db_write_idle_seconds: u64,
+
+    /// Reset current-database pg_stat_statements and measured table counters before measurement.
+    /// This is destructive to shared statistics and requires --preset db-write-measurement.
+    #[arg(long)]
+    pub(crate) db_write_reset_stats: bool,
+
     /// Base URL for API-level scenarios, for example https://host or http://127.0.0.1:8080.
     #[arg(long)]
     pub(crate) api_base_url: Option<String>,
@@ -666,6 +675,7 @@ impl ModelLatencyProfile {
 pub(crate) enum StressPreset {
     ChatBaseline,
     HotThread,
+    DbWriteMeasurement,
     LargeContext,
     ToolHeavy,
     ModelTail,
@@ -682,6 +692,7 @@ impl StressPreset {
             Self::HotThread => "hot-thread",
             Self::LargeContext => "large-context",
             Self::ToolHeavy => "tool-heavy",
+            Self::DbWriteMeasurement => "db-write-measurement",
             Self::ModelTail => "model-tail",
             Self::ResourceContention => "resource-contention",
             Self::CpuBurn => "cpu-burn",
@@ -998,6 +1009,19 @@ fn apply_preset(args: &mut Args, matches: &ArgMatches) {
             set_default!(tool_output_bytes = 4096);
             set_default!(assistant_message_bytes = 1024);
         }
+        StressPreset::DbWriteMeasurement => {
+            set_default!(scenario = Scenario::ToolSession);
+            set_default!(concurrency = 1);
+            set_default!(operations = 1);
+            set_default!(duration_seconds = 0);
+            set_default!(warmup_seconds = 0);
+            set_default!(users = 1);
+            set_default!(active_thread_count = 1);
+            set_default!(tenants = 1);
+            set_default!(tool_calls_per_turn = 10);
+            set_default!(tool_latency_ms = 0);
+            set_default!(tool_failure_every = 0);
+        }
         StressPreset::ModelTail => {
             set_default!(scenario = Scenario::MixedUserSession);
             set_default!(concurrency = 6);
@@ -1089,6 +1113,49 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
+    }
+    if args.db_write_reset_stats
+        && !matches!(args.preset, Some(StressPreset::DbWriteMeasurement))
+    {
+        return Err(
+            "--db-write-reset-stats requires --preset db-write-measurement because it resets \
+             shared current-database statistics"
+                .to_string(),
+        );
+    }
+    if matches!(args.preset, Some(StressPreset::DbWriteMeasurement)) {
+        if !matches!(args.backend, Backend::Postgres) {
+            return Err("--preset db-write-measurement requires --backend postgres".to_string());
+        }
+        if !matches!(args.scenario, Scenario::ToolSession)
+            || args.processes != 1
+            || args.concurrency != 1
+            || args.operations != 1
+            || args.duration_seconds != 0
+            || args.warmup_seconds != 0
+            || args.users != 1
+            || args.active_thread_count != 1
+            || args.tenants != 1
+            || args.tool_calls_per_turn != 10
+            || args.tool_failure_every != 0
+        {
+            return Err(
+                "--preset db-write-measurement is a fixed single-user, single-turn workload with \
+                 10 successful tool calls; do not override its workload shape"
+                    .to_string(),
+            );
+        }
+        if args.suite.is_some()
+            || ramp::is_enabled(args)
+            || sweep::is_enabled(args)
+            || args.repetitions > 1
+        {
+            return Err(
+                "--preset db-write-measurement cannot be combined with suite, ramp, sweep, or \
+                 repeated runs"
+                    .to_string(),
+            );
+        }
     }
     if args.scenario.is_api_capacity() {
         if args.api_base_url.is_none() {
@@ -1946,14 +2013,53 @@ async fn run_user_turn_in_process(
         let _ = run_user_turn_tasks(Arc::clone(&workload), &warmup_args, Arc::clone(&identities))
             .await?;
     }
+    let measurement_enabled =
+        matches!(args.preset, Some(StressPreset::DbWriteMeasurement));
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
-    let db_probe_before = db_probe::capture(args).await;
+    let db_probe_before = if measurement_enabled {
+        db_probe::begin_measurement(args).await?
+    } else {
+        db_probe::capture(args).await
+    };
     let started = Instant::now();
     let target = workload.target().to_string();
-    let samples = run_user_turn_tasks(workload, args, identities).await?;
+    let samples =
+        run_user_turn_tasks(Arc::clone(&workload), args, identities).await?;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let db_probe = if measurement_enabled {
+        let after = db_probe::capture_measurement(args).await?;
+        let idle_after = if args.db_write_idle_seconds == 0 {
+            None
+        } else {
+            eprintln!(
+                "{} observing idle database writes for {} seconds",
+                log_prefix(args),
+                args.db_write_idle_seconds
+            );
+            tokio::time::sleep(Duration::from_secs(args.db_write_idle_seconds)).await;
+            Some(db_probe::capture_measurement(args).await?)
+        };
+        db_probe::summarize_measurement(
+            db_probe_before,
+            after,
+            idle_after,
+            db_probe::DbWriteMeasurement {
+                workload: "single-tool-heavy-user-turn".to_string(),
+                tool_calls_per_turn: args.tool_calls_per_turn,
+                idle_observation_seconds: args.db_write_idle_seconds,
+                reset_stats: args.db_write_reset_stats,
+                stats_scope: if args.db_write_reset_stats {
+                    "explicit-reset-current-database"
+                } else {
+                    "snapshot-delta-current-database"
+                }
+                .to_string(),
+            },
+        )
+    } else {
+        db_probe::summarize(db_probe_before, db_probe::capture(args).await)
+    };
     let summary = summarize(
         args,
         run_id,

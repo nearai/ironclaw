@@ -362,6 +362,28 @@ fn large_context_preset_populates_workload_defaults() {
 }
 
 #[test]
+fn db_write_measurement_preset_is_one_deterministic_tool_heavy_turn() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "postgres",
+        "--preset",
+        "db-write-measurement",
+        "--db-write-idle-seconds",
+        "12",
+    ]);
+
+    assert_eq!(args.scenario, Scenario::ToolSession);
+    assert_eq!(args.concurrency, 1);
+    assert_eq!(args.operations, 1);
+    assert_eq!(args.users, 1);
+    assert_eq!(args.active_thread_count, 1);
+    assert_eq!(args.tool_calls_per_turn, 10);
+    assert_eq!(args.db_write_idle_seconds, 12);
+    validate_args(&args).expect("measurement preset is valid");
+}
+
+#[test]
 fn preset_respects_explicit_overrides() {
     let args = parse_test_args([
         "ironclaw_stress",
@@ -1149,6 +1171,9 @@ fn human_summary_places_db_probe_errors_in_matching_columns() {
             ..db_probe::DbProbeSnapshot::default()
         },
         delta: db_probe::DbProbeDelta::default(),
+        idle_after: None,
+        idle_delta: None,
+        measurement: None,
     });
 
     let rendered = human::render_run_summary(&summary);
@@ -1180,6 +1205,178 @@ fn postgres_probe_error_redacts_resolved_url() {
 
     assert!(sanitized.contains("postgresql://<redacted>@localhost:5432/app"));
     assert!(!sanitized.contains("secret"));
+}
+
+#[test]
+fn missing_pg_stat_statements_error_is_actionable_and_redacted() {
+    let message = db_probe::pg_stat_statements_unavailable(
+        "postgresql://postgres:secret@localhost:5432/app",
+        "extension is not installed",
+    );
+
+    assert!(message.contains("CREATE EXTENSION pg_stat_statements"));
+    assert!(message.contains("shared_preload_libraries"));
+    assert!(message.contains("postgresql://<redacted>@localhost:5432/app"));
+    assert!(!message.contains("secret"));
+}
+
+#[test]
+fn postgres_write_delta_aggregates_tables_queries_and_totals() {
+    let before = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_entries".to_string(),
+            inserts: 10,
+            updates: 4,
+            deletes: 1,
+        }],
+        postgres_statement_calls: vec![db_probe::PostgresStatementCalls {
+            query_id: "000000000000002a".to_string(),
+            operation: "insert".to_string(),
+            tables: vec!["root_filesystem_entries".to_string()],
+            calls: 5,
+        }],
+        ..db_probe::DbProbeSnapshot::default()
+    };
+    let after = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_entries".to_string(),
+            inserts: 13,
+            updates: 9,
+            deletes: 1,
+        }],
+        postgres_statement_calls: vec![db_probe::PostgresStatementCalls {
+            query_id: "000000000000002a".to_string(),
+            operation: "insert".to_string(),
+            tables: vec!["root_filesystem_entries".to_string()],
+            calls: 12,
+        }],
+        ..db_probe::DbProbeSnapshot::default()
+    };
+
+    let summary = db_probe::summarize_measurement(
+        before,
+        after,
+        None,
+        db_probe::DbWriteMeasurement {
+            workload: "single-tool-heavy-user-turn".to_string(),
+            tool_calls_per_turn: 10,
+            idle_observation_seconds: 0,
+            reset_stats: false,
+            stats_scope: "snapshot-delta-current-database".to_string(),
+        },
+    );
+
+    assert_eq!(summary.delta.postgres_table_writes[0].inserts, 3);
+    assert_eq!(summary.delta.postgres_table_writes[0].updates, 5);
+    assert_eq!(summary.delta.postgres_table_writes_total.total(), 8);
+    assert_eq!(summary.delta.postgres_statement_calls[0].calls, 7);
+    assert_eq!(summary.delta.postgres_statement_calls_total, 7);
+    assert_eq!(
+        summary.delta.postgres_statement_calls_by_table[0].calls,
+        7
+    );
+    let json = serde_json::to_value(&summary).expect("serialize measurement summary");
+    assert_eq!(
+        json["measurement"]["workload"],
+        "single-tool-heavy-user-turn"
+    );
+    assert_eq!(
+        json["before"]["postgres_table_writes"][0]["inserts"],
+        10
+    );
+    assert_eq!(json["after"]["postgres_statement_calls"][0]["calls"], 12);
+    assert_eq!(
+        json["delta"]["postgres_statement_calls_by_table"][0]["calls"],
+        7
+    );
+}
+
+#[test]
+fn postgres_statement_aggregation_groups_normalized_queries_without_sql_text() {
+    let statements = db_probe::aggregate_statement_calls([
+        (
+            42,
+            "INSERT INTO root_filesystem_entries(path, contents) VALUES ($1, 'secret-value')",
+            3,
+        ),
+        (
+            42,
+            "INSERT INTO root_filesystem_entries(path, contents) VALUES ($1, 'other-secret')",
+            4,
+        ),
+        (
+            7,
+            "UPDATE trigger_records SET enabled = $1 WHERE trigger_id = $2",
+            2,
+        ),
+        (99, "SELECT * FROM unrelated_table", 100),
+    ]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(statements[0].calls + statements[1].calls, 9);
+    assert!(statements.iter().any(|statement| {
+        statement.tables == ["root_filesystem_entries"] && statement.calls == 7
+    }));
+    assert!(statements
+        .iter()
+        .any(|statement| statement.tables == ["trigger_records"] && statement.calls == 2));
+    let serialized = serde_json::to_string(&statements).expect("serialize statement counters");
+    assert!(!serialized.contains("secret-value"));
+    assert!(!serialized.contains("other-secret"));
+    assert!(!serialized.contains("UPDATE trigger_records"));
+}
+
+#[test]
+fn human_summary_renders_postgres_write_and_idle_measurement() {
+    let mut summary = run_summary_with_bottlenecks();
+    let before = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_events".to_string(),
+            inserts: 1,
+            updates: 0,
+            deletes: 0,
+        }],
+        ..db_probe::DbProbeSnapshot::default()
+    };
+    let after = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_events".to_string(),
+            inserts: 4,
+            updates: 0,
+            deletes: 0,
+        }],
+        ..db_probe::DbProbeSnapshot::default()
+    };
+    let idle_after = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_events".to_string(),
+            inserts: 5,
+            updates: 0,
+            deletes: 0,
+        }],
+        ..db_probe::DbProbeSnapshot::default()
+    };
+    summary.db_probe = Some(db_probe::summarize_measurement(
+        before,
+        after,
+        Some(idle_after),
+        db_probe::DbWriteMeasurement {
+            workload: "single-tool-heavy-user-turn".to_string(),
+            tool_calls_per_turn: 10,
+            idle_observation_seconds: 300,
+            reset_stats: false,
+            stats_scope: "snapshot-delta-current-database".to_string(),
+        },
+    ));
+
+    let rendered = human::render_run_summary(&summary);
+
+    assert!(rendered.contains("DB write measurement"));
+    assert!(rendered.contains("single-tool-heavy-user-turn"));
+    assert!(rendered.contains("Postgres table writes"));
+    assert!(rendered.contains("root_filesystem_events"));
+    assert!(rendered.contains("Postgres idle table writes"));
+    assert!(rendered.contains("300"));
 }
 
 #[test]
@@ -1507,6 +1704,8 @@ fn test_args() -> Args {
         libsql_path: None,
         postgres_url: None,
         postgres_pool_size: 4,
+        db_write_idle_seconds: 300,
+        db_write_reset_stats: false,
         api_base_url: None,
         api_users_jsonl: None,
         api_bearer_token: None,
@@ -1616,6 +1815,9 @@ fn db_probe_summary() -> db_probe::DbProbeSummary {
             libsql_file_bytes: Some(1024),
             ..db_probe::DbProbeDelta::default()
         },
+        idle_after: None,
+        idle_delta: None,
+        measurement: None,
     }
 }
 

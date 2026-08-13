@@ -261,6 +261,7 @@ defaults.
 | --- | --- |
 | `chat-baseline` | Baseline user-turn storage latency and throughput. |
 | `hot-thread` | Same-thread serialization and busy-thread rejection behavior. |
+| `db-write-measurement` | One deterministic Postgres user turn with 10 tool calls, plus an idle write window. |
 | `large-context` | Context read amplification with prefilled history. |
 | `tool-heavy` | Tool transcript writes and larger tool output payloads. |
 | `model-tail` | Tail-spike synthetic model latency. |
@@ -290,6 +291,36 @@ cargo run -p ironclaw_stress --release -- \
   --human-read \
   --bottleneck-report
 ```
+
+### Postgres DB write measurement
+
+`db-write-measurement` is a fixed workload: one user, one thread, one turn, and
+10 successful tool calls. Unlike general presets, its workload-shape flags
+cannot be overridden. The report contains before/after/delta
+`pg_stat_user_tables` insert/update/delete counters and normalized
+`pg_stat_statements` calls for RootFilesystem entry/event/index/sequence tables
+and trigger tables. Statement output contains query IDs, operation names, and
+table names, never SQL text.
+
+```bash
+export IRONCLAW_FILESYSTEM_POSTGRES_URL='postgresql://USER:PASSWORD@HOST:PORT/DB'
+
+cargo run -p ironclaw_stress --release -- \
+  --backend postgres \
+  --preset db-write-measurement \
+  --db-write-idle-seconds 300 \
+  --human-read
+```
+
+The default uses non-destructive snapshots scoped to the current database.
+`pg_stat_statements` must be installed and loaded; the command fails with setup
+instructions when it is unavailable.
+
+`--db-write-reset-stats` is optional and destructive to shared statistics. It
+resets normalized statement counters for the current database and counters for
+the measured tables. Use it only on an isolated measurement database where
+discarding other observers' statistics is intentional. Omit it on arbitrary
+remote or shared databases.
 
 ## Suites
 
@@ -718,8 +749,9 @@ done with libsql. To use Postgres, pass `--postgres-url` or set:
 export IRONCLAW_FILESYSTEM_POSTGRES_URL='postgresql://USER:PASSWORD@HOST:PORT/DB'
 ```
 
-The URL is redacted in output. Postgres DB probe fields include database size
-and active/idle/waiting connection counts.
+The URL is redacted in output. Regular Postgres DB probe fields remain database
+size and active/idle/waiting connection counts. The `db-write-measurement`
+preset adds table-write and normalized-statement before/after/delta reports.
 
 ## Practical Workflow
 

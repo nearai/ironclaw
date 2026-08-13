@@ -509,6 +509,182 @@ fn push_db_probe_table(output: &mut String, db_probe: &DbProbeSummary) {
     );
     push_db_probe_error(output, "before_error", &db_probe.before);
     push_db_probe_error(output, "after_error", &db_probe.after);
+    if let Some(measurement) = &db_probe.measurement {
+        let _ = writeln!(output, "\nDB write measurement");
+        push_metric(output, "workload", measurement.workload.clone());
+        push_metric(
+            output,
+            "tool_calls",
+            measurement.tool_calls_per_turn.to_string(),
+        );
+        push_metric(
+            output,
+            "idle_seconds",
+            measurement.idle_observation_seconds.to_string(),
+        );
+        push_metric(output, "stats_scope", measurement.stats_scope.clone());
+        push_metric(output, "stats_reset", measurement.reset_stats.to_string());
+        push_postgres_table_write_table(output, db_probe);
+        push_postgres_statement_table(output, db_probe);
+        if let Some(idle_delta) = &db_probe.idle_delta {
+            push_postgres_idle_tables(output, idle_delta);
+            push_postgres_idle_statements(output, idle_delta);
+        }
+    }
+}
+
+fn push_postgres_table_write_table(output: &mut String, db_probe: &DbProbeSummary) {
+    let _ = writeln!(output, "\nPostgres table writes");
+    let _ = writeln!(
+        output,
+        "{:<40} {:>10} {:>10} {:>10}",
+        "counter", "before", "after", "delta"
+    );
+    let _ = writeln!(output, "{:-<40} {:->10} {:->10} {:->10}", "", "", "", "");
+    for table_delta in &db_probe.delta.postgres_table_writes {
+        let before = db_probe
+            .before
+            .postgres_table_writes
+            .iter()
+            .find(|table| table.table == table_delta.table);
+        let after = db_probe
+            .after
+            .postgres_table_writes
+            .iter()
+            .find(|table| table.table == table_delta.table);
+        for (name, before, after, counter_delta) in [
+            (
+                "insert",
+                before.map(|table| table.inserts),
+                after.map(|table| table.inserts),
+                table_delta.inserts,
+            ),
+            (
+                "update",
+                before.map(|table| table.updates),
+                after.map(|table| table.updates),
+                table_delta.updates,
+            ),
+            (
+                "delete",
+                before.map(|table| table.deletes),
+                after.map(|table| table.deletes),
+                table_delta.deletes,
+            ),
+        ] {
+            let _ = writeln!(
+                output,
+                "{:<40} {:>10} {:>10} {:>+10}",
+                truncate(&format!("{}.{}", table_delta.table, name), 40),
+                format_optional(before),
+                format_optional(after),
+                counter_delta,
+            );
+        }
+    }
+    let total = &db_probe.delta.postgres_table_writes_total;
+    let _ = writeln!(
+        output,
+        "{:<40} {:>10} {:>10} {:>+10}",
+        "TOTAL.rows",
+        db_probe.before.postgres_table_writes_total.total(),
+        db_probe.after.postgres_table_writes_total.total(),
+        total.total(),
+    );
+}
+
+fn push_postgres_statement_table(output: &mut String, db_probe: &DbProbeSummary) {
+    let _ = writeln!(output, "\nPostgres normalized statement calls");
+    let _ = writeln!(
+        output,
+        "{:<18} {:<8} {:<30} {:>9} {:>9} {:>9}",
+        "query_id", "op", "tables", "before", "after", "delta"
+    );
+    let _ = writeln!(
+        output,
+        "{:-<18} {:-<8} {:-<30} {:->9} {:->9} {:->9}",
+        "", "", "", "", "", ""
+    );
+    for delta in &db_probe.delta.postgres_statement_calls {
+        let before = db_probe
+            .before
+            .postgres_statement_calls
+            .iter()
+            .find(|statement| statement.query_id == delta.query_id)
+            .map(|statement| statement.calls)
+            .unwrap_or(0);
+        let after = db_probe
+            .after
+            .postgres_statement_calls
+            .iter()
+            .find(|statement| statement.query_id == delta.query_id)
+            .map(|statement| statement.calls)
+            .unwrap_or(0);
+        let _ = writeln!(
+            output,
+            "{:<18} {:<8} {:<30} {:>9} {:>9} {:>+9}",
+            delta.query_id,
+            delta.operation,
+            truncate(&delta.tables.join(","), 30),
+            before,
+            after,
+            delta.calls,
+        );
+    }
+    let _ = writeln!(
+        output,
+        "{:<18} {:<8} {:<30} {:>9} {:>9} {:>+9}",
+        "TOTAL",
+        "",
+        "",
+        db_probe.before.postgres_statement_calls_total,
+        db_probe.after.postgres_statement_calls_total,
+        db_probe.delta.postgres_statement_calls_total,
+    );
+    let _ = writeln!(output, "\nPostgres statement calls by table");
+    for table in &db_probe.delta.postgres_statement_calls_by_table {
+        let _ = writeln!(output, "{:<40} {:>+10}", table.table, table.calls);
+    }
+}
+
+fn push_postgres_idle_tables(output: &mut String, idle: &crate::db_probe::DbProbeDelta) {
+    let _ = writeln!(output, "\nPostgres idle table writes");
+    let _ = writeln!(
+        output,
+        "{:<40} {:>10} {:>10} {:>10} {:>10}",
+        "table", "inserts", "updates", "deletes", "total"
+    );
+    for table in &idle.postgres_table_writes {
+        let _ = writeln!(
+            output,
+            "{:<40} {:>+10} {:>+10} {:>+10} {:>+10}",
+            truncate(&table.table, 40),
+            table.inserts,
+            table.updates,
+            table.deletes,
+            table.inserts + table.updates + table.deletes,
+        );
+    }
+}
+
+fn push_postgres_idle_statements(output: &mut String, idle: &crate::db_probe::DbProbeDelta) {
+    let _ = writeln!(output, "\nPostgres idle normalized statement calls");
+    for statement in &idle.postgres_statement_calls {
+        let _ = writeln!(
+            output,
+            "{:<18} {:<8} {:<30} {:>+9}",
+            statement.query_id,
+            statement.operation,
+            truncate(&statement.tables.join(","), 30),
+            statement.calls,
+        );
+    }
+    let _ = writeln!(
+        output,
+        "{:<18} {:<8} {:<30} {:>+9}",
+        "TOTAL", "", "", idle.postgres_statement_calls_total,
+    );
+
 }
 
 fn push_db_size_metric(
