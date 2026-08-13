@@ -7710,9 +7710,9 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
     serve_handle.abort();
 }
 
-// Regression for the WS-shares-SSE-pool review (Medium): the WS
-// transport must draw from the same `SseCapacity` pool as the SSE
-// transport for the same `(tenant, user)`. If they kept independent
+// Regression for the WS-shares-SSE-pool review (Medium), carried onto the
+// session socket: the session WebSocket must draw from the same
+// event-connection pool as the SSE transport for the same `(tenant, user)`. If they kept independent
 // counters, a caller could open `cap` SSE streams *and* `cap` WS
 // streams concurrently — doubling the backend `stream_events` drain
 // the cap is supposed to bound.
@@ -7722,7 +7722,7 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
 // with an held-open SSE response, then asserting a same-caller WS
 // upgrade attempt returns 429 until the SSE body is dropped.
 #[tokio::test]
-async fn stream_events_ws_shares_capacity_with_sse_streams() {
+async fn session_websocket_shares_capacity_with_sse_streams() {
     let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     // Pool size 1: any one open stream (SSE or WS) must exhaust the
     // budget for the caller.
@@ -7773,7 +7773,7 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
     // real WS handshake against the same listener; the upgrade
     // response carries the 429 from `try_acquire` before any frames
     // flow.
-    let ws_url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let ws_url = format!("ws://{addr}/api/webchat/v2/session/websocket");
     let ws_attempt = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(ws_url.clone()),
@@ -8676,39 +8676,84 @@ async fn missing_caller_extension_returns_500() {
     let _ = response.into_body().collect().await.expect("drain body");
 }
 
-// Regression for the "WS transport's projection payload + redacted
-// error frame untested" review (Medium). The composition crate's WS
-// caller-level test verifies the upgrade returns 101, but only a real
-// WS connection that pumps frames can catch breakage in the
-// per-envelope JSON serialization, cursor advancement on the
-// `after_cursor` field, or the redacted error frame the handler emits
-// on service failure.
-#[tokio::test]
-async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
+// ─── session WebSocket protocol tests ─────────────────────────────────
+//
+// The session socket multiplexes independent typed logical subscriptions
+// over one read-only connection. These tests drive the REAL handler over a
+// real TCP WebSocket (axum's `WebSocketUpgrade` extractor needs a genuine
+// `hyper::upgrade::OnUpgrade`), with the caller extension injected the same
+// way the bearer middleware would after consuming a single-use ticket.
+
+async fn connect_session_socket(
+    addr: std::net::SocketAddr,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let url = format!("ws://{addr}/api/webchat/v2/session/websocket");
+    let (ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("session ws connect within 5s")
+    .expect("session ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+    ws
+}
+
+fn session_subscribe_frame(
+    subscription_id: &str,
+    thread_id: &str,
+    after_cursor: Option<&str>,
+) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "subscribe",
+        "subscription_id": subscription_id,
+        "selector": {"kind": "thread", "thread_id": thread_id},
+        "after_cursor": after_cursor,
+    }))
+    .expect("subscribe frame serializes")
+}
+
+async fn next_session_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
     use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                return serde_json::from_str(&text).expect("session frame parses");
+            }
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => panic!("socket closed early"),
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(error))) => panic!("socket error: {error}"),
+            Err(_) => panic!("no session frame within deadline"),
+        }
+    }
+}
+
+/// The core multiplexing contract: one socket carries several logical
+/// subscriptions; each is admitted with a connection-scoped generation,
+/// delivers typed browser event bodies with per-event cursors through the
+/// shared codec, and fails independently — a failed subscription emits a
+/// typed `subscription_error` and cancels only its own generation while the
+/// socket (and every other subscription) stays open.
+#[tokio::test]
+async fn session_websocket_multiplexes_subscriptions_and_isolates_failures() {
+    use futures::SinkExt;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     let services = Arc::new(StubServices::default());
-
     let envelope_a = make_projection_envelope("cursor:a", "hello");
     let envelope_b = make_projection_envelope("cursor:b", "world");
     services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
         events: vec![envelope_a.clone(), envelope_b.clone()],
     }));
-    // After draining the two real events, the next drain produces a
-    // service error so the handler exercises the redacted-error-frame +
-    // close path before lifetime expiry.
-    services.enqueue_stream_events(Err(ProductSurfaceError {
-        code: ProductSurfaceErrorCode::Unavailable,
-        kind: ProductSurfaceErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    }));
 
     let router = router_with(services.clone());
-
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -8717,104 +8762,97 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
-    let (mut ws, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url),
-    )
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-x", None).into(),
+    ))
     .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
+    .expect("send subscribe");
 
-    // Read frames until we see both projection envelopes and the
-    // redacted error frame, or the stream closes.
-    let mut text_frames: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, ws.next()).await {
-            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
-            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
-            Ok(Some(Ok(_))) => continue, // ignore ping/pong/binary
-            Ok(Some(Err(_))) => break,
-            Err(_) => break,
-        }
-    }
+    let subscribed = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed["schema"], "webui.session_event.v1");
+    assert_eq!(subscribed["type"], "subscribed");
+    assert_eq!(subscribed["subscription_id"], "chat-active");
+    let chat_generation = subscribed["generation"].as_u64().expect("generation");
+
+    // The two events arrive in order, tagged with the subscription id and
+    // generation, carrying the typed browser event body (never adapter or
+    // delivery metadata) plus the per-event resume cursor.
+    let event_a = next_session_frame(&mut ws).await;
+    assert_eq!(event_a["type"], "event");
+    assert_eq!(event_a["subscription_id"], "chat-active");
+    assert_eq!(event_a["generation"], chat_generation);
+    let expected_body_a = serde_json::to_value(ironclaw_webui::webui_v2::WebChatV2Event::from(
+        envelope_a.payload().clone(),
+    ))
+    .expect("body a");
+    assert_eq!(event_a["event"], expected_body_a);
+    assert_eq!(
+        event_a["cursor"],
+        Value::String(serde_json::to_string(envelope_a.projection_cursor()).expect("cursor token")),
+    );
+    let event_b = next_session_frame(&mut ws).await;
+    assert_eq!(event_b["subscription_id"], "chat-active");
+    let expected_body_b = serde_json::to_value(ironclaw_webui::webui_v2::WebChatV2Event::from(
+        envelope_b.payload().clone(),
+    ))
+    .expect("body b");
+    assert_eq!(event_b["event"], expected_body_b);
+
+    // A second logical subscription whose service call fails receives its
+    // own typed subscription_error with its own generation...
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }));
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("other-thread", "thread-y", None).into(),
+    ))
+    .await
+    .expect("send second subscribe");
+    let error_frame = next_session_frame(&mut ws).await;
+    assert_eq!(error_frame["type"], "subscription_error");
+    assert_eq!(error_frame["subscription_id"], "other-thread");
+    assert_eq!(error_frame["error"], "unavailable");
+    assert_eq!(error_frame["retryable"], true);
+    assert!(
+        error_frame["generation"]
+            .as_u64()
+            .expect("error generation")
+            > chat_generation,
+        "each admission attempt gets a newer connection-scoped generation",
+    );
+    assert!(
+        error_frame.get("detail").is_none() && error_frame.get("field").is_none(),
+        "subscription errors carry only the redacted taxonomy",
+    );
+
+    // ...and the socket plus the healthy subscription survive: the
+    // transport still answers pings after the sibling failure.
+    ws.send(WsMessage::Text(r#"{"type":"ping"}"#.to_string().into()))
+        .await
+        .expect("send ping");
+    let pong = next_session_frame(&mut ws).await;
+    assert_eq!(pong["type"], "pong");
+
     let _ = ws.close(None).await;
     serve_handle.abort();
-
-    assert!(
-        text_frames.len() >= 3,
-        "expected projection envelopes + error frame; got {} text frame(s): {:?}",
-        text_frames.len(),
-        text_frames,
-    );
-
-    // First two frames carry the typed product stream envelopes, in order —
-    // cursor plus payload only, never adapter/installation/delivery routing
-    // metadata.
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
-    let expected_a: Value = serde_json::to_value(typed_stream_event_envelope(envelope_a.clone()))
-        .expect("envelope a value");
-    assert_eq!(
-        envelope_a_json, expected_a,
-        "first WS frame must carry the first typed stream envelope verbatim",
-    );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
-    let expected_b: Value = serde_json::to_value(typed_stream_event_envelope(envelope_b.clone()))
-        .expect("envelope b value");
-    assert_eq!(envelope_b_json, expected_b);
-
-    // Third frame is the redacted error payload — `error` code +
-    // `retryable` flag only. No `detail`, `field`, `validation_code`,
-    // or any internal diagnostic must leak through.
-    let error_json: Value =
-        serde_json::from_str(&text_frames[2]).expect("error frame parses as json");
-    assert_eq!(error_json["error"], serde_json::json!("unavailable"));
-    assert_eq!(error_json["retryable"], serde_json::json!(true));
-    assert!(
-        error_json.get("detail").is_none(),
-        "redacted error frame must not carry server diagnostics",
-    );
-    assert!(error_json.get("field").is_none());
-    assert!(error_json.get("validation_code").is_none());
-
-    // The handler must have advanced `after_cursor` between the two
-    // drains so the browser would resume from cursor:b on reconnect.
-    let calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert!(
-        calls.len() >= 2,
-        "second poll must occur for the redacted-error path to fire",
-    );
-    assert_eq!(
-        calls[1].after_cursor.as_ref(),
-        Some(envelope_b.projection_cursor()),
-        "second WS poll must advance after_cursor to the last emitted projection cursor",
-    );
 }
 
+/// Every product mutation stays on authenticated HTTP: mutation-shaped
+/// frames (operation IDs, turn submissions, gate resolutions) are protocol
+/// violations that close the socket, and the handler never reaches
+/// `ProductSurface::invoke`.
 #[tokio::test]
-async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+async fn session_websocket_rejects_mutation_frames_without_reaching_invoke() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(ProductSurfaceError {
-        code: ProductSurfaceErrorCode::Unavailable,
-        kind: ProductSurfaceErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    }));
-
-    let query_cursor = make_projection_envelope("cursor:query", "query");
-    let header_cursor = make_projection_envelope("cursor:header", "header");
-    let query_cursor_json =
-        serde_json::to_string(query_cursor.projection_cursor()).expect("query cursor");
-    let header_cursor_json =
-        serde_json::to_string(header_cursor.projection_cursor()).expect("header cursor");
-
     let router = router_with(services.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -8824,71 +8862,64 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let url = format!(
-        "ws://{addr}/api/webchat/v2/threads/thread-x/ws?after_cursor={}",
-        url_encode(&query_cursor_json)
-    );
-    let mut request = url.into_client_request().expect("ws request");
-    request.headers_mut().insert(
-        "Last-Event-ID",
-        header_cursor_json.parse().expect("header cursor value"),
-    );
-
-    let (mut ws, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(request),
-    )
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        r#"{"type":"invoke","operation_id":"webui.submit_turn.v1","input":{"text":"hi"}}"#
+            .to_string()
+            .into(),
+    ))
     .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
+    .expect("send mutation frame");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let violation = next_session_frame(&mut ws).await;
+    assert_eq!(violation["type"], "protocol_error");
+    assert_eq!(violation["violation"], "malformed_frame");
+
+    // The server closes after a protocol violation.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if !services
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => break,
+            Err(_) => panic!("socket must close after a protocol violation"),
+        }
+    }
+
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "no WebSocket frame may reach ProductSurface::invoke",
+    );
+    assert!(
+        services
             .stream_events_calls
             .lock()
             .expect("lock")
-            .is_empty()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "WS handler did not call stream_events"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let _ = ws.close(None).await;
-    serve_handle.abort();
-
-    let calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert_eq!(
-        calls[0].after_cursor.as_ref(),
-        Some(header_cursor.projection_cursor()),
-        "Last-Event-ID must win over ?after_cursor= for WS reconnects, matching SSE"
+            .is_empty(),
+        "a rejected frame must not open a subscription either",
     );
+    serve_handle.abort();
 }
 
-// Regression for the WS-idle-close review (Medium): the WS drain
-// loop must observe socket close immediately. Without this, an
-// idle peer (closed tab, dropped network) leaves the loop polling
-// the service at the 1Hz cadence — its per-caller `SseSlot` stays
-// reserved until `SSE_MAX_LIFETIME` (5 min). With the recv-aware
-// select, a peer close releases the slot within one poll cycle.
-//
-// The test pins the budget at 1 stream per caller, opens a WS,
-// closes the browser side, and asserts a subsequent WS upgrade from
-// the same caller succeeds within ~2s (well under the 5-minute
-// lifetime). If the loop didn't observe the close, the second
-// upgrade would 429 for minutes.
+/// Independent resume: each logical subscription supplies its own cursor,
+/// and the service sees exactly that cursor for exactly that selector —
+/// there is no session-wide cursor.
 #[tokio::test]
-async fn stream_events_ws_releases_slot_on_peer_close() {
+async fn session_websocket_subscriptions_resume_from_independent_cursors() {
     use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
-    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
 
+    let cursor_a = make_projection_envelope("cursor:sub-a", "a");
+    let cursor_b = make_projection_envelope("cursor:sub-b", "b");
+    let cursor_a_json = serde_json::to_string(cursor_a.projection_cursor()).expect("cursor a");
+    let cursor_b_json = serde_json::to_string(cursor_b.projection_cursor()).expect("cursor b");
+
+    let router = router_with(services.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -8897,46 +8928,145 @@ async fn stream_events_ws_releases_slot_on_peer_close() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
-
-    // Open WS #1, send a Close frame, drop the client.
-    let (mut ws_one, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url.clone()),
-    )
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-a", "thread-a", Some(&cursor_a_json)).into(),
+    ))
     .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
-    let _ = ws_one
-        .send(tokio_tungstenite::tungstenite::Message::Close(None))
-        .await;
-    drop(ws_one);
-
-    // Wait briefly for the server-side WS task to observe the close
-    // and release the slot. With the recv-aware select the slot
-    // returns within one poll cycle; without it, it would be pinned
-    // for SSE_MAX_LIFETIME.
-    let recovered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            match tokio_tungstenite::connect_async(url.clone()).await {
-                Ok(pair) => return pair,
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
-        }
-    })
+    .expect("subscribe a");
+    let subscribed_a = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed_a["type"], "subscribed");
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-b", "thread-b", Some(&cursor_b_json)).into(),
+    ))
     .await
-    .expect(
-        "second WS upgrade must succeed within 3s after peer close \
-         — the slot should have been released by the recv-aware select",
+    .expect("subscribe b");
+    let subscribed_b = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed_b["type"], "subscribed");
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    // Drain-only stubs re-poll on the idle cadence, so assert on the first
+    // call per selector rather than the total count: each selector's
+    // authorization-bearing first drain must carry exactly its own cursor.
+    assert!(calls.len() >= 2, "both selectors must reach the service");
+    let call_for = |thread: &str| {
+        calls
+            .iter()
+            .find(|call| call.thread_id == thread)
+            .unwrap_or_else(|| panic!("no stream call for {thread}"))
+            .clone()
+    };
+    assert_eq!(
+        call_for("thread-a").after_cursor.as_ref(),
+        Some(cursor_a.projection_cursor()),
+        "subscription A resumes from its own cursor",
     );
     assert_eq!(
-        recovered.1.status().as_u16(),
-        101,
-        "second WS upgrade must complete once the slot has been released",
+        call_for("thread-b").after_cursor.as_ref(),
+        Some(cursor_b.projection_cursor()),
+        "subscription B resumes from its own cursor",
     );
-    let mut ws_two = recovered.0;
-    let _ = ws_two.close(None).await;
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// Reusing an active subscription id authorizes the replacement first: a
+/// failed replacement is rejected with its own (newer) generation while the
+/// existing authorized subscription continues unchanged, and a successful
+/// replacement swaps generations atomically.
+#[tokio::test]
+async fn session_websocket_replacement_authorizes_before_swapping_generations() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-x", None).into(),
+    ))
+    .await
+    .expect("subscribe");
+    let admitted = next_session_frame(&mut ws).await;
+    assert_eq!(admitted["type"], "subscribed");
+    let original_generation = admitted["generation"].as_u64().expect("generation");
+
+    // Unauthorized replacement: rejected with the attempted generation;
+    // the original subscription keeps its id.
+    services.enqueue_stream_events(Err(ProductSurfaceError::not_found()));
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-foreign", None).into(),
+    ))
+    .await
+    .expect("attempt replacement");
+    let rejected = next_session_frame(&mut ws).await;
+    assert_eq!(rejected["type"], "subscription_error");
+    assert_eq!(rejected["subscription_id"], "chat-active");
+    let rejected_generation = rejected["generation"].as_u64().expect("generation");
+    assert!(rejected_generation > original_generation);
+
+    // Successful replacement: admitted under a still-newer generation.
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-z", None).into(),
+    ))
+    .await
+    .expect("replace");
+    let replaced = next_session_frame(&mut ws).await;
+    assert_eq!(replaced["type"], "subscribed");
+    assert!(replaced["generation"].as_u64().expect("generation") > rejected_generation);
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// A dropped browser tab releases the caller's connection slot promptly:
+/// with a per-caller budget of one, closing the first session socket lets
+/// the next upgrade succeed instead of pinning the slot for the lifetime
+/// budget.
+#[tokio::test]
+async fn session_websocket_releases_slot_on_peer_close() {
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut first = connect_session_socket(addr).await;
+    let _ = first.close(None).await;
+    drop(first);
+
+    // The close needs a moment to propagate through the socket task.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let url = format!("ws://{addr}/api/webchat/v2/session/websocket");
+        match tokio_tungstenite::connect_async(url).await {
+            Ok((mut ws, response)) => {
+                assert_eq!(response.status().as_u16(), 101);
+                let _ = ws.close(None).await;
+                break;
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("slot never released after peer close: {error}"),
+        }
+    }
     serve_handle.abort();
 }
 

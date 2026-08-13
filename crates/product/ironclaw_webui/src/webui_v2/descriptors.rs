@@ -42,7 +42,8 @@ pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
 pub const WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT: &str = "webui.v2.get_thread_artifact";
 pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
-pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
+pub const WEBUI_V2_ROUTE_SESSION_WEBSOCKET_TICKET: &str = "webui.v2.session_websocket_ticket";
+pub const WEBUI_V2_ROUTE_SESSION_WEBSOCKET: &str = "webui.v2.session_websocket";
 pub const WEBUI_V2_ROUTE_LIST_COMMANDS: &str = "webui.v2.list_commands";
 pub const WEBUI_V2_ROUTE_EXECUTE_COMMAND: &str = "webui.v2.execute_command";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
@@ -177,7 +178,9 @@ pub const WEBUI_V2_PATTERN_LOGS: &str = "/api/webchat/v2/logs";
 pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
-pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{thread_id}/ws";
+pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET: &str =
+    "/api/webchat/v2/session/websocket-ticket";
+pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET: &str = "/api/webchat/v2/session/websocket";
 pub const WEBUI_V2_PATTERN_LIST_COMMANDS: &str = "/api/webchat/v2/commands";
 pub const WEBUI_V2_PATTERN_EXECUTE_COMMAND: &str = "/api/webchat/v2/threads/{thread_id}/commands";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
@@ -343,7 +346,8 @@ pub fn webui_v2_routes_with_artifact_flags(
         logs_descriptor(),
         get_attachment_descriptor(),
         stream_events_descriptor(),
-        stream_events_ws_descriptor(),
+        session_websocket_ticket_descriptor(),
+        session_websocket_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         retry_run_descriptor(),
@@ -1107,16 +1111,53 @@ fn archive_notification_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn stream_events_ws_descriptor() -> IngressRouteDescriptor {
+fn session_websocket_ticket_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
+        WEBUI_V2_ROUTE_SESSION_WEBSOCKET_TICKET,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET,
+        // Transport-auth mint, not a product command: the bearer-backed POST
+        // mints a bounded single-use nonce and never reaches ProductSurface.
+        // The 12/min bound doubles as the per-caller ticket admission rate.
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: bearer_required(),
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit: rate_limit_per_caller(12, 60),
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::NoEffect,
+        })
+        .expect("session websocket ticket policy is statically valid"),
+    )
+}
+
+fn session_websocket_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SESSION_WEBSOCKET,
         NetworkMethod::Get,
-        WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
-        ws_read_policy(
-            stream_rate_limit(),
-            AuditTraceClass::StreamingSubscription,
-            AllowedEffectPath::ProjectionOnly,
-        ),
+        WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
+        // The upgrade authenticates with the single-use ticket the caller
+        // minted over bearer HTTP; the long-lived bearer never appears in
+        // the WebSocket URL. Same-origin enforcement runs before upgrade.
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Required {
+                schemes: vec![IngressAuthScheme::SingleUseTicket],
+            },
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit: stream_rate_limit(),
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::SameOriginRequired,
+            streaming: StreamingMode::WebSocket,
+            audit: AuditTraceClass::StreamingSubscription,
+            effect_path: AllowedEffectPath::ProjectionOnly,
+        })
+        .expect("session websocket policy is statically valid"),
     )
 }
 
@@ -2132,29 +2173,6 @@ fn operator_replace_extension_configuration_descriptor() -> IngressRouteDescript
             AllowedEffectPath::ProductSurface,
         ),
     )
-}
-
-fn ws_read_policy(
-    rate_limit: RateLimitPolicy,
-    audit: AuditTraceClass,
-    effect_path: AllowedEffectPath,
-) -> IngressPolicy {
-    IngressPolicy::new(IngressPolicyParts {
-        listener_class: ListenerClass::LocalGateway,
-        auth: bearer_required(),
-        scope_source: IngressScopeSource::AuthenticatedCaller,
-        body_limit: BodyLimitPolicy::NoBody,
-        rate_limit,
-        cors: CorsPolicy::SameOriginOnly,
-        // WS upgrade is gated by host composition's same-origin
-        // check; declared here so the descriptor is the contract a
-        // future allowlist-based deployment overrides.
-        websocket_origin: WebSocketOriginPolicy::SameOriginRequired,
-        streaming: StreamingMode::WebSocket,
-        audit,
-        effect_path,
-    })
-    .expect("webui v2 WS read policy must validate") // safety: combination LocalGateway + bearer + AuthenticatedCaller + WebSocket + SameOriginRequired is a permitted shape; other parts are crate-local constants
 }
 
 fn descriptor(

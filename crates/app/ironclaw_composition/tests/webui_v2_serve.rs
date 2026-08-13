@@ -1162,7 +1162,10 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_session_socket_ticket_store(Arc::new(
+        ironclaw_webui::InMemorySessionSocketTicketStore::new(),
+    ));
     let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
     (app, services)
 }
@@ -2070,20 +2073,45 @@ async fn spawn_serve(app: axum::Router) -> (std::net::SocketAddr, tokio::task::J
 
 fn ws_upgrade_request(
     addr: std::net::SocketAddr,
-    bearer: &str,
+    ticket: &str,
     origin: &str,
 ) -> tokio_tungstenite::tungstenite::handshake::client::Request {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    // The session socket authenticates with a single-use ticket in the
+    // query string; the long-lived bearer never appears in a WebSocket URL.
+    let url = format!("ws://{addr}/api/webchat/v2/session/websocket?ticket={ticket}");
     let mut request = url.into_client_request().expect("ws client request");
-    request.headers_mut().insert(
-        http::header::AUTHORIZATION,
-        format!("Bearer {bearer}").parse().expect("auth header"),
-    );
     request
         .headers_mut()
         .insert(http::header::ORIGIN, origin.parse().expect("origin header"));
     request
+}
+
+/// Mint a session-socket ticket over ordinary bearer HTTP against the
+/// composed app, exactly as the SPA does before opening the socket.
+async fn mint_session_socket_ticket(app: &axum::Router, bearer: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/session/websocket-ticket")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "ticket mint must succeed"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    body["ticket"].as_str().expect("ticket").to_string()
 }
 
 #[tokio::test]
@@ -2097,9 +2125,10 @@ async fn ws_upgrade_with_matching_origin_succeeds_with_101() {
     // the rejection-path tests, which short-circuit BEFORE the upgrade
     // extractor runs.
     let (app, _services) = build_app();
+    let ticket = mint_session_socket_ticket(&app, VALID_TOKEN).await;
     let (addr, handle) = spawn_serve(app).await;
     let origin = format!("http://{addr}");
-    let request = ws_upgrade_request(addr, VALID_TOKEN, &origin);
+    let request = ws_upgrade_request(addr, &ticket, &origin);
     let (ws_stream, response) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(request),
@@ -2137,13 +2166,18 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
-    .with_canonical_host("app.example.com");
+    .with_canonical_host("app.example.com")
+    .with_session_socket_ticket_store(Arc::new(
+        ironclaw_webui::InMemorySessionSocketTicketStore::new(),
+    ));
     let app = ironclaw_webui::webui_v2_app(product_surface.clone(), config).expect("app");
+    let attack_ticket = mint_session_socket_ticket(&app, VALID_TOKEN).await;
+    let canonical_ticket = mint_session_socket_ticket(&app, VALID_TOKEN).await;
     let (addr, handle) = spawn_serve(app).await;
 
     // (1) Origin matches Host but NOT canonical_host — fail.
     let host_matching_origin = format!("http://{addr}");
-    let attack_request = ws_upgrade_request(addr, VALID_TOKEN, &host_matching_origin);
+    let attack_request = ws_upgrade_request(addr, &attack_ticket, &host_matching_origin);
     let attack = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(attack_request),
@@ -2155,8 +2189,10 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
         "canonical_host must override Host: forged Origin must not pass same-origin",
     );
 
-    // (2) Origin matches canonical_host — succeed.
-    let canonical_request = ws_upgrade_request(addr, VALID_TOKEN, "http://app.example.com");
+    // (2) Origin matches canonical_host — succeed. The origin-forged
+    // attempt above was rejected BEFORE auth, so its ticket was never
+    // consumed; a fresh ticket keeps the two verdicts independent anyway.
+    let canonical_request = ws_upgrade_request(addr, &canonical_ticket, "http://app.example.com");
     let (ws_stream, response) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(canonical_request),
@@ -2175,16 +2211,16 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
 
 #[tokio::test]
 async fn ws_upgrade_without_origin_is_rejected_with_403() {
-    // WebChat v2 declares stream_events_ws as SameOriginRequired.
+    // WebChat v2 declares the session WebSocket as SameOriginRequired.
     // A WS upgrade without the `Origin` header must be rejected at
-    // composition time before the v2 router sees the request.
+    // composition time before the v2 router sees the request — the
+    // origin check runs before auth, so no ticket is consumed.
     let (app, _services) = build_app();
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/threads/thread-x/ws")
-                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .uri("/api/webchat/v2/session/websocket?ticket=unused")
                 // Deliberately no Origin header.
                 .header("connection", "upgrade")
                 .header("upgrade", "websocket")
@@ -2205,8 +2241,7 @@ async fn ws_upgrade_with_disallowed_origin_is_rejected_with_403() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/threads/thread-x/ws")
-                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .uri("/api/webchat/v2/session/websocket?ticket=unused")
                 .header(header::HOST, "127.0.0.1:3000")
                 .header(header::ORIGIN, "http://evil.example.com")
                 .header("connection", "upgrade")

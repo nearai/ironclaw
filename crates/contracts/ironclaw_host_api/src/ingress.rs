@@ -471,6 +471,12 @@ pub enum IngressAuthScheme {
     WebhookSignature,
     OAuthState,
     InternalToken,
+    /// A short-lived, single-use, host-minted ticket consumed atomically at
+    /// the protected request. Used by browser transports that cannot carry a
+    /// bearer header (WebSocket upgrades): the bearer authenticates the
+    /// ticket mint over ordinary HTTP, and the upgrade presents only the
+    /// opaque nonce.
+    SingleUseTicket,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
