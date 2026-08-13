@@ -28,18 +28,8 @@ const ProjectsPage = React.lazy(() =>
     default: ProjectsPage,
   }))
 );
-const MissionsPage = React.lazy(() =>
-  import("../pages/missions/missions-page").then(({ MissionsPage }) => ({
-    default: MissionsPage,
-  }))
-);
 const JobsPage = React.lazy(() =>
   import("../pages/jobs/jobs-page").then(({ JobsPage }) => ({ default: JobsPage }))
-);
-const RoutinesPage = React.lazy(() =>
-  import("../pages/routines/routines-page").then(({ RoutinesPage }) => ({
-    default: RoutinesPage,
-  }))
 );
 const AutomationsPage = React.lazy(() =>
   import("../pages/automations/automations-page").then(({ AutomationsPage }) => ({
@@ -237,19 +227,11 @@ export function App() {
           <Route path="projects" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
           <Route path="projects/:projectId" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
           <Route
-            path="projects/:projectId/missions/:missionId"
-            element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
-          />
-          <Route
             path="projects/:projectId/threads/:threadId"
             element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
           />
-          <Route path="missions" element={(<LazyRoute><MissionsPage /></LazyRoute>)} />
-          <Route path="missions/:missionId" element={(<LazyRoute><MissionsPage /></LazyRoute>)} />
           <Route path="jobs" element={(<LazyRoute><JobsPage /></LazyRoute>)} />
           <Route path="jobs/:jobId" element={(<LazyRoute><JobsPage /></LazyRoute>)} />
-          <Route path="routines" element={(<LazyRoute><RoutinesPage /></LazyRoute>)} />
-          <Route path="routines/:routineId" element={(<LazyRoute><RoutinesPage /></LazyRoute>)} />
           <Route path="automations" element={(<LazyRoute><AutomationsPage /></LazyRoute>)} />
           <Route
             path="extensions"

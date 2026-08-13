@@ -222,6 +222,40 @@ impl ProductInstallationScope {
     }
 }
 
+/// Fail-closed binding resolver for the session-lane inbound core.
+///
+/// The owned-thread arm never resolves external conversation bindings — the
+/// authenticated caller is the binding authority — so any lookup reaching
+/// this resolver is a routing bug (a webhook-shaped envelope admitted into
+/// the session core) and is rejected as an unknown installation rather than
+/// silently resolving against webhook state.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionLaneRejectingBindingResolver;
+
+#[async_trait]
+impl ProductBindingResolver for SessionLaneRejectingBindingResolver {
+    async fn resolve_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        Err(ProductOperationFailure::UnknownInstallation)
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        Err(ProductOperationFailure::UnknownInstallation)
+    }
+
+    async fn reset_binding(
+        &self,
+        _request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        Err(ProductOperationFailure::UnknownInstallation)
+    }
+}
+
 /// Static tenant map for product adapter installations.
 #[derive(Debug, Clone, Default)]
 pub struct StaticProductInstallationResolver {

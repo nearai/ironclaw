@@ -42,10 +42,8 @@ pub struct ConnectedChannelSummary {
     pub name: String,
     pub authenticated: bool,
     pub active: bool,
-    /// The channel's declared presentation facts (`[channel.presentation]`:
-    /// markdown support, message length cap). `None` when the channel does not
-    /// declare presentation. Rendered as a compact per-channel hint so the
-    /// model formats replies within the channel's constraints (OUT-11).
+    /// How the model should format output for this channel. `None` when the
+    /// channel declares no presentation facts.
     pub presentation: Option<ChannelPresentation>,
 }
 
@@ -234,7 +232,7 @@ impl LoopRuntimeContext {
                         let presentation = channel
                             .presentation
                             .as_ref()
-                            .map(|p| format!(", {}", render_presentation_hint(p)))
+                            .map(|facts| format!(", {}", render_presentation_hint(facts)))
                             .unwrap_or_default();
                         let entry = format!(
                             "{} ({auth}, {active}{presentation})",
@@ -380,21 +378,14 @@ fn render_first_party_chat_origin_line(ctx: &ProductTurnContext) -> String {
     }
 }
 
-/// Compact model-visible hint for a channel's declared presentation
-/// (`[channel.presentation]`): markdown support and the per-message length cap.
-/// Rendered inside the connected-channels line so the model formats replies to
-/// fit the channel it is answering on (OUT-11). The values are host-declared
-/// manifest data (a bool and a bounded int), so no sanitization is needed.
+/// Compact model-visible hint for a channel's declared presentation.
 fn render_presentation_hint(presentation: &ChannelPresentation) -> String {
-    let format = if presentation.supports_markdown {
+    if presentation.supports_markdown {
         "markdown"
     } else {
         "plain text only"
-    };
-    match presentation.max_message_chars {
-        Some(max) => format!("{format}, \u{2264}{max} chars/message"),
-        None => format.to_string(),
     }
+    .to_string()
 }
 
 /// Sanitize a string for safe interpolation into model-visible prompt text.

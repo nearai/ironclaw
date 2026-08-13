@@ -457,7 +457,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 ### Task 12: Reborn-scoped legacy purge
 
 **Files:**
-- Rewrite: `docs/reborn/extension-runtime/overview.md` (current extension contract: single extension, admin setup pipeline, pairing state machine, DM admission table, honest-delivery mapping; names its test bins + run commands), `tests/telegram_v2_default_off_integration.rs` → new-model gating test (feature posture + `REBORN_TELEGRAM_V2_ENABLED` v1-exclusivity arbitration comment refresh)
+- Rewrite: `docs/internal/reborn/extension-runtime/overview.md` (current extension contract: single extension, admin setup pipeline, pairing state machine, DM admission table, honest-delivery mapping; names its test bins + run commands), `tests/telegram_v2_default_off_integration.rs` → new-model gating test (feature posture + `REBORN_TELEGRAM_V2_ENABLED` v1-exclusivity arbitration comment refresh)
 - Modify: telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (WebGeneratedCode payloads), `scripts/reborn_webui_v2_live_qa/case_matrix.py` telegram cases, `scripts/ci/reborn-e2e-rust.sh` (add the telegram contract test mapping); remove dormant pasted-proof redeem plumbing.
 - Do NOT touch: `channels-src/telegram/`, `tools-src/telegram/`, v1 tests, `src/**` (v1 monolith stays working; `validate_telegram_v1_v2_exclusivity` comments updated only if strictly needed)
 

@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::channel_adapter::{
     OutboundEnvelope, OutboundPart, OutboundTarget,
 };
@@ -29,10 +30,18 @@ fn scripted_slack_api(request: &RestrictedEgressRequest) -> RestrictedEgressResp
 #[tokio::test]
 async fn slack_channel_adapter_satisfies_the_conformance_contract() {
     run_channel_adapter_conformance(ChannelAdapterConformance {
-        adapter: Arc::new(SlackChannelAdapter),
+        // Slack implements every half: a webhook ingress, a message reply,
+        // and a message delivery. The suite drives exactly what is bound.
+        surfaces: {
+            let adapter = Arc::new(SlackChannelAdapter);
+            ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         extension_id: "slack".to_string(),
         installation_id: "install_alpha".to_string(),
-        message_inbound: ConformanceInbound {
+        message_inbound: Some(ConformanceInbound {
             body: br#"{
                 "type": "event_callback",
                 "event_id": "Ev-conformance",
@@ -48,15 +57,12 @@ async fn slack_channel_adapter_satisfies_the_conformance_contract() {
             }"#
             .to_vec(),
             headers: Vec::new(),
-        },
+        }),
         challenge_inbound: Some(ConformanceInbound {
             body: br#"{"type":"url_verification","challenge":"conformance-token"}"#.to_vec(),
             headers: Vec::new(),
         }),
         outbound_envelope: OutboundEnvelope {
-            extension_id: "slack".to_string(),
-            installation_id: "install_alpha".to_string(),
-            delivery_attempt_id: "attempt-conformance".to_string(),
             target: OutboundTarget {
                 conversation: ExternalConversationRef::new(Some("T-A"), "D123", None, None)
                     .expect("conversation"),
@@ -69,10 +75,10 @@ async fn slack_channel_adapter_satisfies_the_conformance_contract() {
                 },
             ],
             reply_context: None,
+            registrations: Vec::new(),
         },
         vendor_responses: Arc::new(scripted_slack_api),
         config: Vec::new(),
-        expects_unsupported_free_target_listing: true,
     })
     .await;
 }

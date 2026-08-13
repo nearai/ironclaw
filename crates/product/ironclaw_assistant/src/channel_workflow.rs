@@ -50,6 +50,7 @@ use ironclaw_product_contracts::channel_workflow::{
     ChannelRunDeliveryObserver, ChannelWorkflowFactory, ChannelWorkflowGraph,
     ChannelWorkflowRequest, ChannelWorkflowStorageRoots,
 };
+use ironclaw_product_contracts::operator_llm::LlmConfigService;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
@@ -130,6 +131,9 @@ pub struct RebornChannelWorkflowServices {
     /// Enqueues a message arriving on a busy thread as steering input for the
     /// active run instead of rejecting it.
     pub input_enqueue: Arc<dyn HostInputEnqueuePort>,
+    /// Resolves explicit hints and caller-scoped saved model preferences for
+    /// ordinary channel turns through the same policy used by model commands.
+    pub llm_config: Option<Arc<dyn LlmConfigService>>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub identity: ChannelWorkflowIdentity,
@@ -285,6 +289,47 @@ pub async fn channel_conversation_services(
     )
 }
 
+/// Deployment-wide durable idempotency ledger for the authenticated-session
+/// inbound lane (browser + API-key transports riding `submit_turn`). One
+/// store for the whole session surface: fingerprints are already
+/// tenant/actor/conversation-scoped, so a single mount serves every session
+/// caller, exactly like the per-extension channel ledgers serve every vendor
+/// sender. Uses the same mount alias, bounds, and CAS-backed store as the
+/// channel workflow ledgers so the two lanes cannot drift onto different
+/// durability semantics.
+pub fn build_session_inbound_ledger(
+    filesystem: &Arc<dyn RootFilesystem>,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
+    ledger_scope: ResourceScope,
+) -> Result<Arc<dyn IdempotencyLedger>, String> {
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(tenant_id.as_str());
+    let root = VirtualPath::new(format!(
+        "/tenants/{tenant}/shared/session-inbound/product-workflow/idempotency"
+    ))
+    .map_err(|error| format!("invalid session ledger storage root: {error}"))?;
+    let alias = MountAlias::new("/engine/product_surface/idempotency")
+        .map_err(|error| format!("invalid session ledger mount alias: {error}"))?;
+    let view = MountView::new(vec![MountGrant::new(
+        alias,
+        root,
+        MountPermissions::read_write_list_delete(),
+    )])
+    .map_err(|error| format!("invalid session ledger mount view: {error}"))?;
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(filesystem),
+        view,
+    ));
+    let settled_limit = NonZeroUsize::new(CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT)
+        .ok_or_else(|| "settled entry limit must be non-zero".to_string())?;
+    let prune_interval = NonZeroUsize::new(CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL)
+        .ok_or_else(|| "settled prune interval must be non-zero".to_string())?;
+    Ok(Arc::new(
+        RebornFilesystemIdempotencyLedger::new(scoped, ledger_scope)
+            .with_settled_entry_limit(settled_limit)
+            .with_settled_prune_interval(prune_interval),
+    ))
+}
+
 /// The durable per-extension workflow state, private to this module: the
 /// conversations half must not leave it (see the module doc).
 struct ChannelWorkflowState {
@@ -346,15 +391,17 @@ impl ChannelWorkflowFactory for RebornChannelWorkflowFactory {
             resolver,
         )) as Arc<dyn ProductBindingResolver>;
 
-        let inbound = Arc::new(
-            DefaultInboundTurnService::new(
-                Arc::clone(&binding),
-                Arc::clone(&self.services.thread_service),
-                Arc::clone(&self.services.turn_coordinator),
-                Arc::clone(&self.services.input_enqueue),
-            )
-            .with_inbound_attachments(Arc::clone(&self.services.inbound_attachments)),
-        );
+        let mut inbound = DefaultInboundTurnService::new(
+            Arc::clone(&binding),
+            Arc::clone(&self.services.thread_service),
+            Arc::clone(&self.services.turn_coordinator),
+            Arc::clone(&self.services.input_enqueue),
+        )
+        .with_inbound_attachments(Arc::clone(&self.services.inbound_attachments));
+        if let Some(llm_config) = &self.services.llm_config {
+            inbound = inbound.with_llm_config_service(Arc::clone(llm_config));
+        }
+        let inbound = Arc::new(inbound);
         let mut workflow = DefaultProductSurface::new(
             inbound,
             Arc::clone(&workflow_state.ledger),

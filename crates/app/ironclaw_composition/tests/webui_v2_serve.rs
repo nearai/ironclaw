@@ -1954,6 +1954,7 @@ async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_
     let (app, services) = build_app();
     let payload = json!({
         "client_action_id": "large-inline-attachment",
+        "thread_id": "thread-large",
         "content": "read this",
         "attachments": [{
             "mime_type": "text/plain",
@@ -1969,7 +1970,7 @@ async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-large/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(payload))
@@ -3033,20 +3034,22 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
 
 #[tokio::test]
 async fn js_client_send_message_path_shape_reaches_service() {
-    // api.ts → `sendMessage({threadId, content, clientActionId})`
-    // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
-    // body `{client_action_id, content}` (no thread_id in body —
-    // it lives in the path).
+    // api.ts → `sendMessage({threadId, content, clientActionId})` builds
+    // `POST /api/webchat/v2/channels/{extension_id}/messages` with body
+    // `{client_action_id, thread_id, content}`. The unified channel model
+    // moved thread_id from the path into the body: the path names the
+    // CHANNEL (learned from `GET /session`), not the thread.
     let (app, _) = build_app();
     let body = json!({
         "client_action_id": "act-from-js",
+        "thread_id": "thread.fake",
         "content": "hello from the SPA",
     });
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread.fake/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))

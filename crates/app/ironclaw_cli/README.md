@@ -77,4 +77,4 @@ cargo clippy -p ironclaw --all-targets -- -D warnings
 
 Working rules (command layout, adding a command, the serve subcommand):
 `AGENTS.md` · family rules: `crates/app/AGENTS.md` · design record:
-`docs/reborn/target-architecture/families/app.md` (§6.10.2).
+`docs/internal/reborn/target-architecture/families/app.md` (§6.10.2).

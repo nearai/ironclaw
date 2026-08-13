@@ -422,6 +422,18 @@ impl SecretStorePort for SharedSecretStore {
         self.0.put(scope, handle, material, expires_at).await
     }
 
+    async fn put_if_absent(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<bool, SecretStoreError> {
+        self.0
+            .put_if_absent(scope, handle, material, expires_at)
+            .await
+    }
+
     async fn metadata(
         &self,
         scope: &ResourceScope,

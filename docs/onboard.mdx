@@ -168,16 +168,17 @@ channels.
 
 Slack and Telegram are connected afterwards, in the web interface:
 
-**Extensions → Channels tab → scroll to the bottom of the Built-in section → Configure**
+**Admin → Configuration → fill in the channel's deployment configuration card → Save**
 
 Two things trip people up here:
 
-- **Extensions opens on the Registry tab**, which is not where channels are connected.
-  Using **Configure** from Registry on Telegram opens the pairing panel, which can only
-  report *"An administrator must configure the Telegram bot first."* That is not a
-  permissions problem — you're on the wrong tab.
+- **The channel's own Configure button covers only pairing.** Using **Configure** on
+  Telegram from the Extensions page opens the pairing panel, which can only report
+  *"An administrator must configure the Telegram bot first."* until the deployment
+  configuration under **Admin → Configuration** is saved. That is not a permissions
+  problem — the operator step just hasn't happened yet.
 - **Asking the agent to connect a channel covers only the personal half.** The operator
-  step — registering the app or bot credentials for the instance — stays in the web
+  step — saving the app or bot credentials for the instance — stays in the web
   interface. Once that's done, asking the agent ("connect Slack") works: it installs and
   activates the extension, an in-chat connection panel opens if your account still needs
   OAuth, and if your account is already connected the agent says so and continues.

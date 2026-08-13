@@ -478,6 +478,98 @@ async fn terminal_turn_events_wait_for_next_live_text_projection() {
 }
 
 #[tokio::test]
+async fn completed_turn_replays_finalized_text_from_durable_thread_state() {
+    use ironclaw_threads::{
+        AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
+        MessageContent, SessionThreadService, ThreadScope,
+    };
+
+    let tenant_id = TenantId::new("webui-durable-final-tenant").unwrap();
+    let user_id = UserId::new("webui-durable-final-user").unwrap();
+    let agent_id = AgentId::new("webui-durable-final-agent").unwrap();
+    let thread_id = ThreadId::new("webui-durable-final-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id,
+        project_id: None,
+        owner_user_id: Some(user_id.clone()),
+        mission_id: None,
+    };
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    threads
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: user_id.to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    threads
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: thread_scope,
+            thread_id,
+            turn_run_id: run_id.to_string(),
+            content: MessageContent::text("durable final answer"),
+        })
+        .await
+        .unwrap();
+
+    let mut completed_state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
+    completed_state.status = TurnStatus::Completed;
+    completed_state.gate_ref = None;
+    let completed_event =
+        TurnLifecycleEvent::from_run_state(&completed_state, TurnEventKind::Completed, None);
+    let services = build_reborn_projection_services(
+        Arc::new(InMemoryDurableEventLog::new()),
+        ReplyTargetBindingRef::new("webui-durable-final-reply").unwrap(),
+    )
+    .with_thread_service(threads as Arc<dyn SessionThreadService>)
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![completed_event],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: completed_state,
+        }),
+    );
+
+    let events = services
+        .product_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Text { run_id: Some(item_run_id), body, .. }
+                        if *item_run_id == run_id && body == "durable final answer"
+                )) && state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::RunStatus { run_id: item_run_id, status, .. }
+                        if *item_run_id == run_id && status == "completed"
+                ))
+        )
+    }));
+}
+
+#[tokio::test]
 async fn product_event_stream_drains_capability_activity_from_projection() {
     let tenant_id = TenantId::new("webui-activity-tenant").unwrap();
     let user_id = UserId::new("webui-activity-user").unwrap();

@@ -66,7 +66,7 @@ Root cause, in two parts:
 
 | Gate | What it pins | Where |
 | --- | --- | --- |
-| `scripts/ci/check-guidance.py` (docs surface) | Every backticked repo path in published pages, the `zh/` mirror, and `docs/reborn/contracts/` resolves against `git ls-files`. Mintlify link targets are a different namespace and deliberately unchecked; dated archives (`docs/internal/`, non-contract `docs/reborn/`) are excluded as classes. MDX comment form of the suppress marker: `{/* check-guidance: path-ok */}`. | `fast-checks` job, `has_guidance` trigger (probes pinned in `ws12_workflow_contracts.py`) |
+| `scripts/ci/check-guidance.py` (docs surface) | Every backticked repo path in published pages, the `zh/` mirror, and `docs/internal/reborn/contracts/` resolves against `git ls-files`. Mintlify link targets are a different namespace and deliberately unchecked; dated archives (`docs/internal/`, non-contract `docs/internal/reborn/`) are excluded as classes. MDX comment form of the suppress marker: `{/* check-guidance: path-ok */}`. | `fast-checks` job, `has_guidance` trigger (probes pinned in `ws12_workflow_contracts.py`) |
 | `crates/app/ironclaw_cli/tests/docs_cli_reference.rs` | `docs/using/cli.mdx` ↔ the real binary's `--help`, both directions, subcommand granularity, alias-aware, row-count floor. | `cargo test -p ironclaw` |
 | `crates/extensions/ironclaw_extension_registry/tests/docs_manifest_schema_version.rs` | Zero retired `reborn.extension_manifest.v2` literals in published pages (fences included); `building-a-tool.md` names `MANIFEST_SCHEMA_VERSION_V3` and documents `origin_gate_matrix`. | `cargo test -p ironclaw_extension_registry` |
 | `crates/product/ironclaw_openai_compat/tests/docs_responses_contract.rs` | The `doc-fact:responses-request-policy` marker block in `docs/api/responses.mdx`, driven behaviorally through the real router — the marker's values parameterize the assertions. | `cargo test -p ironclaw_openai_compat` |
@@ -91,7 +91,7 @@ routes docs changes to the crates whose tests read them — any published-tree
 docs change selects `ironclaw_extension_registry` (its sweep walks the whole
 published tree), `docs/using/cli.mdx` additionally selects `ironclaw`, and
 `docs/api/responses.mdx` additionally selects `ironclaw_openai_compat`.
-Fenced trees (`docs/internal/`, `docs/reborn/`, drafts) keep the prose
+Fenced trees (`docs/internal/`, `docs/internal/reborn/`, drafts) keep the prose
 classification: no cargo test reads them, and check-guidance covers their
 path claims independently.
 
@@ -136,7 +136,7 @@ compensating control.
 
 | Doc surface | Drift class | Gate |
 | --- | --- | --- |
-| Any published page, `zh/`, `docs/reborn/contracts/` | dead repo path in backticks | check-guidance docs surface |
+| Any published page, `zh/`, `docs/internal/reborn/contracts/` | dead repo path in backticks | check-guidance docs surface |
 | `docs/using/cli.mdx` | missing/retired subcommand rows | `docs_cli_reference.rs` |
 | `docs/extensions/building-a-tool.md` + published tree | retired schema literal; missing v3/gate-matrix teaching | `docs_manifest_schema_version.rs` |
 | `docs/api/responses.mdx` | request-policy claims (rejections, ranges, caps, unknown-field tolerance) | `docs_responses_contract.rs` |
@@ -171,7 +171,7 @@ compensating control.
 5. **zh freshness policy** — the `zh/` mirror gets path-reference checking
    but no translation-parity signal; a per-page `translated-at` frontmatter
    plus a non-blocking staleness report is the cheap version.
-6. **Contract-doc pinned-test claims** — `docs/reborn/contracts/` names
+6. **Contract-doc pinned-test claims** — `docs/internal/reborn/contracts/` names
    pinning tests whose functions have moved or been renamed (found while
    fixing its dangling paths); an owner pass re-verifying those claims is
    recorded here rather than half-fixed mechanically.

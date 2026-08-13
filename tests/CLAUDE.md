@@ -51,7 +51,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 2 | 3 | ✓ | ✓ |
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
-| Memory & workspace | 5 | 2 | — | ✓ |
+| Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **52** group scenarios · **55** flat integration bins (49 in
+Totals: **55** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -70,7 +70,7 @@ Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (52)
+## 3. Group scenarios — `tests/integration/group_*/` (55)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -118,7 +118,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (6)
+### 3.4 Memory — `group_memory/` (9)
 
 | The user can… | Evidence |
 |---|---|
@@ -128,6 +128,9 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
 | Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
+| Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
+| Ask about a stored fact in their OWN words rather than the words it was saved in, and still have it recalled — the paraphrase shares only some of the saved sentence's terms and adds one it never contained (#7185) | `scenario_paraphrased_prompt_recall_libsql.rs` |
+| Tell from the run itself that memory retrieval BROKE rather than simply having nothing to say — the two used to be the same silent empty section (#7185/#7275) | `scenario_memory_retrieval_failure_is_visible.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -191,6 +194,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
+| Ordinary authentication vocabulary in verified and locally imported tool descriptions survives prompt construction without denying the turn | `extension_visibility.rs::prompt_description_auth_vocabulary_survives_at_the_real_turn_seam` |
 | With a large tool catalog, progressive-disclosure modes and the `namespaces` production default expose `tool_search`, `tool_describe`, and `tool_call` instead of flat tools; a complete search signature invokes directly, while incomplete or explicitly inspected results fall back through `tool_describe` | `tool_disclosure.rs` |
 | Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
 | Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
@@ -244,7 +248,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Scheduled-origin runs carry their origin into persisted state | `triggered_submit.rs` |
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
-| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-push` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_push_enrollment_and_notification_channel_round_trip_through_production_facade` |
+| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
 One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
@@ -261,7 +265,7 @@ channel-delivery journeys (two-lane model):
 | Have a conditional fire that calls no delivery tool produce zero outbound attempts | `conditional_fire_with_no_delivery_call_produces_zero_attempts` |
 | Get blocked-fire notices fanned out to every notification channel, first approve wins | `blocked_fire_fans_out_and_first_approve_wins` |
 | Keep a blocked fire app-only when the notification-channel set is empty | `empty_notification_set_keeps_blocked_fire_in_app_only` |
-| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_push_notice_to_enrolled_browser` |
+| Enroll a browser and get a blocked fire's gate notice as a real Web Push (encrypted `aes128gcm` body, host-injected `Authorization: vapid`, one POST to the enrolled endpoint) while the run stays parked | `blocked_fire_pushes_web_app_notice_to_enrolled_browser` |
 | Have a dead browser subscription (push service answers `410 Gone`) pruned after one notice attempt | `gone_push_subscription_is_pruned_after_notice_attempt` |
 
 ---

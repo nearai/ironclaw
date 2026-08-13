@@ -211,9 +211,10 @@ use ironclaw_loop_contracts::{
     LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
     LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
     LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+    MemoryPromptContextLoad, MemoryPromptContextService, ModelProfileId, ModelStreamChunk,
+    ParentLoopOutput, PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
@@ -334,10 +335,22 @@ where
     /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
-    /// Per-run cache for the fetched memory snippets. Shared across clones via
+    /// Per-run cache for the fetched memory load. Shared across clones via
     /// `Arc` so the "fetch once per run" guarantee holds even if the port is
-    /// cloned, exactly like `identity_candidates`.
-    memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
+    /// cloned, exactly like `identity_candidates`. The cached value is the
+    /// whole [`MemoryPromptContextLoad`], degradations included: a failed
+    /// fetch must not be remembered as a plain empty result for the rest of
+    /// the run.
+    memory_snippets_cache: Arc<OnceCell<MemoryPromptContextLoad>>,
+    /// One-shot guard so a degraded memory retrieval produces exactly ONE
+    /// operator-visible driver note per run, however many prompt builds read
+    /// the cached load. `Arc`-shared for the same reason as the cache itself.
+    /// Set only AFTER the note is published, so a transient sink failure does
+    /// not permanently suppress it; `memory_degradation_note_in_flight` keeps
+    /// the window between claim and publish from producing duplicates. Same
+    /// pair, and same rationale, as `personal_context_admitted`.
+    memory_degradation_note_emitted: Arc<OnceCell<()>>,
+    memory_degradation_note_in_flight: Arc<AtomicBool>,
     /// Pre-resolved channel conversation history for shared-channel runs
     /// (UNTRUSTED third-party text carried on the run's persisted product
     /// context). Rendered as ONE framed system-context block per prompt
@@ -412,6 +425,8 @@ where
             milestone_sink: None,
             memory_context_service: None,
             memory_snippets_cache: Arc::new(OnceCell::new()),
+            memory_degradation_note_emitted: Arc::new(OnceCell::new()),
+            memory_degradation_note_in_flight: Arc::new(AtomicBool::new(false)),
             channel_conversation_context: None,
         }
     }
@@ -444,8 +459,8 @@ where
     /// Installs pre-resolved channel conversation history (UNTRUSTED
     /// third-party text from the run's product context). Each prompt build
     /// renders it as exactly ONE system-context block framed by the
-    /// channel-conversation trust preamble; content that fails prompt-safety
-    /// validation is omitted (advisory context never fails the run).
+    /// channel-conversation trust preamble; content that fails structural
+    /// prompt validation is omitted (advisory context never fails the run).
     pub fn with_channel_conversation_context(mut self, context: String) -> Self {
         self.channel_conversation_context = (!context.trim().is_empty()).then_some(context);
         self
@@ -590,7 +605,7 @@ where
 
         // Channel conversation context: exactly ONE framed system-context
         // block per prompt build, mirroring how identity context rides the
-        // same bundle. Content that cannot pass the bundle's prompt-safety
+        // same bundle. Content that cannot pass the bundle's structural
         // validation is dropped here (advisory context never fails the run).
         if let Some(snippet) = self.channel_conversation_context_snippet() {
             instruction_snippets.push(snippet);
@@ -660,10 +675,12 @@ where
 {
     /// The framed channel-conversation block for this run, or `None` when the
     /// run carries no channel context or the assembled block cannot pass the
-    /// same generic model-content validation the instruction bundle applies
-    /// at render time. Pre-validating with [`LoopInlineMessageBody`] (the
-    /// same rule, same crate) is what turns a would-be bundle failure into a
-    /// silent degrade — the memory-lane precedent for untrusted context.
+    /// same structural model-content validation the instruction bundle
+    /// applies at render time. Pre-validating with [`LoopInlineMessageBody`]
+    /// (the same rule, same crate) is what turns a would-be bundle failure
+    /// into a silent degrade — the memory-lane precedent for untrusted
+    /// context. Secret-like values remain intact at this raw context seam and
+    /// are redacted by the final model-gateway boundary.
     fn channel_conversation_context_snippet(&self) -> Option<LoopContextSnippet> {
         let text = self.channel_conversation_context.as_deref()?;
         let content = format!(
@@ -680,7 +697,7 @@ where
             Err(reason) => {
                 tracing::debug!(
                     reason,
-                    "channel conversation context failed prompt-safety validation; \
+                    "channel conversation context failed structural prompt validation; \
                      omitting it from this run"
                 );
                 None

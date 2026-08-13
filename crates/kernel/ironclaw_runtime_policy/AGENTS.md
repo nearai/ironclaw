@@ -6,9 +6,9 @@
   This file is the canonical working-rules home; `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/runtime-profiles.md`
-- `docs/reborn/contracts/runtime-selection.md`
-- `docs/reborn/contracts/runtime-workflows.md`
+- `docs/internal/reborn/contracts/runtime-profiles.md`
+- `docs/internal/reborn/contracts/runtime-selection.md`
+- `docs/internal/reborn/contracts/runtime-workflows.md`
 
 ## What This Crate Owns
 

@@ -230,6 +230,10 @@ pub struct ResolvedMemoryProvider {
     /// the capability ids `package` declares. `None` ⇒ no memory tools are
     /// dispatchable (matching their absence from the surface).
     pub tool_handler: Option<Arc<dyn FirstPartyCapabilityHandler>>,
+    /// The bound provider's own memory guidance for the model (#7185),
+    /// resolved from its bundle. `None` when unbound or the provider
+    /// declares no `guidance_doc`.
+    pub guidance: Option<String>,
 }
 
 impl ResolvedMemoryProvider {
@@ -239,6 +243,7 @@ impl ResolvedMemoryProvider {
             package: None,
             lifecycle: MemoryDescriptor::default(),
             tool_handler: None,
+            guidance: None,
         }
     }
 }
@@ -282,6 +287,7 @@ pub fn resolve_memory_provider(
                 package: Some(bundle.package),
                 lifecycle: bundle.lifecycle,
                 tool_handler: Some(tool_handler),
+                guidance: bundle.guidance,
             })
         }
         MemoryProviderBinding::Disabled => Ok(ResolvedMemoryProvider::unbound(resolver)),
@@ -293,14 +299,14 @@ pub fn resolve_memory_provider(
                 // handler (which calls its inherent tool operations).
                 return Ok(match create_mem0_provider(deps) {
                     Some(provider) => {
-                        let bundle =
-                            memory_extension::mem0_memory_provider_bundle().map_err(|error| {
-                                crate::RebornBuildError::InvalidConfig {
-                                    reason: format!(
-                                        "mem0 memory provider package is invalid: {error}"
-                                    ),
-                                }
-                            })?;
+                        let bundle = memory_extension::mem0_memory_provider_bundle(
+                            ironclaw_memory_mem0::MEMORY_GUIDANCE_ASSETS,
+                        )
+                        .map_err(|error| {
+                            crate::RebornBuildError::InvalidConfig {
+                                reason: format!("mem0 memory provider package is invalid: {error}"),
+                            }
+                        })?;
                         let tool_handler: Arc<dyn FirstPartyCapabilityHandler> =
                             Arc::new(Mem0MemoryToolHandler {
                                 provider: Arc::clone(&provider),
@@ -313,6 +319,7 @@ pub fn resolve_memory_provider(
                             package: Some(bundle.package),
                             lifecycle: bundle.lifecycle,
                             tool_handler: Some(tool_handler),
+                            guidance: bundle.guidance,
                         }
                     }
                     // create_mem0_provider already logged why; fail closed —
@@ -621,6 +628,7 @@ mod tests {
             Some(inert_provider()),
             &MemoryDescriptor {
                 lifecycle: ironclaw_extension_contracts::memory::MemoryLifecycleHook::ALL.to_vec(),
+                ..MemoryDescriptor::default()
             },
         );
         assert!(full.memory_context_service.is_some());

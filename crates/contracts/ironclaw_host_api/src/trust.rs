@@ -37,7 +37,7 @@
 //!
 //! See `ironclaw_trust::TrustPolicy` for the engine that bridges request to
 //! effective trust, `crates/kernel/ironclaw_trust/CONTRACT.md` for the full
-//! evaluation matrix, and `docs/reborn/contracts/host-api.md` (in the
+//! evaluation matrix, and `docs/internal/reborn/contracts/host-api.md` (in the
 //! staging-track docs) for the broader Reborn vocabulary.
 
 use std::collections::BTreeSet;
@@ -79,7 +79,7 @@ pub struct TrustPolicyInput {
 ///
 /// ## Manifest mapping
 ///
-/// The manifest field `trust = "..."` (see `docs/reborn/contracts/extensions.md`
+/// The manifest field `trust = "..."` (see `docs/internal/reborn/contracts/extensions.md`
 /// §4 in the staging-track docs) parses into this type via snake_case serde:
 ///
 /// | Manifest value | Variant |

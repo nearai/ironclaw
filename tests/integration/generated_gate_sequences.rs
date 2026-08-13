@@ -602,6 +602,7 @@ mod invariant_checker {
             accepted_message_ref: AcceptedMessageRef::new(message)
                 .expect("sabotage message ref is valid"),
             submitted_run_id: TurnRunId::new(),
+            submission: None,
         };
         accepted_and_busy_run(
             ack("message:sabotage-a"),

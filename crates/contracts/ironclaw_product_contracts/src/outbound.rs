@@ -966,6 +966,10 @@ pub enum ProductGateKind {
     Generic,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
@@ -974,6 +978,10 @@ pub enum ProductProjectionItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<TurnRunId>,
         body: String,
+        /// True only when `id` names the durable finalized transcript row.
+        /// Live projection text leaves this false and cannot prove delivery.
+        #[serde(default, skip_serializing_if = "is_false")]
+        finalized: bool,
     },
     Thinking {
         id: String,
@@ -1154,6 +1162,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 #[serde(default)]
                 run_id: Option<TurnRunId>,
                 body: String,
+                #[serde(default)]
+                finalized: bool,
             },
             Thinking {
                 id: String,
@@ -1200,7 +1210,17 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             },
         }
         let value = match Wire::deserialize(deserializer)? {
-            Wire::Text { id, run_id, body } => ProductProjectionItem::Text { id, run_id, body },
+            Wire::Text {
+                id,
+                run_id,
+                body,
+                finalized,
+            } => ProductProjectionItem::Text {
+                id,
+                run_id,
+                body,
+                finalized,
+            },
             Wire::Thinking { id, run_id, body } => {
                 ProductProjectionItem::Thinking { id, run_id, body }
             }
@@ -1345,20 +1365,6 @@ impl ProductOutboundTarget {
             external_actor_ref,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProductSynchronousResponse {
-    pub content_type: String,
-    pub body: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductRenderOutcome {
-    DeliveryRecorded,
-    SynchronousResponse(ProductSynchronousResponse),
-    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

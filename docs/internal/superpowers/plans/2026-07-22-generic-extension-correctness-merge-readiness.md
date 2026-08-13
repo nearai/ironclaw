@@ -656,7 +656,7 @@ Use fresh users and fresh provider identities where possible. Record sanitized t
 
 ## 12. Documentation and contract gates
 
-- [ ] Relevant `docs/reborn/contracts/` documents describe the three-state lifecycle and the three authority axes.
+- [ ] Relevant `docs/internal/reborn/contracts/` documents describe the three-state lifecycle and the three authority axes.
 - [ ] Auth contract documents server-derived manifest OAuth recipes and automatic callback reconciliation.
 - [ ] Conversation/delivery contract documents sealed source-route persistence and event-driven delayed delivery.
 - [ ] Trigger contract documents source-target inheritance, revalidation, idempotency, and scheduled self-mutation denial.

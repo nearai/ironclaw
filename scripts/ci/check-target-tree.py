@@ -13,7 +13,7 @@ So this gate compares the two directly:
 
   * the documented tree — parsed out of the fenced `text` block under
     `## 5. Recommended target directory tree` in
-    `docs/reborn/target-architecture/PROPOSAL.md`, which is the *only* copy;
+    `docs/internal/reborn/target-architecture/PROPOSAL.md`, which is the *only* copy;
     this script deliberately embeds no second copy that could drift from it;
   * the real tree — `cargo metadata --no-deps`, i.e. every workspace member's
     manifest directory and package name.
@@ -55,7 +55,7 @@ import re
 import subprocess
 import sys
 
-PROPOSAL_RELATIVE = "docs/reborn/target-architecture/PROPOSAL.md"
+PROPOSAL_RELATIVE = "docs/internal/reborn/target-architecture/PROPOSAL.md"
 SECTION_HEADING = "## 5. Recommended target directory tree"
 
 PACKAGE_MARKER = "▣"

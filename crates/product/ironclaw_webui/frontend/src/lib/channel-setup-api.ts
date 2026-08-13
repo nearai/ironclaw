@@ -1,7 +1,10 @@
 // @ts-nocheck
-// Shared helpers for the per-channel setup API modules (slack-setup-api,
-// telegram-setup-api): sanitized error extraction and optional-field
-// normalization. Channel-specific endpoints stay in their own modules.
+// Shared helpers for the generic extension-setup API modules: sanitized
+// error extraction and optional-field normalization. The per-channel
+// setup/pairing modules these once served are gone — the unified channel
+// model routes both through `{extension_id}`-parameterized endpoints
+// (`extension-pairing-api.ts`, `WEBUI_V2_PATTERN_SETUP_EXTENSION`), and no
+// route may name a channel.
 
 export function channelSetupError(error, fallback) {
   return error?.payload?.error || error?.payload?.message || error?.message || fallback;

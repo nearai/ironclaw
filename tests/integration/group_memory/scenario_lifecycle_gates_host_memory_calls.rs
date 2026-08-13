@@ -143,6 +143,7 @@ pub async fn run() -> HarnessResult<()> {
             Arc::clone(&observed) as Arc<dyn MemoryService>,
             MemoryDescriptor {
                 lifecycle: MemoryLifecycleHook::ALL.to_vec(),
+                ..MemoryDescriptor::default()
             },
         )
         .builtin_tools()

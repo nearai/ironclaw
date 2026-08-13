@@ -44,6 +44,11 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    /// Host-owned per-user delivery registrations, handed to the coordinator
+    /// so a channel with zero of them resolves to "no target" before any
+    /// adapter call (design §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
 }
 
 pub(crate) struct BackendExtensionHostAssembly {
@@ -67,6 +72,7 @@ pub(crate) async fn build_backend_extension_host(
         channel_bindings,
         installation_store,
         admin_configuration_resolver,
+        delivery_registrations,
         resource_governor,
         reserved_capability_ids,
         host_runtime_http_egress,
@@ -113,7 +119,7 @@ pub(crate) async fn build_backend_extension_host(
             native_factories,
             channel_adapters: channel_bindings
                 .iter()
-                .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
+                .map(|binding| (binding.extension_id.clone(), binding.surfaces.clone()))
                 .collect(),
             installation_store: Arc::clone(&installation_store),
             boot_installations,
@@ -163,6 +169,7 @@ pub(crate) async fn build_backend_extension_host(
                 Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
                     Arc::clone(&ingress.reply_context),
                 )),
+                Arc::clone(&delivery_registrations),
                 ironclaw_assistant::DeliveryRetryPolicy::default(),
             ));
             (Some(coordinator), Some(resolver))
@@ -343,6 +350,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) llm_config: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
@@ -357,6 +365,7 @@ pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) llm_config: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) approval_interaction: Arc<dyn ApprovalInteractionService>,
     pub(crate) auth_interaction: Arc<dyn AuthInteractionService>,
     pub(crate) thread_scope: &'a ThreadScope,
@@ -475,6 +484,7 @@ pub(crate) fn start_channel_host(
         thread_service,
         turn_coordinator,
         input_enqueue,
+        llm_config,
         approval_interaction,
         auth_interaction,
         identity,
@@ -524,6 +534,7 @@ pub(crate) fn start_channel_host(
             turn_coordinator,
             inbound_attachments: Arc::clone(inbound_attachments),
             input_enqueue,
+            llm_config: llm_config.map(|service| service as _),
             approval_interaction,
             auth_interaction,
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
@@ -566,6 +577,7 @@ pub(crate) async fn build_runtime_channel_host(
         approval_interaction,
         auth_interaction,
         input_enqueue,
+        llm_config,
         thread_scope,
         actor_user_id,
         auth_challenges,
@@ -598,6 +610,7 @@ pub(crate) async fn build_runtime_channel_host(
             thread_service,
             turn_coordinator,
             input_enqueue,
+            llm_config,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
             identity,

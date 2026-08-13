@@ -97,4 +97,4 @@ cargo test -p ironclaw_architecture_tests
   here).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.1.3;
-  `docs/reborn/target-architecture/families/contracts.md`.
+  `docs/internal/reborn/target-architecture/families/contracts.md`.

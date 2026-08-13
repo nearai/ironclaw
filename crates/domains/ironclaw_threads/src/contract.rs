@@ -376,12 +376,24 @@ pub struct AcceptInboundMessageRequest {
     pub content: MessageContent,
 }
 
+/// Internal acceptance metadata that must remain stable across retries and
+/// accepted-message replay. This is deliberately separate from transcript
+/// content so product/UI history never renders submission-routing state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundMessageReplayMetadata {
+    /// Model selected by product policy before the message crossed the durable
+    /// acceptance boundary. `None` preserves the default-model route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedInboundMessage {
     pub thread_id: ThreadId,
     pub message_id: ThreadMessageId,
     pub sequence: u64,
     pub idempotent_replay: bool,
+    pub replay_metadata: InboundMessageReplayMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +407,7 @@ pub struct AcceptedInboundMessageReplay {
     pub source_binding_id: Option<String>,
     pub reply_target_binding_id: Option<String>,
     pub turn_run_id: Option<String>,
+    pub replay_metadata: InboundMessageReplayMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

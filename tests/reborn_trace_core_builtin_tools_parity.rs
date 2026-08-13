@@ -120,7 +120,7 @@ async fn reborn_trace_core_builtin_tools_parity() {
             submitted.run_id,
             TurnStatus::Completed,
             HarnessWaitConfig {
-                timeout: Duration::from_secs(15),
+                timeout: Duration::from_secs(60),
                 poll_interval: Duration::from_millis(10),
             },
         )

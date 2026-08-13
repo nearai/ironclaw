@@ -289,7 +289,7 @@ fn reborn_dockerfile_build_is_covered_by_ci() {
 
 #[test]
 fn reborn_deployment_docs_keep_webui_sso_separate_from_product_auth() {
-    let docs = read_repo_file("docs/reborn/deploy-reborn-cli-docker.md");
+    let docs = read_repo_file("docs/internal/reborn/deploy-reborn-cli-docker.md");
 
     assert!(
         docs.contains("https://<railway-domain>/auth/callback/google"),

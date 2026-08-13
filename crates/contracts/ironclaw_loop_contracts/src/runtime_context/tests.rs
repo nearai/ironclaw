@@ -8,6 +8,7 @@
 
 use super::*;
 use chrono::TimeZone;
+use ironclaw_extension_contracts::channel::ChannelPresentation;
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::turn::TurnOwner;
 
@@ -298,7 +299,6 @@ fn renders_channel_presentation_hint() {
                         supports_markdown: false,
                         supports_threads: false,
                         can_reply_in_threads: false,
-                        max_message_chars: Some(4000),
                         command_prefix: None,
                     }),
                 },
@@ -310,7 +310,6 @@ fn renders_channel_presentation_hint() {
                         supports_markdown: true,
                         supports_threads: true,
                         can_reply_in_threads: false,
-                        max_message_chars: None,
                         command_prefix: None,
                     }),
                 },
@@ -323,8 +322,8 @@ fn renders_channel_presentation_hint() {
     };
     let text = ctx.render_model_content();
     assert!(
-        text.contains("Acme (authenticated, active, plain text only, \u{2264}4000 chars/message)"),
-        "no-markdown + capped presentation hint: {text}"
+        text.contains("Acme (authenticated, active, plain text only)"),
+        "plain-text presentation hint: {text}"
     );
     assert!(
         text.contains("Rich (authenticated, active, markdown)"),
@@ -514,12 +513,7 @@ fn omits_delivery_guidance_block_when_tools_not_visible() {
 }
 
 #[test]
-fn connected_channel_name_tripping_model_safe_policy_degrades_to_placeholder() {
-    // A legitimate label can contain a word the model-safe-text policy rejects
-    // (e.g. "authorization"). It must degrade to a placeholder rather than
-    // surviving into the slice and later failing prompt-bundle construction.
-    // (Moved from the retired delivery-target label test — `model_safe_label`
-    // is exercised here via the connected-channel name instead.)
+fn connected_channel_name_with_security_vocabulary_remains_usable() {
     let ctx = LoopRuntimeContext {
         loop_started_at_utc: stamp(),
         communication: Some(CommunicationRuntimeContext {
@@ -538,17 +532,43 @@ fn connected_channel_name_tripping_model_safe_policy_degrades_to_placeholder() {
     };
     let text = ctx.render_model_content();
     assert!(
-        !text.contains("authorization"),
-        "denylisted label word must not survive into the slice: {text}"
+        text.contains("Connected channels: authorization (authenticated, active)."),
+        "ordinary security vocabulary must survive in the slice: {text}"
     );
-    assert!(
-        text.contains("Connected channels: a connected channel (authenticated, active)."),
-        "label degrades to placeholder: {text}"
-    );
-    // The rendered slice must itself pass the model-safe-text policy.
     assert!(
         crate::prompt_text::validate_model_safe_text(text.clone(), "test").is_ok(),
-        "degraded slice must be model-safe: {text}"
+        "rendered slice must remain model-safe: {text}"
+    );
+}
+
+#[test]
+fn connected_channel_name_with_credential_value_reaches_final_redaction_boundary() {
+    let ctx = LoopRuntimeContext {
+        loop_started_at_utc: stamp(),
+        communication: Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                name: "Authorization: Bearer ghp_secretvalue123".to_string(),
+                authenticated: true,
+                active: true,
+                presentation: None,
+            }]),
+            notification_channels: NotificationChannelsState::Unknown,
+            pending_extension_auth: PendingExtensionAuthState::Unknown,
+            delivery_tools_visible: false,
+        }),
+        product_context: None,
+        user_profile: None,
+    };
+    let text = ctx.render_model_content();
+    assert!(
+        text.contains("ghp_secretvalue123"),
+        "the contract preserves source data until the provider-bound redaction pass: {text}"
+    );
+    assert!(
+        text.contains(
+            "Connected channels: Authorization: Bearer ghp_secretvalue123 (authenticated, active)."
+        ),
+        "credential content must not remove the connected channel: {text}"
     );
 }
 
@@ -1043,7 +1063,6 @@ fn worst_case_runtime_context_stays_within_the_prompt_surface_cap() {
             active: true,
             presentation: Some(ChannelPresentation {
                 supports_markdown: false,
-                max_message_chars: Some(4000),
                 ..Default::default()
             }),
         })

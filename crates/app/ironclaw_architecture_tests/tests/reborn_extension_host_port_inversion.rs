@@ -130,6 +130,9 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     ("ChannelDeliveryResolver", EXTENSION_HOST),
     ("CommandActorRoleResolver", EXTENSION_HOST),
     ("DeliveryReplyContextSource", EXTENSION_HOST),
+    // Unified channel model (2026-08-10): the generic session-inbound route's
+    // extension_id validation — derived from the deployment channel registry.
+    ("SessionChannelDirectory", EXTENSION_HOST),
     // WS2.4: the lifecycle product service is the manager's headline surface.
     ("LifecycleProductService", EXTENSION_MANAGER),
     // WS2.5: inverted once `ExternalActorBindingEpoch` moved to

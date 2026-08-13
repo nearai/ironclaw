@@ -49,9 +49,6 @@ impl RestrictedEgress for ScriptedEgress {
 
 fn envelope(parts: Vec<OutboundPart>, topic: Option<&str>) -> OutboundEnvelope {
     OutboundEnvelope {
-        extension_id: "telegram".to_string(),
-        installation_id: "install_alpha".to_string(),
-        delivery_attempt_id: "attempt-1".to_string(),
         target: OutboundTarget {
             conversation: ExternalConversationRef::new(None, "8675309", topic, None)
                 .expect("conversation"),
@@ -59,6 +56,7 @@ fn envelope(parts: Vec<OutboundPart>, topic: Option<&str>) -> OutboundEnvelope {
         },
         parts,
         reply_context: None,
+        registrations: Vec::new(),
     }
 }
 
@@ -209,16 +207,17 @@ async fn deliver_react_with_non_numeric_ref_is_permanent_without_egress() {
 }
 
 #[tokio::test]
-async fn deliver_react_retries_vendor_status_and_malformed_success_response() {
-    for (response, expected_reason) in [
+async fn deliver_react_distinguishes_safe_retry_from_ambiguous_response() {
+    for (response, expected_reason, expected_ambiguous) in [
         (
             Ok(RestrictedEgressResponse {
                 status: 429,
                 body: Vec::new(),
             }),
             "status 429",
+            false,
         ),
-        (ScriptedEgress::ok("not-json"), "was not valid JSON"),
+        (ScriptedEgress::ok("not-json"), "was not valid JSON", true),
     ] {
         let egress = ScriptedEgress::new(vec![response]);
         let report = TelegramChannelAdapter::default()
@@ -236,10 +235,14 @@ async fn deliver_react_retries_vendor_status_and_malformed_success_response() {
             .await
             .expect("deliver drives");
 
-        assert!(matches!(
-            &report.parts[0],
-            PartDeliveryOutcome::Retryable { reason } if reason.contains(expected_reason)
-        ));
+        let correct = match (&report.parts[0], expected_ambiguous) {
+            (PartDeliveryOutcome::Ambiguous { reason }, true)
+            | (PartDeliveryOutcome::Retryable { reason }, false) => {
+                reason.contains(expected_reason)
+            }
+            _ => false,
+        };
+        assert!(correct, "unexpected outcome: {:?}", report.parts[0]);
     }
 }
 
@@ -388,6 +391,45 @@ async fn deliver_splits_oversized_text_at_the_vendor_limit() {
             .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }))
     );
     assert_eq!(egress.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn deliver_splits_text_by_telegram_utf16_units() {
+    // U+1F600 occupies two UTF-16 code units. Counting Rust `char`s would
+    // incorrectly treat this as one legal 4096-unit message.
+    let text = "😀".repeat(4_096);
+    let egress = ScriptedEgress::new(vec![
+        ScriptedEgress::ok(r#"{"ok":true,"result":{"message_id":1}}"#),
+        ScriptedEgress::ok(r#"{"ok":true,"result":{"message_id":2}}"#),
+    ]);
+
+    let report = TelegramChannelAdapter::default()
+        .deliver(
+            envelope(vec![OutboundPart::Text(text.clone())], None),
+            &egress,
+        )
+        .await
+        .expect("delivery drives");
+
+    assert_eq!(report.parts.len(), 2);
+    let requests = egress.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let chunks = requests
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(request.body.as_deref().unwrap_or_default())
+                    .expect("sendMessage body is JSON");
+            body["text"].as_str().expect("sendMessage text").to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.encode_utf16().count() <= 4_096),
+        "every provider request must fit Telegram's UTF-16-unit limit"
+    );
+    assert_eq!(chunks.concat(), text, "splitting must remain lossless");
 }
 
 #[tokio::test]

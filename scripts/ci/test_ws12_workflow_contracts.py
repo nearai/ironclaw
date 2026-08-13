@@ -42,6 +42,88 @@ from ws12_workflow_contracts import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+SCCACHE_SETUP_ACTION = (
+    ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
+)
+
+
+class SccacheSetupActionContractTests(unittest.TestCase):
+    """The optional compiler cache must never gate the tests it accelerates."""
+
+    COMPLIANT_ACTION = """\
+runs:
+  using: composite
+  steps:
+    - name: Install sccache
+      id: install_sccache
+      continue-on-error: true
+      uses: mozilla-actions/sccache-action@example
+
+    - name: Configure OVH sccache
+      if: ${{ inputs.enabled == 'true' && steps.install_sccache.outcome == 'success' }}
+      shell: bash
+      run: configure-cache
+
+    - name: Fall back to local compilation
+      if: ${{ steps.install_sccache.outcome == 'failure' }}
+      shell: bash
+      run: echo "::warning title=sccache unavailable::Installation failed; using local compilation."
+"""
+
+    def validate(self, text: str) -> list[str]:
+        validator = getattr(
+            ws12_workflow_contracts, "validate_sccache_setup_action", None
+        )
+        self.assertIsNotNone(
+            validator,
+            "ws12_workflow_contracts must validate the shared sccache action",
+        )
+        return validator(text)
+
+    def test_checked_in_action_keeps_installation_best_effort(self) -> None:
+        action = SCCACHE_SETUP_ACTION.read_text(encoding="utf-8")
+        self.assertEqual(self.validate(action), [])
+
+    def test_compliant_fixture_passes(self) -> None:
+        self.assertEqual(self.validate(self.COMPLIANT_ACTION), [])
+
+    def test_install_failure_must_be_tolerated(self) -> None:
+        sabotaged = self.COMPLIANT_ACTION.replace(
+            "      continue-on-error: true\n", ""
+        )
+        errors = self.validate(sabotaged)
+        self.assertTrue(any("continue-on-error" in error for error in errors), errors)
+
+    def test_configuration_must_require_a_successful_install(self) -> None:
+        sabotaged = self.COMPLIANT_ACTION.replace(
+            " && steps.install_sccache.outcome == 'success'", ""
+        )
+        errors = self.validate(sabotaged)
+        self.assertTrue(
+            any("successful installation" in error for error in errors), errors
+        )
+
+    def test_install_failure_must_explain_the_local_fallback(self) -> None:
+        sabotaged = self.COMPLIANT_ACTION.replace(
+            "      if: ${{ steps.install_sccache.outcome == 'failure' }}\n",
+            "      if: ${{ steps.install_sccache.outcome == 'success' }}\n",
+        )
+        errors = self.validate(sabotaged)
+        self.assertTrue(any("local compilation" in error for error in errors), errors)
+
+    def test_action_failures_reach_the_top_level_contract(self) -> None:
+        original = ws12_workflow_contracts.validate_sccache_setup_action
+        sentinel = "sccache action contract sentinel"
+        ws12_workflow_contracts.validate_sccache_setup_action = lambda _text: [sentinel]
+        self.addCleanup(
+            setattr,
+            ws12_workflow_contracts,
+            "validate_sccache_setup_action",
+            original,
+        )
+
+        errors = validate_workflow_texts(load_workflows(ROOT), ROOT)
+        self.assertIn(sentinel, errors)
 
 
 class WorkflowContractSabotageTests(unittest.TestCase):

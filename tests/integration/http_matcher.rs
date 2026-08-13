@@ -223,7 +223,7 @@ const ERR_URL: &str = "https://api.example.test/v1/err";
 /// capability outcome carrying the sanitized status as model-visible
 /// diagnostic context, so the run completes (the model sees a failed tool
 /// outcome, not a terminal driver failure) and can react. Pinned by
-/// `docs/reborn/contracts/host-runtime.md`.
+/// `docs/internal/reborn/contracts/host-runtime.md`.
 #[tokio::test]
 async fn http_5xx_status_surfaces_as_failed_tool_outcome_with_status() {
     let h = RebornIntegrationHarness::test_default()

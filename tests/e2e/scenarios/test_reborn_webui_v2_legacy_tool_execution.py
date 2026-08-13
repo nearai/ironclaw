@@ -151,6 +151,7 @@ async def _open_mocked_empty_reply_page(reborn_v2_server, reborn_v2_browser):
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

@@ -48,8 +48,9 @@ pub trait ChannelConnectionScopeSource: Send + Sync {
 /// Vendor residue hook after a successful identity bind. Implementations must
 /// not fail the already-completed bind; surface failures via their own logs or
 /// telemetry.
+#[async_trait::async_trait]
 pub trait ChannelIdentityPostBind: Send + Sync {
-    fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str);
+    async fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str);
 }
 
 /// Builds per-extension post-bind provisioning for discovered channel

@@ -857,7 +857,6 @@ mod tests {
                 supports_markdown: true,
                 supports_threads: false,
                 can_reply_in_threads: false,
-                max_message_chars: Some(4096),
                 command_prefix: None,
             });
         let provider =
@@ -892,7 +891,6 @@ mod tests {
                 supports_markdown: true,
                 supports_threads: false,
                 can_reply_in_threads: false,
-                max_message_chars: Some(4096),
                 command_prefix: None,
             }),
             "the channel's declared presentation reaches the connected-channel summary"

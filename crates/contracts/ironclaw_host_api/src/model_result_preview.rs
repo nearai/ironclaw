@@ -56,10 +56,16 @@ impl ModelResultPreview {
     /// receives an opaque reference it cannot read or page. Prefer this when the
     /// alternative is showing nothing.
     pub fn redacted(value: impl Into<String>) -> Result<Self, HostApiError> {
-        let value = value.into();
+        let mut value = value.into();
         match validate_model_result_preview(&value) {
             Ok(()) => Ok(Self(value)),
             Err(_) => {
+                if let Ok(mut structured) = serde_json::from_str(&value)
+                    && redact_structured_credential_values(&mut structured, 0)
+                {
+                    value = serde_json::to_string(&structured)
+                        .unwrap_or_else(|_| "[redacted]".to_string());
+                }
                 let redacted = crate::credential_redaction::redact_credential_text(&value);
                 validate_model_result_preview(&redacted)?;
                 Ok(Self(redacted))
@@ -74,6 +80,69 @@ impl ModelResultPreview {
     pub fn into_inner(self) -> String {
         self.0
     }
+}
+
+fn redact_structured_credential_values(value: &mut serde_json::Value, depth: usize) -> bool {
+    if depth >= 16 {
+        *value = serde_json::Value::String("[redacted]".to_string());
+        return true;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.iter_mut().fold(false, |changed, (key, value)| {
+                if crate::credential_redaction::contains_credential_marker(
+                    &key.to_ascii_lowercase(),
+                ) {
+                    *value = serde_json::Value::String("[redacted]".to_string());
+                    true
+                } else {
+                    redact_structured_credential_values(value, depth + 1) || changed
+                }
+            })
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= redact_structured_credential_values(value, depth + 1);
+            }
+            changed
+        }
+        serde_json::Value::String(text) => redact_embedded_structured_text(text, depth + 1),
+        _ => false,
+    }
+}
+
+fn redact_embedded_structured_text(text: &mut String, depth: usize) -> bool {
+    let range = if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+        0..text.len()
+    } else {
+        let Some(start) = text.find(['{', '[']) else {
+            return redact_unparsed_credential_text(text);
+        };
+        let Some(end) = text.rfind(['}', ']']).map(|end| end + 1) else {
+            return redact_unparsed_credential_text(text);
+        };
+        start..end
+    };
+    let Ok(mut nested) = serde_json::from_str(&text[range.clone()]) else {
+        return redact_unparsed_credential_text(text);
+    };
+    if !redact_structured_credential_values(&mut nested, depth) {
+        return false;
+    }
+    let replacement = serde_json::to_string(&nested).unwrap_or_else(|_| "[redacted]".to_string());
+    text.replace_range(range, &replacement);
+    true
+}
+
+fn redact_unparsed_credential_text(text: &mut String) -> bool {
+    if !crate::credential_redaction::contains_unredacted_credential_value(
+        &text.to_ascii_lowercase(),
+    ) {
+        return false;
+    }
+    *text = "[redacted]".to_string();
+    true
 }
 
 impl TryFrom<String> for ModelResultPreview {
