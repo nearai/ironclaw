@@ -120,8 +120,11 @@ content owner adds the `✎` / `path-ok` marker those lines should carry.
 
 The gate fails closed on its own errors — unreadable file, unterminated or
 unparseable frontmatter, broken crate discovery, an extraction pass that finds
-almost nothing (floor constants below) — because "the checker crashed" must
-never be reported as "the guidance is fine".
+almost nothing (floor constants below), a docs.json navigation page missing
+from the docs scan (`check_docs_nav_coverage`: the published surface defines
+what docs discovery must cover, so there is no docs count floor to tune) —
+because "the checker crashed" must never be reported as "the guidance is
+fine".
 
     python3 scripts/ci/check-guidance.py           # verify
     python3 scripts/ci/check-guidance.py --json    # machine-readable report
@@ -142,10 +145,17 @@ import re
 import subprocess
 import sys
 
-_LIB = pathlib.Path(__file__).resolve().parent / "lib"
-sys.path.insert(0, str(_LIB))
+_CI = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(_CI / "lib"))
+sys.path.insert(0, str(_CI))
 
 import crate_tree  # noqa: E402  (scripts/ci/lib — the one discovery rule)
+
+# The publication-boundary gate owns the Mintlify navigation model
+# (collect_nav_pages, the OpenAPI pseudo-page filter, page suffixes); the
+# docs-coverage check below reuses it rather than re-deriving what counts
+# as a published page.
+import docs_publication_boundary  # noqa: E402  (scripts/ci)
 
 ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
@@ -237,17 +247,17 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # it, high enough that a parser or discovery pass silently degrading to a
 # handful of hits refuses instead of passing — a floor of 1 catches only
 # total loss, not the degraded-but-nonzero shape. The published docs/
-# surface gets its own floor (measured 2026-08-13: 82 published pages in
-# scope; the living internal spec pages are guarded separately by their
-# per-prefix zero-match refusal) because the aggregate floors sit below the
-# guidance-only remainder — without it, the docs branch of discovery
-# silently breaking would pass on guidance alone, which is exactly the
-# silent-degradation shape floors exist to refuse.
+# surface deliberately has *no* count floor: its health is checked against
+# an independent definition of the published set instead — every page
+# docs.json navigation publishes must be in the scan
+# (`check_docs_nav_coverage` below), so the docs branch of discovery
+# breaking refuses on the first missing page rather than at an arbitrary
+# magnitude. The living internal spec pages are likewise guarded by their
+# own per-prefix zero-match refusal, not a count.
 MIN_GUIDANCE_FILES = 180
 MIN_PATH_REFERENCES = 1100
 MIN_RULE_GLOBS = 20
 MIN_ALIAS_PAIRS = 40
-MIN_DOCS_FILES = 40
 
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -478,6 +488,66 @@ def discover_guidance(tree: Tree) -> list[str]:
                 "INTERNAL_GUIDANCE_PREFIXES to the new location."
             )
     return docs
+
+
+def check_docs_nav_coverage(repo_root: pathlib.Path, docs: list[str]) -> int:
+    """Every page docs.json navigation publishes must be in the scan.
+
+    The docs branch of discovery is validated against an independent
+    definition of the published surface — the Mintlify navigation — rather
+    than a count floor: if the discovery filter breaks (a renamed prefix, an
+    over-broad exclusion), the first navigation page missing from the scan
+    set refuses, with no arbitrary threshold to tune. Routes are
+    extensionless and docs/-relative; OpenAPI pseudo-pages ("GET /users")
+    name generated endpoint docs, not source files, and are skipped exactly
+    as `docs_publication_boundary.py` skips them. That gate separately fails
+    a navigation entry with no source file as a broken public page; here the
+    same entry refuses too, because either way it is published prose this
+    scan is not checking. Returns the number of covered pages — zero is a
+    refusal, since a navigation that names no source-backed page means the
+    coverage check has nothing to validate discovery against.
+    """
+    docs_json = repo_root / "docs" / "docs.json"
+    try:
+        manifest = json.loads(docs_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GuidanceError(
+            f"cannot read docs/docs.json ({error}) — the published-page set "
+            "cannot be derived, so docs discovery cannot be validated."
+        ) from error
+    scanned = frozenset(docs)
+    covered = 0
+    uncovered: list[str] = []
+    for page in sorted(
+        docs_publication_boundary.collect_nav_pages(manifest.get("navigation", {}))
+    ):
+        if docs_publication_boundary.OPENAPI_PAGE_RE.match(page):
+            continue
+        if any(
+            f"docs/{page}{suffix}" in scanned
+            for suffix in docs_publication_boundary.PAGE_SUFFIXES
+        ):
+            covered += 1
+        else:
+            uncovered.append(page)
+    if uncovered:
+        shown = ", ".join(uncovered[:10])
+        more = f" (and {len(uncovered) - 10} more)" if len(uncovered) > 10 else ""
+        raise GuidanceError(
+            f"docs.json navigation publishes pages the reference scan does "
+            f"not cover: {shown}{more}. Either the docs branch of discovery "
+            "broke (fix DOCS_PREFIX/DOCS_EXCLUDED_PREFIX) or a navigation "
+            "entry has no tracked source file (docs_publication_boundary.py "
+            "fails on that too); refusing rather than leaving published "
+            "prose unchecked."
+        )
+    if covered == 0:
+        raise GuidanceError(
+            "docs.json navigation names no source-backed pages — the "
+            "coverage check has nothing to validate docs discovery against; "
+            "refusing rather than passing vacuously."
+        )
+    return covered
 
 
 def _read_guidance(path: pathlib.Path) -> str:
@@ -1132,21 +1202,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
-        # The published-docs floor counts only the Mintlify surface: the
-        # living internal spec pages have their own per-prefix zero-match
-        # refusal in discovery, so they must not pad this count.
         docs_files = sum(
             1
             for doc in docs
             if doc.startswith(DOCS_PREFIX)
             and not doc.startswith(DOCS_EXCLUDED_PREFIX)
         )
-        if docs_files < MIN_DOCS_FILES:
-            raise GuidanceError(
-                f"discovered only {docs_files} docs/ files in scope (floor is "
-                f"{MIN_DOCS_FILES}). The docs branch of discovery broke; "
-                "refusing rather than passing on the guidance-only remainder."
-            )
+        nav_covered = check_docs_nav_coverage(repo_root, docs)
         crates = load_crates(repo_root)
         reference_problems, warnings, references = check_references(
             repo_root, docs, tree, crates
@@ -1162,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "guidance_files": len(docs),
         "docs_files": docs_files,
+        "nav_pages_covered": nav_covered,
         "path_references": references,
         "rule_globs": globs_checked,
         "crates_tabled": crates_tabled,
@@ -1194,6 +1257,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "guidance: OK "
         f"({len(docs)} guidance files, {references} path references verified, "
+        f"{nav_covered} published docs pages nav-covered, "
         f"{globs_checked} frontmatter globs live, {crates_tabled} crates tabled "
         f"in their family AGENTS.md with README.md present, "
         f"{aliases_verified} CLAUDE.md aliases verified, "

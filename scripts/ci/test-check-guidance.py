@@ -85,6 +85,12 @@ class GuidanceGateTests(unittest.TestCase):
         self.write("CLAUDE.md", "Read `docs/guide.md` and `crates/core/ironclaw_alpha/README.md`.\n")
         self.symlink("crates/core/CLAUDE.md", "AGENTS.md")
         self.write("docs/guide.md", "scanned like every docs/ page\n")
+        # The Mintlify navigation defines the published surface the docs
+        # branch of discovery must cover (check_docs_nav_coverage).
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide"]}}\n',
+        )
         self.write(
             ".claude/rules/alpha.md",
             '---\npaths:\n  - "crates/**/*.rs"\n---\n# Alpha rule\n',
@@ -151,7 +157,6 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
-            mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
             # Fixtures opt in to living internal spec pages per test: the
             # production tuple names real-repo pages, and the liveness refusal
             # would otherwise fire on every fixture that lacks them.
@@ -545,7 +550,6 @@ class GuidanceGateTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
-                mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
                 mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", ()),
                 mock.patch.object(GATE, "KNOWN_MISSING", ()),
                 mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
@@ -727,38 +731,61 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("matched no tracked", output)
         self.assertIn("docs/internal/reborn/contracts/", output)
 
-    def test_docs_floor_refuses_when_docs_branch_breaks(self) -> None:
-        """The aggregate floors sit below the guidance-only remainder, so the
-        docs surface silently falling out of discovery needs its own refusal."""
+    def test_nav_coverage_refuses_when_docs_discovery_breaks(self) -> None:
+        """The published surface is defined by docs.json navigation, so the
+        docs branch of discovery silently breaking (here: a wrong prefix
+        drops every docs page from the scan) refuses on the first
+        navigation page the scan no longer covers — no count floor
+        involved."""
         self.build_fixture()
-        listing = self.root / "tracked-files.txt"
-        listing.write_text(
-            "\n".join(t for t in self.tracked() if t != "tracked-files.txt") + "\n",
-            encoding="utf-8",
-        )
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
-            mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
-            mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
-            mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
-            mock.patch.object(GATE, "MIN_DOCS_FILES", 5),
-            mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", ()),
-            mock.patch.object(
-                GATE, "ALIAS_REAL_FILE_EXCEPTIONS", dict(self.ROOT_ALIAS_EXCEPTION)
-            ),
-            mock.patch.object(GATE, "KNOWN_MISSING", ()),
-            mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
-            contextlib.redirect_stderr(stderr),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            crate_tree.reset_inventory_cache()
-            code = GATE.main(
-                ["--repo-root", str(self.root), "--tracked-files", str(listing)]
-            )
-        crate_tree.reset_inventory_cache()
+        with mock.patch.object(GATE, "DOCS_PREFIX", "docz/"):
+            code, output = self.run_gate()
         self.assertEqual(code, 1)
-        self.assertIn("docs branch of discovery broke", stderr.getvalue())
+        self.assertIn("navigation publishes pages the reference scan", output)
+        self.assertIn("guide", output)
+
+    def test_nav_page_without_scanned_source_refuses(self) -> None:
+        """A navigation entry whose source file is not in the scan set —
+        whether the file is missing or filtered out — is published prose
+        the gate is not checking, and must refuse."""
+        self.build_fixture()
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide", "ghost-page"]}}\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("ghost-page", output)
+
+    def test_openapi_nav_pseudo_pages_are_not_coverage_claims(self) -> None:
+        """Auto-generated endpoint entries ("GET /users") name no source
+        file; they are skipped exactly as docs_publication_boundary.py
+        skips them."""
+        self.build_fixture()
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide", "GET /users"]}}\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_unreadable_docs_json_refuses(self) -> None:
+        """Without docs.json the published-page set cannot be derived, so
+        docs discovery cannot be validated — refuse, never pass vacuously.
+        Same for a navigation that names no source-backed page."""
+        self.build_fixture()
+        self.write("docs/docs.json", "{not json\n")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read docs/docs.json", output)
+        (self.root / "docs/docs.json").unlink()
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read docs/docs.json", output)
+        self.write("docs/docs.json", '{"navigation": {"pages": []}}\n')
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("names no source-backed pages", output)
 
     def test_missing_tracked_files_override_refuses(self) -> None:
         stderr = io.StringIO()
