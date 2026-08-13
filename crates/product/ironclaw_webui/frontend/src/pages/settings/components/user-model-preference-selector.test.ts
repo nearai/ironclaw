@@ -38,6 +38,17 @@ function collectTemplateText(root) {
   return text.join("");
 }
 
+function collectRenderedText(root) {
+  const text = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (const value of node.values) {
+      if (typeof value === "string") text.push(value);
+    }
+  });
+  return text.join(" ");
+}
+
 function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
@@ -191,3 +202,61 @@ test("model preference selector blocks writes when the preference read fails", (
     "a failed preference read must prevent an uninformed overwrite"
   );
 });
+
+for (const {
+  name,
+  catalogReadFailed,
+  preferenceReadFailed,
+  selectionEnabled,
+  expectedStatus,
+} of [
+  {
+    name: "catalog",
+    catalogReadFailed: true,
+    preferenceReadFailed: false,
+    selectionEnabled: false,
+    expectedStatus: "llm.catalogLoadFailed",
+  },
+  {
+    name: "preference",
+    catalogReadFailed: false,
+    preferenceReadFailed: true,
+    selectionEnabled: true,
+    expectedStatus: "llm.preferenceLoadFailed",
+  },
+]) {
+  test(`${name} read failures render a load failure before policy status`, () => {
+    const exports = runVmModuleForTest(
+      "./user-model-preference-selector.tsx",
+      ["UserModelPreferenceSelector"],
+      {
+        ApiError: class ApiError extends Error {},
+        Card: "Card",
+        SelectMenu: "SelectMenu",
+        html,
+        useT: () => (key) => key,
+        useUserModelPreference: () => ({
+          catalog: {
+            selection_enabled: selectionEnabled,
+            workspace_default: "model-a",
+            models: ["model-a"],
+          },
+          model: null,
+          isLoading: false,
+          isSaving: false,
+          catalogReadFailed,
+          preferenceReadFailed,
+          saveError: null,
+          error: new Error(`${name} read failed`),
+          setModel: () => {},
+        }),
+      },
+      import.meta.url
+    );
+
+    const text = collectRenderedText(exports.UserModelPreferenceSelector());
+    assert.match(text, new RegExp(expectedStatus.replace(".", "\\.")));
+    assert.doesNotMatch(text, /llm\.selectionUnavailable/);
+    assert.doesNotMatch(text, /error\.saveFailed/);
+  });
+}

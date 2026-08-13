@@ -5,6 +5,7 @@ import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
 import { Input } from "../../../design-system/input";
 import { SelectMenu } from "../../../design-system/select-menu";
+import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
 import { setUserModelPolicy } from "../lib/settings-api";
 
@@ -34,6 +35,10 @@ function validModelId(model) {
 
 function modelTestId(model) {
   return String(model).replace(/[^a-zA-Z0-9_-]+/g, "-");
+}
+
+function requestErrorMessage(error, fallback) {
+  return error instanceof ApiError ? error.message : fallback;
 }
 
 export function ModelSelectionPolicyEditor({ providerState }) {
@@ -96,7 +101,10 @@ export function ModelSelectionPolicyEditor({ providerState }) {
       setStatus({ tone: "success", text: t("llm.policyEnabled") });
     },
     onError: (error) => {
-      setStatus({ tone: "error", text: error.message });
+      setStatus({
+        tone: "error",
+        text: requestErrorMessage(error, t("llm.policySaveFailed")),
+      });
     },
   });
 
@@ -164,7 +172,10 @@ export function ModelSelectionPolicyEditor({ providerState }) {
         text: t("llm.modelsFetched", { count: result.models.length }),
       });
     } catch (error) {
-      setStatus({ tone: "error", text: error.message });
+      setStatus({
+        tone: "error",
+        text: requestErrorMessage(error, t("llm.modelsLoadFailed")),
+      });
     }
   };
 

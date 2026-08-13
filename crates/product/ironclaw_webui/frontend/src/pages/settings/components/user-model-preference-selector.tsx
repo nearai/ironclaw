@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { Card } from "../../../design-system/card";
 import { SelectMenu } from "../../../design-system/select-menu";
+import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
 import { useUserModelPreference } from "../hooks/useUserModelPreference";
 
@@ -11,8 +12,9 @@ export function UserModelPreferenceSelector() {
     model,
     isLoading,
     isSaving,
+    catalogReadFailed,
     preferenceReadFailed,
-    error,
+    saveError,
     setModel,
   } = useUserModelPreference();
   const workspaceDefault = catalog.workspace_default || t("inference.none");
@@ -56,6 +58,7 @@ export function UserModelPreferenceSelector() {
             disabled={
               isLoading ||
               isSaving ||
+              catalogReadFailed ||
               preferenceReadFailed ||
               (!catalog.selection_enabled && !model)
             }
@@ -69,13 +72,19 @@ export function UserModelPreferenceSelector() {
             data-testid="settings-model-selector-status"
             className="mt-2 min-h-5 text-xs text-[var(--v2-text-muted)]"
           >
-            {!catalog.selection_enabled && !isLoading
-              ? t("llm.selectionUnavailable")
+            {catalogReadFailed
+              ? t("llm.catalogLoadFailed")
+              : preferenceReadFailed
+                ? t("llm.preferenceLoadFailed")
               : isSaving
                 ? t("llm.preferenceSaving")
-                : error
-                  ? t("error.saveFailed", { message: error.message })
-                  : null}
+                : saveError
+                  ? saveError instanceof ApiError
+                    ? t("error.saveFailed", { message: saveError.message })
+                    : t("llm.preferenceSaveFailed")
+                  : !catalog.selection_enabled && !isLoading
+                    ? t("llm.selectionUnavailable")
+                    : null}
           </div>
         </div>
       </div>

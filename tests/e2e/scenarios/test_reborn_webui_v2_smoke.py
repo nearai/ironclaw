@@ -1527,6 +1527,19 @@ async def _wait_for_model_selector_layout(selector, description, *, wide: bool) 
         ) from None
 
 
+async def _assert_no_horizontal_overflow(page, *, mode: str) -> None:
+    dimensions = await page.evaluate(
+        """() => ({
+            scrollWidth: document.documentElement.scrollWidth,
+            innerWidth: window.innerWidth,
+        })"""
+    )
+    assert dimensions["scrollWidth"] <= dimensions["innerWidth"], (
+        f"the long model name caused horizontal overflow in the {mode} layout: "
+        f"{dimensions}"
+    )
+
+
 async def _publish_model_selection_policy(
     page, operator, cleanup, reborn_v2_server: str, selected_model: str
 ) -> None:
@@ -1608,8 +1621,10 @@ async def _choose_model_preference(
         "Used for future messages in all conversations.", exact=True
     )
     await _wait_for_model_selector_layout(selector, description, wide=False)
+    await _assert_no_horizontal_overflow(page, mode="narrow")
     await page.set_viewport_size({"width": 1440, "height": 720})
     await _wait_for_model_selector_layout(selector, description, wide=True)
+    await _assert_no_horizontal_overflow(page, mode="wide")
 
 
 async def _wait_for_model_preference(member, reborn_v2_server: str, model) -> None:

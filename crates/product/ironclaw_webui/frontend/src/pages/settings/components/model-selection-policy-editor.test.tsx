@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, notifyManager } from "@tanstack/react-query";
 import { test, vi } from "vitest";
 import "../../../i18n/en";
+import { ApiError } from "../../../lib/api";
 import { I18nProvider } from "../../../lib/i18n";
 
 notifyManager.setScheduler((callback) => callback());
@@ -151,5 +152,61 @@ test("policy editor fails closed without an active provider", async () => {
   } finally {
     act(() => rendered.root.unmount());
     rendered.container.remove();
+  }
+});
+
+test("policy editor does not expose native request errors", async () => {
+  requests.setPolicy.mockRejectedValue(new Error("browser save details"));
+  const state = providerState({
+    listModels: vi.fn().mockRejectedValue(new Error("browser network details")),
+  });
+  const rendered = await renderEditor(state);
+  try {
+    const fetchModels = Array.from(
+      rendered.container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "Fetch models");
+    assert.ok(fetchModels);
+    await act(async () => fetchModels.click());
+
+    const status = rendered.container.querySelector(
+      '[data-testid="settings-model-policy-status"]'
+    );
+    assert.equal(status?.textContent, "Could not load models.");
+    assert.doesNotMatch(status?.textContent ?? "", /browser network details/);
+
+    const save = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-model-policy-save"]'
+    );
+    assert.ok(save);
+    await act(async () => save.click());
+
+    assert.equal(status?.textContent, "Could not save the model selection policy.");
+    assert.doesNotMatch(status?.textContent ?? "", /browser save details/);
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setPolicy.mockReset();
+  }
+});
+
+test("policy editor preserves sanitized API errors", async () => {
+  requests.setPolicy.mockRejectedValue(new ApiError("policy rejected"));
+  const rendered = await renderEditor(providerState());
+  try {
+    const save = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-model-policy-save"]'
+    );
+    assert.ok(save);
+    await act(async () => save.click());
+
+    assert.equal(
+      rendered.container.querySelector('[data-testid="settings-model-policy-status"]')
+        ?.textContent,
+      "policy rejected"
+    );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setPolicy.mockReset();
   }
 });
