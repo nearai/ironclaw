@@ -500,10 +500,8 @@ impl AvailableExtensionCatalog {
         record: &ExtensionManifestRecord,
     ) -> Result<Option<AvailableExtensionPackage>, ProductOperationFailure> {
         let extension_id = &record.resolved().id;
-        let package_ref = LifecyclePackageRef::new(
-            LifecyclePackageKind::Extension,
-            extension_id.as_str(),
-        )?;
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())?;
         let Some(existing) = self.resolve_optional(&package_ref)? else {
             return Ok(None);
         };

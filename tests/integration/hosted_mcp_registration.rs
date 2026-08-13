@@ -621,6 +621,10 @@ async fn bundled_oauth_mcp_projects_active_after_callback_discovers_tools() {
         .await
         .expect("discovered manifest readback before upgrade simulation")
         .expect("discovered Notion manifest persists");
+    let current_hash = stale_manifest
+        .manifest_hash()
+        .cloned()
+        .expect("current bundled manifest hash");
     let stale_raw = format!(
         "{}\n# previous bundled definition\n",
         stale_manifest.raw_toml()
@@ -676,6 +680,20 @@ async fn bundled_oauth_mcp_projects_active_after_callback_discovers_tools() {
             .as_ref()
             .is_some_and(|mcp| mcp.dynamic_input_schemas.is_empty()),
         "a bundle hash mismatch must retain the current loader contract instead of stale discovery: {migrated:#?}"
+    );
+    assert_eq!(migrated.manifest_hash(), Some(&current_hash));
+    let migrated_installation = upgraded
+        .extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("migrated installation readback")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "notion")
+        .expect("migrated Notion installation persists");
+    assert_eq!(
+        migrated_installation.manifest_ref().manifest_hash(),
+        Some(&current_hash)
     );
 }
 
