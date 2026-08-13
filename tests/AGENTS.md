@@ -100,7 +100,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **61** group scenarios · **62** flat integration bins (55 in
+Totals: **61** group scenarios · **63** flat integration bins (56 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -221,7 +221,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (62)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (63)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -230,6 +230,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | A plain message gets a persisted reply through the whole real stack | `greeting.rs` |
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
+| A completed turn streams over one real session-WebSocket subscription and ends with the exact durable finalized reply the HTTP timeline serves; two logical subscriptions on one socket deliver their own threads independently | `session_events.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
