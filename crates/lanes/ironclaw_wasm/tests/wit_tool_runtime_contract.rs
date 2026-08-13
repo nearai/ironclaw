@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use ironclaw_wasm::{
-    DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostHttp, WasmHttpRequest,
-    WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, RecordingWasmHostHttp, WASM_DIAGNOSTIC_MAX_BYTES,
+    WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION, WASM_DIAGNOSTIC_REDACTION_MARKER, WasmError,
+    WasmHostHttp, WasmHttpRequest, WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -200,6 +202,46 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
     encoder.encode().expect("component must encode")
 }
 
+fn metadata_trap_component(export_name: &str, module_name: &str, function_name: &str) -> Vec<u8> {
+    let original_function = format!("${export_name}");
+    let crafted_function = format!("${function_name}");
+    let function_start = format!("  (func {crafted_function} (result i32)\n");
+    let trapping_function_start = format!("{function_start}    unreachable\n");
+    let wat = COUNTER_TOOL_WAT
+        .replacen("(module", &format!("(module ${module_name}"), 1)
+        .replace(&original_function, &crafted_function)
+        .replacen(&function_start, &trapping_function_start, 1);
+
+    assert!(
+        wat.contains(&trapping_function_start),
+        "fixture must insert a real trap into the selected metadata export"
+    );
+    tool_component(&wat)
+}
+
+fn assert_metadata_trap_is_safe(export_name: &str, module_name: &str, function_name: &str) {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let error = runtime
+        .prepare(
+            "crafted-metadata-trap",
+            &metadata_trap_component(export_name, module_name, function_name),
+        )
+        .unwrap_err();
+
+    let display = error.to_string();
+    assert!(!display.contains(module_name));
+    assert!(!display.contains(function_name));
+    assert!(!display.contains("wasm backtrace"));
+    match error {
+        WasmError::ExecutionFailed { message, .. } => assert_eq!(
+            message,
+            wasmtime::Trap::UnreachableCodeReached.to_string(),
+            "metadata traps should retain only their typed, actionable cause"
+        ),
+        other => panic!("expected metadata execution failure, got {other:?}"),
+    }
+}
+
 #[test]
 fn prepares_metadata_from_wit_tool_component() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
@@ -215,14 +257,34 @@ fn prepares_metadata_from_wit_tool_component() {
 #[test]
 fn malformed_component_bytes_are_rejected_as_compilation_failure() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let private_marker = "guest-private-malformed-component-marker";
 
     let error = runtime
-        .prepare("malformed", b"not a wasm component")
+        .prepare("malformed", private_marker.as_bytes())
         .unwrap_err();
 
-    assert!(
-        matches!(error, WasmError::CompilationFailed(_)),
-        "unexpected error: {error:?}"
+    let WasmError::CompilationFailed(message) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(message, "WASM component compilation failed");
+    assert!(!message.contains(private_marker));
+}
+
+#[test]
+fn description_trap_does_not_expose_guest_module_or_function_names() {
+    assert_metadata_trap_is_safe(
+        "description",
+        "guest-private-description-module-marker",
+        "guest-private-description-function-marker",
+    );
+}
+
+#[test]
+fn schema_trap_does_not_expose_guest_module_or_function_names() {
+    assert_metadata_trap_is_safe(
+        "schema",
+        "guest-private-schema-module-marker",
+        "guest-private-schema-function-marker",
     );
 }
 
@@ -248,10 +310,17 @@ fn unsupported_component_without_tool_exports_is_rejected_at_instantiation() {
         .prepare("unsupported", &component_without_tool_exports)
         .unwrap_err();
 
-    assert!(
-        matches!(error, WasmError::InstantiationFailed(_)),
-        "unexpected error: {error:?}"
+    let WasmError::InstantiationFailed(message) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(
+        message,
+        format!(
+            "WASM component instantiation failed; component may target an incompatible WIT ABI (host: {})",
+            ironclaw_wasm::WIT_TOOL_VERSION
+        )
     );
+    assert!(!message.contains("near:agent"));
 }
 
 #[test]
@@ -654,4 +723,369 @@ fn trap_after_http_wat() -> String {
         "i32.const 48\n    i32.const 1\n    i32.store",
         "unreachable\n\n    i32.const 48\n    i32.const 1\n    i32.store",
     )
+}
+
+fn wat_bytes(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect()
+}
+
+fn diagnostic_tool_wat(logs: &[(u32, String)], response_error: Option<&str>, trap: bool) -> String {
+    let mut wat = COUNTER_TOOL_WAT.to_string();
+    let mut data = String::new();
+    let mut calls = String::new();
+    let mut next_offset = 8_192_u32;
+    let mut message_offsets = std::collections::BTreeMap::new();
+
+    for (level, message) in logs {
+        let message_offset = if let Some(offset) = message_offsets.get(message) {
+            *offset
+        } else {
+            let offset = next_offset;
+            data.push_str(&format!(
+                "  (data (i32.const {offset}) \"{}\")\n",
+                wat_bytes(message)
+            ));
+            next_offset = next_offset
+                .checked_add(
+                    u32::try_from(message.len()).expect("fixture message length must fit u32"),
+                )
+                .and_then(|next| next.checked_add(16))
+                .expect("fixture data offsets must not overflow");
+            message_offsets.insert(message.clone(), offset);
+            offset
+        };
+        calls.push_str(&format!(
+            "    i32.const {level}\n    i32.const {message_offset}\n    i32.const {}\n    call $log\n",
+            message.len()
+        ));
+    }
+
+    if let Some(error) = response_error {
+        data.push_str(&format!(
+            "  (data (i32.const {next_offset}) \"{}\")\n",
+            wat_bytes(error)
+        ));
+    }
+
+    wat = wat.replacen("  (func $schema", &format!("{data}  (func $schema"), 1);
+    wat = wat.replacen(
+        "  (func $execute (param i32 i32 i32 i32 i32) (result i32)\n",
+        &format!(
+            "  (func $execute (param i32 i32 i32 i32 i32) (result i32)\n{calls}{}",
+            if trap { "    unreachable\n" } else { "" }
+        ),
+        1,
+    );
+
+    if let Some(error) = response_error {
+        let success_response = r#"    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    global.get $count
+    i32.const 1
+    i32.eq
+    if (result i32)
+      i32.const 3072
+    else
+      i32.const 3073
+    end
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)"#;
+        let error_response = format!(
+            r#"    i32.const 48
+    i32.const 0
+    i32.store
+    i32.const 60
+    i32.const 1
+    i32.store
+    i32.const 64
+    i32.const {next_offset}
+    i32.store
+    i32.const 68
+    i32.const {}
+    i32.store
+    i32.const 48)"#,
+            error.len()
+        );
+        wat = wat.replacen(success_response, &error_response, 1);
+    }
+
+    wat
+}
+
+fn execute_diagnostic_tool(
+    logs: &[(u32, String)],
+    response_error: Option<&str>,
+    trap: bool,
+) -> Result<ironclaw_wasm::WitToolExecution, WasmError> {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare(
+            "diagnostic-boundary",
+            &tool_component(&diagnostic_tool_wat(logs, response_error, trap)),
+        )
+        .unwrap();
+    runtime.execute(
+        &prepared,
+        WitToolHost::deny_all(),
+        WitToolRequest::new("{}"),
+    )
+}
+
+fn secret_patterns() -> [(String, &'static str); 3] {
+    [
+        (
+            format!("sk-{}", "B".repeat(24)),
+            "block-action API-key shape",
+        ),
+        (
+            format!("Bearer {}", "r".repeat(24)),
+            "redact-action bearer shape",
+        ),
+        (
+            "0123456789abcdef".repeat(4),
+            "warn-action high-entropy-hex shape",
+        ),
+    ]
+}
+
+#[test]
+fn guest_logs_sanitize_every_leak_action_before_public_success_result() {
+    let mut logs = vec![(2, "benign diagnostic".to_string())];
+    for (secret, label) in secret_patterns() {
+        logs.push((3, format!("{label}: {secret}; retained cause")));
+    }
+
+    let executed = execute_diagnostic_tool(&logs, None, false).unwrap();
+
+    assert_eq!(executed.logs[0].message, "benign diagnostic");
+    for (record, (secret, label)) in executed.logs[1..].iter().zip(secret_patterns()) {
+        assert!(!record.message.contains(&secret), "{label} leaked");
+        assert!(
+            record.message.contains("retained cause"),
+            "sanitization should retain non-secret diagnostic context"
+        );
+        assert!(record.message.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
+    }
+}
+
+#[test]
+fn guest_response_error_is_sanitized_independently_from_captured_logs() {
+    let log_secret = format!("sk-{}", "L".repeat(24));
+    let response_secret = format!("Bearer {}", "e".repeat(24));
+    let response_error = format!("request failed for {response_secret}; status=503");
+
+    let executed = execute_diagnostic_tool(
+        &[(4, format!("log contained {log_secret}; log cause"))],
+        Some(&response_error),
+        false,
+    )
+    .unwrap();
+
+    let error = executed
+        .error
+        .expect("guest response.error must be retained");
+    assert!(!error.contains(&response_secret));
+    assert!(error.contains("status=503"));
+    assert!(error.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
+    assert!(!executed.logs[0].message.contains(&log_secret));
+    assert!(executed.logs[0].message.contains("log cause"));
+}
+
+#[test]
+fn guest_response_error_size_boundary_is_fail_closed() {
+    let retained_cause = "guest returned status=503; ";
+    let exactly_at_limit = format!(
+        "{retained_cause}{}",
+        "r".repeat(WASM_DIAGNOSTIC_MAX_BYTES - retained_cause.len())
+    );
+    let over_limit = "e".repeat(WASM_DIAGNOSTIC_MAX_BYTES + 1);
+
+    let retained = execute_diagnostic_tool(&[], Some(&exactly_at_limit), false).unwrap();
+    assert_eq!(retained.error.as_deref(), Some(exactly_at_limit.as_str()));
+
+    let redacted = execute_diagnostic_tool(&[], Some(&over_limit), false).unwrap();
+    assert_eq!(
+        redacted.error.as_deref(),
+        Some(WASM_DIAGNOSTIC_REDACTION_MARKER)
+    );
+}
+
+#[test]
+fn guest_trap_preserves_sanitized_log_snapshot_and_safe_trap_cause() {
+    let secret = format!("sk-{}", "T".repeat(24));
+    let guest_function_name = "guest-owned-private-execute-marker";
+    let component = diagnostic_tool_wat(
+        &[(4, format!("before trap {secret}; operation=write"))],
+        None,
+        true,
+    )
+    .replace("$execute", &format!("${guest_function_name}"));
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare("diagnostic-boundary", &tool_component(&component))
+        .unwrap();
+    let error = runtime
+        .execute(
+            &prepared,
+            WitToolHost::deny_all(),
+            WitToolRequest::new("{}"),
+        )
+        .unwrap_err();
+
+    let display = error.to_string();
+    assert!(!display.contains(guest_function_name));
+    assert!(!display.contains(&secret));
+    match error {
+        WasmError::ExecutionFailed { message, logs, .. } => {
+            assert_eq!(
+                message,
+                wasmtime::Trap::UnreachableCodeReached.to_string(),
+                "the typed trap cause should remain useful without exposing its cause chain"
+            );
+            assert!(!message.contains(guest_function_name));
+            assert!(!message.contains(&secret));
+            assert_eq!(logs.len(), 1);
+            assert!(!logs[0].message.contains(&secret));
+            assert!(logs[0].message.contains("operation=write"));
+            assert!(logs[0].message.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
+        }
+        other => panic!("expected execution failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn execution_failure_message_size_boundary_is_fail_closed() {
+    let secret = format!("sk-{}", "F".repeat(24));
+    let sanitized = WasmError::execution_failed(format!(
+        "guest trap while writing record: {secret}; wasm-function=7"
+    ));
+    match &sanitized {
+        WasmError::ExecutionFailed { message, .. } => {
+            assert!(!message.contains(&secret));
+            assert!(message.contains("wasm-function=7"));
+            assert!(message.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
+        }
+        other => panic!("expected execution failure, got {other:?}"),
+    }
+    assert!(!sanitized.to_string().contains(&secret));
+    assert!(sanitized.to_string().contains("wasm-function=7"));
+
+    let retained_cause = "guest trap: unreachable; ";
+    let exactly_at_limit = format!(
+        "{retained_cause}{}",
+        "t".repeat(WASM_DIAGNOSTIC_MAX_BYTES - retained_cause.len())
+    );
+    let retained = WasmError::execution_failed(exactly_at_limit.clone());
+    match &retained {
+        WasmError::ExecutionFailed { message, .. } => assert_eq!(message, &exactly_at_limit),
+        other => panic!("expected execution failure, got {other:?}"),
+    }
+    assert!(retained.to_string().contains(retained_cause));
+
+    let redacted = WasmError::execution_failed("x".repeat(WASM_DIAGNOSTIC_MAX_BYTES + 1));
+    match &redacted {
+        WasmError::ExecutionFailed { message, .. } => {
+            assert_eq!(message, WASM_DIAGNOSTIC_REDACTION_MARKER)
+        }
+        other => panic!("expected execution failure, got {other:?}"),
+    }
+    assert_eq!(
+        redacted.to_string(),
+        format!("failed to execute WIT component: {WASM_DIAGNOSTIC_REDACTION_MARKER}")
+    );
+}
+
+#[test]
+fn guest_log_size_boundary_is_fail_closed_and_utf8_safe() {
+    let exactly_at_limit = "é".repeat(WASM_DIAGNOSTIC_MAX_BYTES / 2);
+    let over_limit = "x".repeat(WASM_DIAGNOSTIC_MAX_BYTES + 1);
+    let straddling_secret = format!(
+        "{}sk-{}",
+        "p".repeat(WASM_DIAGNOSTIC_MAX_BYTES - 4),
+        "S".repeat(24)
+    );
+    let split_codepoint = format!("{}é", "u".repeat(WASM_DIAGNOSTIC_MAX_BYTES));
+    let executed = execute_diagnostic_tool(
+        &[
+            (0, exactly_at_limit.clone()),
+            (1, over_limit),
+            (2, straddling_secret.clone()),
+            (3, split_codepoint),
+        ],
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(executed.logs[0].message, exactly_at_limit);
+    assert_eq!(executed.logs[1].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
+    assert_eq!(executed.logs[2].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
+    assert!(!executed.logs[2].message.contains(&straddling_secret));
+    assert_eq!(executed.logs[3].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
+    assert!(
+        executed
+            .logs
+            .iter()
+            .all(|record| record.message.is_char_boundary(record.message.len()))
+    );
+}
+
+#[test]
+fn diagnostic_redaction_marker_is_idempotent() {
+    let executed = execute_diagnostic_tool(
+        &[(2, WASM_DIAGNOSTIC_REDACTION_MARKER.to_string())],
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(executed.logs[0].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
+}
+
+#[test]
+fn guest_log_count_order_levels_and_total_scan_work_are_bounded() {
+    assert_eq!(
+        WASM_DIAGNOSTIC_MAX_BYTES.checked_mul(WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION),
+        Some(4_096_000),
+        "the count and per-record caps must bound total diagnostic scan work",
+    );
+
+    let max_sized = "z".repeat(WASM_DIAGNOSTIC_MAX_BYTES);
+    let logs: Vec<_> = (0..=WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION)
+        .map(|index| ((index % 5) as u32, max_sized.clone()))
+        .collect();
+    let executed = execute_diagnostic_tool(&logs, None, false).unwrap();
+
+    assert_eq!(
+        executed.logs.len(),
+        WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION
+    );
+    assert!(
+        executed
+            .logs
+            .iter()
+            .all(|record| record.message == max_sized)
+    );
+    let expected_levels = [
+        ironclaw_wasm::WasmLogLevel::Trace,
+        ironclaw_wasm::WasmLogLevel::Debug,
+        ironclaw_wasm::WasmLogLevel::Info,
+        ironclaw_wasm::WasmLogLevel::Warn,
+        ironclaw_wasm::WasmLogLevel::Error,
+    ];
+    for (index, record) in executed.logs.iter().enumerate() {
+        assert_eq!(record.level, expected_levels[index % expected_levels.len()]);
+    }
 }

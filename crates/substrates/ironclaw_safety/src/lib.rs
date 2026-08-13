@@ -42,8 +42,8 @@ pub use display_redaction::{
     sanitize_url_for_display, shell_command_display_text,
 };
 pub use leak_detector::{
-    LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakPreviewPolicy,
-    LeakRedactionError, LeakScanResult, LeakSeverity,
+    LEAK_DETECTOR_REDACTION_MARKER, LeakAction, LeakDetectionError, LeakDetector, LeakMatch,
+    LeakPattern, LeakPreviewPolicy, LeakRedactionError, LeakScanResult, LeakSeverity,
 };
 pub use leak_pattern_class::LeakPatternClass;
 pub use model_input_redaction::{

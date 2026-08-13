@@ -18,10 +18,17 @@ pub const WIT_TOOL_VERSION: &str = "0.3.0";
 /// at the owner plus a public const is the same bytes with none of that.
 pub const TOOL_WIT: &str = include_str!("../wit/tool.wit");
 
+/// Maximum raw UTF-8 bytes accepted for one guest-controlled diagnostic.
+pub const WASM_DIAGNOSTIC_MAX_BYTES: usize = 4 * 1024;
+
+/// Maximum guest diagnostic entries accepted during one execution.
+pub const WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION: usize = 1_000;
+
+/// Stable replacement for a guest diagnostic that cannot be exposed safely.
+pub const WASM_DIAGNOSTIC_REDACTION_MARKER: &str = "[WASM_DIAGNOSTIC_REDACTED]";
+
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) const DEFAULT_HTTP_TIMEOUT_MS: u32 = 30_000;
-pub(crate) const MAX_LOGS_PER_EXECUTION: usize = 1_000;
-pub(crate) const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// Configuration for the Reborn WIT tool runtime.
 ///

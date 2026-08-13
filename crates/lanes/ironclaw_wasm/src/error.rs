@@ -1,6 +1,7 @@
 use ironclaw_host_api::resource::ResourceUsage;
 use thiserror::Error;
 
+use crate::diagnostic::sanitize_wasm_diagnostic;
 use crate::types::WasmLogRecord;
 
 /// Errors returned by the Reborn WASM runtime.
@@ -34,7 +35,7 @@ impl WasmError {
     /// join error, or a blocking-task panic into a structured error.
     pub fn execution_failed(message: String) -> Self {
         Self::ExecutionFailed {
-            message,
+            message: sanitize_wasm_diagnostic(message),
             usage: ResourceUsage::default(),
             logs: Vec::new(),
         }
