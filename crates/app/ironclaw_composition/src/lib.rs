@@ -24,6 +24,7 @@ mod automation;
 mod backend_store_assembly;
 mod builtin_capability_policy;
 mod capability_authorization;
+mod channel_initialization;
 #[cfg(test)]
 #[path = "extension_lifecycle_capabilities_auth_tests.rs"]
 mod composition_extension_lifecycle_auth_tests;
@@ -99,6 +100,11 @@ pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master
 pub use filesystem_assembly::standalone_db_path;
 // consumer: `ironclaw_cli` config/set · pinned by: `ironclaw_cli` build (the error is the store's; module is private)
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+// consumer: `ironclaw_cli` native channel bindings · pinned by: `ironclaw_cli` build
+pub use channel_initialization::{
+    FirstPartyChannelInitializationContext, FirstPartyChannelInitializationError,
+    FirstPartyChannelInitializer,
+};
 // consumer: `ironclaw_cli` serve/runtime/native_extensions, `harness/latency/runner` · pinned by: `composition/tests/admin_api_e2e.rs`
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
@@ -398,13 +404,28 @@ pub type PostgresProductionHostRuntimeServices =
 /// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
+/// The web-app channel's registration document, at its pre-§8 address.
+///
+/// Both halves of this path are persisted identity: the `/web-push` alias
+/// resolves to a physical per-user subpath, and `subscriptions.json` is the
+/// name every existing enrollment already lives under. The store's shape
+/// migrated forward; its address deliberately did not.
 const PER_USER_ALIASES: &[&str] = &[
     "/product-results",
     "/processes",
     "/secrets",
     "/authorization",
     "/outbound",
+    // The web-app channel's enrollment store. The alias keeps its pre-rename
+    // `web-push` spelling on purpose: it resolves to a PHYSICAL per-user
+    // subpath (`/tenants/<t>/users/<u>/web-push`), so renaming it would
+    // orphan every persisted browser enrollment. Pinned as sanctioned
+    // residue by the web-push-vocabulary retirement gate.
     "/web-push",
+    // Generic per-channel delivery registrations for every OTHER channel.
+    // The web-app channel keeps its own alias above rather than moving here,
+    // because moving it would relocate live enrollment documents.
+    "/delivery-registrations",
     "/run-state",
     "/checkpoint-state",
     "/approvals",

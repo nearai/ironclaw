@@ -150,9 +150,13 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "Slack messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"   # see notes below
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.ingress]
 route_suffix = "events"           # served at /webhooks/extensions/slack/events
@@ -183,7 +187,7 @@ credential_handle = "slack_bot_token"
 [channel.presentation]
 supports_markdown = true
 supports_threads = true
-max_message_chars = 40000
+can_reply_in_threads = true
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 
@@ -217,9 +221,15 @@ Notes on the sections:
   of `[runtime]` + `[[tools]]` — see §3.1.
 - **`[channel.ingress.verification]`** is a declarative recipe the *host*
   executes: `hmac_sha256` (segment list: literals, named headers, body),
-  `shared_secret_header` (constant-time compare), or `none`. Signing secrets
-  never reach the adapter. Two recipe kinds cover Slack and Telegram; new kinds
-  are added to the host when a protocol genuinely needs one.
+  `shared_secret_header` (constant-time compare), `authenticated_session`, or
+  `none`. Signing secrets never reach a package. Vendor/webhook ingress binds
+  `ChannelIngress`; authenticated-session ingress is normalized by the host
+  and intentionally binds no package ingress capability.
+- **`[channel.reply]` and `[channel.delivery]` are orthogonal axes.** Reply is
+  source-routed back to a run's input; delivery is target-resolved and may
+  happen without a run. `reply.transport = "stream"` is host-owned and binds no
+  `ChannelReply`; message reply binds one. Every delivery section binds
+  `ChannelDelivery`.
 - **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
   segment-bounded `path_prefixes`, and request/response byte limits. Empty path
   lists preserve the legacy host+method policy. Path-placeholder credentials
@@ -349,9 +359,9 @@ vocabulary, binding rules, and contract principles.
 
 ## 4. The adapters
 
-The count follows the product model: one adapter per surface kind that has
-extension-specific runtime behavior. Auth has none — every vendor difference is
-data — so extensions implement at most **two** traits.
+Tool surfaces use one adapter. A channel surface exposes a capability set with
+up to three independent protocol translations: ingress, reply, and delivery.
+Auth has no adapter — every vendor difference is recipe data.
 
 ### 4.0 Entrypoint and binding
 
@@ -364,7 +374,13 @@ pub trait ExtensionEntrypoint: Send + Sync {
 
 pub struct ExtensionBindings {
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    pub channel: Option<Arc<dyn ChannelAdapter>>,
+    pub channel: ChannelSurfaces,
+}
+
+pub struct ChannelSurfaces {
+    pub ingress: Option<Arc<dyn ChannelIngress>>,
+    pub reply: Option<Arc<dyn ChannelReply>>,
+    pub delivery: Option<Arc<dyn ChannelDelivery>>,
 }
 ```
 
@@ -375,13 +391,19 @@ only behind host injection). The binding rule is a direct check, not a
 framework:
 
 - manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
-- manifest declares `[channel]` → `channel` must be `Some`;
+- vendor/webhook `[channel.ingress]` ↔ `channel.ingress` must be `Some`;
+- `authenticated_session` ingress ↔ `channel.ingress` must be `None`;
+- message `[channel.reply]` ↔ `channel.reply` must be `Some`, while stream
+  reply requires it absent;
+- `[channel.delivery]` ↔ `channel.delivery` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
 - internal publication requires an operational surface: a tool, channel, or hook. The
   host-internal `[mcp]` connection template is discovery authority, not a
   callable tool, so an empty discovered catalog cannot publish by itself;
   channel-only and hook-only contracts remain valid;
-- violations fail publication with a typed error. No partial surface publishes.
+- violations fail publication with a typed error. These per-axis checks are
+  what keep the option set from becoming a second, drifting copy of manifest
+  facts; no mismatched capability set publishes.
 
 Loaders by runtime kind:
 
@@ -454,101 +476,86 @@ maps to the generic re-auth gate. **Discovery is never the adapter's job:**
 | Published as | tool surfaces in the active snapshot | tool surfaces in the active snapshot |
 | Downstream difference | none | none |
 
-### 4.2 `ChannelAdapter` — one per extension
+### 4.2 Channel capabilities — a translator, one method each way
 
 ```rust
 #[async_trait]
-pub trait ChannelAdapter: Send + Sync {
-    /// Idempotent; runs during internal publication. Vendor-side wiring and
-    /// configuration validation live here (Telegram `setWebhook`, Slack
-    /// `auth.test`). Failure aborts publication.
-    async fn activate(&self, ctx: &ChannelContext<'_>, egress: &dyn RestrictedEgress) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    /// Idempotent, best-effort; runs during unpublication/removal. Vendor-side
-    /// unwiring (Telegram `deleteWebhook`). Failure is recorded and retryable;
-    /// it does not block removal forever.
-    async fn cleanup(&self, ctx: &ChannelContext<'_>, egress: &dyn RestrictedEgress) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    /// Parse one host-verified inbound request into a normalized outcome.
-    /// `VerifiedInbound` includes the verified installation's host-resolved,
-    /// manifest-declared non-secret config. Pure protocol work: no I/O, no
-    /// secrets, bounded input.
-    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
-
-    /// Fetch one inbound attachment through the manifest-restricted egress
-    /// pinned to the adapter generation that parsed the request. The default
-    /// fails closed with `Unsupported`.
-    async fn fetch_attachment(
+pub trait ChannelIngress: Send + Sync {
+    async fn receive(
         &self,
-        attachment: &ChannelAttachmentRef,
+        request: VerifiedInbound<'_>,
         egress: &dyn RestrictedEgress,
-    ) -> Result<InboundAttachment, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
+    ) -> Result<InboundOutcome, ChannelError>;
+}
 
-    /// Render and send one normalized outbound envelope through restricted
-    /// egress. Owns vendor formatting, splitting, target syntax, DM
-    /// provisioning, and safe error mapping. Returns structured outcomes;
-    /// never touches the delivery store.
-    async fn deliver(&self, envelope: OutboundEnvelope, egress: &dyn RestrictedEgress) -> Result<DeliveryReport, ChannelError>;
+#[async_trait]
+pub trait ChannelReply: Send + Sync {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError>;
+}
 
-    /// Optional: list/search delivery targets for pickers.
-    async fn list_targets(&self, query: TargetQuery, egress: &dyn RestrictedEgress) -> Result<Vec<TargetCandidate>, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
+#[async_trait]
+pub trait ChannelDelivery: Send + Sync {
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError>;
+
+    async fn provision_direct_target(
+        &self,
+        request: DirectTargetProvisionRequest,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<Option<ExternalConversationRef>, ChannelError>;
 }
 ```
+
+A package implements only the halves its protocol needs. Slack and Telegram
+implement all three. Web-app implements delivery only: authenticated-session
+ingress and stream replies are host transports. Lifecycle wiring is manifest
+data too: `[channel.ingress.registration]` and `.deregistration` replace the
+old activation/cleanup hooks and run through restricted egress with host-side
+credential injection.
+
+`receive` returns a **complete** normalized outcome. It may use only the
+manifest-restricted egress provided for this verified installation. Vendor
+handles such as a Slack private-file URL or Telegram file id stay package-
+internal (`ChannelAttachmentRef`); the host receives canonical
+`InboundAttachment` values containing reconciled metadata and fetched bytes.
+The host enforces count and total-byte budgets, sanitizes any conversation
+context, permits policy only to filter or reorder exact original descriptors,
+and lands the exact bytes during durable message acceptance. Raw bytes never
+enter events, projections, transcripts, or model-visible records.
+
+Provider batches are the bounded exception to purely transient pre-admission
+bytes. A completed fragment is stored in a tenant-scoped, host-private batch
+snapshot (including base64-encoded bytes) so settle/recovery survives restart;
+the snapshot has a 16 MiB hard cap and is deleted only through the batch
+lifecycle after admission/rejection. It is not an event, transcript, or model
+surface.
+
+Conversation context is content, not a deferred reference. The adapter fetches
+it inside `receive` when the triggering mode needs it; delaying it would make
+the current turn run without the messages needed to answer. Absence is still a
+valid degradation, and the host frames the returned text as untrusted quoted
+context.
 
 For inbound calls, `ChannelError::Parse` means the verified vendor payload is
 malformed and maps to a permanent 400. `ChannelError::Configuration` means
 host-supplied adapter configuration is missing or invalid and maps to a
-retryable 503; this distinction prevents operator mistakes from being
-misreported as vendor payload failures. Telegram validates the configured
-public bot username syntactically (5–32 ASCII alphanumeric/underscore
-characters ending in `bot`, case-insensitively). A syntactically valid but
-wrong identity requires a future mediated `getMe` verification step; inbound
-normalization does not perform live vendor I/O.
+retryable 503. Telegram validates `bot_username` syntax on the first inbound
+message; an absent required value still prevents activation. Verifying a
+syntactically valid but incorrect identity would require a separate mediated
+`getMe` step.
 
-```rust
-pub enum InboundOutcome {
-    /// Normalized message(s) for the workflow (actor, conversation, event id,
-    /// text, attachments, optional opaque `reply_context` ≤ 4 KiB that the
-    /// host stores server-side and hands back at delivery time).
-    Messages(Vec<NormalizedInboundMessage>),
-    /// One verified fragment of a provider-level logical message. The host
-    /// durably stages it, acknowledges the fragment, and admits one ordered
-    /// atomic message after a bounded quiet window.
-    BatchFragment(InboundBatchFragment),
-    /// Bounded immediate response (e.g. Slack URL-verification challenge).
-    Respond(ImmediateResponse),
-    /// Authenticated no-op (ignored event types).
-    Ignore,
-}
-```
-
-Inbound attachments remain **references, not bytes** during parsing:
-`ChannelAttachmentRef` carries a validated descriptor plus an opaque vendor
-reference. The reference is host-only and redacted from `Debug`. Ordinary
-message references remain transient. Provider batches require one narrow
-exception: verified fragments are serialized only into the tenant-scoped,
-host-private inbound-batch snapshot until the batch is admitted or rejected.
-Those opaque references never enter events, projections, transcripts, or
-model-visible state. After duplicate replay misses and before-inbound policy
-allows or rewrites the message, the product workflow fetches through the exact
-generation-pinned adapter and manifest-restricted egress, validates id, MIME,
-size, count, and total-byte budgets, and lands bytes through the project
-filesystem before accepting the message. Retryable transfer failures release
-the idempotency attempt; permanent failures settle it.
-
-For final and triggered outbound replies, the coordinator recognizes confined
-`/workspace/...` file references, preflights and reads them through the
-turn-scoped project filesystem, and appends transient `OutboundPart::File`
-values. Callers cannot inject pre-materialized file parts. The adapter owns the
-vendor upload; raw bytes never enter attempts, events, projections, or
+For final replies and target-resolved delivery, the coordinator recognizes
+confined `/workspace/...` file references, reads them through the turn-scoped
+filesystem, and appends transient `OutboundPart::File` values. The package owns
+vendor rendering/upload only; callers cannot inject pre-materialized parts,
+and raw outbound bytes never enter attempts, events, projections, or
 transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
@@ -611,15 +618,16 @@ If a future vendor genuinely defeats the descriptor, add a narrow quirk hook
 
 ## 5. Core flows
 
-Four host pipelines wrap the extension surfaces. Each pipeline is implemented
+Five host pipelines wrap the extension surfaces. Each pipeline is implemented
 once and owns semantics, security, and reliability; the extension contributes
 one narrow call — or nothing:
 
 | Flow | Host pipeline (once) | Extension contribution |
 | --- | --- | --- |
 | Tool call | dispatcher (§5.2) | `ToolAdapter::invoke` |
-| Inbound message | ingress router (§5.3) | `ChannelAdapter::inbound` |
-| Outbound message | delivery coordinator (§5.4) | `ChannelAdapter::deliver` |
+| Inbound message | ingress router (§5.3) | `ChannelIngress::receive` (or host session normalization) |
+| Run reply | delivery coordinator (§5.4) | `ChannelReply::send_reply` (or host projection stream) |
+| Target-resolved delivery | delivery coordinator (§5.4) | `ChannelDelivery::deliver` |
 | Auth | auth engine (§5.5) | recipe data only |
 
 ### 5.1 Install and readiness reconciliation
@@ -684,16 +692,17 @@ reaches its conversation (lane 1, §5.4).
 sequenceDiagram
     participant V as Vendor
     participant R as Generic ingress router
-    participant A as ChannelAdapter
+    participant A as ChannelIngress
     participant W as Product surface
 
     V->>R: POST /webhooks/extensions/{ext}/{suffix}
     R->>R: match route, enforce method/body/rate/deadline
     R->>R: execute verification recipe (constant-time, replay window)
-    R->>A: inbound(verified bounded request)
-    A-->>R: Messages | BatchFragment | Respond | Ignore
+    R->>A: receive(verified bounded request, restricted egress)
+    A-->>R: complete Messages | BatchFragment | Respond | Ignore
     alt Ordinary message
-        R->>W: durable dedupe + admission commit
+        R->>R: validate exact attachments, sanitize context, apply policy
+        R->>W: durable dedupe + attachment landing + admission commit
         W-->>R: receipt
         R-->>V: 2xx after admission (else retryable 5xx)
     else Provider-batch fragment
@@ -775,9 +784,9 @@ handler is not a second pipeline — it is one more caller of the same
 host-emitted intent, so the tool call *is* the coordinator path, not a
 shortcut around it.
 
-The coordinator is **not folded into `ChannelAdapter`** for the same reason
-the dispatcher is not folded into `ToolAdapter` and the ingress router is not
-folded into `inbound()`: folding it in would hand every channel its own copy
+The coordinator is **not folded into `ChannelReply`/`ChannelDelivery`** for the
+same reason the dispatcher is not folded into `ToolAdapter` and the ingress
+router is not folded into `ChannelIngress::receive`: folding it in would hand every channel its own copy
 of retry/persistence/crash semantics, give adapters store access (a buggy or
 malicious adapter could mark failures delivered), and something above the
 adapter must resolve the target before an adapter can even be chosen. From an
@@ -797,7 +806,7 @@ reply always lands in the conversation it belongs to, automatically, and
 rides neither tool — never sealed, redirected, or suppressed by a lane-2 call.
 There is no `web_app` pseudo-target: the WebUI already owns lane 1 for its own
 runs, so an empty notification-channel set simply means "no external
-notification; the app is the surface." (✎ 2026-08-08: the `web-push` catalog
+notification; the app is the surface." (✎ 2026-08-08: the `web-app` catalog
 target — browser push notifications to the user's enrolled devices — is a
 *real* external destination with genuine push-service egress, not a revival
 of that pseudo-target; selecting it delivers OS notifications even while the
@@ -962,7 +971,7 @@ reintroduced without one.
 | Digest-pinned shared vendor implementation packages | shared vendor = identical-recipe rule (§3.2); native code shares via crate deps | third-party binary vendor-implementation sharing exists |
 | Per-vendor auth adapters, manual-validator trait | recipes cover all five current vendors; no code in auth flows | a vendor defeats the descriptor (add a narrow hook) |
 | Generic "dynamic tools" abstraction | MCP is the only dynamic source; one `[mcp]` section, owned by the MCP loader | a second, non-MCP discovery source is real |
-| Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[admin_configuration]` | a real action that config + hooks cannot express |
+| Channel capability traits beyond ingress/reply/delivery (connection/target/action) | the three transport axes plus manifest configuration cover shipped behavior | a real action that those capabilities and config cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
 | Per-installation admin setup | manifest `[admin_configuration]` is stored once per tenant and shared by every member | a deployment genuinely needs multiple administrator-selected instances (new ADR) |
 | Multiple accounts per vendor per user | one account per vendor per user matches current behavior | **triggered 2026-07-13** (work + personal Google accounts; two Notion accounts) — accepted as a dedicated post-P7 PR, `adr/0001-multiple-accounts-per-vendor.md`; the train ships only the list-shaped wire (§6.4) |
@@ -975,10 +984,10 @@ reintroduced without one.
 
 The abstraction pays for itself here:
 
-- **One conformance suite per adapter.** `ironclaw_host_api` exports the
-  reusable channel-adapter conformance suite (inbound outcomes, deliver report
-  shape, internal publish/cleanup idempotency against a scripted vendor server); each
-  extension crate runs it in its tests. Tool adapters get the same treatment.
+- **One conformance suite per channel capability set.**
+  `ironclaw_extension_contracts` exports the reusable suite (complete inbound
+  outcomes and reply/delivery report shape against scripted egress); each
+  channel package runs it in its tests. Tool adapters get the same treatment.
 - **One auth-engine suite.** State/PKCE/replay/exchange/refresh/revoke/identity
   tested once against a scripted vendor server; each vendor recipe is a table
   row, not a suite.

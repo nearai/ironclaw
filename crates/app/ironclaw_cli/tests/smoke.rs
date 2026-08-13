@@ -4864,10 +4864,27 @@ fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Resul
         .ok_or_else(|| format!("create-thread response missing thread_id: {created_json}"))?
         .to_string();
 
-    let message_body =
-        format!(r#"{{"content":"hi","client_action_id":"smoke-send-message-{label}"}}"#);
+    // The unified channel model routes browser sends through the generic
+    // session-inbound route, keyed by the extension id `GET /session`
+    // advertises — the same discovery the SPA performs.
+    let session_request = format!(
+        "GET /api/webchat/v2/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+    );
+    let session = http_response(port, &session_request, "session probe")?;
+    let session_json: serde_json::Value =
+        serde_json::from_str(&session.body).map_err(|error| format!("session body: {error}"))?;
+    let session_channel = session_json["session_channel_extension_id"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("session response missing session_channel_extension_id: {session_json}")
+        })?
+        .to_string();
+
+    let message_body = format!(
+        r#"{{"content":"hi","thread_id":"{thread_id}","client_action_id":"smoke-send-message-{label}"}}"#
+    );
     let send_request = format!(
-        "POST /api/webchat/v2/threads/{thread_id}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
+        "POST /api/webchat/v2/channels/{session_channel}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
         message_body.len()
     );
     let sent = http_response(port, &send_request, "send message")?;

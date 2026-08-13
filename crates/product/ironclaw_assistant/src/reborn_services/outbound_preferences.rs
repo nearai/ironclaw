@@ -589,7 +589,7 @@ mod tests {
     /// The base list is the UNION of `final_replies` and `notifications`, and the
     /// two are INDEPENDENT: a final-reply-only target (a model-delivery target,
     /// not a notification channel) and a notification-only target (a notification
-    /// channel, not a model target — like web-push) both survive the base;
+    /// channel, not a model target — like web-app) both survive the base;
     /// a target with neither capability is excluded. The picker
     /// (`build_outbound_delivery_targets_view`) and the model list
     /// (`list_outbound_delivery_targets_for_model`) then narrow this base to
@@ -614,7 +614,7 @@ mod tests {
             "user-alpha",
             target_entry_with_caps(
                 "notif-only",
-                "web-push",
+                "web-app",
                 "Notif only",
                 "reply:notif-only",
                 false,

@@ -72,6 +72,12 @@ pub enum VerificationFailure {
     TooManyCandidates,
     #[error("verification secret is misconfigured (empty)")]
     MisconfiguredSecret,
+    /// The recipe declares authenticated-session ingress, whose trust is
+    /// established upstream by the host's authenticated transport (T1) — it is
+    /// never presented to this webhook verifier. Reaching here means a session
+    /// channel was wrongly routed to the webhook mount; fail closed.
+    #[error("authenticated-session ingress is not verifiable through the webhook path")]
+    NotWebhookVerifiable,
 }
 
 /// Case-insensitive single-instance header lookup over raw request headers.
@@ -136,6 +142,13 @@ pub fn verify_recipe(
         }
         IngressVerificationRecipe::SharedSecretHeader(recipe) => {
             verify_shared_secret(recipe, headers, candidates)
+        }
+        // An authenticated-session channel mounts no webhook route (its
+        // `route_suffix` is absent), so this verifier is never reached for it
+        // in production. Fail closed if a routing bug ever presents one: the
+        // webhook path must never attest a session recipe as verified-inbound.
+        IngressVerificationRecipe::AuthenticatedSession => {
+            Err(VerificationFailure::NotWebhookVerifiable)
         }
     }
 }

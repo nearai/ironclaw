@@ -164,6 +164,7 @@ fn projection_state() -> ProductProjectionState {
                 id: "message-1".to_string(),
                 run_id: None,
                 body: "hello".to_string(),
+                finalized: false,
             },
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),

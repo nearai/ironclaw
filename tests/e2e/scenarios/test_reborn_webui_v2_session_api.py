@@ -18,6 +18,7 @@ from reborn_webui_harness import (
     reborn_bearer_headers,
     send_message,
     wait_for_assistant_message,
+    session_channel_extension_id,
 )
 
 pytest_plugins = ["reborn_webui_harness"]
@@ -134,8 +135,12 @@ async def test_reborn_v2_session_thread_api_rejects_bad_requests(reborn_v2_serve
 
         thread_id = await create_thread(client, reborn_v2_server)
         empty_message = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
-            json={"client_action_id": client_action_id(), "content": ""},
+            f"{reborn_v2_server}/api/webchat/v2/channels/{await session_channel_extension_id(client, reborn_v2_server)}/messages",
+            json={
+                "client_action_id": client_action_id(),
+                "thread_id": thread_id,
+                "content": "",
+            },
             timeout=15,
         )
         assert empty_message.status_code == 400

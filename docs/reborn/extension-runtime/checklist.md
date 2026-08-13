@@ -781,19 +781,20 @@ Rules — kept short on purpose:
 - [x] OUT-11 Prompt construction consumes `CommunicationPresentationPolicy`
   from the channel contract; concrete channel branches in `ironclaw_llm` are
   deleted. — no concrete channel branch remains in `ironclaw_llm`, and the
-  manifest's `[channel.presentation]` (`supports_markdown`,
-  `max_message_chars`) now feeds prompt construction per channel. The resolved
-  `ChannelPresentation` (`ironclaw_extension_contracts::channel`) flows manifest →
+  manifest's `[channel.presentation]` (`supports_markdown`, `supports_threads`)
+  now feeds prompt construction per channel. Provider message-size limits stay
+  adapter-owned because their units differ. The resolved `ChannelPresentation`
+  (`ironclaw_extension_contracts::channel`) flows manifest →
   `LifecycleExtensionSummary.channel_presentation`
   (`available_extensions.rs::summary` / `channel_presentation_from_manifest_record`)
   → the communication provider → `ConnectedChannelSummary.presentation` →
   `LoopRuntimeContext::render_model_content`, which renders a compact per-channel
-  hint (e.g. `Slack (authenticated, active, markdown, ≤40000 chars/message)`).
+  hint (e.g. `Slack (authenticated, active, markdown)`).
   Pins: `renders_channel_presentation_hint`
   (`ironclaw_turns/src/run_profile/runtime_context.rs`, render half),
   `bundled_slack_package_declares_product_adapter_channel_surface` (the real
-  slack manifest projects `supports_markdown=true`/`max_message_chars=40000`
-  onto the summary), and `channel_extensions_are_classified_as_connected_channels`
+  Slack manifest projects `supports_markdown=true` onto the summary), and
+  `channel_extensions_are_classified_as_connected_channels`
   (the presentation flows through `RuntimeCommunicationContextProvider` onto the
   connected-channel summary). OWNER CALL (flagged in the PR body): Option A —
   widen the communication-context seam (`LifecycleExtensionSummary` → provider →

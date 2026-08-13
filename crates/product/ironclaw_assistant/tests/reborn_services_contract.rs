@@ -165,8 +165,7 @@ use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPreferenceRequest,
-    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -226,9 +225,30 @@ fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
 }
 
+fn session_services(
+    thread_service: Arc<dyn SessionThreadService>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+) -> RebornServices {
+    ironclaw_assistant::RebornServices::new(thread_service, turn_coordinator)
+        .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }))
+}
+
+fn session_submit_request(
+    mut value: serde_json::Value,
+) -> Result<ProductSubmitTurnRequest, serde_json::Error> {
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("extension_id")
+            .or_insert_with(|| json!("web-app"));
+    }
+    serde_json::from_value(value)
+}
+
 #[tokio::test]
 async fn status_command_reports_idle_for_a_bound_conversation_without_messages() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -264,12 +284,12 @@ async fn status_command_reports_idle_for_a_bound_conversation_without_messages()
 async fn new_command_preflight_requires_stopping_a_nonterminal_run() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-active-new-preflight").await;
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-before-new-preflight",
                 "thread_id": "thread-active-new-preflight",
                 "content": "still working"
@@ -2306,7 +2326,7 @@ impl SessionThreadService for ScriptedThreadService {
                     message_id: *message_id,
                     sequence: 1,
                     idempotent_replay: false,
-                    replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
+                    replay_metadata: Default::default(),
                 })
             }
             _ => scripted_stub_unreachable("accept_inbound_message"),
@@ -2329,7 +2349,7 @@ impl SessionThreadService for ScriptedThreadService {
                     source_binding_id: Some(request.source_binding_id),
                     reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                     turn_run_id: turn_run_id.clone(),
-                    replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
+                    replay_metadata: Default::default(),
                 }))
             }
             ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
@@ -2342,7 +2362,7 @@ impl SessionThreadService for ScriptedThreadService {
                 source_binding_id: Some(request.source_binding_id),
                 reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                 turn_run_id: None,
-                replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
+                replay_metadata: Default::default(),
             })),
             ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
                 // replay_webui_send_message probes with two source-binding variants
@@ -2367,7 +2387,7 @@ impl SessionThreadService for ScriptedThreadService {
                         source_binding_id: Some(request.source_binding_id),
                         reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                         turn_run_id: None,
-                        replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
+                        replay_metadata: Default::default(),
                     }))
                 }
             }
@@ -2393,7 +2413,7 @@ impl SessionThreadService for ScriptedThreadService {
                         source_binding_id: Some(request.source_binding_id),
                         reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                         turn_run_id: None,
-                        replay_metadata: ironclaw_threads::InboundMessageReplayMetadata::default(),
+                        replay_metadata: Default::default(),
                     }))
                 }
             }
@@ -2608,7 +2628,7 @@ async fn create_thread_for(
 
 #[tokio::test]
 async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -2631,7 +2651,7 @@ async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
 
 #[tokio::test]
 async fn trace_hold_authorize_capability_decodes_typed_product_input() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -2683,7 +2703,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
 
 #[tokio::test]
 async fn duplicate_create_thread_replays_generated_thread_for_same_client_action() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -2709,7 +2729,7 @@ async fn duplicate_create_thread_replays_generated_thread_for_same_client_action
 
 #[tokio::test]
 async fn create_thread_metadata_is_serialized_json() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -3104,7 +3124,7 @@ fn sample_reborn_project_member(user_id: &str) -> RebornProjectMemberInfo {
 async fn project_and_filesystem_reads_are_available_as_product_views() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let project_service = Arc::new(RecordingProjectService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_project_filesystem_reader(Arc::new(StaticProjectFilesystemReader))
         .with_filesystem_browser(Arc::new(StaticFilesystemBrowser))
         .with_project_service(project_service.clone());
@@ -3259,7 +3279,7 @@ async fn project_and_filesystem_reads_are_available_as_product_views() {
 #[tokio::test]
 async fn project_mutations_are_available_as_product_capabilities() {
     let project_service = Arc::new(RecordingProjectService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -3372,7 +3392,7 @@ async fn project_mutations_are_available_as_product_capabilities() {
 
 #[tokio::test]
 async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -3436,7 +3456,7 @@ async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
 
 #[tokio::test]
 async fn browse_fs_authorizes_project_selector_and_fails_closed() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -3474,7 +3494,7 @@ async fn browse_fs_authorizes_project_selector_and_fails_closed() {
 #[tokio::test]
 async fn create_thread_scopes_to_authorized_project() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -3510,7 +3530,7 @@ async fn create_thread_scopes_to_authorized_project() {
 
 #[tokio::test]
 async fn create_thread_rejects_unauthorized_project() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -3541,7 +3561,7 @@ async fn create_thread_rejects_unauthorized_project() {
 #[tokio::test]
 async fn create_thread_without_proposed_project_keeps_caller_scope() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -3664,13 +3684,13 @@ fn service_error_taxonomy_serializes_all_stable_wire_names() {
 async fn submit_turn_uses_service_and_thread_history_without_route_store_access() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-1",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -3730,14 +3750,13 @@ async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let policy = Arc::new(SetupRecordingLlmConfigService::default());
     policy.resolve_next_model_as(Ok(Some("model-approved".to_string())));
-    let services =
-        RebornServices::new(threads, coordinator.clone()).with_llm_config_service(policy);
+    let services = session_services(threads, coordinator.clone()).with_llm_config_service(policy);
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-model-approved",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui",
@@ -3755,7 +3774,7 @@ async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
 }
 
 #[tokio::test]
-async fn submit_turn_replay_preserves_model_resolved_at_webui_acceptance() {
+async fn submit_turn_replay_preserves_model_resolved_at_session_acceptance() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
         TurnError::Unavailable {
@@ -3765,10 +3784,10 @@ async fn submit_turn_replay_preserves_model_resolved_at_webui_acceptance() {
     let policy = Arc::new(SetupRecordingLlmConfigService::default());
     policy.resolve_next_model_as(Ok(Some("model-a".to_string())));
     let services =
-        RebornServices::new(threads, coordinator.clone()).with_llm_config_service(policy.clone());
+        session_services(threads, coordinator.clone()).with_llm_config_service(policy.clone());
     create_thread_for(&services, caller(), "thread-model-replay").await;
     let request = || {
-        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+        session_submit_request(json!({
             "client_action_id": "send-model-replay",
             "thread_id": "thread-model-replay",
             "content": "hello from webui"
@@ -3781,19 +3800,63 @@ async fn submit_turn_replay_preserves_model_resolved_at_webui_acceptance() {
         .await
         .expect_err("the injected first coordinator submission must fail");
 
-    // Model policy changes after the transcript row was accepted. The retry
-    // must submit the resolved model stored at acceptance, not resolve current
-    // policy again or fall back to the request's empty model hint.
     policy.resolve_next_model_as(Ok(Some("model-b".to_string())));
     services
         .submit_turn(caller(), request())
         .await
-        .expect("idempotent WebUI replay succeeds");
+        .expect("idempotent session replay succeeds");
 
     assert_eq!(
         coordinator.last_requested_model().as_deref(),
         Some("model-a")
     );
+}
+
+#[tokio::test]
+async fn submit_turn_model_policy_backend_fault_stays_retryable() {
+    // Regression: `LlmConfigServiceError::Internal` mapped to a PERMANENT
+    // policy failure, which the workflow settles durably as
+    // Rejected(PolicyDenied) in the session idempotency ledger — the same
+    // client_action_id kept failing even after the backend recovered. A
+    // backend fault is not a policy verdict: it surfaces transient, settles
+    // nothing, and the SAME action id succeeds on retry.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Err(LlmConfigServiceError::Internal));
+    let services =
+        session_services(threads, coordinator.clone()).with_llm_config_service(policy.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let request = || {
+        session_submit_request(json!({
+            "client_action_id": "send-through-backend-fault",
+            "thread_id": "thread-alpha",
+            "content": "hello from webui"
+        }))
+        .expect("request")
+    };
+    services
+        .submit_turn(caller(), request())
+        .await
+        .expect_err("a model-policy backend fault must surface");
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "nothing may be submitted while the policy backend is down"
+    );
+
+    // Backend recovers; the SAME client_action_id must now succeed — a
+    // durable permanent settle would replay the rejection here instead.
+    let response = services
+        .submit_turn(caller(), request())
+        .await
+        .expect("the same action id succeeds after the backend recovers");
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
 }
 
 #[tokio::test]
@@ -3805,14 +3868,13 @@ async fn submit_turn_rejects_disallowed_model_before_message_side_effects() {
         field: Some("model".to_string()),
         reason: "model is not allowed".to_string(),
     }));
-    let services =
-        RebornServices::new(threads, coordinator.clone()).with_llm_config_service(policy);
+    let services = session_services(threads, coordinator.clone()).with_llm_config_service(policy);
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let error = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-model-denied",
                 "thread_id": "thread-alpha",
                 "content": "must not persist",
@@ -3833,26 +3895,68 @@ async fn submit_turn_rejects_disallowed_model_before_message_side_effects() {
 }
 
 #[tokio::test]
+async fn submit_turn_replays_an_accepted_message_before_rechecking_model_policy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Ok(Some("model-approved".to_string())));
+    let first = session_services(Arc::clone(&threads), coordinator.clone())
+        .with_llm_config_service(policy.clone());
+    create_thread_for(&first, caller(), "thread-alpha").await;
+
+    let request = || {
+        session_submit_request(json!({
+            "client_action_id": "send-model-replay",
+            "thread_id": "thread-alpha",
+            "content": "hello from webui",
+            "model": "model-user-requested"
+        }))
+        .expect("request")
+    };
+    first
+        .submit_turn(caller(), request())
+        .await
+        .expect("first submit succeeds");
+
+    policy.resolve_next_model_as(Err(LlmConfigServiceError::InvalidRequest {
+        field: Some("model".to_string()),
+        reason: "model is no longer allowed".to_string(),
+    }));
+    let replay = session_services(threads, coordinator.clone())
+        .with_llm_config_service(policy)
+        .submit_turn(caller(), request())
+        .await
+        .expect("accepted replay remains authoritative");
+
+    assert!(matches!(
+        replay,
+        RebornSubmitTurnResponse::AlreadySubmitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
 async fn submit_turn_records_skill_activation_message_before_turn_wake() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let recorded_for_hook = Arc::clone(&recorded);
-    let services = RebornServices::new(threads, coordinator.clone())
-        .with_skill_activation_recorder(move |scope, accepted_message_ref, message| {
+    let services = session_services(threads, coordinator.clone()).with_skill_activation_recorder(
+        move |scope, accepted_message_ref, message| {
             recorded_for_hook.lock().expect("lock").push((
                 scope.thread_id.as_str().to_string(),
                 accepted_message_ref.as_str().to_string(),
                 message.to_string(),
             ));
             Ok(())
-        });
+        },
+    );
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let submitted = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-skill-activation",
                 "thread_id": "thread-alpha",
                 "content": "/code-review inspect this"
@@ -3895,7 +3999,7 @@ async fn busy_submit_clears_skill_activation_message() {
     let cleared = Arc::new(Mutex::new(Vec::new()));
     let recorded_for_hook = Arc::clone(&recorded);
     let cleared_for_hook = Arc::clone(&cleared);
-    let services = RebornServices::new(threads, coordinator.clone()).with_skill_activation_hooks(
+    let services = session_services(threads, coordinator.clone()).with_skill_activation_hooks(
         move |scope, accepted_message_ref, message| {
             recorded_for_hook.lock().expect("lock").push((
                 scope.thread_id.as_str().to_string(),
@@ -3917,7 +4021,7 @@ async fn busy_submit_clears_skill_activation_message() {
     let rejected = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-skill-activation-busy",
                 "thread_id": "thread-alpha",
                 "content": "/code-review inspect this"
@@ -3949,8 +4053,8 @@ async fn busy_submit_clears_skill_activation_message() {
 async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone())
-        .with_skill_activation_recorder(|_, _, _| {
+    let services =
+        session_services(threads, coordinator.clone()).with_skill_activation_recorder(|_, _, _| {
             Err(ironclaw_product_contracts::surface::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
@@ -3965,7 +4069,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-recorder-fails",
                 "thread_id": "thread-alpha",
                 "content": "/code-review inspect this"
@@ -3996,7 +4100,7 @@ async fn m2_service_timeline_contract_uses_fake_thread_port_with_authenticated_s
         &web_caller,
         "thread-alpha",
     )));
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -4030,7 +4134,7 @@ async fn m2_service_timeline_contract_uses_fake_thread_port_with_authenticated_s
 async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
     let web_caller = caller();
     let event_stream = Arc::new(RecordingProjectionStream::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -4069,7 +4173,7 @@ async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
     let web_caller = caller();
     let expected = keep_alive_outbound("cursor-live");
     let event_stream = Arc::new(SubscribingProjectionStream::new(expected.clone()));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -4127,7 +4231,7 @@ async fn product_surface_subscription_bounds_a_silent_first_event() {
     let web_caller = caller();
     let (event_stream, _sender) = ControlledSubscribingProjectionStream::new();
     let services = Arc::new(
-        RebornServices::new(
+        session_services(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(FakeTurnCoordinator::default()),
         )
@@ -4177,7 +4281,7 @@ async fn product_surface_subscription_revalidates_visibility_without_blocking_ev
         &caller,
     ));
     let (event_stream, sender) = ControlledSubscribingProjectionStream::new();
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service.clone())
         .with_event_stream(Arc::new(event_stream));
 
@@ -4218,11 +4322,11 @@ async fn product_surface_subscription_revalidates_visibility_without_blocking_ev
 async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let request = || {
-        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+        session_submit_request(json!({
             "client_action_id": "send-duplicate",
             "thread_id": "thread-alpha",
             "content": "hello once"
@@ -4250,7 +4354,7 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
 async fn submitted_replay_with_missing_or_invalid_run_id_maps_to_replay_unavailable() {
     for turn_run_id in [None, Some("not-a-uuid".to_string())] {
         let coordinator = Arc::new(FakeTurnCoordinator::default());
-        let services = RebornServices::new(
+        let services = session_services(
             Arc::new(ScriptedThreadService::submitted_replay(turn_run_id)),
             coordinator.clone(),
         );
@@ -4258,7 +4362,7 @@ async fn submitted_replay_with_missing_or_invalid_run_id_maps_to_replay_unavaila
         let err = services
             .submit_turn(
                 caller(),
-                serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+                session_submit_request(json!({
                     "client_action_id": "send-replay-corrupt",
                     "thread_id": "thread-alpha",
                     "content": "hello from webui"
@@ -4280,12 +4384,12 @@ async fn submitted_replay_with_missing_or_invalid_run_id_maps_to_replay_unavaila
 async fn submit_turn_rejects_missing_thread_before_turn_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
 
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-missing",
                 "thread_id": "thread-missing",
                 "content": "this thread was never created"
@@ -4306,13 +4410,13 @@ async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
     let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
         TurnError::capacity_exceeded(TurnCapacityResource::SubmitTurn, 1),
     ));
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-capacity",
                 "thread_id": "thread-alpha",
                 "content": "capacity denied"
@@ -4332,13 +4436,13 @@ async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
 async fn submit_turn_rejects_non_owner_before_turn_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let err = services
         .submit_turn(
             caller_for_user("user-beta"),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-denied",
                 "thread_id": "thread-alpha",
                 "content": "wrong participant"
@@ -4395,12 +4499,12 @@ async fn same_thread_retry_replays_legacy_submitted_message_after_binding_key_ch
         .expect("submitted");
 
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(thread_service.clone(), coordinator.clone());
+    let services = session_services(thread_service.clone(), coordinator.clone());
 
     let replayed = services
         .submit_turn(
             caller,
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-legacy-submitted",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -4454,12 +4558,12 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
         .expect("accepted");
 
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(thread_service.clone(), coordinator.clone());
+    let services = session_services(thread_service.clone(), coordinator.clone());
 
     let response = services
         .submit_turn(
             caller.clone(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-legacy-accepted",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -4491,14 +4595,14 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
 async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
     create_thread_for(&services, caller(), "thread-beta").await;
 
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-cross-thread",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -4511,7 +4615,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-cross-thread",
                 "thread_id": "thread-beta",
                 "content": "hello twice"
@@ -4551,12 +4655,12 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
         in_memory_agent_turn_runtime(),
     )));
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;
     let services = Arc::new(services);
 
     let request = || {
-        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+        session_submit_request(json!({
             "client_action_id": "send-concurrent",
             "thread_id": "thread-alpha",
             "content": "hello once"
@@ -4613,7 +4717,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
 async fn refresh_reresolves_thread_to_same_canonical_scope() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let first = services
@@ -4648,7 +4752,7 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
 
 #[tokio::test]
 async fn get_timeline_rejects_cross_user_access() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -4668,7 +4772,7 @@ async fn get_timeline_rejects_cross_user_access() {
 
 #[tokio::test]
 async fn delete_thread_removes_owned_thread() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -4700,7 +4804,7 @@ async fn delete_thread_removes_owned_thread() {
 
 #[tokio::test]
 async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -4733,12 +4837,12 @@ async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread()
 async fn delete_thread_rejects_thread_with_active_run() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-before-delete",
                 "thread_id": "thread-alpha",
                 "content": "keep this run alive"
@@ -4775,7 +4879,7 @@ async fn delete_thread_rejects_thread_with_active_run() {
 async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(BlockingSubmitCoordinator::new());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let submit_services = services.clone();
@@ -4783,7 +4887,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
         submit_services
             .submit_turn(
                 caller(),
-                serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+                session_submit_request(json!({
                     "client_action_id": "send-racing-delete",
                     "thread_id": "thread-alpha",
                     "content": "submit while delete races"
@@ -4838,7 +4942,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
 #[tokio::test]
 async fn stream_events_rejects_cross_user_access_before_draining_stream() {
     let stream = Arc::new(SpyProjectionStream::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -4865,7 +4969,7 @@ async fn stream_events_rejects_cross_user_access_before_draining_stream() {
 async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     let caller = caller_with_project(None);
     create_thread_for(&services, caller.clone(), "thread-alpha").await;
     create_thread_for(&services, caller.clone(), "thread-beta").await;
@@ -4873,7 +4977,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
     services
         .submit_turn(
             caller.clone(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-no-project",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -4886,7 +4990,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
     let err = services
         .submit_turn(
             caller,
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-no-project",
                 "thread_id": "thread-beta",
                 "content": "hello twice"
@@ -4906,7 +5010,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
 async fn duplicate_submit_is_isolated_by_project_scope() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(
         &services,
         caller_with_project(Some("project-alpha")),
@@ -4923,7 +5027,7 @@ async fn duplicate_submit_is_isolated_by_project_scope() {
     let first = services
         .submit_turn(
             caller_with_project(Some("project-alpha")),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-project-scoped",
                 "thread_id": "thread-alpha",
                 "content": "hello alpha"
@@ -4935,7 +5039,7 @@ async fn duplicate_submit_is_isolated_by_project_scope() {
     let second = services
         .submit_turn(
             caller_with_project(Some("project-beta")),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-project-scoped",
                 "thread_id": "thread-beta",
                 "content": "hello beta"
@@ -4952,7 +5056,7 @@ async fn duplicate_submit_is_isolated_by_project_scope() {
 
 #[tokio::test]
 async fn validation_errors_are_stable_and_sanitized() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -4960,7 +5064,7 @@ async fn validation_errors_are_stable_and_sanitized() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-1",
                 "thread_id": "thread-alpha"
             }))
@@ -4984,7 +5088,7 @@ async fn validation_errors_are_stable_and_sanitized() {
 
 #[tokio::test]
 async fn turn_admission_rejected_maps_to_busy_taxonomy() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::with_submit_error(
             TurnError::AdmissionRejected(AdmissionRejection::new(
@@ -4997,7 +5101,7 @@ async fn turn_admission_rejected_maps_to_busy_taxonomy() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-rate-limited",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -5015,7 +5119,7 @@ async fn turn_admission_rejected_maps_to_busy_taxonomy() {
 
 #[tokio::test]
 async fn turn_unauthorized_maps_to_forbidden() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::with_submit_error(
             TurnError::Unauthorized,
@@ -5026,7 +5130,7 @@ async fn turn_unauthorized_maps_to_forbidden() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-forbidden",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -5087,7 +5191,7 @@ async fn turn_error_categories_map_to_service_taxonomy() {
     for (name, turn_error, expected_code, expected_kind, expected_status, expected_retryable) in
         cases
     {
-        let services = RebornServices::new(
+        let services = session_services(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(FakeTurnCoordinator::with_submit_error(turn_error)),
         );
@@ -5097,7 +5201,7 @@ async fn turn_error_categories_map_to_service_taxonomy() {
         let err = services
             .submit_turn(
                 caller(),
-                serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+                session_submit_request(json!({
                     "client_action_id": format!("send-{name}"),
                     "thread_id": thread_id,
                     "content": "hello from webui"
@@ -5116,7 +5220,7 @@ async fn turn_error_categories_map_to_service_taxonomy() {
 
 #[tokio::test]
 async fn stream_events_without_projection_stream_maps_to_replay_unavailable_taxonomy() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -5141,7 +5245,7 @@ async fn stream_events_without_projection_stream_maps_to_replay_unavailable_taxo
 
 #[tokio::test]
 async fn adapter_authentication_maps_to_unauthenticated() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -5169,7 +5273,7 @@ async fn adapter_authentication_maps_to_unauthenticated() {
 
 #[tokio::test]
 async fn projection_transient_maps_to_replay_unavailable_taxonomy() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -5203,7 +5307,7 @@ async fn projection_transient_maps_to_replay_unavailable_taxonomy() {
 
 #[tokio::test]
 async fn projection_egress_denied_maps_to_blocked_resource_taxonomy() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -5280,7 +5384,7 @@ async fn surface_rejection_kinds_map_to_service_taxonomy() {
     ];
 
     for (workflow_kind, status_code, expected_code, expected_kind) in cases {
-        let services = RebornServices::new(
+        let services = session_services(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(FakeTurnCoordinator::default()),
         )
@@ -5318,7 +5422,7 @@ async fn surface_rejection_kinds_map_to_service_taxonomy() {
 
 #[tokio::test]
 async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(ScriptedThreadService::backend_history()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -5344,7 +5448,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
 #[tokio::test]
 async fn cancel_run_uses_turn_service_and_stable_response() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5373,7 +5477,7 @@ async fn cancel_run_uses_turn_service_and_stable_response() {
 #[tokio::test]
 async fn retry_run_uses_turn_service_and_stable_response() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5423,7 +5527,7 @@ async fn retry_run_uses_turn_service_and_stable_response() {
 #[tokio::test]
 async fn retry_run_rejects_invalid_run_id_without_turn_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5463,7 +5567,7 @@ async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
     let coordinator = Arc::new(FakeTurnCoordinator::with_retry_error(
         TurnError::RunNotRetryable { run_id },
     ));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5493,7 +5597,7 @@ async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
 #[tokio::test]
 async fn retry_run_rejects_cross_user_access() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5532,7 +5636,7 @@ async fn retry_run_rejects_cross_user_access() {
 #[tokio::test]
 async fn approved_gate_resolution_resumes_turn() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5570,7 +5674,7 @@ async fn approved_gate_resolution_resumes_turn() {
 #[tokio::test]
 async fn resolve_gate_rejects_missing_run_state_actor() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5602,7 +5706,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
 #[tokio::test]
 async fn resolve_gate_rejects_mismatched_run_state_actor() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5634,7 +5738,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
 #[tokio::test]
 async fn generic_gate_resolution_rejects_blocked_auth_run() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5665,7 +5769,7 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
 async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5700,7 +5804,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
 async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5735,7 +5839,7 @@ async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
 async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5773,7 +5877,7 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
 async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5808,7 +5912,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
 async fn terminal_run_state_rejects_gate_resolution_before_shape_fallback() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5844,7 +5948,7 @@ async fn terminal_run_state_rejects_gate_resolution_before_shape_fallback() {
 async fn approval_gate_resolution_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5883,7 +5987,7 @@ async fn approval_gate_resolution_uses_approval_interaction_service() {
 async fn approval_gate_denial_uses_approval_interaction_service_and_returns_cancelled() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5921,7 +6025,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
 #[tokio::test]
 async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_port_exists() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -5956,7 +6060,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
 async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -5995,7 +6099,7 @@ async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
 async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -6063,7 +6167,7 @@ async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
     // through the service.
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -6100,7 +6204,7 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
         TurnError::ScopeNotFound,
     ));
     let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -6138,7 +6242,7 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
 #[tokio::test]
 async fn denied_gate_resolution_cancels_run() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -6171,7 +6275,7 @@ async fn denied_gate_resolution_cancels_run() {
 #[tokio::test]
 async fn cancel_run_rejects_cross_user_access() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -6221,7 +6325,7 @@ async fn cancel_run_rejects_cross_user_access() {
 #[tokio::test]
 async fn cancel_run_remaps_thread_scope_mismatch_to_not_found() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(Arc::new(ScopeMismatchThreadStub), coordinator.clone());
+    let services = session_services(Arc::new(ScopeMismatchThreadStub), coordinator.clone());
 
     let err = services
         .cancel_run(
@@ -6251,7 +6355,7 @@ async fn cancel_run_remaps_thread_scope_mismatch_to_not_found() {
 #[tokio::test]
 async fn resolve_gate_rejects_cross_user_access() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -6299,7 +6403,7 @@ async fn resolve_gate_rejects_cross_user_access() {
 async fn stream_events_rejects_cross_user_access() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let event_stream = Arc::new(RecordingProjectionStream::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -6344,7 +6448,7 @@ async fn stream_events_rejects_cross_user_access() {
 // caller cannot usefully probe deterministically-derived UUIDv5 ids.
 #[tokio::test]
 async fn create_thread_explicit_id_collision_remaps_to_not_found() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -6381,7 +6485,7 @@ async fn create_thread_explicit_id_collision_remaps_to_not_found() {
 #[tokio::test]
 async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -6417,7 +6521,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
 #[tokio::test]
 async fn generic_gate_resolution_with_persistent_flag_is_rejected() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -6453,7 +6557,7 @@ async fn generic_gate_resolution_with_persistent_flag_is_rejected() {
 async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -6495,7 +6599,7 @@ async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction
 #[tokio::test]
 async fn setup_extension_projects_through_configured_lifecycle_service() {
     let lifecycle_service = Arc::new(RecordingLifecycleService::new());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -6528,7 +6632,7 @@ async fn setup_extension_projects_through_configured_lifecycle_service() {
 #[tokio::test]
 async fn extension_setup_is_available_as_product_view() {
     let lifecycle_service = Arc::new(RecordingLifecycleService::new());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -6555,7 +6659,7 @@ async fn extension_setup_is_available_as_product_view() {
 
 #[tokio::test]
 async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -6593,9 +6697,82 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
 }
 
 #[tokio::test]
+async fn a_directory_classified_session_channel_is_hidden_from_the_extension_list() {
+    // The fail-open arm (no directory wired → everything listed) is covered
+    // by every other listing test passing `None`. This pins the PRESENT arm:
+    // the deployment's session channel is host infrastructure, not an
+    // installable row — a regression that inverts `is_some_and` or drops the
+    // filter must fail here while an unrelated extension still survives.
+    struct TwoExtensionListingService {
+        session_channel: LifecycleInstalledExtensionSummary,
+        unrelated: LifecycleInstalledExtensionSummary,
+    }
+
+    #[async_trait]
+    impl LifecycleProductService for TwoExtensionListingService {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            assert!(matches!(action, LifecycleProductAction::ExtensionList));
+            Ok(LifecycleProductResponse {
+                package_ref: None,
+                phase: self.session_channel.phase,
+                blockers: Vec::new(),
+                message: None,
+                payload: Some(LifecycleProductPayload::ExtensionList {
+                    extensions: vec![self.session_channel.clone(), self.unrelated.clone()],
+                    count: 2,
+                }),
+            })
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            panic!("list_extensions should execute the list action, not project one package")
+        }
+    }
+
+    let installed = |id: &str| LifecycleInstalledExtensionSummary {
+        summary: extension_summary(id, Vec::new(), None),
+        phase: InstallationState::Installed,
+        install_scope: None,
+    };
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(Arc::new(TwoExtensionListingService {
+        session_channel: installed("web-app"),
+        unrelated: installed("github"),
+    }))
+    .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+        session_channels: vec!["web-app"],
+    }));
+
+    let response = query_extensions(&services, caller())
+        .await
+        .expect("extension list response");
+    let listed: Vec<&str> = response
+        .extensions
+        .iter()
+        .map(|extension| extension.package_ref.id.as_str())
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["github"],
+        "the session channel is hidden; unrelated extensions survive"
+    );
+}
+
+#[tokio::test]
 async fn list_automation_dispatches_through_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -6676,7 +6853,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
         submit_label: "Connect Slack".to_string(),
         error_message: "Slack OAuth connection failed.".to_string(),
     });
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -6790,7 +6967,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         error_message: "Acme Messenger OAuth connection failed.".to_string(),
     });
 
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -6980,7 +7157,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         error_message: "Acme Messenger OAuth connection failed.".to_string(),
     });
 
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7359,7 +7536,7 @@ fn outbound_target_empty_description_is_accepted() {
 
 #[tokio::test]
 async fn outbound_unwired_target_listing_fails_closed() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -7383,7 +7560,7 @@ async fn outbound_unwired_target_listing_fails_closed() {
 #[tokio::test]
 async fn outbound_delivery_targets_are_available_as_a_product_view() {
     let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7423,7 +7600,7 @@ async fn trace_reads_are_available_as_product_views() {
         None,
         None,
     );
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -7465,7 +7642,7 @@ async fn trace_reads_are_available_as_product_views() {
 #[tokio::test]
 async fn list_automations_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7487,7 +7664,7 @@ async fn list_automations_rejects_missing_agent_id() {
 #[tokio::test]
 async fn list_automations_clamps_oversize_limit_before_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7513,7 +7690,7 @@ async fn list_automations_clamps_oversize_limit_before_product_service() {
 #[tokio::test]
 async fn list_automations_clamps_zero_limit_before_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7538,7 +7715,7 @@ async fn list_automations_clamps_zero_limit_before_product_service() {
 #[tokio::test]
 async fn list_automations_uses_default_limit_when_omitted() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7564,7 +7741,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
 #[tokio::test]
 async fn list_automations_clamps_oversize_run_limit_before_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7590,7 +7767,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_service() {
 #[tokio::test]
 async fn list_automations_allows_zero_run_limit_before_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7615,7 +7792,7 @@ async fn list_automations_allows_zero_run_limit_before_product_service() {
 #[tokio::test]
 async fn list_automations_forwards_include_completed_true_to_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7640,7 +7817,7 @@ async fn list_automations_forwards_include_completed_true_to_product_service() {
 #[tokio::test]
 async fn list_automations_forwards_include_completed_false_to_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7665,7 +7842,7 @@ async fn list_automations_forwards_include_completed_false_to_product_service() 
 #[tokio::test]
 async fn pause_automation_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7690,7 +7867,7 @@ async fn pause_automation_rejects_missing_agent_id() {
 #[tokio::test]
 async fn resume_automation_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7715,7 +7892,7 @@ async fn resume_automation_rejects_missing_agent_id() {
 #[tokio::test]
 async fn rename_automation_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7741,7 +7918,7 @@ async fn rename_automation_rejects_missing_agent_id() {
 #[tokio::test]
 async fn delete_automation_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7766,7 +7943,7 @@ async fn delete_automation_rejects_missing_agent_id() {
 #[tokio::test]
 async fn automation_mutations_forward_caller_scope_to_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7871,7 +8048,7 @@ async fn automation_mutations_forward_caller_scope_to_product_service() {
 #[tokio::test]
 async fn automation_mutations_are_available_as_product_capabilities() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7939,7 +8116,7 @@ async fn automation_mutations_are_available_as_product_capabilities() {
 #[tokio::test]
 async fn rename_automation_validates_name_before_product_service() {
     let automation_service = Arc::new(RecordingAutomationService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8170,7 +8347,7 @@ impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
 #[tokio::test]
 async fn query_operator_logs_bounds_query_before_logs_service() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8229,7 +8406,7 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
 #[tokio::test]
 async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8269,7 +8446,7 @@ async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
 #[tokio::test]
 async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8309,7 +8486,7 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
 #[tokio::test]
 async fn query_logs_requires_thread_scope() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8332,7 +8509,7 @@ async fn query_logs_requires_thread_scope() {
 #[tokio::test]
 async fn query_logs_rejects_ambiguous_tail_follow_modes() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8362,7 +8539,7 @@ async fn query_logs_rejects_ambiguous_tail_follow_modes() {
 #[tokio::test]
 async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8398,7 +8575,7 @@ async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
 #[tokio::test]
 async fn query_logs_rejects_thread_owned_by_another_caller() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8456,7 +8633,7 @@ async fn run_artifact_selects_one_owned_run_and_queries_only_its_scoped_logs() {
     )
     .await;
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_operator_logs_service(operator_logs.clone());
 
     let page = services
@@ -8516,7 +8693,7 @@ async fn run_artifact_rejects_another_user_before_querying_logs() {
     )
     .await;
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_operator_logs_service(operator_logs.clone());
 
     let error = services
@@ -8575,7 +8752,7 @@ async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs(
     )
     .await;
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_operator_logs_service(operator_logs.clone());
 
     let page = services
@@ -8640,7 +8817,7 @@ async fn thread_artifact_projects_messages_from_the_bounded_snapshot() {
         },
     };
     let thread_service = Arc::new(ScriptedThreadService::thread_artifact(history, snapshot));
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8709,7 +8886,7 @@ async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() 
         .await;
     }
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_operator_logs_service(operator_logs.clone());
 
     let error = services
@@ -8750,7 +8927,7 @@ async fn thread_artifact_reports_bounded_backend_failure_as_unavailable() {
         history, snapshot,
     ));
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_operator_logs_service(operator_logs.clone());
 
     let error = services
@@ -8791,7 +8968,7 @@ async fn thread_artifact_rejects_another_user_before_querying_logs() {
         .await
         .expect("thread");
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_operator_logs_service(operator_logs.clone());
 
     let error = services
@@ -8964,7 +9141,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
         ),
     );
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service);
 
     let response = services
@@ -9083,7 +9260,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
         bytes: vec![1, 2, 3, 4],
         reads: Mutex::new(Vec::new()),
     });
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service)
         .with_inbound_attachment_reader(reader.clone());
 
@@ -9140,7 +9317,7 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
     // must deny him because resolve_run_thread_scope returns None.
     let automation_service = Arc::new(StaticAutomationService::new(Vec::new()));
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service);
 
     let err = services
@@ -9187,7 +9364,7 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     // The automation service returns a 503 backend error from resolve_run_thread_scope.
     let automation_service = Arc::new(ErroringAutomationService::unavailable());
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service);
 
     let err = services
@@ -9401,7 +9578,7 @@ async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reloa
         ),
     );
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service);
 
     let err = services
@@ -9477,7 +9654,7 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
             .with_resolve_scope_for_thread(trigger_thread_id.clone(), scope_with_no_agent),
     );
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service);
 
     let response = services
@@ -9608,7 +9785,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     coordinator.set_parked_approval_gate(gate_ref.clone());
     coordinator.set_run_state_actor(Some(turn_actor_for_user(TRIGGER_CREATOR_USER_ID)));
 
-    let services = RebornServices::new(thread_service, coordinator.clone())
+    let services = session_services(thread_service, coordinator.clone())
         .with_automation_product_service(automation_service_with_trigger_thread(
             trigger_thread_id.clone(),
             &caller,
@@ -9681,7 +9858,7 @@ async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
 
     let services =
-        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_service(
+        session_services(thread_service, coordinator.clone()).with_automation_product_service(
             automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller),
         );
 
@@ -9733,7 +9910,7 @@ async fn get_run_state_succeeds_for_own_automation_trigger_thread() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
 
     let services =
-        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_service(
+        session_services(thread_service, coordinator.clone()).with_automation_product_service(
             automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller),
         );
 
@@ -9777,7 +9954,7 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(bob_automation_service)
         .with_approval_interactions(approval_interactions.clone());
 
@@ -9828,7 +10005,7 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
         setup_trigger_thread(&thread_service, &caller, "thread-trigger-stream-alpha").await;
 
     let event_stream = Arc::new(RecordingProjectionStream::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service_with_trigger_thread(
             trigger_thread_id.clone(),
             &caller,
@@ -9886,7 +10063,7 @@ async fn stream_events_revalidates_service_on_every_poll() {
     let automation_service =
         automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller);
     let event_stream = Arc::new(RecordingProjectionStream::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service.clone())
         .with_event_stream(event_stream.clone());
 
@@ -9938,7 +10115,7 @@ async fn stream_events_fails_when_visibility_revoked_between_polls() {
         &caller,
     ));
     let event_stream = Arc::new(RecordingProjectionStream::default());
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(revocable_service.clone())
         .with_event_stream(event_stream.clone());
 
@@ -10015,7 +10192,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
         }]), // resolve_scope is None — the service does not recognise the requested thread.
     );
 
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_service(automation_service);
 
     let err = services
@@ -10032,7 +10209,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
 
 #[tokio::test]
 async fn list_automations_returns_empty_list() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -10056,7 +10233,7 @@ async fn list_automations_surfaces_disabled_scheduler() {
     // Regression: when the trigger poller is off, the response must report
     // scheduler_enabled=false so the browser can warn that listed automations
     // will not fire. Previously the wire response had no such signal.
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -10077,7 +10254,7 @@ async fn list_automations_surfaces_disabled_scheduler() {
 
 #[tokio::test]
 async fn automation_service_unwired_fails_closed() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -10097,7 +10274,7 @@ async fn automation_service_unwired_fails_closed() {
 
 #[tokio::test]
 async fn setup_extension_returns_post_setup_onboarding_payload() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -10132,7 +10309,7 @@ async fn setup_extension_dispatches_one_typed_hosted_mcp_auth_selection() {
             true,
         )],
     ));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -10350,7 +10527,7 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
     let lifecycle_service = Arc::new(RecordingLifecycleService::with_credential_requirements(
         vec![manual_credential_requirement("api_token", false)],
     ));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -10469,7 +10646,7 @@ async fn setup_extension_rejects_unknown_channel_config_field() {
 fn setup_services_with_requirements(
     requirements: Vec<LifecycleExtensionCredentialRequirement>,
 ) -> RebornServices {
-    RebornServices::new(
+    session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -10509,9 +10686,6 @@ struct SetupRecordingLlmConfigService {
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
     next_login_error: Mutex<Option<LlmConfigServiceError>>,
     next_model_resolution: Mutex<Option<Result<Option<String>, LlmConfigServiceError>>>,
-    user_model_catalog: Mutex<UserModelCatalog>,
-    user_model_preferences: Mutex<HashMap<(String, String), UserModelPreference>>,
-    user_model_preference_updates: Mutex<Vec<(String, String, Option<String>)>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10530,13 +10704,6 @@ impl Default for SetupRecordingLlmConfigService {
             next_set_active_error: Mutex::new(None),
             next_login_error: Mutex::new(None),
             next_model_resolution: Mutex::new(None),
-            user_model_catalog: Mutex::new(UserModelCatalog {
-                selection_enabled: true,
-                workspace_default: Some("model-a".to_string()),
-                models: vec!["model-a".to_string(), "model-b".to_string()],
-            }),
-            user_model_preferences: Mutex::new(HashMap::new()),
-            user_model_preference_updates: Mutex::new(Vec::new()),
         }
     }
 }
@@ -10600,24 +10767,6 @@ impl SetupRecordingLlmConfigService {
 
     fn resolve_next_model_as(&self, result: Result<Option<String>, LlmConfigServiceError>) {
         *self.next_model_resolution.lock().expect("lock") = Some(result);
-    }
-
-    fn user_model_preference_updates(&self) -> Vec<(String, String, Option<String>)> {
-        self.user_model_preference_updates
-            .lock()
-            .expect("lock")
-            .clone()
-    }
-
-    fn use_user_model_catalog(&self, catalog: UserModelCatalog) {
-        *self.user_model_catalog.lock().expect("lock") = catalog;
-    }
-
-    fn user_model_preference_key(caller: &ProductSurfaceCaller) -> (String, String) {
-        (
-            caller.tenant_id.as_str().to_string(),
-            caller.user_id.as_str().to_string(),
-        )
     }
 
     fn empty_snapshot() -> LlmConfigSnapshot {
@@ -10757,46 +10906,6 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
             .unwrap_or(Ok(requested_model))
     }
 
-    async fn user_model_catalog(
-        &self,
-        _caller: ProductSurfaceCaller,
-    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
-        Ok(self.user_model_catalog.lock().expect("lock").clone())
-    }
-
-    async fn user_model_preference(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<UserModelPreference, LlmConfigServiceError> {
-        Ok(self
-            .user_model_preferences
-            .lock()
-            .expect("lock")
-            .get(&Self::user_model_preference_key(&caller))
-            .cloned()
-            .unwrap_or(UserModelPreference { model: None }))
-    }
-
-    async fn set_user_model_preference(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: SetUserModelPreferenceRequest,
-    ) -> Result<UserModelPreference, LlmConfigServiceError> {
-        let key = Self::user_model_preference_key(&caller);
-        self.user_model_preference_updates
-            .lock()
-            .expect("lock")
-            .push((key.0.clone(), key.1.clone(), request.model.clone()));
-        let preference = UserModelPreference {
-            model: request.model,
-        };
-        self.user_model_preferences
-            .lock()
-            .expect("lock")
-            .insert(key, preference.clone());
-        Ok(preference)
-    }
-
     // The three vendor logins answer with `next_login_error` when one is armed.
     // They used to `panic!("not used by operator setup tests")`, which made the
     // *failure* half of each path untestable -- and that half is the whole
@@ -10867,7 +10976,7 @@ impl OperatorStatusService for RecordingOperatorStatusService {
 fn services_with_setup_llm_config(
     llm_config: Arc<SetupRecordingLlmConfigService>,
 ) -> RebornServices {
-    RebornServices::new(
+    session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -11483,7 +11592,7 @@ async fn submit_extension_setup_and_query<S: ProductSurface + ?Sized>(
 #[tokio::test]
 async fn extension_import_is_available_as_product_capability() {
     let lifecycle_service = Arc::new(RecordingLifecycleService::new());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -11520,7 +11629,7 @@ async fn extension_import_is_available_as_product_capability() {
 /// follow-ups" row; the code used to be 400.)
 #[tokio::test]
 async fn webui_extension_import_reports_unavailable_when_no_service_is_wired() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -11551,7 +11660,7 @@ async fn webui_extension_import_reports_unavailable_when_no_service_is_wired() {
 #[tokio::test]
 async fn hosted_mcp_registration_auth_selection_blocker_is_sanitized_surface_validation_error() {
     let lifecycle = Arc::new(RecordingLifecycleService::new());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -11611,7 +11720,7 @@ async fn hosted_mcp_registration_auth_selection_blocker_is_sanitized_surface_val
 #[tokio::test]
 async fn skill_reads_are_available_as_product_views() {
     let skills = Arc::new(RecordingSkillsService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -12459,7 +12568,7 @@ async fn operator_only_product_views_require_operator_config() {
 
 #[tokio::test]
 async fn operator_diagnostics_reports_setup_service_absence_without_failing_route() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -12519,7 +12628,7 @@ async fn get_operator_setup_returns_snapshot_from_llm_config() {
 
 #[tokio::test]
 async fn get_operator_setup_without_llm_config_returns_service_unavailable() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -12567,7 +12676,7 @@ async fn setup_response_reflects_active_provider_and_model() {
 
 #[tokio::test]
 async fn run_operator_setup_without_llm_config_returns_service_unavailable() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -13321,7 +13430,7 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
             .expect("valid category")
             .with_detail("HTTP 500 from provider at /internal/models/route-xyz"),
     );
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -13389,7 +13498,7 @@ async fn get_run_state_surfaces_token_usage_and_priced_cost() {
         },
         LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1"),
     );
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -13450,7 +13559,7 @@ async fn get_run_state_prices_default_model_run_against_active_model() {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
     });
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -13500,7 +13609,7 @@ async fn get_run_state_default_model_run_omits_cost_without_active_model() {
     // No active-model reader wired (and a reader that reports no concrete model
     // behaves the same): the run reports token usage but omits cost rather than
     // mispricing against a sentinel.
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     )
@@ -13531,7 +13640,7 @@ async fn get_run_state_default_model_run_omits_cost_without_active_model() {
 #[tokio::test]
 async fn get_run_state_rejects_invalid_thread_id() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -13564,7 +13673,7 @@ async fn get_run_state_rejects_invalid_thread_id() {
 #[tokio::test]
 async fn get_run_state_rejects_non_uuid_run_id() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -13595,7 +13704,7 @@ async fn get_run_state_maps_scope_not_found_to_not_found() {
     let coordinator = Arc::new(FakeTurnCoordinator::with_run_state_error(
         TurnError::ScopeNotFound,
     ));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -13624,7 +13733,7 @@ async fn get_run_state_maps_scope_not_found_to_not_found() {
 #[tokio::test]
 async fn get_run_state_rejects_cross_user_access() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -13699,7 +13808,7 @@ async fn seed_thread_messages(
 async fn get_timeline_pages_messages_with_cursor() {
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads.clone(), coordinator);
+    let services = session_services(threads.clone(), coordinator);
     let alice = caller();
     setup_owned_thread(&services, alice.clone(), "thread-paginate").await;
     seed_thread_messages(&threads, &alice, "thread-paginate", 25).await;
@@ -13783,7 +13892,7 @@ async fn get_timeline_pages_messages_with_cursor() {
 async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads.clone(), coordinator);
+    let services = session_services(threads.clone(), coordinator);
     let alice = caller();
     setup_owned_thread(&services, alice.clone(), "thread-cap").await;
     // Seed more than the hard ceiling so the clamp is observable.
@@ -13815,7 +13924,7 @@ async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
 async fn get_timeline_rejects_malformed_cursor() {
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     let alice = caller();
     setup_owned_thread(&services, alice.clone(), "thread-bad-cursor").await;
 
@@ -13880,7 +13989,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     // grew a real enumeration impl (standalone needed working
     // sidebar listing), so it can no longer stand in for a backend
     // without enumeration support.
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(ScopeMismatchThreadStub),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -13913,7 +14022,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
 #[tokio::test]
 async fn list_threads_hides_automation_trigger_threads() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -13991,7 +14100,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
         .into_iter()
         .collect(),
     });
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -14046,7 +14155,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
     });
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -14092,7 +14201,7 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     });
     let automation_service =
         automation_service_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -14135,7 +14244,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
     });
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -14191,7 +14300,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
     });
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -14226,7 +14335,7 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
     let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
         pending_thread_ids: [automation_pending_thread_id.clone()].into_iter().collect(),
     });
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -14287,7 +14396,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
             next_cursor: Some(stalled_cursor.clone()),
         },
     ]));
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -14346,7 +14455,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
         })
         .collect::<Vec<_>>();
     let thread_service = Arc::new(ScriptedThreadService::list_pages(responses));
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -14384,7 +14493,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
 #[tokio::test]
 async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -14487,13 +14596,13 @@ async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
             event_cursor: EventCursor(5),
         }),
     ));
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-notice").await;
 
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-notice-approval",
                 "thread_id": "thread-notice",
                 "content": "hello"
@@ -14529,13 +14638,13 @@ async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
             event_cursor: EventCursor(5),
         }),
     ));
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-notice").await;
 
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-notice-auth",
                 "thread_id": "thread-notice",
                 "content": "hello"
@@ -14571,13 +14680,13 @@ async fn rejected_busy_notice_generic_status_contains_generic_copy() {
             event_cursor: EventCursor(5),
         }),
     ));
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-notice").await;
 
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-notice-generic",
                 "thread_id": "thread-notice",
                 "content": "hello"
@@ -14613,7 +14722,7 @@ async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     // ScriptedThreadService pre-seeds the message as RejectedBusy — simulates
     // the client retrying after the original rejection response was lost.
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(ScriptedThreadService::rejected_busy_replay()),
         coordinator.clone(),
     );
@@ -14621,7 +14730,7 @@ async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-replay-rejected-busy",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -14651,7 +14760,7 @@ async fn replayed_rejected_busy_returns_none_run_metadata() {
     // Replay: the original blocking run is gone — run metadata must be None,
     // not a fabricated run-id or status that the client cannot query.
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(ScriptedThreadService::rejected_busy_replay()),
         coordinator.clone(),
     );
@@ -14659,7 +14768,7 @@ async fn replayed_rejected_busy_returns_none_run_metadata() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-replay-none-metadata",
                 "thread_id": "thread-alpha",
                 "content": "replay with none metadata"
@@ -14716,13 +14825,13 @@ async fn fresh_rejected_busy_returns_some_run_metadata() {
         }),
     ));
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-busy-fresh").await;
 
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-fresh-busy-metadata",
                 "thread_id": "thread-busy-fresh",
                 "content": "hello busy"
@@ -14780,7 +14889,7 @@ async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_b
             event_cursor: EventCursor(3),
         }),
     ));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(ScriptedThreadService::rejected_busy_mark_fails()),
         coordinator,
     );
@@ -14790,7 +14899,7 @@ async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_b
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-mark-fail-reconcile",
                 "thread_id": "thread-alpha",
                 "content": "hello mark-fail"
@@ -14857,7 +14966,7 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
             event_cursor: EventCursor(3),
         }),
     ));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(ScriptedThreadService::deferred_busy_mark_fails()),
         coordinator,
     );
@@ -14868,7 +14977,7 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
     let error = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-deferred-busy-mark-fail-reconcile",
                 "thread_id": "thread-alpha",
                 "content": "hello deferred-busy mark-fail"
@@ -14962,7 +15071,7 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let lander = Arc::new(RecordingLander::default());
-    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+    let services = session_services(Arc::clone(&threads), coordinator.clone())
         .with_inbound_attachments(lander.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
@@ -14970,7 +15079,7 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-att",
                 "thread_id": "thread-alpha",
                 "content": "see attached",
@@ -15037,7 +15146,7 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let lander = Arc::new(RecordingLander::default());
-    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+    let services = session_services(Arc::clone(&threads), coordinator.clone())
         .with_inbound_attachments(lander.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
 
@@ -15045,7 +15154,7 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-att",
                 "thread_id": "thread-alpha",
                 "content": "spreadsheet attached",
@@ -15095,14 +15204,14 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     // No `.with_inbound_attachments(...)`: a deployment without attachment
     // support must reject rather than silently drop the files.
-    let services = RebornServices::new(threads, coordinator);
+    let services = session_services(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7");
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-att",
                 "thread_id": "thread-alpha",
                 "content": "see attached",
@@ -15349,7 +15458,7 @@ impl AdminUserService for FakeAdminUsers {
 }
 
 fn admin_services(fake: FakeAdminUsers) -> RebornServices {
-    RebornServices::new(
+    session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -15365,7 +15474,7 @@ fn assert_forbidden(err: ProductSurfaceError) {
 #[traced_test]
 async fn admin_thread_scraping_reads_only_the_selected_users_threads() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -15501,7 +15610,7 @@ async fn admin_thread_scraping_does_not_match_a_target_from_another_tenant() {
 #[traced_test]
 async fn admin_thread_scrape_views_dispatch_through_query() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -16459,7 +16568,7 @@ fn command_palette_services(
     admin_users: FakeAdminUsers,
     llm_config: Arc<SetupRecordingLlmConfigService>,
 ) -> RebornServices {
-    RebornServices::new(
+    session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -16661,132 +16770,6 @@ async fn member_execute_model_read_returns_view() {
 }
 
 #[tokio::test]
-async fn member_model_preference_commands_update_only_the_callers_preference() {
-    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
-    let services = command_palette_services(
-        FakeAdminUsers::with([
-            admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
-            admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
-        ]),
-        llm_config.clone(),
-    );
-    let alice_tenant_a = caller();
-    let bob_tenant_a = caller_for_user("user-beta");
-    let alice_tenant_b = ProductSurfaceCaller::new(
-        TenantId::new("tenant-beta").expect("valid tenant"),
-        UserId::new("user-alpha").expect("valid user"),
-        Some(AgentId::new("agent-alpha").expect("valid agent")),
-        Some(ProjectId::new("project-alpha").expect("valid project")),
-    );
-
-    let selected = execute_product_command_via_invoke(
-        &services,
-        alice_tenant_a.clone(),
-        "thread-command-palette",
-        "/model use model-b",
-    )
-    .await
-    .expect("member may set a caller-scoped preference");
-    assert!(selected.rejection.is_none(), "{selected:?}");
-    assert_eq!(
-        selected.result.expect("selection view").title,
-        "Model preference updated"
-    );
-
-    for isolated_caller in [bob_tenant_a, alice_tenant_b] {
-        let isolated = execute_product_command_via_invoke(
-            &services,
-            isolated_caller,
-            "thread-command-palette",
-            "/model",
-        )
-        .await
-        .expect("another caller may read its own model status");
-        let view = isolated.result.expect("isolated status view");
-        assert_eq!(view.fields[0].value, "workspace default");
-        assert_eq!(view.fields[1].value, "model-a");
-    }
-
-    let selected_status = execute_product_command_via_invoke(
-        &services,
-        alice_tenant_a.clone(),
-        "thread-command-palette",
-        "/model",
-    )
-    .await
-    .expect("selecting caller may read its preference")
-    .result
-    .expect("selected status view");
-    assert_eq!(selected_status.fields[0].value, "model-b");
-    assert_eq!(selected_status.fields[1].value, "model-b");
-
-    let reset = execute_product_command_via_invoke(
-        &services,
-        alice_tenant_a,
-        "thread-command-palette",
-        "/model default",
-    )
-    .await
-    .expect("member may return to the workspace default");
-    assert!(reset.rejection.is_none(), "{reset:?}");
-    assert_eq!(
-        llm_config.user_model_preference_updates(),
-        vec![
-            (
-                "tenant-alpha".to_string(),
-                "user-alpha".to_string(),
-                Some("model-b".to_string()),
-            ),
-            ("tenant-alpha".to_string(), "user-alpha".to_string(), None,),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn member_model_status_marks_a_stale_preference_unavailable() {
-    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
-    let services = command_palette_services(
-        FakeAdminUsers::with([admin_record(
-            "user-alpha",
-            AdminUserRole::Member,
-            AdminUserStatus::Active,
-        )]),
-        llm_config.clone(),
-    );
-
-    execute_product_command_via_invoke(
-        &services,
-        caller(),
-        "thread-command-palette",
-        "/model use model-b",
-    )
-    .await
-    .expect("member may set an initially allowed preference");
-    llm_config.use_user_model_catalog(UserModelCatalog {
-        selection_enabled: true,
-        workspace_default: Some("model-a".to_string()),
-        models: vec!["model-a".to_string()],
-    });
-
-    let view =
-        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/model")
-            .await
-            .expect("member may inspect a stale preference")
-            .result
-            .expect("model status view");
-
-    assert_eq!(view.fields[0].value, "model-b (unavailable)");
-    assert_eq!(view.fields[1].value, "unavailable");
-    assert!(
-        view.lines
-            .iter()
-            .any(|line| line
-                == "Your saved preference is no longer available. Use `/model default`."),
-        "status must explain how to recover: {view:?}"
-    );
-}
-
-#[tokio::test]
 async fn member_execute_unknown_command_help_excludes_admin_names() {
     let services = command_palette_services(
         FakeAdminUsers::with([admin_record(
@@ -16818,7 +16801,7 @@ async fn member_execute_unknown_command_help_excludes_admin_names() {
 
 #[tokio::test]
 async fn execute_new_creates_a_fresh_thread_and_returns_an_open_thread_effect() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -16848,12 +16831,12 @@ async fn execute_new_creates_a_fresh_thread_and_returns_an_open_thread_effect() 
 async fn execute_interrupt_cancels_the_latest_active_run() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads, coordinator.clone());
+    let services = session_services(threads, coordinator.clone());
     create_thread_for(&services, caller(), "thread-stop-command").await;
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            session_submit_request(json!({
                 "client_action_id": "send-before-stop",
                 "thread_id": "thread-stop-command",
                 "content": "please keep working"
@@ -16890,7 +16873,7 @@ async fn execute_interrupt_cancels_the_latest_active_run() {
 #[tokio::test]
 async fn execute_stop_without_an_active_run_is_a_successful_no_op() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
@@ -17258,7 +17241,7 @@ async fn admin_execute_lifecycle_command_reads_admin_directory_exactly_once() {
         AdminUserRole::Admin,
         AdminUserStatus::Active,
     )]));
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -17340,7 +17323,7 @@ async fn suspended_admin_is_treated_as_member_on_both_doors() {
 // retryable 503, never a silent "not admin" or an opaque 500.
 #[tokio::test]
 async fn list_commands_surfaces_directory_unavailable_as_retryable_503() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -17373,7 +17356,7 @@ async fn list_commands_surfaces_directory_unavailable_as_retryable_503() {
 #[tokio::test]
 async fn execute_user_audience_commands_succeed_without_admin_directory_but_admin_audience_still_fails_closed()
  {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -17456,7 +17439,7 @@ impl IronhubLinkService for RecordingIronhubLinkService {
 #[tokio::test]
 async fn ironhub_delivery_command_forwards_authenticated_product_surface_caller() {
     let link = Arc::new(RecordingIronhubLinkService::default());
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -17500,7 +17483,7 @@ async fn ironhub_delivery_command_forwards_authenticated_product_surface_caller(
 
 #[tokio::test]
 async fn ironhub_delivery_command_fails_closed_when_link_service_is_unwired() {
-    let services = RebornServices::new(
+    let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
@@ -17573,14 +17556,14 @@ async fn webui_queued_replay_re_enqueues_crash_orphaned_message() {
     ));
     // Phase 1 — the "crashed" process: the enqueue vanishes, leaving the row
     // Queued with no backing queue entry.
-    let crashed = RebornServices::new(
+    let crashed = session_services(
         thread_service.clone() as Arc<dyn SessionThreadService>,
         coordinator.clone(),
     )
     .with_input_enqueue(Arc::new(VanishingWebUiEnqueue));
     setup_owned_thread(&crashed, caller(), "thread-orphan-webui").await;
     let request = || {
-        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+        session_submit_request(json!({
             "client_action_id": "send-orphan-webui",
             "thread_id": "thread-orphan-webui",
             "content": "orphaned webui steering"
@@ -17601,7 +17584,7 @@ async fn webui_queued_replay_re_enqueues_crash_orphaned_message() {
     let real_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
         thread_service.clone() as Arc<dyn SessionThreadService>,
     ));
-    let restarted = RebornServices::new(
+    let restarted = session_services(
         thread_service.clone() as Arc<dyn SessionThreadService>,
         coordinator,
     )
@@ -17720,4 +17703,156 @@ async fn vendor_login_failures_project_the_sanitized_port_taxonomy() {
         .await
         .expect("a healthy backend starts the login");
     assert!(start.auth_url.contains("/v1/auth/github"));
+}
+
+// ─── Generic session-inbound channel parameter ──────────────────────────────
+//
+// The generic session route keys submissions by `extension_id`; the surface
+// validates it against the deployment's session-channel directory before
+// admitting anything under that identity. Unknown/non-session extensions and
+// missing directories fail closed; unparameterized submissions are rejected.
+
+struct StaticSessionChannelDirectory {
+    session_channels: Vec<&'static str>,
+}
+
+impl ironclaw_product_contracts::session_ingress::SessionChannelDirectory
+    for StaticSessionChannelDirectory
+{
+    fn is_session_channel(&self, extension_id: &str) -> bool {
+        self.session_channels.contains(&extension_id)
+    }
+}
+
+fn submit_request_for_extension(
+    extension_id: Option<&str>,
+    thread_id: &str,
+    action: &str,
+) -> ProductSubmitTurnRequest {
+    let mut body = json!({
+        "client_action_id": action,
+        "thread_id": thread_id,
+        "content": "hello channel"
+    });
+    if let Some(extension_id) = extension_id {
+        body["extension_id"] = json!(extension_id);
+    }
+    serde_json::from_value::<ProductSubmitTurnRequest>(body).expect("request")
+}
+
+#[tokio::test]
+async fn submit_turn_with_extension_id_requires_a_session_channel_directory() {
+    let services = ironclaw_assistant::RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let error = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("web-app"), "thread-alpha", "send-no-directory"),
+        )
+        .await
+        .expect_err("no directory wired must fail closed");
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+}
+
+#[test]
+fn builtin_session_surface_id_matches_the_kernel_transport_constant() {
+    // The contracts crate cannot import the kernel (layer order points the
+    // other way), so the two spellings of the host transport identity are
+    // pinned equal here instead. Both are persisted coordinates; neither may
+    // move independently.
+    assert_eq!(
+        ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID,
+        ironclaw_turns::product_context::WEBUI_SOURCE_CHANNEL,
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_without_extension_id_admits_under_the_legacy_api_surface() {
+    // The unparameterized lane is the OpenAI-compatible API's documented wire
+    // shape (`ProductSubmitTurnRequest::extension_id`): headless SDK clients
+    // cannot learn a channel id from `GET /session`, so `None` submits under
+    // the built-in surface identity — even on a deployment with no session
+    // channel directory at all. Regression: 97274d5c9a removed this arm and
+    // hard-404'd every `/v1/chat/completions` submission.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = session_services(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let response = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(None, "thread-alpha", "send-without-channel"),
+        )
+        .await
+        .expect("API transports submit under the legacy surface without a channel parameter");
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_an_unknown_or_non_session_extension_as_not_found() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = session_services(threads, coordinator.clone()).with_session_channel_directory(
+        Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let error = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("slack"), "thread-alpha", "send-wrong-channel"),
+        )
+        .await
+        .expect_err("a webhook channel must never admit session submissions");
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+
+    // The built-in surface id is not route-addressable either: naming it
+    // through the parameterized route must 404 unless a manifest channel
+    // actually claims it. Only the unparameterized API lane reaches it.
+    let error = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("webui"), "thread-alpha", "send-builtin-by-name"),
+        )
+        .await
+        .expect_err("the built-in surface id is not a route-addressable channel");
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "nothing may be submitted under a rejected channel identity"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_admits_a_declared_session_channel() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = session_services(threads, coordinator.clone()).with_session_channel_directory(
+        Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("web-app"), "thread-alpha", "send-on-channel"),
+        )
+        .await
+        .expect("session channel submission admits");
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
 }

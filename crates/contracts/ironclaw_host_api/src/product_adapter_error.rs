@@ -106,6 +106,15 @@ pub enum ProductSurfaceRejectionKind {
     Unavailable,
     Conflict,
     Ambiguous,
+    /// The submission reuses an idempotency identity that already settled
+    /// against a different target (e.g. the same client action id on another
+    /// thread). Distinct from `Conflict` so transports can render the
+    /// duplicate-action taxonomy.
+    DuplicateAction,
+    /// An idempotent replay was recognized but its stored submission
+    /// reference can no longer be resolved, so the prior outcome cannot be
+    /// reported.
+    ReplayUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

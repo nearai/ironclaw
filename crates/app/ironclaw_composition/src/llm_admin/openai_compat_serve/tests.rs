@@ -663,6 +663,7 @@ impl ResponseReaderFixture {
                 )
                 .expect("accepted ref"),
                 submitted_run_id: run_id,
+                submission: None,
             }),
             requested_model: "reborn-test".to_string(),
             projection_read: self.projection_read.clone(),

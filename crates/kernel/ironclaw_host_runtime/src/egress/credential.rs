@@ -937,6 +937,19 @@ mod tests {
             self.inner.put(scope, handle, material, expires_at).await
         }
 
+        async fn put_if_absent(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+            expires_at: Option<Timestamp>,
+        ) -> Result<bool, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner
+                .put_if_absent(scope, handle, material, expires_at)
+                .await
+        }
+
         async fn metadata(
             &self,
             scope: &ResourceScope,

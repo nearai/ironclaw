@@ -10,6 +10,9 @@
 //! descriptor, the fail-closed error for "no service wired", and the
 //! `RebornServices` wiring that calls through the port.
 
+use ironclaw_product_contracts::operator_llm::{
+    SetUserModelPreferenceRequest, UserModelPreference,
+};
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
 
 use ironclaw_product_contracts::surface::{
@@ -20,8 +23,8 @@ use ironclaw_product_contracts::surface::{
 use super::{ProductCapabilityInvoker, RebornServices};
 
 use ironclaw_product_contracts::operator_llm::{
-    LlmConfigSnapshot, SetActiveLlmRequest, SetUserModelPolicyRequest,
-    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
+    LlmConfigSnapshot, SetActiveLlmRequest, SetUserModelPolicyRequest, UpsertLlmProviderRequest,
+    UserModelCatalog,
 };
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -173,20 +176,6 @@ where
         };
         service
             .user_model_preference(caller)
-            .await
-            .map_err(ProductSurfaceError::from)
-    }
-
-    pub(super) async fn resolve_user_model(
-        &self,
-        caller: ProductSurfaceCaller,
-        requested_model: Option<String>,
-    ) -> Result<Option<String>, ProductSurfaceError> {
-        let Some(service) = self.llm_config.as_ref() else {
-            return Ok(requested_model);
-        };
-        service
-            .resolve_user_model(caller, requested_model)
             .await
             .map_err(ProductSurfaceError::from)
     }

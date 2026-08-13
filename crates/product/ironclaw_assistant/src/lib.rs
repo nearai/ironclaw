@@ -117,7 +117,7 @@ pub use automation_thread_metadata::{
 pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
-    RebornChannelWorkflowServices, channel_conversation_services,
+    RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
@@ -152,7 +152,8 @@ pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate
 // `ironclaw_product_contracts::actor_identity` (WS2.5).
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductInstallationScope, SessionLaneRejectingBindingResolver, StaticProductActorUserResolver,
+    StaticProductInstallationResolver,
 };
 pub use error::{
     AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,
@@ -179,6 +180,7 @@ pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    SessionSkillActivationClearer, SessionSkillActivationPorts, SessionSkillActivationRecorder,
 };
 // **No foreign re-export facade.** This crate re-exports only what it
 // *declares*. The 144-symbol block that used to sit here — the channel-adapter,
@@ -217,8 +219,8 @@ pub use lifecycle::{
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
-    DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoReplyContext,
-    NoticeDeliveryRequest,
+    DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoDeliveryRegistrations,
+    NoReplyContext, NoticeDeliveryRequest,
 };
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
@@ -230,6 +232,11 @@ pub use model_channel_delivery::{
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
+};
+pub use run_delivery::notifications::{
+    ChannelNotification, ChannelNotificationContext, NotificationChannelTarget,
+    NotificationDeliveryFailure, ResolvedUserNotificationTargets, notify, notify_user,
+    resolve_user_notification_targets,
 };
 pub use run_delivery::{
     DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
@@ -261,6 +268,7 @@ pub use reborn_services::{
     AUTOMATIONS_VIEW, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
     CREATE_THREAD_COMMAND, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
+    ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
@@ -275,8 +283,8 @@ pub use reborn_services::{
     LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY_ID, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW,
     NOTIFICATION_CHANNELS_SET_COMMAND, NOTIFICATION_CHANNELS_SET_COMMAND_ID,
-    NOTIFICATION_CHANNELS_SET_MAX_ITEMS, NOTIFICATION_CHANNELS_VIEW, NotificationChannelsSetInput,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    NOTIFICATION_CHANNELS_SET_MAX_ITEMS, NOTIFICATION_CHANNELS_VIEW, NoDeliveryClientBootstrap,
+    NotificationChannelsSetInput, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
@@ -357,21 +365,21 @@ pub use reborn_services::{
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornVendorAuthAccounts, RebornWebPushProductService, RunArtifactLogs, RunArtifactMessage,
-    RunArtifactRedaction, RunArtifactToolCall, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SettingsToolPermissionState, SkillsProductService,
-    StaticOperatorStatusService, THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA,
-    THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
-    TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope, UnavailableRebornViewProvider,
-    UnsupportedAutomationProductService, UnsupportedOperatorLogsService,
+    RebornVendorAuthAccounts, RegistrationChannelNotificationSetupService, RunArtifactLogs,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
+    SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SUBMIT_TURN_COMMAND, SettingsToolPermissionState,
+    SkillsProductService, StaticOperatorStatusService, THREAD_ARTIFACT_MAX_MESSAGES,
+    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    TriggerRunThreadScope, UnavailableRebornViewProvider, UnsupportedAutomationProductService,
+    UnsupportedChannelNotificationSetupService, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductService, UnsupportedWebPushProductService,
-    WebPushProductService, list_outbound_delivery_targets_for_model,
+    UnsupportedOutboundPreferencesProductService, list_outbound_delivery_targets_for_model,
     notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
     outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
     parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,

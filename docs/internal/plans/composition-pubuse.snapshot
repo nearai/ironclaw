@@ -12,6 +12,10 @@ pub use factory::production_first_party_trust_policy;
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
 pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+pub use channel_initialization::{
+    FirstPartyChannelInitializationContext, FirstPartyChannelInitializationError,
+    FirstPartyChannelInitializer,
+};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
