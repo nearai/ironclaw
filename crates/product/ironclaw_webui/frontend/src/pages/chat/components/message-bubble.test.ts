@@ -111,6 +111,23 @@ test("assistant bubbles expose final reply state for live QA", () => {
   );
 });
 
+test("user error bubbles translate durable error keys at render time", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "busy-rejected",
+        role: CHAT_MESSAGE_ROLES.USER,
+        content: "try this",
+        status: "error",
+        errorKey: "chat.busyRejectedResend",
+      },
+    }),
+  );
+
+  assert.match(html, /chat\.busyRejectedResend/);
+});
+
 test("assistant bubbles render only durable attachment references, not workspace paths in prose", async () => {
   const { MessageBubble } = await import("./message-bubble");
   const render = (attachments?: Array<Record<string, unknown>>) =>
