@@ -108,6 +108,7 @@ registerPack("ko", {
   "chat.oobe.status.completed": "Completed",
   "chat.oobe.status.failed": "Couldn't complete",
   "chat.oobe.status.scheduled": "Automation scheduled",
+  "chat.oobe.connectUnavailable": "This app isn't available to connect yet.",
 
   // Chat — input
   "chat.placeholder": "IronClaw에 메시지 보내기...",
