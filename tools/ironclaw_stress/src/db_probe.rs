@@ -555,9 +555,9 @@ fn normalize_snapshot(mut snapshot: DbProbeSnapshot) -> DbProbeSnapshot {
 }
 
 fn snapshot_delta(before: &DbProbeSnapshot, after: &DbProbeSnapshot) -> DbProbeDelta {
-    let table_writes = table_write_delta(before, after);
+    let postgres_table_writes = table_write_delta(before, after);
     let postgres_table_writes_total =
-        table_writes
+        postgres_table_writes
             .iter()
             .fold(PostgresWriteDelta::default(), |mut total, table| {
                 total.inserts += table.inserts;
