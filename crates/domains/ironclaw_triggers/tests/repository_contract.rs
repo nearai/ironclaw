@@ -3763,12 +3763,28 @@ mod fire_claim_contract {
         for offset in 0..=500 {
             let fire_slot = base_fire_slot + chrono::Duration::minutes(offset);
             let run_id = TurnRunId::new();
-            let mut active_record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-            active_record.active_fire_slot = Some(fire_slot);
-            active_record.active_run_ref = Some(run_id);
-            repo.upsert_trigger(active_record)
+            let claimed = repo
+                .claim_due_fire(ClaimDueFireRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    now: fire_slot,
+                })
                 .await
-                .expect("upsert active retention record");
+                .expect("claim retention fire");
+            assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+            repo.mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id: ThreadId::new(format!("thread-retention-{offset}"))
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+            })
+            .await
+            .expect("accept retention fire")
+            .expect("accepted retention fire should persist");
             repo.clear_active_fire(ClearActiveFireRequest {
                 tenant_id: tenant_id.clone(),
                 trigger_id,

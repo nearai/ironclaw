@@ -834,6 +834,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 ),
             )
             .await?;
+            prune_run_history(&transaction, &request.tenant_id, request.trigger_id).await?;
             Ok(Some(record))
         }
         .await;
@@ -1788,7 +1789,6 @@ async fn upsert_run_history(
     )
     .await
     .map_err(|error| backend_error("upsert trigger run history", error))?;
-    prune_run_history(conn, &run.tenant_id, run.trigger_id).await?;
     Ok(())
 }
 fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
@@ -1836,6 +1836,8 @@ async fn complete_run_history(
     )
     .await
     .map_err(|error| backend_error("complete trigger run history", error))?;
+    // Completion normally updates the claim row, but recovery may insert a
+    // missing row. Keep pruning on that conservative compatibility path.
     prune_run_history(conn, tenant_id, trigger_id).await?;
     Ok(())
 }

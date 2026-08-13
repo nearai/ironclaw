@@ -606,6 +606,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             ),
         )
         .await?;
+        prune_run_history(&tx, &record.tenant_id, record.trigger_id).await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit trigger fire claim", error))?;
@@ -1244,7 +1245,6 @@ async fn upsert_run_history(
         )
         .await
         .map_err(|error| backend_error("upsert trigger run history", error))?;
-    prune_run_history(client, &run.tenant_id, run.trigger_id).await?;
     Ok(())
 }
 
@@ -1287,6 +1287,8 @@ async fn complete_run_history(
         )
         .await
         .map_err(|error| backend_error("complete trigger run history", error))?;
+    // Completion normally updates the claim row, but recovery may insert a
+    // missing row. Keep pruning on that conservative compatibility path.
     prune_run_history(client, tenant_id, trigger_id).await?;
     Ok(())
 }
