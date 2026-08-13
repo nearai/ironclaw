@@ -107,6 +107,10 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
   const context = {
     ConfirmDialog,
     React: createReactStub(),
+    SearchField: ({ value, onChange, onClear, placeholder }) => ({
+      type: "search-field",
+      props: { value, onChange, onClear, placeholder },
+    }),
     NavLink: "NavLink",
     Icon: "Icon",
     MarqueeText: ({ children, className }) => ({
