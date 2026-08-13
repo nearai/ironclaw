@@ -74,7 +74,7 @@ impl HostManagedCredentialExtension {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvailableExtensionAsset {
     pub path: String,
     pub content: AvailableExtensionAssetContent,
@@ -84,12 +84,12 @@ pub struct AvailableExtensionAsset {
 /// remove -> reinstall re-materializes from the entry alone (a `Filesystem`
 /// path-pointer variant existed before that invariant and dangled after
 /// `remove` deleted the extension dir).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AvailableExtensionPackage {
     pub package_ref: LifecyclePackageRef,
     pub manifest_toml: String,
@@ -477,6 +477,71 @@ impl AvailableExtensionCatalog {
                 self.packages.push(package);
             }
         }
+    }
+
+    /// Refresh runtime-derived package data after hosted discovery while
+    /// retaining the catalog metadata injected by the original loader.
+    pub(crate) fn refresh_resolved_manifest(
+        &mut self,
+        record: &ExtensionManifestRecord,
+    ) -> Result<bool, ProductOperationFailure> {
+        let Some(refreshed) = self.refreshed_resolved_manifest(record)? else {
+            return Ok(false);
+        };
+        self.extend(Self::from_packages(vec![refreshed]));
+        Ok(true)
+    }
+
+    /// Build a replacement catalog entry without mutating the catalog, so a
+    /// caller can complete other fallible synchronization before committing
+    /// the refresh.
+    pub(crate) fn refreshed_resolved_manifest(
+        &self,
+        record: &ExtensionManifestRecord,
+    ) -> Result<Option<AvailableExtensionPackage>, ProductOperationFailure> {
+        let extension_id = &record.resolved().id;
+        let Some(existing) = self
+            .packages
+            .iter()
+            .find(|package| package.package.id == *extension_id)
+        else {
+            return Ok(None);
+        };
+        if existing.source != record.manifest().source {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} changed manifest source during runtime discovery",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let manifest: ironclaw_extension_registry::ExtensionManifest =
+            record.manifest().clone().try_into().map_err(|error| {
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} discovered an invalid manifest: {error}",
+                        extension_id.as_str()
+                    ),
+                }
+            })?;
+        let package = crate::generic_host::rebuild_package_from_resolved(
+            manifest,
+            record.resolved(),
+            extension_id.as_str(),
+        )
+        .map_err(|reason| ProductOperationFailure::InvalidBindingRequest { reason })?;
+        let surface_kinds = surface_kinds_from_manifest_record(record, extension_id.as_str())?;
+        let channel_directions =
+            channel_directions_from_manifest_record(record, extension_id.as_str())?;
+        let channel_presentation = channel_presentation_from_manifest_record(record);
+        let mut refreshed = existing.as_ref().clone();
+        refreshed.manifest_toml = record.raw_toml().to_string();
+        refreshed.resolved_manifest = Arc::new(record.resolved().clone());
+        refreshed.package = package;
+        refreshed.surface_kinds = surface_kinds;
+        refreshed.channel_directions = channel_directions;
+        refreshed.channel_presentation = channel_presentation;
+        Ok(Some(refreshed))
     }
 
     pub(crate) fn remove(

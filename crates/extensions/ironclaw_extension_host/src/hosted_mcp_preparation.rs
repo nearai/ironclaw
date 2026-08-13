@@ -641,15 +641,24 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         }
-        if finalized.manifest().source == ManifestSource::UserRegistered {
+        let refreshed = {
+            let catalog = self.catalog.read().await;
+            catalog.refreshed_resolved_manifest(&finalized)?
+        };
+        let replacement = match refreshed {
+            Some(refreshed) => Some(refreshed),
+            None if finalized.manifest().source == ManifestSource::UserRegistered => {
+                Some(crate::hosted_mcp_manifest::available_package(&finalized)?)
+            }
+            None => None,
+        };
+        self.sync_lifecycle_package(extension_id).await?;
+        if let Some(replacement) = replacement {
             self.catalog
                 .write()
                 .await
-                .extend(AvailableExtensionCatalog::from_packages(vec![
-                    crate::hosted_mcp_manifest::available_package(&finalized)?,
-                ]));
+                .extend(AvailableExtensionCatalog::from_packages(vec![replacement]));
         }
-        self.sync_lifecycle_package(extension_id).await?;
         Ok(None)
     }
 
