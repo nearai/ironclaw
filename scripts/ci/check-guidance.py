@@ -1202,12 +1202,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
-        docs_files = sum(
-            1
-            for doc in docs
-            if doc.startswith(DOCS_PREFIX)
-            and not doc.startswith(DOCS_EXCLUDED_PREFIX)
-        )
+        # Every scanned file under docs/ — the published surface plus the
+        # living internal spec pages. Published-surface health has its own
+        # signal (`nav_pages_covered` below); this metric reports scan scope.
+        docs_files = sum(1 for doc in docs if doc.startswith(DOCS_PREFIX))
         nav_covered = check_docs_nav_coverage(repo_root, docs)
         crates = load_crates(repo_root)
         reference_problems, warnings, references = check_references(
