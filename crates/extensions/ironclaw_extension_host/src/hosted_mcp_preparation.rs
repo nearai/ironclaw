@@ -650,7 +650,14 @@ impl HostedMcpPreparationService {
             None if finalized.manifest().source == ManifestSource::UserRegistered => {
                 Some(crate::hosted_mcp_manifest::available_package(&finalized)?)
             }
-            None => None,
+            None => {
+                tracing::debug!(
+                    extension_id = extension_id.as_str(),
+                    source = ?finalized.manifest().source,
+                    "hosted MCP discovery finalized without a catalog entry to refresh"
+                );
+                None
+            }
         };
         self.sync_lifecycle_package(extension_id).await?;
         if let Some(replacement) = replacement {

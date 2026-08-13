@@ -68,10 +68,12 @@ pub async fn restore_extension_lifecycle_state(
                 hash_error,
             )
             .await?;
-        } else if available.source == ManifestSource::HostBundled
-            && stored_manifest
+        } else if let Some(stored) = stored_manifest.as_ref()
+            && available.source == ManifestSource::HostBundled
+            && stored
+                .resolved()
+                .mcp
                 .as_ref()
-                .and_then(|manifest| manifest.resolved().mcp.as_ref())
                 .is_some_and(|mcp| !mcp.dynamic_input_schemas.is_empty())
         {
             // Same-bundle restart: hosted discovery enriched the durable
@@ -81,14 +83,12 @@ pub async fn restore_extension_lifecycle_state(
             // On binary upgrades the mismatch path above retains the new
             // catalog contract and performs the existing migration instead of
             // reviving stale endpoint/auth/effect policy.
-            catalog.refresh_resolved_manifest(stored_manifest.as_ref().ok_or_else(|| {
-                ProductOperationFailure::InvalidBindingRequest {
-                    reason: format!(
-                        "extension {} has discovery metadata without an installed manifest",
-                        installation.extension_id().as_str()
-                    ),
-                }
-            })?)?;
+            if !catalog.refresh_resolved_manifest(stored)? {
+                tracing::warn!(
+                    extension_id = installation.extension_id().as_str(),
+                    "stored discovery metadata did not match the bundled catalog package"
+                );
+            }
             available = catalog.resolve(&package_ref)?;
         }
         if available.source != ManifestSource::UserRegistered {
