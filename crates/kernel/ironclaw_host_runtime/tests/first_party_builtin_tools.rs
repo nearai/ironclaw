@@ -10949,6 +10949,36 @@ async fn builtin_write_file_rejects_extracted_read_representation_at_unlisted_ex
 }
 
 #[tokio::test]
+async fn builtin_write_file_rejects_macro_enabled_ooxml_formats() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    for extension in ["docm", "xlsm", "pptm"] {
+        let path = format!("/workspace/macro.{extension}");
+        let failure = invoke_failure_with_context(
+            &runtime,
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": path, "content": "not office bytes"}),
+            context.clone(),
+        )
+        .await;
+        assert_eq!(failure.kind, FailureKind::OperationFailed);
+        assert!(
+            failure
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("binary documents cannot be edited with text tools"),
+            "{extension}: {:?}",
+            failure.message
+        );
+        assert!(!temp.path().join(format!("macro.{extension}")).exists());
+    }
+}
+
+#[tokio::test]
 async fn builtin_write_file_still_overwrites_text_log_with_stray_nul() {
     // The binary backstop on the write path must use the SAME leniency as the
     // read path (`read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs`).
@@ -11152,6 +11182,113 @@ async fn document_edit_accepts_redlines_into_a_new_file_leaving_the_original_int
 }
 
 #[tokio::test]
+async fn an_edited_document_requires_a_fresh_structured_read_before_another_edit() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    invoke_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/first.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/first.docx",
+            "output_path": "/workspace/second.docx",
+            "edits": [{"op": "replace_paragraph_text", "paragraph": "p1", "text": "Changed"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read it in full with read_file"),
+        "{:?}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn oversized_structured_views_fail_instead_of_authorizing_partial_addresses() {
+    let temp = tempfile::tempdir().unwrap();
+    let paragraphs = (0..1200)
+        .map(|index| {
+            format!(
+                r#"<w:p><w:r><w:t>paragraph {index} {}</w:t></w:r></w:p>"#,
+                "x".repeat(60)
+            )
+        })
+        .collect::<String>();
+    let document = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}</w:body></w:document>"#
+    );
+    let docx = skill_bundle_zip(&[("word/document.xml", document.as_bytes())]);
+    std::fs::write(temp.path().join("large.docx"), docx).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/large.docx"}),
+        context.clone(),
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("structured document view exceeds the response limit"),
+        "{:?}",
+        failure.message
+    );
+    let edit_failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/large.docx",
+            "output_path": "/workspace/out.docx",
+            "edits": [{"op": "replace_paragraph_text", "paragraph": "p1", "text": "Changed"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        edit_failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read it in full with read_file")
+    );
+}
+
+#[tokio::test]
 async fn document_edit_requires_a_prior_structured_read() {
     // Same read-before-edit guarantee write_file has, on the representation
     // whose addresses the edits name.
@@ -11308,6 +11445,23 @@ async fn html_to_pdf_writes_a_pdf_and_refuses_to_overwrite_an_existing_one() {
         bytes,
         "the refused render must leave the existing file untouched"
     );
+}
+
+#[tokio::test]
+async fn html_to_pdf_rejects_unbounded_html_before_rendering() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTML_TO_PDF_CAPABILITY_ID,
+        json!({"path": "/workspace/large.pdf", "html": "x".repeat(1024 * 1024 + 1)}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::Resource);
+    assert!(!temp.path().join("large.pdf").exists());
 }
 
 #[tokio::test]

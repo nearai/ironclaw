@@ -231,7 +231,8 @@ fn clone_slide(
         })?
         .clone();
 
-    let next_number = parts
+    let next_number = package
+        .names()
         .iter()
         .filter_map(|part| slide_number(part))
         .max()
@@ -492,12 +493,14 @@ fn append_slide_id(presentation_xml: &str, relationship_id: &str) -> Result<Stri
     let out = transform_xml(presentation_xml, |event| match event {
         Event::End(tag) if local_name(tag.name().as_ref()) == b"sldIdLst" => {
             appended = true;
-            let mut slide_id = BytesStart::new("p:sldId");
+            let list_name = String::from_utf8_lossy(tag.name().as_ref()).into_owned();
+            let slide_name = qualified_name(tag.name().as_ref(), "sldId");
+            let mut slide_id = BytesStart::new(slide_name);
             slide_id.push_attribute(("id", (highest + 1).to_string().as_str()));
             slide_id.push_attribute(("r:id", relationship_id));
             Ok(EventAction::Replace(vec![
                 Event::Empty(slide_id.into_owned()),
-                Event::End(BytesEnd::new("p:sldIdLst")),
+                Event::End(BytesEnd::new(list_name)),
             ]))
         }
         _ => Ok(EventAction::Keep),
@@ -509,6 +512,13 @@ fn append_slide_id(presentation_xml: &str, relationship_id: &str) -> Result<Stri
         });
     }
     Ok(out)
+}
+
+fn qualified_name(raw: &[u8], local: &str) -> String {
+    match raw.iter().position(|byte| *byte == b':') {
+        Some(index) => format!("{}:{local}", String::from_utf8_lossy(&raw[..index])),
+        None => local.to_string(),
+    }
 }
 
 fn append_content_type_override(
@@ -894,5 +904,51 @@ mod tests {
             append_slide_id("<p:sldIdLst><p:sldId></p:sldIdLst>", "rId2"),
             Err(DocumentError::MalformedPart { .. })
         ));
+    }
+
+    #[test]
+    fn cloning_does_not_overwrite_an_orphan_slide_part() {
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><a:t>one</a:t></p:sld>"#;
+        let orphan = r#"<p:sld xmlns:p="p" xmlns:a="a"><a:t>orphan</a:t></p:sld>"#;
+        let deck = presentation_with(
+            &[("rId1", "slides/slide1.xml")],
+            &[
+                ("ppt/slides/slide1.xml", slide),
+                ("ppt/slides/slide2.xml", orphan),
+            ],
+            true,
+        );
+        let edited = edit_pptx(
+            &deck,
+            &[PptxEdit::CloneSlide {
+                source: 1,
+                text: vec!["clone".to_string()],
+            }],
+        )
+        .unwrap();
+        let package = OoxmlPackage::read(&edited).unwrap();
+        assert!(
+            package
+                .part_str("ppt/slides/slide2.xml")
+                .unwrap()
+                .contains("orphan")
+        );
+        assert!(
+            package
+                .part_str("ppt/slides/slide3.xml")
+                .unwrap()
+                .contains("clone")
+        );
+    }
+
+    #[test]
+    fn appended_slide_ids_preserve_the_presentations_prefix() {
+        let xml = r#"<x:presentation xmlns:x="p" xmlns:r="r"><x:sldIdLst><x:sldId id="256" r:id="rId1"/></x:sldIdLst></x:presentation>"#;
+        let edited = append_slide_id(xml, "rId2").unwrap();
+        assert!(
+            edited.contains(r#"<x:sldId id="257" r:id="rId2"/>"#),
+            "{edited}"
+        );
+        assert!(!edited.contains("p:sldId"), "{edited}");
     }
 }

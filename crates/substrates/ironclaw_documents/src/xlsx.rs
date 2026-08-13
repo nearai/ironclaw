@@ -275,8 +275,11 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
     let mut cells: Vec<Cell> = Vec::new();
     let mut reference = String::new();
     let mut is_shared = false;
+    let mut is_inline = false;
     let mut in_value = false;
     let mut in_formula = false;
+    let mut in_inline_string = false;
+    let mut in_inline_text = false;
     let mut value = String::new();
     let mut formula = String::new();
     let mut open = false;
@@ -297,12 +300,15 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
                 b"c" => {
                     reference = attribute(tag, b"r").unwrap_or_default();
                     is_shared = attribute(tag, b"t").as_deref() == Some("s");
+                    is_inline = attribute(tag, b"t").as_deref() == Some("inlineStr");
                     value.clear();
                     formula.clear();
                     open = true;
                 }
                 b"v" => in_value = true,
                 b"f" => in_formula = true,
+                b"is" if open && is_inline => in_inline_string = true,
+                b"t" if open && in_inline_string => in_inline_text = true,
                 _ => {}
             },
             Event::Empty(tag) => {
@@ -332,7 +338,7 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
                                 ),
                             }
                         })?)
-                    } else if value.is_empty() {
+                    } else if value.is_empty() && !is_inline {
                         None
                     } else {
                         Some(value.clone())
@@ -347,6 +353,8 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
                 }
                 b"v" => in_value = false,
                 b"f" => in_formula = false,
+                b"t" => in_inline_text = false,
+                b"is" => in_inline_string = false,
                 _ => {}
             },
             Event::Text(text) => {
@@ -356,7 +364,7 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
                         part: "worksheet".to_string(),
                         detail: error.to_string(),
                     })?;
-                if in_value {
+                if in_value || in_inline_text {
                     value.push_str(&decoded);
                 } else if in_formula {
                     formula.push_str(&decoded);
@@ -371,8 +379,9 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
 // --- write -----------------------------------------------------------------
 
 fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, DocumentError> {
-    let (_target_column, target_column_index, target_row) = parse_cell_reference(target)?;
-    reject_grouped_formula_target(xml, target)?;
+    let (target_column, target_column_index, target_row) = parse_cell_reference(target)?;
+    let target = format!("{target_column}{target_row}");
+    reject_grouped_formula_target(xml, &target)?;
 
     let mut in_target_row = false;
     let mut wrote = false;
@@ -405,7 +414,17 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                         let row_number = attribute(tag, b"r").and_then(|r| r.parse::<u32>().ok());
                         if !wrote && row_number == Some(target_row) {
                             wrote = true;
-                            return Ok(EventAction::Replace(new_row(target_row, target, formula)));
+                            return Ok(EventAction::Replace(new_row(target_row, &target, formula)));
+                        }
+                        if !row_seen
+                            && !wrote
+                            && row_number.is_some_and(|number| number > target_row)
+                        {
+                            row_seen = true;
+                            wrote = true;
+                            let mut events = new_row(target_row, &target, formula);
+                            events.push(clone_event(event));
+                            return Ok(EventAction::Replace(events));
                         }
                         Ok(EventAction::Keep)
                     }
@@ -423,7 +442,7 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                         {
                             row_seen = true;
                             wrote = true;
-                            let mut events = new_row(target_row, target, formula);
+                            let mut events = new_row(target_row, &target, formula);
                             events.push(clone_event(event));
                             return Ok(EventAction::Replace(events));
                         }
@@ -452,7 +471,7 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                             }
                             let style = attribute(tag, b"s");
                             return Ok(EventAction::Replace(formula_cell(
-                                target,
+                                &target,
                                 formula,
                                 style.as_deref(),
                             )));
@@ -461,7 +480,7 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                             // Cells must stay in ascending column order, so the
                             // new one goes in *before* the first later column.
                             wrote = true;
-                            let mut events = formula_cell(target, formula, None);
+                            let mut events = formula_cell(&target, formula, None);
                             events.push(clone_event(event));
                             return Ok(EventAction::Replace(events));
                         }
@@ -475,7 +494,7 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                 // end of the sheet data.
                 if local_name(tag.name().as_ref()) == b"sheetData" && !wrote {
                     wrote = true;
-                    let mut events = new_row(target_row, target, formula);
+                    let mut events = new_row(target_row, &target, formula);
                     events.push(Event::End(BytesEnd::new("sheetData")));
                     return Ok(EventAction::Replace(events));
                 }
@@ -484,7 +503,7 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                     if !wrote {
                         // Target column is past every existing cell in the row.
                         wrote = true;
-                        let mut events = formula_cell(target, formula, None);
+                        let mut events = formula_cell(&target, formula, None);
                         events.push(Event::End(BytesEnd::new("row")));
                         return Ok(EventAction::Replace(events));
                     }
@@ -951,6 +970,42 @@ mod tests {
 mod review_regressions {
     use super::*;
     use crate::test_fixtures::expenses_xlsx;
+
+    #[test]
+    fn inline_strings_are_present_in_the_structured_read() {
+        let cells = parse_cells(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Amount</t></is></c></row></sheetData></worksheet>"#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].reference, "A1");
+        assert_eq!(cells[0].value.as_deref(), Some("Amount"));
+    }
+
+    #[test]
+    fn lowercase_targets_do_not_bypass_the_grouped_formula_guard() {
+        let error = set_cell_formula(
+            r#"<worksheet><sheetData><row r="5"><c r="C5"><f t="shared">SUM(C2:C4)</f></c></row></sheetData></worksheet>"#,
+            "c5",
+            "SUM(C2:C4)",
+        )
+        .unwrap_err();
+        assert!(matches!(error, DocumentError::InapplicableEdit { .. }));
+    }
+
+    #[test]
+    fn a_created_row_precedes_a_later_self_closing_row() {
+        let edited = set_cell_formula(
+            r#"<worksheet><sheetData><row r="1"><c r="A1"><v>x</v></c></row><row r="9"/></sheetData></worksheet>"#,
+            "C6",
+            "SUM(C2:C5)",
+        )
+        .unwrap();
+        let inserted = edited.find(r#"<row r="6">"#).unwrap();
+        let later = edited.find(r#"<row r="9"/>"#).unwrap();
+        assert!(inserted < later, "rows must stay ascending: {edited}");
+    }
 
     /// A cell's `s` attribute is its style index. Replacing a cell wholesale
     /// drops it, so a currency/date column silently reverts to General — the

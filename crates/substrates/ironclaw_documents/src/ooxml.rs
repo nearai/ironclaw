@@ -47,8 +47,13 @@ impl OoxmlPackage {
         max_total_bytes: u64,
         max_entries: usize,
     ) -> Result<Self, DocumentError> {
-        let mut archive = zip::ZipArchive::new(Cursor::new(data))
-            .map_err(|error| DocumentError::NotAnOoxmlPackage(error.to_string()))?;
+        reject_duplicate_central_directory_names(data)?;
+        let mut archive = zip::ZipArchive::new(Cursor::new(data)).map_err(|source| {
+            DocumentError::OoxmlArchive {
+                operation: "open archive",
+                source,
+            }
+        })?;
         if archive.len() > max_entries {
             return Err(DocumentError::PackageTooLarge {
                 detail: format!("{} entries exceeds the {max_entries} limit", archive.len()),
@@ -59,9 +64,13 @@ impl OoxmlPackage {
         let mut entries = BTreeMap::new();
         let mut total: u64 = 0;
         for index in 0..archive.len() {
-            let mut file = archive
-                .by_index(index)
-                .map_err(|error| DocumentError::NotAnOoxmlPackage(error.to_string()))?;
+            let mut file =
+                archive
+                    .by_index(index)
+                    .map_err(|source| DocumentError::OoxmlArchive {
+                        operation: "read archive entry",
+                        source,
+                    })?;
             if file.is_dir() {
                 continue;
             }
@@ -76,7 +85,10 @@ impl OoxmlPackage {
             }
             let mut bytes = Vec::new();
             let read = std::io::copy(&mut file.by_ref().take(max_entry_bytes + 1), &mut bytes)
-                .map_err(|error| DocumentError::NotAnOoxmlPackage(error.to_string()))?;
+                .map_err(|source| DocumentError::OoxmlIo {
+                    operation: "decompress archive entry",
+                    source,
+                })?;
             if read > max_entry_bytes {
                 return Err(DocumentError::PackageTooLarge {
                     detail: format!("entry {name} exceeds {max_entry_bytes} bytes"),
@@ -170,15 +182,83 @@ impl OoxmlPackage {
                     continue;
                 };
                 zip.start_file(name, options)
-                    .map_err(|error| DocumentError::Write(error.to_string()))?;
+                    .map_err(|source| DocumentError::OoxmlArchive {
+                        operation: "start output entry",
+                        source,
+                    })?;
                 zip.write_all(bytes)
-                    .map_err(|error| DocumentError::Write(error.to_string()))?;
+                    .map_err(|source| DocumentError::OoxmlIo {
+                        operation: "write output entry",
+                        source,
+                    })?;
             }
-            zip.finish()
-                .map_err(|error| DocumentError::Write(error.to_string()))?;
+            zip.finish().map_err(|source| DocumentError::OoxmlArchive {
+                operation: "finish output archive",
+                source,
+            })?;
         }
         Ok(cursor.into_inner())
     }
+}
+
+fn reject_duplicate_central_directory_names(data: &[u8]) -> Result<(), DocumentError> {
+    const EOCD: &[u8] = b"PK\x05\x06";
+    const CENTRAL_ENTRY: &[u8] = b"PK\x01\x02";
+    let Some(eocd) = data
+        .windows(EOCD.len())
+        .enumerate()
+        .rev()
+        .find_map(|(position, window)| {
+            if window != EOCD || position + 22 > data.len() {
+                return None;
+            }
+            let comment_len = usize::from(u16::from_le_bytes([
+                data[position + 20],
+                data[position + 21],
+            ]));
+            (position + 22 + comment_len == data.len()).then_some(position)
+        })
+    else {
+        return Ok(());
+    };
+    let entries = usize::from(u16::from_le_bytes([data[eocd + 10], data[eocd + 11]]));
+    let mut cursor = u32::from_le_bytes([
+        data[eocd + 16],
+        data[eocd + 17],
+        data[eocd + 18],
+        data[eocd + 19],
+    ]) as usize;
+    let mut names = std::collections::HashSet::with_capacity(entries);
+    for _ in 0..entries {
+        if cursor + 46 > data.len() || &data[cursor..cursor + 4] != CENTRAL_ENTRY {
+            return Ok(());
+        }
+        let name_len = usize::from(u16::from_le_bytes([data[cursor + 28], data[cursor + 29]]));
+        let extra_len = usize::from(u16::from_le_bytes([data[cursor + 30], data[cursor + 31]]));
+        let comment_len = usize::from(u16::from_le_bytes([data[cursor + 32], data[cursor + 33]]));
+        let name_start = cursor + 46;
+        let Some(name_end) = name_start.checked_add(name_len) else {
+            return Ok(());
+        };
+        if name_end > data.len() {
+            return Ok(());
+        }
+        let name = String::from_utf8_lossy(&data[name_start..name_end]).into_owned();
+        if !names.insert(name.clone()) {
+            return Err(DocumentError::MalformedPart {
+                part: name,
+                detail: "duplicate zip entry name".to_string(),
+            });
+        }
+        let Some(next) = name_end
+            .checked_add(extra_len)
+            .and_then(|offset| offset.checked_add(comment_len))
+        else {
+            return Ok(());
+        };
+        cursor = next;
+    }
+    Ok(())
 }
 
 /// What [`transform_xml`] should do with the event it was handed.
@@ -208,12 +288,10 @@ where
 
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     loop {
-        let event = reader
-            .read_event()
-            .map_err(|error| DocumentError::MalformedPart {
-                part: "xml".to_string(),
-                detail: error.to_string(),
-            })?;
+        let event = reader.read_event().map_err(|source| DocumentError::Xml {
+            part: "xml".to_string(),
+            source,
+        })?;
         if matches!(event, Event::Eof) {
             break;
         }
@@ -221,13 +299,19 @@ where
             EventAction::Keep => {
                 writer
                     .write_event(event)
-                    .map_err(|error| DocumentError::Write(error.to_string()))?;
+                    .map_err(|source| DocumentError::OoxmlIo {
+                        operation: "write transformed XML",
+                        source,
+                    })?;
             }
             EventAction::Replace(events) => {
                 for replacement in events {
                     writer
                         .write_event(replacement)
-                        .map_err(|error| DocumentError::Write(error.to_string()))?;
+                        .map_err(|source| DocumentError::OoxmlIo {
+                            operation: "write transformed XML",
+                            source,
+                        })?;
                 }
             }
             EventAction::Drop => {}
@@ -273,6 +357,29 @@ mod tests {
         let first = OoxmlPackage::read(&original).unwrap().write().unwrap();
         let second = OoxmlPackage::read(&first).unwrap().write().unwrap();
         assert_eq!(first, second, "re-writing must be deterministic");
+    }
+
+    #[test]
+    fn duplicate_archive_entry_names_fail_loudly() {
+        // Generated by Python's zipfile, because zip::ZipWriter correctly
+        // refuses to create duplicate names itself.
+        let archive = [
+            80, 75, 3, 4, 20, 0, 0, 0, 0, 0, 205, 181, 13, 93, 87, 238, 113, 146, 5, 0, 0, 0, 5, 0,
+            0, 0, 8, 0, 0, 0, 115, 97, 109, 101, 46, 120, 109, 108, 102, 105, 114, 115, 116, 80,
+            75, 3, 4, 20, 0, 0, 0, 0, 0, 205, 181, 13, 93, 105, 17, 31, 182, 6, 0, 0, 0, 6, 0, 0,
+            0, 8, 0, 0, 0, 115, 97, 109, 101, 46, 120, 109, 108, 115, 101, 99, 111, 110, 100, 80,
+            75, 1, 2, 20, 3, 20, 0, 0, 0, 0, 0, 205, 181, 13, 93, 87, 238, 113, 146, 5, 0, 0, 0, 5,
+            0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 1, 0, 0, 0, 0, 115, 97, 109, 101, 46,
+            120, 109, 108, 80, 75, 1, 2, 20, 3, 20, 0, 0, 0, 0, 0, 205, 181, 13, 93, 105, 17, 31,
+            182, 6, 0, 0, 0, 6, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 1, 43, 0, 0, 0,
+            115, 97, 109, 101, 46, 120, 109, 108, 80, 75, 5, 6, 0, 0, 0, 0, 2, 0, 2, 0, 108, 0, 0,
+            0, 87, 0, 0, 0, 0, 0,
+        ];
+        match OoxmlPackage::read(&archive) {
+            Err(DocumentError::MalformedPart { part, .. }) if part == "same.xml" => {}
+            Err(error) => panic!("wrong duplicate-entry error: {error:?}"),
+            Ok(package) => panic!("duplicate entry was accepted: {:?}", package.names),
+        }
     }
 
     #[test]

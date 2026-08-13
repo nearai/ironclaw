@@ -46,8 +46,9 @@ use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, FilesystemOper
 /// Ceiling on a document read/edit, matching the OOXML package budget in
 /// `ironclaw_documents`.
 const MAX_DOCUMENT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_HTML_BYTES: usize = 1024 * 1024;
 
-fn document_error(
+pub(super) fn document_error(
     operation: &str,
     scoped_path: &str,
     error: DocumentError,
@@ -179,6 +180,18 @@ pub(super) async fn document_edit(
         )));
     }
 
+    let stat = request
+        .filesystem
+        .stat(&source.virtual_path)
+        .await
+        .map_err(|error| {
+            filesystem_error_with_summary("document_edit", source.scoped_path.as_str(), error)
+        })?;
+    if stat.len > MAX_DOCUMENT_BYTES as u64 {
+        return Err(CodingCapabilityError::new(
+            RuntimeDispatchErrorKind::Resource,
+        ));
+    }
     let bytes = request
         .filesystem
         .read_file(&source.virtual_path)
@@ -186,11 +199,6 @@ pub(super) async fn document_edit(
         .map_err(|error| {
             filesystem_error_with_summary("document_edit", source.scoped_path.as_str(), error)
         })?;
-    if bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(CodingCapabilityError::new(
-            RuntimeDispatchErrorKind::Resource,
-        ));
-    }
     if content_fingerprint(&bytes) != recorded.fingerprint {
         return Err(stale_read_error(
             "document_edit",
@@ -202,14 +210,6 @@ pub(super) async fn document_edit(
         .map_err(|error| document_error("document_edit", source.scoped_path.as_str(), error))?;
 
     create_new_output(request, "document_edit", &target, &edited).await?;
-    // Record the NEW file's structured fingerprint so a follow-up edit can
-    // chain off it without a redundant read, exactly as write_file does.
-    read_states.record(
-        &scope,
-        target.virtual_path.as_str(),
-        content_fingerprint(&edited),
-        ReadRepresentation::Structured,
-    );
 
     Ok(CodingCapabilityOutput::new(json!({
         "path": target.scoped_path.as_str(),
@@ -228,18 +228,24 @@ fn apply_typed_edits(
     let raw = Value::Array(edits.to_vec());
     match format {
         DocumentFormat::Docx => {
-            let typed: Vec<docx::DocxEdit> = serde_json::from_value(raw)
-                .map_err(|error| DocumentError::UnsupportedFormat(error.to_string()))?;
+            let typed: Vec<docx::DocxEdit> =
+                serde_json::from_value(raw).map_err(|error| DocumentError::InvalidEdit {
+                    detail: error.to_string(),
+                })?;
             docx::edit_docx(bytes, &typed)
         }
         DocumentFormat::Xlsx => {
-            let typed: Vec<xlsx::XlsxEdit> = serde_json::from_value(raw)
-                .map_err(|error| DocumentError::UnsupportedFormat(error.to_string()))?;
+            let typed: Vec<xlsx::XlsxEdit> =
+                serde_json::from_value(raw).map_err(|error| DocumentError::InvalidEdit {
+                    detail: error.to_string(),
+                })?;
             xlsx::edit_xlsx(bytes, &typed)
         }
         DocumentFormat::Pptx => {
-            let typed: Vec<pptx::PptxEdit> = serde_json::from_value(raw)
-                .map_err(|error| DocumentError::UnsupportedFormat(error.to_string()))?;
+            let typed: Vec<pptx::PptxEdit> =
+                serde_json::from_value(raw).map_err(|error| DocumentError::InvalidEdit {
+                    detail: error.to_string(),
+                })?;
             pptx::edit_pptx(bytes, &typed)
         }
     }
@@ -259,6 +265,12 @@ pub(super) async fn html_to_pdf_capability(
         return Err(input_error());
     }
     let html = required_str(request.input, "html")?;
+    if html.len() > MAX_HTML_BYTES {
+        return Err(CodingCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::Resource,
+            format!("html_to_pdf accepts at most {MAX_HTML_BYTES} bytes of HTML"),
+        ));
+    }
     let target = resolve_required_path(request, "path", FilesystemOperation::WriteFile)?;
     if !target
         .scoped_path
@@ -286,14 +298,15 @@ pub(super) async fn html_to_pdf_capability(
         .get("title")
         .and_then(Value::as_str)
         .unwrap_or("Document");
-    let pdf = html_to_pdf(
-        html,
-        &PdfOptions {
-            title: title.to_string(),
-            ..PdfOptions::default()
-        },
-    )
-    .map_err(|error| document_error("html_to_pdf", target.scoped_path.as_str(), error))?;
+    let html = html.to_string();
+    let options = PdfOptions {
+        title: title.to_string(),
+        ..PdfOptions::default()
+    };
+    let pdf = tokio::task::spawn_blocking(move || html_to_pdf(&html, &options))
+        .await
+        .map_err(|_| operation_error_with_summary("html_to_pdf rendering task failed".to_string()))?
+        .map_err(|error| document_error("html_to_pdf", target.scoped_path.as_str(), error))?;
 
     // The atomic absent precondition closes the stat/write race and makes any
     // filesystem failure fail closed rather than silently overwriting.
@@ -304,4 +317,20 @@ pub(super) async fn html_to_pdf_capability(
         "bytes_written": pdf.len(),
         "success": true,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_edit_payloads_are_not_reported_as_unsupported_formats() {
+        let error = apply_typed_edits(
+            DocumentFormat::Docx,
+            &[],
+            &[json!({"op": "replace_paragraph_text", "paragraph": "p1"})],
+        )
+        .unwrap_err();
+        assert!(matches!(error, DocumentError::InvalidEdit { .. }));
+    }
 }

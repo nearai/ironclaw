@@ -62,6 +62,8 @@ const SHEET_CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standa
 /// strings (the shape Excel actually writes) and an existing total formula in
 /// `C5` with a cached value — so the "stale `<v>`" trap is reachable.
 pub(crate) fn expenses_xlsx() -> Vec<u8> {
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
     let workbook = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Expenses" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></sheets></workbook>"#;
     let shared = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -80,13 +82,20 @@ pub(crate) fn expenses_xlsx() -> Vec<u8> {
     );
     let styles = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
 
     package(&[
         (
             "[Content_Types].xml",
             SHEET_CONTENT_TYPES.as_bytes().to_vec(),
         ),
+        ("_rels/.rels", root_rels.as_bytes().to_vec()),
         ("xl/workbook.xml", workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels",
+            workbook_rels.as_bytes().to_vec(),
+        ),
         ("xl/sharedStrings.xml", shared.as_bytes().to_vec()),
         ("xl/styles.xml", styles.as_bytes().to_vec()),
         ("xl/worksheets/sheet1.xml", sheet.as_bytes().to_vec()),
@@ -97,7 +106,10 @@ pub(crate) fn expenses_xlsx() -> Vec<u8> {
 /// meaningful to inherit and the "same style" assertions are not vacuous.
 pub(crate) fn quarterly_pptx() -> Vec<u8> {
     let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#;
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
 
     let presentation = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst></p:presentation>"#;
@@ -123,11 +135,21 @@ pub(crate) fn quarterly_pptx() -> Vec<u8> {
     let layout = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="titleAndBody"><p:cSld name="Title and Content"/></p:sldLayout>"#;
 
+    let layout_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
+
+    let master = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld/><p:sldLayoutIdLst><p:sldLayoutId id="1" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>"#;
+
+    let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#;
+
     let theme = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="IronClaw"><a:themeElements><a:clrScheme name="IronClaw"/></a:themeElements></a:theme>"#;
 
     package(&[
         ("[Content_Types].xml", content_types.as_bytes().to_vec()),
+        ("_rels/.rels", root_rels.as_bytes().to_vec()),
         ("ppt/presentation.xml", presentation.as_bytes().to_vec()),
         (
             "ppt/_rels/presentation.xml.rels",
@@ -141,6 +163,18 @@ pub(crate) fn quarterly_pptx() -> Vec<u8> {
         (
             "ppt/slideLayouts/slideLayout1.xml",
             layout.as_bytes().to_vec(),
+        ),
+        (
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes().to_vec(),
+        ),
+        (
+            "ppt/slideMasters/slideMaster1.xml",
+            master.as_bytes().to_vec(),
+        ),
+        (
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes().to_vec(),
         ),
         ("ppt/theme/theme1.xml", theme.as_bytes().to_vec()),
     ])

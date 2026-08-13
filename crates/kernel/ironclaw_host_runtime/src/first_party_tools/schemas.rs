@@ -443,7 +443,15 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "minItems": 1,
                     "maxItems": 256,
                     "description": "Structural edits, applied in order. The accepted shapes depend on the document format.\n\n.docx:\n- {\"op\": \"resolve_all_revisions\", \"disposition\": \"accept\"|\"reject\"} — resolve every tracked change\n- {\"op\": \"resolve_revisions\", \"paragraph\": \"p3\", \"disposition\": \"accept\"|\"reject\"} — resolve one paragraph's tracked changes\n- {\"op\": \"replace_paragraph_text\", \"paragraph\": \"p3\", \"text\": \"...\"} — replace a paragraph's text, keeping its style\n\n.xlsx:\n- {\"op\": \"set_cell_formula\", \"sheet\": \"Sheet1\", \"cell\": \"C5\", \"formula\": \"SUM(C2:C4)\"}\n\n.pptx:\n- {\"op\": \"clone_slide\", \"source\": 1, \"text\": [\"Title\", \"Body\"]} — append a copy of slide `source` (1-based) with its text replaced, inheriting the source's layout and style",
-                    "items": { "type": "object" }
+                    "items": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "op": { "const": "resolve_all_revisions" }, "disposition": { "type": "string", "enum": ["accept", "reject"] } }, "required": ["op", "disposition"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "resolve_revisions" }, "paragraph": { "type": "string" }, "disposition": { "type": "string", "enum": ["accept", "reject"] } }, "required": ["op", "paragraph", "disposition"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "replace_paragraph_text" }, "paragraph": { "type": "string" }, "text": { "type": "string" } }, "required": ["op", "paragraph", "text"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "set_cell_formula" }, "sheet": { "type": "string" }, "cell": { "type": "string" }, "formula": { "type": "string" } }, "required": ["op", "sheet", "cell", "formula"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "clone_slide" }, "source": { "type": "integer", "minimum": 1 }, "text": { "type": "array", "items": { "type": "string" } } }, "required": ["op", "source", "text"], "additionalProperties": false }
+                        ]
+                    }
                 }
             },
             "required": ["path", "output_path", "edits"],
@@ -453,7 +461,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Scoped path for the new .pdf. Must not already exist — existing PDFs are never overwritten." },
-                "html": { "type": "string", "description": "HTML to render. Supported: h1-h3, p, ul/ol with li, hr as vertical spacing, blockquote, strong/b, em/i, code, br, and HTML entities. Other tags are ignored but their text still renders. CSS is not supported." },
+                "html": { "type": "string", "maxLength": 1048576, "description": "HTML to render. Supported: h1-h3, p, ul/ol with li, hr as vertical spacing, blockquote, strong/b, em/i, code, br, and HTML entities. Other tags are ignored but their text still renders. CSS is not supported." },
                 "title": { "type": "string", "description": "Document title recorded in the PDF metadata" }
             },
             "required": ["path", "html"],

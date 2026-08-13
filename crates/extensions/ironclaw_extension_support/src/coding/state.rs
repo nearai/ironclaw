@@ -49,8 +49,9 @@ impl CodingEditLocks {
 /// scope + resolved virtual path. `write_file` and `apply_patch` on an
 /// existing file require a recorded entry (read-before-edit) whose
 /// fingerprint still matches the file's current bytes (mid-air collision
-/// detection); a successful edit refreshes the entry so chained edits keep
-/// working. The registry is bounded; eviction and process restarts fail
+/// detection); a successful text edit refreshes the entry so chained text
+/// edits keep working. Structured document edits require a fresh read because
+/// their addresses can shift. The registry is bounded; eviction and process restarts fail
 /// safe — a missing entry only forces a fresh `read_file` before editing.
 const MAX_READ_STATE_ENTRIES: usize = 8192;
 

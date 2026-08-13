@@ -15,6 +15,7 @@
 //! | reject | drop the runs entirely | unwrap, and turn `w:delText` back into `w:t` |
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::error::DocumentError;
 use crate::ooxml::{EventAction, OoxmlPackage, local_name, transform_xml};
@@ -224,7 +225,9 @@ fn absorb_text(
                 paragraph.text.push_str(text);
             }
             match pending {
-                Some((existing_kind, buffer, _)) if *existing_kind == kind => {
+                Some((existing_kind, buffer, existing_author))
+                    if *existing_kind == kind && *existing_author == author =>
+                {
                     buffer.push_str(text);
                 }
                 _ => {
@@ -288,6 +291,7 @@ fn resolve_revisions(
     let mut in_insert = false;
     let mut in_delete = false;
     let mut resolved_any = false;
+    let mut found_target = only.is_none();
 
     let out = transform_xml(xml, |event| {
         // A discarded subtree swallows everything until it closes.
@@ -307,6 +311,7 @@ fn resolve_revisions(
                     target_stack.push(in_target);
                     if let Some(target) = only {
                         in_target = format!("p{paragraph_index}") == target;
+                        found_target |= in_target;
                     }
                     Ok(EventAction::Keep)
                 }
@@ -351,9 +356,14 @@ fn resolve_revisions(
                     }
                 }
                 b"delText" if in_delete && disposition == RevisionDisposition::Reject => {
-                    let mut replacement = tag.clone().into_owned();
-                    replacement.set_name(b"w:t");
-                    Ok(EventAction::Replace(vec![Event::Start(replacement)]))
+                    let mut replacement =
+                        BytesStart::new(qualified_name(tag.name().as_ref(), b"t"));
+                    for attribute in tag.attributes().flatten() {
+                        replacement.push_attribute(attribute);
+                    }
+                    Ok(EventAction::Replace(vec![Event::Start(
+                        replacement.into_owned(),
+                    )]))
                 }
                 _ => Ok(EventAction::Keep),
             },
@@ -371,7 +381,9 @@ fn resolve_revisions(
                     Ok(EventAction::Drop)
                 }
                 b"delText" if in_delete && disposition == RevisionDisposition::Reject => {
-                    Ok(EventAction::Replace(vec![Event::End(BytesEnd::new("w:t"))]))
+                    Ok(EventAction::Replace(vec![Event::End(BytesEnd::new(
+                        qualified_name(tag.name().as_ref(), b"t"),
+                    ))]))
                 }
                 _ => Ok(EventAction::Keep),
             },
@@ -379,6 +391,13 @@ fn resolve_revisions(
         }
     })?;
 
+    if let Some(target) = only
+        && !found_target
+    {
+        return Err(DocumentError::UnknownAddress {
+            address: target.to_string(),
+        });
+    }
     if let Some(target) = only
         && !resolved_any
     {
@@ -390,17 +409,32 @@ fn resolve_revisions(
     Ok(out)
 }
 
+fn qualified_name(raw: &[u8], local: &[u8]) -> String {
+    match raw.iter().position(|byte| *byte == b':') {
+        Some(index) => format!(
+            "{}:{}",
+            String::from_utf8_lossy(&raw[..index]),
+            String::from_utf8_lossy(local)
+        ),
+        None => String::from_utf8_lossy(local).into_owned(),
+    }
+}
+
 /// Replace a paragraph's text, keeping `w:pPr` and the first run's `w:rPr`.
 fn replace_paragraph_text(
     xml: &str,
     paragraph: &str,
     replacement: &str,
 ) -> Result<String, DocumentError> {
+    let nested_runs = direct_runs_with_nested_paragraphs(xml, paragraph)?;
     let mut paragraph_index = 0usize;
     let mut target_stack: Vec<bool> = Vec::new();
     let mut in_target = false;
     let mut wrote_replacement = false;
     let mut found = false;
+    let mut target_prefix = String::new();
+    let mut target_run_index = 0usize;
+    let mut preserving_nested_run = false;
     // Depth tracking so the original runs are removed but `w:pPr` survives —
     // dropping the whole paragraph body would lose alignment, numbering and
     // style, which is exactly the silent formatting loss this crate exists to
@@ -427,10 +461,22 @@ fn replace_paragraph_text(
                     if in_target {
                         found = true;
                         wrote_replacement = false;
+                        target_prefix = String::from_utf8_lossy(qname.as_ref()).into_owned();
                     }
                     return Ok(EventAction::Keep);
                 }
                 if in_target && name == b"r" {
+                    target_run_index += 1;
+                    if nested_runs.contains(&target_run_index) {
+                        preserving_nested_run = true;
+                        if wrote_replacement {
+                            return Ok(EventAction::Keep);
+                        }
+                        wrote_replacement = true;
+                        let mut events = replacement_run(&target_prefix, replacement);
+                        events.push(Event::Start(tag.clone().into_owned()));
+                        return Ok(EventAction::Replace(events));
+                    }
                     dropping = 1;
                     if wrote_replacement {
                         return Ok(EventAction::Drop);
@@ -438,23 +484,41 @@ fn replace_paragraph_text(
                     wrote_replacement = true;
                     // One fresh run carrying the replacement text. `xml:space`
                     // is preserved so leading/trailing spaces are not eaten.
-                    let mut text_tag = BytesStart::new("w:t");
-                    text_tag.push_attribute(("xml:space", "preserve"));
-                    return Ok(EventAction::Replace(vec![
-                        Event::Start(BytesStart::new("w:r")),
-                        Event::Start(text_tag),
-                        Event::Text(BytesText::new(replacement).into_owned()),
-                        Event::End(BytesEnd::new("w:t")),
-                        Event::End(BytesEnd::new("w:r")),
-                    ]));
+                    return Ok(EventAction::Replace(replacement_run(
+                        &target_prefix,
+                        replacement,
+                    )));
+                }
+                if preserving_nested_run && in_target && matches!(name, b"t" | b"delText") {
+                    dropping = 1;
+                    return Ok(EventAction::Drop);
                 }
                 Ok(EventAction::Keep)
             }
             Event::End(tag) => {
-                if local_name(tag.name().as_ref()) == b"p" {
+                let qname = tag.name();
+                let name = local_name(qname.as_ref());
+                if name == b"r" && in_target && preserving_nested_run {
+                    preserving_nested_run = false;
+                }
+                if name == b"p" {
+                    if in_target && !wrote_replacement {
+                        wrote_replacement = true;
+                        let mut events = replacement_run(&target_prefix, replacement);
+                        events.push(Event::End(tag.clone().into_owned()));
+                        in_target = target_stack.pop().unwrap_or(false);
+                        return Ok(EventAction::Replace(events));
+                    }
                     in_target = target_stack.pop().unwrap_or(false);
                 }
                 Ok(EventAction::Keep)
+            }
+            Event::Empty(tag)
+                if preserving_nested_run
+                    && in_target
+                    && matches!(local_name(tag.name().as_ref()), b"tab" | b"br" | b"cr") =>
+            {
+                Ok(EventAction::Drop)
             }
             _ => Ok(EventAction::Keep),
         }
@@ -466,6 +530,76 @@ fn replace_paragraph_text(
         });
     }
     Ok(out)
+}
+
+fn replacement_run(prefix_source: &str, replacement: &str) -> Vec<Event<'static>> {
+    let run_name = qualified_name(prefix_source.as_bytes(), b"r");
+    let text_name = qualified_name(prefix_source.as_bytes(), b"t");
+    let mut text_tag = BytesStart::new(text_name.clone());
+    text_tag.push_attribute(("xml:space", "preserve"));
+    vec![
+        Event::Start(BytesStart::new(run_name.clone())),
+        Event::Start(text_tag),
+        Event::Text(BytesText::new(replacement).into_owned()),
+        Event::End(BytesEnd::new(text_name)),
+        Event::End(BytesEnd::new(run_name)),
+    ]
+}
+
+fn direct_runs_with_nested_paragraphs(
+    xml: &str,
+    target: &str,
+) -> Result<HashSet<usize>, DocumentError> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut paragraph_index = 0usize;
+    let mut paragraph_depth = 0usize;
+    let mut target_depth = None;
+    let mut run_index = 0usize;
+    let mut direct_run = None;
+    let mut nested = HashSet::new();
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|error| DocumentError::MalformedPart {
+                part: DOCUMENT_PART.to_string(),
+                detail: error.to_string(),
+            })?;
+        match event {
+            Event::Eof => break,
+            Event::Start(ref tag) => match local_name(tag.name().as_ref()) {
+                b"p" => {
+                    paragraph_index += 1;
+                    if let Some(run) = direct_run
+                        && target_depth.is_some()
+                    {
+                        nested.insert(run);
+                    }
+                    paragraph_depth += 1;
+                    if format!("p{paragraph_index}") == target {
+                        target_depth = Some(paragraph_depth);
+                    }
+                }
+                b"r" if target_depth == Some(paragraph_depth) && direct_run.is_none() => {
+                    run_index += 1;
+                    direct_run = Some(run_index);
+                }
+                _ => {}
+            },
+            Event::End(ref tag) => match local_name(tag.name().as_ref()) {
+                b"r" if target_depth == Some(paragraph_depth) => direct_run = None,
+                b"p" => {
+                    if target_depth == Some(paragraph_depth) {
+                        target_depth = None;
+                        direct_run = None;
+                    }
+                    paragraph_depth = paragraph_depth.saturating_sub(1);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(nested)
 }
 
 #[cfg(test)]
@@ -678,6 +812,69 @@ mod review_regressions {
     use super::*;
     use crate::test_fixtures::docx_with_body;
 
+    #[test]
+    fn adjacent_revisions_from_different_authors_stay_distinct() {
+        let docx = docx_with_body(concat!(
+            r#"<w:p><w:ins w:author="Alice"><w:r><w:t>A</w:t></w:r></w:ins>"#,
+            r#"<w:ins w:author="Bob"><w:r><w:t>B</w:t></w:r></w:ins></w:p>"#,
+        ));
+        let revisions = &read_docx(&docx).unwrap()[0].revisions;
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].author.as_deref(), Some("Alice"));
+        assert_eq!(revisions[1].author.as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn resolving_revisions_at_an_unknown_paragraph_is_an_address_error() {
+        let error = edit_docx(
+            &docx_with_body(r#"<w:p><w:r><w:t>plain</w:t></w:r></w:p>"#),
+            &[DocxEdit::ResolveRevisions {
+                paragraph: "p99".to_string(),
+                disposition: RevisionDisposition::Accept,
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(error, DocumentError::UnknownAddress { .. }));
+    }
+
+    #[test]
+    fn edits_preserve_nonstandard_wordprocessing_prefixes() {
+        let document = r#"<x:document xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><x:body><x:p><x:del><x:r><x:delText>old</x:delText></x:r></x:del></x:p><x:p><x:r><x:t>plain</x:t></x:r></x:p></x:body></x:document>"#;
+        let docx =
+            crate::test_fixtures::package(&[("word/document.xml", document.as_bytes().to_vec())]);
+        let resolved = edit_docx(
+            &docx,
+            &[DocxEdit::ResolveAllRevisions {
+                disposition: RevisionDisposition::Reject,
+            }],
+        )
+        .unwrap();
+        let resolved_xml = OoxmlPackage::read(&resolved)
+            .unwrap()
+            .part_str(DOCUMENT_PART)
+            .unwrap();
+        assert!(resolved_xml.contains("<x:t>old</x:t>"), "{resolved_xml}");
+        assert!(!resolved_xml.contains("w:"), "{resolved_xml}");
+
+        let replaced = edit_docx(
+            &docx,
+            &[DocxEdit::ReplaceParagraphText {
+                paragraph: "p2".to_string(),
+                text: "new".to_string(),
+            }],
+        )
+        .unwrap();
+        let replaced_xml = OoxmlPackage::read(&replaced)
+            .unwrap()
+            .part_str(DOCUMENT_PART)
+            .unwrap();
+        assert!(
+            replaced_xml.contains("<x:r><x:t xml:space=\"preserve\">new</x:t></x:r>"),
+            "{replaced_xml}"
+        );
+        assert!(!replaced_xml.contains("w:"), "{replaced_xml}");
+    }
+
     /// Word nests `w:p` inside table cells and text boxes. If the reader loses
     /// the outer paragraph while the writer counts every `w:p`, the ids the
     /// caller reads no longer address the paragraphs the writer edits — so an
@@ -710,6 +907,21 @@ mod review_regressions {
             )
             .unwrap();
             let after = read_docx(&edited).unwrap();
+            assert_eq!(
+                after.len(),
+                paragraphs.len(),
+                "editing {} must preserve every nested paragraph",
+                target.id
+            );
+            for (before, current) in paragraphs.iter().zip(&after) {
+                if before.id != target.id {
+                    assert_eq!(
+                        current.text, before.text,
+                        "editing {} changed nested/non-target {}",
+                        target.id, before.id
+                    );
+                }
+            }
             let changed: Vec<_> = after
                 .iter()
                 .filter(|p| p.text == "REPLACED")

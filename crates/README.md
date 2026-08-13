@@ -79,7 +79,7 @@ directory has its own `README.md`, crate or not.
 
 ### The workspace beyond `crates/`
 
-63 of the workspace's **65 packages** live under `crates/`. The other two are
+65 of the workspace's **67 packages** live under `crates/`. The other two are
 the root package `ironclaw_integration_tests` (the in-process integration
 suite driving `tests/integration/`) and `tools/ironclaw_stress`. One package
 is deliberately excluded from the workspace: `tools/ironclaw_silk_decoder`,

@@ -940,8 +940,8 @@ def build_plan(
         ):
             # Document/binary fixtures (docx, xlsx, pptx, pdf) are consumed by
             # integration tests through `include_bytes!`, so changing one
-            # changes what those tests assert. Recorded LLM traces are handled
-            # under `reborn_qa` are handled by the QA-evidence arm above;
+            # changes what those tests assert. Recorded LLM traces under
+            # `reborn_qa` are handled by the QA-evidence arm above;
             # other trace families require an explicit owner rather than
             # silently becoming generic integration fixtures.
             integration_lanes.add(0)

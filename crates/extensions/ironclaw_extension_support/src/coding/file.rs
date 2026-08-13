@@ -90,8 +90,10 @@ pub(super) async fn read_file(
     // know to prefer would mostly go unused.
     if let Some(format) =
         ironclaw_documents::DocumentFormat::from_path(resolved.scoped_path.as_str())
-        && let Ok(view) = super::document::structured_document_view(format, &bytes)
     {
+        let view = super::document::structured_document_view(format, &bytes).map_err(|error| {
+            super::document::document_error("read_file", resolved.scoped_path.as_str(), error)
+        })?;
         let rendered = serde_json::to_string_pretty(&view).map_err(|error| {
             CodingCapabilityError::with_safe_summary(
                 RuntimeDispatchErrorKind::OperationFailed,
@@ -108,6 +110,12 @@ pub(super) async fn read_file(
             limit,
             has_explicit_range,
         );
+        if read_output_truncated(&output) {
+            return Err(operation_error_with_summary(format!(
+                "read_file failed for {}: the structured document view exceeds the response limit and cannot be edited safely",
+                safe_summary_path(resolved.scoped_path.as_str())
+            )));
+        }
         if !has_explicit_range && !read_output_truncated(&output) {
             read_states.record(
                 &read_scope_key(request),
@@ -560,7 +568,7 @@ fn lower_path_extension(scoped_path: &str) -> Option<String> {
 fn is_opaque_binary_document_path(scoped_path: &str) -> bool {
     matches!(
         lower_path_extension(scoped_path).as_deref(),
-        Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx")
+        Some("doc" | "docx" | "docm" | "xls" | "xlsx" | "xlsm" | "ppt" | "pptx" | "pptm")
     )
 }
 

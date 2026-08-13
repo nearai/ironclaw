@@ -7,6 +7,27 @@ pub enum DocumentError {
     #[error("not a readable OOXML package: {0}")]
     NotAnOoxmlPackage(String),
 
+    #[error("OOXML archive operation {operation} failed")]
+    OoxmlArchive {
+        operation: &'static str,
+        #[source]
+        source: zip::result::ZipError,
+    },
+
+    #[error("OOXML I/O operation {operation} failed")]
+    OoxmlIo {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("part {part} could not be parsed as XML")]
+    Xml {
+        part: String,
+        #[source]
+        source: quick_xml::Error,
+    },
+
     #[error("package is too large to edit safely: {detail}")]
     PackageTooLarge { detail: String },
 
@@ -26,6 +47,9 @@ pub enum DocumentError {
     /// example accepting a revision on a paragraph that carries none.
     #[error("edit does not apply at {address}: {detail}")]
     InapplicableEdit { address: String, detail: String },
+
+    #[error("edit payload is invalid: {detail}")]
+    InvalidEdit { detail: String },
 
     #[error("failed to write the edited document: {0}")]
     Write(String),

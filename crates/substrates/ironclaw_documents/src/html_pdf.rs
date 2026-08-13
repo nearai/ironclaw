@@ -408,7 +408,10 @@ fn decode_entities(text: &str) -> String {
                 other => other
                     .strip_prefix('#')
                     .and_then(|digits| digits.parse::<u32>().ok())
-                    .and_then(char::from_u32),
+                    .and_then(char::from_u32)
+                    .filter(|character| {
+                        !character.is_control() || matches!(character, '\t' | '\n' | '\r')
+                    }),
             })
             .flatten();
 
@@ -582,11 +585,25 @@ impl Layout {
             }
         }
 
-        let mut line: Vec<(String, Style)> = Vec::new();
+        let mut line: Vec<(String, Style, bool)> = Vec::new();
         let mut line_width = 0.0f32;
         let mut first_line = true;
 
+        let mut fitted_words = Vec::new();
         for (word, style) in words {
+            if word == HARD_BREAK.to_string() {
+                fitted_words.push((word, style, false));
+            } else {
+                fitted_words.extend(
+                    self.split_word_to_width(&word, style, size, available)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, piece)| (piece, style, index == 0)),
+                );
+            }
+        }
+
+        for (word, style, separated) in fitted_words {
             if word == HARD_BREAK.to_string() {
                 self.emit_line(&line, size, left, line_height, first_line, marker);
                 first_line = false;
@@ -594,7 +611,7 @@ impl Layout {
                 line_width = 0.0;
                 continue;
             }
-            let space = if line.is_empty() {
+            let space = if line.is_empty() || !separated {
                 0.0
             } else {
                 self.metrics.width(" ", style.font(), size)
@@ -604,21 +621,48 @@ impl Layout {
                 self.emit_line(&line, size, left, line_height, first_line, marker);
                 first_line = false;
                 line.clear();
-                line.push((word, style));
+                line.push((word, style, false));
                 line_width = width;
                 continue;
             }
             line_width += space + width;
-            line.push((word, style));
+            line.push((word, style, separated));
         }
         if !line.is_empty() {
             self.emit_line(&line, size, left, line_height, first_line, marker);
         }
     }
 
+    fn split_word_to_width(
+        &mut self,
+        word: &str,
+        style: Style,
+        size: Pt,
+        available: f32,
+    ) -> Vec<String> {
+        if self.metrics.width(word, style.font(), size) <= available {
+            return vec![word.to_string()];
+        }
+        let mut pieces = Vec::new();
+        let mut current = String::new();
+        for character in word.chars() {
+            let mut candidate = current.clone();
+            candidate.push(character);
+            if !current.is_empty() && self.metrics.width(&candidate, style.font(), size) > available
+            {
+                pieces.push(std::mem::take(&mut current));
+            }
+            current.push(character);
+        }
+        if !current.is_empty() {
+            pieces.push(current);
+        }
+        pieces
+    }
+
     fn emit_line(
         &mut self,
-        line: &[(String, Style)],
+        line: &[(String, Style, bool)],
         size: Pt,
         left: f32,
         line_height: f32,
@@ -662,8 +706,8 @@ impl Layout {
         }
 
         let mut x = left;
-        for (index, (word, style)) in line.iter().enumerate() {
-            let text = if index == 0 {
+        for (index, (word, style, separated)) in line.iter().enumerate() {
+            let text = if index == 0 || !separated {
                 word.clone()
             } else {
                 format!(" {word}")
@@ -774,6 +818,17 @@ mod tests {
     }
 
     #[test]
+    fn numeric_entities_cannot_inject_control_sentinels() {
+        let parsed = parse_blocks("<p>a&#0;b&#1;c</p>");
+        let Block::Paragraph { spans } = &parsed[0] else {
+            panic!("expected a paragraph");
+        };
+        let joined: String = spans.iter().map(|span| span.text.as_str()).collect();
+        assert!(!joined.contains(HARD_BREAK), "{joined:?}");
+        assert!(!joined.chars().any(char::is_control), "{joined:?}");
+    }
+
+    #[test]
     fn source_whitespace_collapses_but_explicit_breaks_survive() {
         let parsed = parse_blocks("<p>a\n   b<br>c</p>");
         let Block::Paragraph { spans } = &parsed[0] else {
@@ -853,6 +908,22 @@ mod tests {
     }
 
     #[test]
+    fn a_single_oversized_word_is_split_to_the_available_width() {
+        let mut layout = Layout::new(&PdfOptions::default()).unwrap();
+        let style = Style::default();
+        let size = Pt(10.0);
+        let available = 40.0;
+        let pieces = layout.split_word_to_width(&"x".repeat(200), style, size, available);
+        assert!(pieces.len() > 1);
+        assert_eq!(pieces.concat(), "x".repeat(200));
+        assert!(
+            pieces
+                .iter()
+                .all(|piece| { layout.metrics.width(piece, style.font(), size) <= available })
+        );
+    }
+
+    #[test]
     fn empty_or_markup_only_html_is_a_typed_error_not_a_blank_pdf() {
         // Silently emitting an empty PDF would look like success.
         for html in ["", "   ", "<div></div>", "<!-- just a comment -->"] {
@@ -888,11 +959,6 @@ mod tests {
             Err(DocumentError::Html(_))
         ));
     }
-}
-
-#[cfg(test)]
-mod review_regressions {
-    use super::*;
 
     #[test]
     fn text_before_a_comment_is_not_dropped() {
