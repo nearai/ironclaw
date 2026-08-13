@@ -11,7 +11,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
 NEARAI_MANIFEST_TEMPLATE="${REPO_ROOT}/scripts/live-canary/fixtures/nearai-runtime-manifest.toml"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
-BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
+# Must equal BUNDLED_MARKER_OWNER in
+# crates/extensions/ironclaw_extension_host/src/bundled_skills.rs — the
+# runtime mint this scrubber verifies. The WS6/WS7 crate renames changed
+# the Rust side to "ironclaw_composition_bundled_skill" while this copy
+# kept the retired "reborn" spelling, so EVERY marker failed the owner
+# check and the bundled-skill pruning silently never engaged (the
+# test-side lockstep pin now guards the pair).
+BUNDLED_SKILL_OWNER="ironclaw_composition_bundled_skill"
 
 # The default first-party extensions root hops from the ironclaw_extension_support
 # crate (found by NAME through the shared inventory, scripts/ci/lib/crate_tree.py)
