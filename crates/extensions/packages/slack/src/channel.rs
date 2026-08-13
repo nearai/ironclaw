@@ -247,6 +247,17 @@ impl SlackChannelAdapter {
                         break 'parts;
                     }
                 }
+                OutboundPart::RunCompletion(_) => {
+                    // §7.9: run-completion notifications are exclusive to
+                    // the web-app channel (its capability alone is true);
+                    // this part reaching a vendor adapter is a coordinator
+                    // bug, reported honestly rather than rendered as text.
+                    parts.push(PartDeliveryOutcome::Permanent {
+                        reason: "run-completion notifications are not supported by this channel"
+                            .to_string(),
+                    });
+                    break 'parts;
+                }
                 OutboundPart::React {
                     vendor_message_ref,
                     reaction,

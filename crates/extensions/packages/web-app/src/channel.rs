@@ -43,6 +43,9 @@ use ironclaw_web_app::{
 /// the app origin.
 const NOTIFICATION_URL: &str = "/automations";
 const NOTIFICATION_TITLE: &str = "IronClaw";
+/// Fixed run-completion copy (design §7.10): a push payload never carries
+/// generated or protected content, only this generic sentence.
+const RUN_COMPLETION_BODY: &str = "An agent run finished.";
 
 /// Per-registration send outcomes, folded into one part outcome.
 #[derive(Default)]
@@ -117,6 +120,9 @@ impl ChannelDelivery for WebAppChannelAdapter {
         let mut lines: Vec<String> = Vec::new();
         let mut urgency = PushUrgency::Normal;
         let mut part_supported: Vec<Result<(), &'static str>> = Vec::new();
+        // §7.10: a typed run-completion part builds its own fixed-copy v2
+        // payload; it never mixes with free-text rendering.
+        let mut run_completion: Option<WebAppNotificationPayload> = None;
         for part in &envelope.parts {
             match part {
                 OutboundPart::Text(text) => {
@@ -129,6 +135,20 @@ impl ChannelDelivery for WebAppChannelAdapter {
                 } => {
                     lines.push(render_channel_auth_prompt(view, *direct_message));
                     urgency = PushUrgency::High;
+                    part_supported.push(Ok(()));
+                }
+                OutboundPart::RunCompletion(view) => {
+                    // Fixed copy only (design §7.10): the payload carries no
+                    // generated or protected content, and the URL derives
+                    // from the typed thread id inside the payload builder.
+                    run_completion = Some(WebAppNotificationPayload::run_completion(
+                        NOTIFICATION_TITLE,
+                        RUN_COMPLETION_BODY,
+                        view.thread_id.as_str(),
+                        view.notice_id.clone(),
+                        view.opaque_thread_tag.clone(),
+                        view.unread_count_for_thread,
+                    ));
                     part_supported.push(Ok(()));
                 }
                 OutboundPart::File(_) => {
@@ -170,12 +190,15 @@ impl ChannelDelivery for WebAppChannelAdapter {
                 reason: "no clients are enrolled for browser push".to_string(),
             }
         } else {
-            let payload = WebAppNotificationPayload::new(
-                NOTIFICATION_TITLE,
-                lines.join("\n\n"),
-                NOTIFICATION_URL,
-                None,
-            );
+            let payload = match run_completion {
+                Some(payload) => payload,
+                None => WebAppNotificationPayload::new(
+                    NOTIFICATION_TITLE,
+                    lines.join("\n\n"),
+                    NOTIFICATION_URL,
+                    None,
+                ),
+            };
             tally = self
                 .fan_out(&envelope.registrations, &payload, urgency, egress)
                 .await;

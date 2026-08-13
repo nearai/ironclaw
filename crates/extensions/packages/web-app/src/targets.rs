@@ -71,6 +71,11 @@ fn web_app_entry(
             gate_prompts: true,
             auth_prompts: true,
             notifications: true,
+            // §7.9: the ONLY provider advertising run-completion pushes.
+            // Capability filtering over the user's effective notification
+            // set therefore yields zero or one completion target with no
+            // extension-name conditions in fanout code.
+            run_completions: true,
             modalities: vec![CommunicationModality::Text],
         },
         destination,

@@ -109,6 +109,10 @@ pub enum RunNotificationEventKind {
     /// `OutboundPushKind::ModelDelivery` so attempts stay
     /// distinguishable in the durable audit trail and per-run accounting.
     ModelDelivery,
+    /// A web-app run-completion notification (2026-08-13 design §7.9). The
+    /// push fallback for a completed top-level run when no browser surface
+    /// answered arbitration; carries fixed copy only, never reply content.
+    RunCompleted,
 }
 
 impl RunNotificationEventKind {
@@ -120,6 +124,7 @@ impl RunNotificationEventKind {
             Self::AuthRequired => OutboundPushKind::AuthPrompt,
             Self::DeliveryStatus => OutboundPushKind::DeliveryStatus,
             Self::ModelDelivery => OutboundPushKind::ModelDelivery,
+            Self::RunCompleted => OutboundPushKind::RunCompletion,
         }
     }
 }
@@ -175,6 +180,12 @@ pub struct DeliveryTargetCapabilities {
     /// (until it gains outbound thread creation).
     #[serde(default)]
     pub notifications: bool,
+    /// This target receives web-app run-completion notifications (2026-08-13
+    /// design §7.9). Defaults false everywhere; only the web-app provider
+    /// advertises true, so capability filtering structurally yields zero or
+    /// one completion target with no extension-name conditions in fanout.
+    #[serde(default)]
+    pub run_completions: bool,
     pub modalities: Vec<CommunicationModality>,
 }
 

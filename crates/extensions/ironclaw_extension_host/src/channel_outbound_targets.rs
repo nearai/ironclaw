@@ -473,6 +473,9 @@ fn full_capabilities() -> DeliveryTargetCapabilities {
         gate_prompts: true,
         auth_prompts: true,
         notifications: true,
+        // §7.9: run-completion notifications are exclusive to the web-app
+        // provider; generic vendor channels never advertise them.
+        run_completions: false,
         modalities: Vec::new(),
     }
 }
