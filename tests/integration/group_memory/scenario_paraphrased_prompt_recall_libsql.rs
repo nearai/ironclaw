@@ -26,9 +26,7 @@ use super::reborn_support::reply::RebornScriptedReply;
 /// simply carries everything.
 const UNWRITTEN_MARKER: &str = "wombat-31";
 
-pub async fn run() -> HarnessResult<()> {
-    let group = RebornIntegrationGroup::builtin_tools_with_native_memory_libsql().await?;
-
+pub async fn run(group: &RebornIntegrationGroup) -> HarnessResult<()> {
     let writer = group
         .thread("conv-memory-paraphrase-writer")
         .script([

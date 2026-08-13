@@ -2396,6 +2396,17 @@ impl LibSqlRootFilesystem {
             query: query.to_string(),
             limit,
         };
+        // Answer the empty-term query BEFORE looking for a declared index.
+        // `Filter::FtsRanked` documents that a query with no content terms
+        // matches nothing on every backend, and PostgreSQL returns an empty
+        // result without ever consulting an index. Resolving the FTS table
+        // first made libSQL alone answer `Unsupported` for a stop-words-only
+        // query against an undeclared prefix — a backend-dependent answer to a
+        // question whose answer does not depend on any index.
+        let terms = crate::index::plain_fts_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
         let fts_tables = self.discover_fts_tables_for_filter(path, &probe).await?;
         let Some(fts_table) = fts_tables.get(key.as_str()) else {
             return Err(FilesystemError::Unsupported {
@@ -2403,10 +2414,6 @@ impl LibSqlRootFilesystem {
                 operation: FilesystemOperation::Query,
             });
         };
-        let terms = crate::index::plain_fts_terms(query);
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
         let match_query = terms
             .into_iter()
             .map(|term| format!("\"{term}\""))

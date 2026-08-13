@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use ironclaw_loop_contracts::{
     LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopSafeSummary,
@@ -116,8 +117,16 @@ where
     /// a backend message, a query, or a path.
     ///
     /// The per-run `OnceCell` above means the fetch happens once, but this is
-    /// called on every prompt build that reads the cache, so it is guarded by
-    /// its own cell to stay at one note per run.
+    /// called on every prompt build that reads the cache, so it is guarded to
+    /// stay at one note per run.
+    ///
+    /// That guard is claimed in two steps, matching
+    /// `publish_personal_context_admitted`: an in-flight flag suppresses
+    /// duplicates while a publish is outstanding, and the `OnceCell` is set
+    /// only once a publish SUCCEEDS. Marking the note emitted up front would
+    /// mean a single transient sink error silently suppressed it for the rest
+    /// of the run — putting the operator back in exactly the state this change
+    /// exists to fix, unable to tell broken retrieval from empty memory.
     fn publish_memory_retrieval_degraded(&self, degradations: &[MemoryRetrievalDegradation]) {
         if degradations.is_empty() {
             return;
@@ -125,7 +134,13 @@ where
         let Some(milestone_sink) = self.milestone_sink.as_ref() else {
             return;
         };
-        if self.memory_degradation_note_emitted.set(()).is_err() {
+        if self.memory_degradation_note_emitted.get().is_some() {
+            return;
+        }
+        if self
+            .memory_degradation_note_in_flight
+            .swap(true, Ordering::AcqRel)
+        {
             return;
         }
         let lanes = degradations
@@ -142,19 +157,29 @@ where
         let summary = match LoopSafeSummary::new(format!("memory retrieval degraded ({lanes})")) {
             Ok(summary) => summary,
             Err(error) => {
+                self.memory_degradation_note_in_flight
+                    .store(false, Ordering::Release);
                 tracing::debug!("failed to build memory degradation milestone: {error}");
                 return;
             }
         };
         let context = self.run_context.clone();
         let milestone_sink = Arc::clone(milestone_sink);
+        let emitted = Arc::clone(&self.memory_degradation_note_emitted);
+        let in_flight = Arc::clone(&self.memory_degradation_note_in_flight);
         tokio::spawn(async move {
-            if let Err(error) = LoopHostMilestoneEmitter::new(context, milestone_sink)
+            let publish_result = LoopHostMilestoneEmitter::new(context, milestone_sink)
                 .driver_note(LoopDriverNoteKind::Context, summary)
-                .await
-            {
-                tracing::debug!("failed to emit memory degradation milestone: {error}");
+                .await;
+            match publish_result {
+                Ok(()) => {
+                    let _ = emitted.set(());
+                }
+                Err(error) => {
+                    tracing::debug!("failed to emit memory degradation milestone: {error}");
+                }
             }
+            in_flight.store(false, Ordering::Release);
         });
     }
 

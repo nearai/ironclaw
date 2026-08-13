@@ -93,11 +93,20 @@ async fn memory_group_e2e() {
 
     // Scenario 8 (#7185): ranked-OR retrieval. A fact saved as one sentence is
     // recalled by a differently-worded question sharing only some of its
-    // content words — the case every-term (AND) matching silently missed. Own
-    // group, same libSQL reason as scenario 6.
+    // content words — the case every-term (AND) matching silently missed.
+    //
+    // The binary owns the group, per the group-scenario contract. It is a
+    // SEPARATE libSQL group rather than the shared `g` above for scenario 6's
+    // reason (the backend binding differs), and separate from scenarios 6/7 on
+    // purpose: those assert on which snippets reach the prompt, and a ranked
+    // top-N lane over one shared store would couple each scenario's positive
+    // assertion to the documents its siblings happened to seed first.
+    let paraphrase_group = RebornIntegrationGroup::builtin_tools_with_native_memory_libsql()
+        .await
+        .expect("libSQL-backed native memory group builds");
     report.record(
         "paraphrased_prompt_recall_libsql",
-        scenario_paraphrased_prompt_recall_libsql::run().await,
+        scenario_paraphrased_prompt_recall_libsql::run(&paraphrase_group).await,
     );
 
     // Scenario 9 (#7185/#7275 observability): a retrieval/backend FAILURE is

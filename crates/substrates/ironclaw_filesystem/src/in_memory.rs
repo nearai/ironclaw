@@ -912,14 +912,24 @@ fn fts_naive_matches(stored: &str, terms: &[String]) -> bool {
     if terms.is_empty() {
         return false;
     }
-    let stored_lower = stored.to_lowercase();
-    let tokens: std::collections::HashSet<&str> = stored_lower
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = fts_tokens(stored);
     terms
         .iter()
-        .all(|term| tokens.contains(term.to_lowercase().as_str()))
+        .all(|term| tokens.contains(&term.to_lowercase()))
+}
+
+/// The whole-token set of `stored`, lowercased. THE single definition of "what
+/// counts as a term occurrence" for this backend: `Filter::Fts` (all terms) and
+/// `Filter::FtsRanked` (any term, ranked) must agree on it or the two matchers
+/// stop being comparable, so both go through here rather than each carrying its
+/// own copy of the split rule.
+fn fts_tokens(stored: &str) -> std::collections::HashSet<String> {
+    stored
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Reference relevance score for [`Filter::FtsRanked`]: how many DISTINCT
@@ -932,14 +942,10 @@ fn fts_term_coverage(stored: &str, terms: &[String]) -> usize {
     if terms.is_empty() {
         return 0;
     }
-    let stored_lower = stored.to_lowercase();
-    let tokens: std::collections::HashSet<&str> = stored_lower
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = fts_tokens(stored);
     terms
         .iter()
-        .filter(|term| tokens.contains(term.to_lowercase().as_str()))
+        .filter(|term| tokens.contains(&term.to_lowercase()))
         .count()
 }
 

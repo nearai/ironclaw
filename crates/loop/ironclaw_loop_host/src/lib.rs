@@ -345,7 +345,12 @@ where
     /// One-shot guard so a degraded memory retrieval produces exactly ONE
     /// operator-visible driver note per run, however many prompt builds read
     /// the cached load. `Arc`-shared for the same reason as the cache itself.
+    /// Set only AFTER the note is published, so a transient sink failure does
+    /// not permanently suppress it; `memory_degradation_note_in_flight` keeps
+    /// the window between claim and publish from producing duplicates. Same
+    /// pair, and same rationale, as `personal_context_admitted`.
     memory_degradation_note_emitted: Arc<OnceCell<()>>,
+    memory_degradation_note_in_flight: Arc<AtomicBool>,
     /// Pre-resolved channel conversation history for shared-channel runs
     /// (UNTRUSTED third-party text carried on the run's persisted product
     /// context). Rendered as ONE framed system-context block per prompt
@@ -421,6 +426,7 @@ where
             memory_context_service: None,
             memory_snippets_cache: Arc::new(OnceCell::new()),
             memory_degradation_note_emitted: Arc::new(OnceCell::new()),
+            memory_degradation_note_in_flight: Arc::new(AtomicBool::new(false)),
             channel_conversation_context: None,
         }
     }

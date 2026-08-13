@@ -1518,6 +1518,31 @@ async fn ranked_fts_contract<F: RootFilesystem>(filesystem: &F, base: &str) {
         .unwrap();
     assert!(stop_words_only.is_empty());
 
+    // ...and it stays "nothing" on a prefix where no FTS index was ever
+    // declared. Every case above declares the index first, so this is the one
+    // combination that can expose an ordering difference INSIDE a backend:
+    // libSQL resolves the FTS table before reading the query, PostgreSQL reads
+    // the query and never consults an index. The answer to "does a query with
+    // no content terms match anything" does not depend on an index, so it must
+    // not depend on which backend is bound.
+    let undeclared = VirtualPath::new(format!("{base}-undeclared")).unwrap();
+    let stop_words_only_undeclared = filesystem
+        .query(
+            &undeclared,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: "and the of to".into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await;
+    assert!(
+        matches!(&stop_words_only_undeclared, Ok(entries) if entries.is_empty()),
+        "a content-term-free ranked query must be an empty result on every backend even where no \
+         FTS index is declared, got {stop_words_only_undeclared:?}"
+    );
+
     // Nesting a ranking filter inside a compound would discard the ordering.
     let nested = filesystem
         .query(
