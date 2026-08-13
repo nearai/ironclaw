@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.2.0-rc.3] - 2026-08-12
+## [1.2.0] - 2026-08-13
 
-### Fixed
+Stable promotion of `1.2.0-rc.3`, including the fixes validated in RC2 and
+RC3 and the complete RC1 feature set below.
+
+### Fixed in 1.2.0-rc.3
 
 - The runtime container image now installs `curl`, so in-container HTTP
   healthchecks can execute. Orchestrators probe the worker with
@@ -17,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe could never run, the container was never marked healthy, and the deploy
   timed out into `error` while the listener served 200s throughout.
 
-### Changed
+### Changed in 1.2.0-rc.3
 
 - Reborn PR test planning and the root-partition runner now share one test
   inventory covering every `tests/*.rs` target, and container image inputs
@@ -25,17 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   partition assignment, so a scheduled root test could be reported green
   without having run.
 
-## [1.2.0-rc.2] - 2026-08-12
-
-### Fixed
+### Fixed in 1.2.0-rc.2
 
 - Windows first-start filesystem publication now uses native atomic rename
   semantics instead of hard links and tolerates unsupported directory syncs.
 - Release smoke runs preserve the Windows account identity required to secure
   the standalone secrets key, isolate workspace state, and keep `icacls`
   status output from contaminating machine-readable CLI JSON.
-
-## [1.2.0-rc.1] - 2026-08-11
 
 ### Added
 
