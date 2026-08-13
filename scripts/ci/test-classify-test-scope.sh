@@ -61,64 +61,56 @@ assert_scope \
   "crates/app/AGENTS.md" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
+has_legacy_tests=true"
 
 assert_scope \
   "reborn binary crate" \
   "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn product storage crate" \
   "crates/ironclaw_product_storage/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn telegram extension crate" \
   "crates/extensions/packages/telegram/src/channel.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn telegram protocol engine (merged from the v2 adapter crate)" \
   "crates/extensions/packages/telegram/src/render.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn slack package crate" \
   "crates/extensions/packages/slack/src/channel.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn memory-native package crate" \
   "crates/extensions/packages/memory-native/src/service.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn mem0 package crate" \
   "crates/extensions/packages/mem0/src/service.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 # A data-only package owns no crate BY DESIGN — no Cargo.toml, just manifest,
 # prompts, schemas and committed wasm. Its data is embedded by
@@ -130,16 +122,14 @@ assert_scope \
   "crates/extensions/packages/github/manifest.toml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "data-only package prompt asset" \
   "crates/extensions/packages/gmail/prompts/gmail/send.md" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 # A guest component rooting its own workspace: attributable to no crate, but a
 # refusal would be wrong — it is excluded by construction, not missing.
@@ -148,8 +138,7 @@ assert_scope \
   "crates/extensions/packages/github/wasm-src/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 # A crate-bearing package resolves through its own Cargo.toml, so its manifest
 # rides the crate's arm rather than the package-data arm.
@@ -158,61 +147,54 @@ assert_scope \
   "crates/extensions/packages/slack/manifest.toml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn support crate" \
   "crates/ironclaw_outbound/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "named critical product invariant" \
   "crates/ironclaw_assistant/src/run_delivery/observer.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "named critical extension-host invariant" \
   "crates/ironclaw_extension_host/src/channel_outbound_targets.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 # The WS2.4 split: the extension-management product face lives in its own crate
 # now, and its arm in `is_reborn_test_path` was added with the split. Without a
-# case here a manager-only diff would classify `has_reborn_tests=false` and the
-# `reborn-tests` roll-up would pass fast having skipped every Reborn lane — the
+# case here a manager-only diff would fall through to `is_code_path`'s arm and
+# `has_legacy_tests` would incorrectly flip true for a Reborn-only crate — the
 # exact failure #6947 records for the stale `crates/ironclaw_product_*/*` arm.
 assert_scope \
   "extension-manager product face (WS2.4 split)" \
   "crates/ironclaw_extension_manager/src/lifecycle_product_service.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn root test runner script" \
   "scripts/ci/run-reborn-root-partition.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn group test runner script" \
   "scripts/ci/run-reborn-group-tests.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn root tests and support" \
@@ -221,32 +203,28 @@ tests/integration/support/harness/mod.rs
 tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn qa trace fixture" \
   "tests/fixtures/llm_traces/reborn_qa/routine_health_ping.json" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn e2e scenario" \
   "tests/e2e/scenarios/test_reborn_scope_isolation.py" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "legacy e2e scenario" \
   "tests/e2e/scenarios/test_live_flow.py" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
+has_legacy_tests=true"
 
 assert_scope \
   "mixed legacy and reborn root tests" \
@@ -254,88 +232,77 @@ assert_scope \
 tests/reborn_trace_first_party_tool_coverage.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "shared manifest" \
   "Cargo.toml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "shared substrate crate" \
   "crates/ironclaw_host_runtime/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "process lifecycle authority crate" \
   "crates/ironclaw_processes/src/journal_store.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "shared classifier script" \
   "scripts/ci/classify-test-scope.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "shared package feature flags script" \
   "scripts/ci/package-feature-flags.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "Reborn crate bucket script" \
   "scripts/ci/reborn-crate-test-buckets.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "Reborn crate bucket regression suite" \
   "scripts/ci/test-reborn-crate-test-buckets.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "Reborn Responses E2E manifest checker" \
   "scripts/ci/check-reborn-responses-e2e-manifest.py" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "Reborn Responses E2E manifest" \
   "tests/e2e/reborn_responses_e2e_tests.txt" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "Reborn coverage manifest" \
   "tests/e2e/reborn_coverage_tests.txt" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "Reborn changed coverage, branch export, and critical mutation gates" \
@@ -346,8 +313,7 @@ scripts/ci/critical_mutation_gate.py
 scripts/ci/test-critical-mutation-gate.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "Reborn QA fixture checker and sabotage suite" \
@@ -355,54 +321,47 @@ assert_scope \
 scripts/ci/test-check-reborn-qa-fixtures.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "shared reborn tests workflow" \
   ".github/workflows/reborn-tests.yml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "legacy code style workflow" \
   ".github/workflows/code_style.yml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
+has_legacy_tests=true"
 
 assert_scope \
   "docs only" \
   "README.md" \
   "docs_only=true
 has_core_code=false
-has_legacy_tests=false
-has_reborn_tests=false"
+has_legacy_tests=false"
 
 assert_empty_scope \
   "docs_only=true
 has_core_code=false
-has_legacy_tests=false
-has_reborn_tests=false"
+has_legacy_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
   "crates/ironclaw_turn_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn docs only" \
   "docs/reborn/harness/e2e.md" \
   "docs_only=true
 has_core_code=false
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "mixed tests and reborn" \
@@ -410,56 +369,49 @@ assert_scope \
 crates/ironclaw_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
   "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn coverage lane-run script" \
   "scripts/ci/reborn-coverage-lane-run.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn coverage merge-lcov script" \
   "scripts/ci/reborn-coverage-merge-lcov.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn coverage summary script" \
   "scripts/ci/reborn-coverage-summary.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn coverage regression suite" \
   "scripts/ci/test-reborn-coverage.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "reborn coverage regression suite, sourced sibling (R-section split)" \
   "scripts/ci/test-reborn-coverage-ratchet-cases.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "WS12 generated gates and sabotage tests are reborn-scoped" \
@@ -472,32 +424,28 @@ scripts/ci/ws12_workflow_contracts.py
 scripts/ci/test_ws12_workflow_contracts.py" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "test suite boundaries checker script" \
   "scripts/ci/check-test-suite-boundaries.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope \
   "test-classify-test-scope script is itself reborn-scoped" \
   "scripts/ci/test-classify-test-scope.sh" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope \
   "shared coverage lcov lib is reborn-scoped (gemini: PR #5718 comment)" \
   "scripts/ci/lib/reborn_coverage_lcov.py" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 # ---------------------------------------------------------------------------
 # Tree-shape independence (CHECKLIST WS10)
@@ -571,8 +519,7 @@ assert_scope_with_root \
   "crates/substrates/ironclaw_host_runtime/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_scope_with_root \
   "nested reborn crate still classifies as reborn-only" \
@@ -580,8 +527,7 @@ assert_scope_with_root \
   "crates/substrates/ironclaw_webui/src/handlers.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
+has_legacy_tests=false"
 
 assert_scope_with_root \
   "nested unlisted crate still classifies as legacy-only (unchanged bucketing)" \
@@ -589,8 +535,7 @@ assert_scope_with_root \
   "crates/substrates/ironclaw_mcp/src/lib.rs" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
+has_legacy_tests=true"
 
 assert_scope_with_root \
   "nested data-only package manifest still classifies as shared (package_asset_dir normalization)" \
@@ -598,8 +543,7 @@ assert_scope_with_root \
   "crates/substrates/packages/github/manifest.toml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true"
+has_legacy_tests=true"
 
 assert_refusal_with_root \
   "a crates/ path attributable to no crate is refused, not bucketed" \
