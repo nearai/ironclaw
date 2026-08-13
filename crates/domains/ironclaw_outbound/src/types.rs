@@ -169,7 +169,6 @@ pub struct LoadSubscriptionCursorRequest {
     pub thread_id: ThreadId,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryStatus {

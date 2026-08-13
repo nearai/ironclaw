@@ -65,7 +65,6 @@ pub trait OutboundStateStorePort: Send + Sync {
         request: LoadSubscriptionCursorRequest,
     ) -> Result<Option<ProjectionCursor>, OutboundError>;
 
-
     async fn record_delivery_attempt(
         &self,
         attempt: OutboundDeliveryAttempt,

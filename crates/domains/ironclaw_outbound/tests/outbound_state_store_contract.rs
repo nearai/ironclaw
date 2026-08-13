@@ -1599,7 +1599,6 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
     // from absence.
     assert!(matches!(result, Ok(None)));
 
-
     let rebind = store
         .upsert_subscription(ProjectionSubscriptionRecord {
             subscription_id: subscription_id(),
@@ -1704,7 +1703,6 @@ async fn subscription_upsert_rejects_backward_cursor(store: &impl OutboundStateS
         })
         .await
         .unwrap();
-
 
     let stale_upsert = store
         .upsert_subscription(ProjectionSubscriptionRecord {
@@ -2538,7 +2536,6 @@ impl RootFilesystem for UnsupportedCriticalCasBackend {
         self.inner.delete(path).await
     }
 }
-
 
 /// Audit finding F4 + F3: write more than `Page::MAX_LIMIT` (1024) delivery
 /// attempts for the same scope and assert `list_delivery_attempts` returns

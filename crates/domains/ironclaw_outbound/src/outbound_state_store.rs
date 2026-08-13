@@ -880,7 +880,6 @@ where
         Ok(record.cursor)
     }
 
-
     async fn record_delivery_attempt(
         &self,
         attempt: OutboundDeliveryAttempt,

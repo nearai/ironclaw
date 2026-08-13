@@ -96,7 +96,6 @@ pub(crate) fn validate_subscription_cursor_progression(
     }
 }
 
-
 pub(crate) fn validate_delivery_attempt(
     attempt: &OutboundDeliveryAttempt,
 ) -> Result<(), OutboundError> {
