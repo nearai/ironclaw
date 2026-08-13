@@ -4096,6 +4096,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "glob",
+ "hex",
  "ironclaw_auth",
  "ironclaw_extractors",
  "ironclaw_filesystem",
@@ -4108,6 +4109,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "similar 3.1.1",
  "tempfile",
  "thiserror 2.0.19",
@@ -4798,6 +4800,7 @@ name = "ironclaw_sandbox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bollard",
  "chrono",
  "futures-util",
@@ -4821,6 +4824,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "uuid",
  "x509-parser",

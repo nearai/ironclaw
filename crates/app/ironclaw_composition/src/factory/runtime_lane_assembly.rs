@@ -123,7 +123,7 @@ where
 {
     match binding {
         RebornRuntimeProcessBinding::None => services,
-        RebornRuntimeProcessBinding::UserSandbox { process_port } => {
+        RebornRuntimeProcessBinding::UserSandbox { process_port, .. } => {
             services.with_production_user_sandbox_process_port(process_port)
         }
     }

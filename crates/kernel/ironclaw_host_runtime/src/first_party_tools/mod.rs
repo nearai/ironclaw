@@ -13,6 +13,7 @@ mod memory;
 mod model_visible_output;
 mod outbound_deliver;
 mod reply_attachment;
+mod sandbox_workspace_copy;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -71,6 +72,9 @@ pub use memory::{
 };
 pub use outbound_deliver::OUTBOUND_DELIVER_CAPABILITY_ID;
 pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
+pub use sandbox_workspace_copy::{
+    MAX_SANDBOX_WORKSPACE_COPY_BYTES, SANDBOX_WORKSPACE_COPY_CAPABILITY_ID,
+};
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
@@ -327,6 +331,27 @@ pub fn append_builtin_shell_guidance(
     Ok(())
 }
 
+/// Add the sandbox-workspace bridge capability to a built-in package.
+///
+/// Composition calls this only when it also holds a concrete transfer port;
+/// keeping the base package free of the descriptor makes unsupported sandbox
+/// providers fail closed at discovery time.
+pub fn append_sandbox_workspace_copy_capability(
+    mut package: ExtensionPackage,
+) -> Result<ExtensionPackage, ExtensionError> {
+    package
+        .manifest
+        .capabilities
+        .push(sandbox_workspace_copy::manifest()?);
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
+}
+
 fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> bool {
     matches!(
         process_backend,
@@ -487,6 +512,19 @@ pub fn register_reply_attachment_first_party_handler(
     intent_port: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
 ) -> Result<(), HostApiError> {
     reply_attachment::insert_handler(registry, intent_port)
+}
+
+pub fn register_sandbox_workspace_copy_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    transport: Arc<dyn ironclaw_host_api::process::SandboxWorkspaceFileTransport>,
+) -> Result<(), HostApiError> {
+    registry.insert_handler(
+        CapabilityId::new(SANDBOX_WORKSPACE_COPY_CAPABILITY_ID)?,
+        Arc::new(sandbox_workspace_copy::SandboxWorkspaceCopyHandler::new(
+            transport,
+        )),
+    );
+    Ok(())
 }
 
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(

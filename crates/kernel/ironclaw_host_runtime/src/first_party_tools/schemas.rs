@@ -273,6 +273,50 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        "schemas/builtin/sandbox_workspace_copy.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["ironclaw_to_sandbox", "sandbox_to_ironclaw"],
+                    "description": "Which separate workspace is the source"
+                },
+                "source_path": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Regular-file source path below /workspace in the source workspace"
+                },
+                "destination_path": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Destination path below /workspace in the other workspace"
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Replace an existing destination only when explicitly true"
+                }
+            },
+            "required": ["direction", "source_path", "destination_path"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/sandbox_workspace_copy.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "direction": { "type": "string" },
+                "source_path": { "type": "string" },
+                "destination_path": { "type": "string" },
+                "bytes_copied": { "type": "integer", "minimum": 0 },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "already_present": { "type": "boolean" },
+                "overwrite_enabled": { "type": "boolean" }
+            },
+            "required": [
+                "direction", "source_path", "destination_path", "bytes_copied",
+                "sha256", "already_present", "overwrite_enabled"
+            ],
+            "additionalProperties": false
+        }),
         // NOTE: this schema is published by the host_runtime first-party
         // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
         // The decorator path (`ironclaw_loop_host::build_spawn_subagent_parameters_schema`)

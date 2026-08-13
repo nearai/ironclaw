@@ -513,9 +513,13 @@ pub(super) async fn build_backend_production(
     }
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
+    let sandbox_workspace_file_transport = production_wiring
+        .runtime_process_binding
+        .workspace_file_transport();
     let extension_registry = production_builtin_extension_registry(
         process_backend,
         supplemental_builtin_shell_guidance,
+        sandbox_workspace_file_transport.is_some(),
         resolved_memory.package.as_ref(),
     )?;
     let extension_registry = Arc::new(extension_registry);
@@ -655,6 +659,7 @@ pub(super) async fn build_backend_production(
         trigger_create_hook,
         trigger_active_run_lookup,
         process_backend,
+        sandbox_workspace_file_transport,
     )?;
     if let (Some(package), Some(handler)) = (
         resolved_memory.package.as_ref(),
@@ -769,7 +774,9 @@ pub(super) async fn build_backend_production(
     };
     let user_sandbox_process_port = match &production_wiring.runtime_process_binding {
         RebornRuntimeProcessBinding::None => None,
-        RebornRuntimeProcessBinding::UserSandbox { process_port } => Some(Arc::clone(process_port)),
+        RebornRuntimeProcessBinding::UserSandbox { process_port, .. } => {
+            Some(Arc::clone(process_port))
+        }
     };
     let services = apply_production_runtime_process_binding(
         services,

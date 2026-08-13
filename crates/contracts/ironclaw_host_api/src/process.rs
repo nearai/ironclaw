@@ -16,6 +16,7 @@
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{mount::MountView, resource::ResourceScope};
@@ -90,4 +91,74 @@ pub trait SandboxCommandTransport: Send + Sync {
     async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
         Ok(())
     }
+}
+
+/// Request to read one bounded regular file from a user's sandbox workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxWorkspaceFileReadRequest {
+    pub scope: ResourceScope,
+    pub path: String,
+    pub max_bytes: usize,
+}
+
+/// Request to atomically write one bounded regular file in a user's sandbox workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxWorkspaceFileWriteRequest {
+    pub scope: ResourceScope,
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub overwrite: bool,
+}
+
+/// Verified bytes returned by a sandbox workspace read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxWorkspaceFileReadOutput {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
+
+/// Verified result of an atomic sandbox workspace write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxWorkspaceFileWriteOutput {
+    pub bytes_written: usize,
+    pub sha256: String,
+    pub already_present: bool,
+}
+
+/// Stable, provider-neutral sandbox workspace file failure.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SandboxWorkspaceFileError {
+    #[error("sandbox workspace file path is invalid")]
+    InvalidPath,
+    #[error("sandbox workspace file byte limit is invalid")]
+    InvalidLimit,
+    #[error("sandbox workspace file exceeds the {max_bytes}-byte limit")]
+    TooLarge { max_bytes: usize },
+    #[error("sandbox workspace file was not found")]
+    NotFound,
+    #[error("sandbox workspace path is not a regular file")]
+    NotRegularFile,
+    #[error("sandbox workspace file already exists with different bytes")]
+    Conflict,
+    #[error("sandbox workspace file transport failed")]
+    TransportFailed,
+    #[error("sandbox workspace file transport returned an invalid response")]
+    InvalidResponse,
+    #[error("sandbox workspace mutation could not be checkpointed")]
+    CheckpointFailed,
+}
+
+/// Transport for bounded regular-file access inside a user's sandbox workspace.
+#[async_trait]
+pub trait SandboxWorkspaceFileTransport: Send + Sync {
+    async fn read_file(
+        &self,
+        request: SandboxWorkspaceFileReadRequest,
+    ) -> Result<SandboxWorkspaceFileReadOutput, SandboxWorkspaceFileError>;
+
+    async fn write_file(
+        &self,
+        request: SandboxWorkspaceFileWriteRequest,
+    ) -> Result<SandboxWorkspaceFileWriteOutput, SandboxWorkspaceFileError>;
 }

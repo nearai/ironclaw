@@ -24,10 +24,6 @@ impl DockerWorkerSecuritySpec {
         Self { network_mode }
     }
 
-    pub(super) fn user(&self) -> String {
-        DOCKER_WORKER_USER.to_string()
-    }
-
     pub(super) fn cap_drop(&self) -> Vec<String> {
         vec!["ALL".to_string()]
     }
@@ -77,14 +73,32 @@ impl DockerWorkerSecuritySpec {
     /// Docker CLI. Provider-owned image, workspace, and resource-limit args
     /// are appended separately.
     pub(super) fn docker_run_args(&self) -> Vec<String> {
+        self.docker_run_args_with_identity(Some(DOCKER_WORKER_USER), &[])
+    }
+
+    /// Render the shared posture for a fixed host-authored filesystem helper.
+    ///
+    /// The helper needs root plus only the filesystem capabilities required to
+    /// repair legacy workspace ownership and modes. It receives no model code,
+    /// no network, and only the current user's workspace mount.
+    pub(super) fn trusted_root_helper_docker_run_args(&self) -> Vec<String> {
+        self.docker_run_args_with_identity(None, &["CHOWN", "DAC_OVERRIDE", "FOWNER"])
+    }
+
+    fn docker_run_args_with_identity(&self, user: Option<&str>, cap_add: &[&str]) -> Vec<String> {
         let mut args = Vec::new();
         if let Some(network_mode) = &self.network_mode {
             args.extend(["--network".to_string(), network_mode.clone()]);
         }
         args.push("--read-only".to_string());
-        args.extend(["--user".to_string(), self.user()]);
+        if let Some(user) = user {
+            args.extend(["--user".to_string(), user.to_string()]);
+        }
         for capability in self.cap_drop() {
             args.extend(["--cap-drop".to_string(), capability]);
+        }
+        for capability in cap_add {
+            args.extend(["--cap-add".to_string(), (*capability).to_string()]);
         }
         for option in self.security_options() {
             args.extend(["--security-opt".to_string(), option]);

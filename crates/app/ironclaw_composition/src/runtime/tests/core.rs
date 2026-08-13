@@ -8,6 +8,7 @@ fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContra
         .expect("register capability provider contract");
     contracts
 }
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicUsize, Ordering},
@@ -824,6 +825,40 @@ struct SandboxShellCallingGateway {
     calls: StdMutex<usize>,
 }
 
+impl SandboxShellCallingGateway {
+    async fn call_tool(
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        capability_id: CapabilityId,
+        call_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let tool = capabilities
+            .tool_definitions()
+            .map_err(model_capability_error)?
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("requested Railway test capability must have a provider tool definition");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some(format!("provider-turn-{call_id}")),
+                id: call_id.to_string(),
+                name: tool.name,
+                arguments,
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_capability_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
 #[derive(Debug, Default)]
 struct AuthGateToolCallingGateway {
     requests: StdMutex<Vec<HostManagedModelRequest>>,
@@ -1087,7 +1122,7 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 "model-visible shell result must report sandbox execution"
             );
             return Ok(HostManagedModelResponse::assistant_reply(
-                "sandbox shell ok",
+                "sandbox shell and workspace copy ok",
             ));
         }
 
@@ -1095,6 +1130,13 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(model_capability_error)?;
+        let workspace_copy_id = CapabilityId::new("builtin.sandbox_workspace_copy")
+            .expect("workspace copy capability id");
+        surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id == workspace_copy_id)
+            .expect("sandbox workspace copy must be visible for the Railway sandbox profile");
         let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
             .expect("shell capability id");
         let shell = surface
@@ -1108,6 +1150,7 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
             "Railway credentials and host-control tooling are not available",
             "separate from the IronClaw workspace",
             "do not automatically appear in both locations",
+            "builtin.sandbox_workspace_copy",
         ] {
             assert!(
                 shell.safe_description.contains(clause),
@@ -1121,24 +1164,13 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
             .find(|definition| definition.capability_id == shell_id)
             .expect("shell provider tool definition");
         assert_eq!(shell.safe_description, shell_tool.description);
-        let candidate = capabilities
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                turn_id: Some("provider-turn-shell".to_string()),
-                id: "shell-call-1".to_string(),
-                name: shell_tool.name,
-                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
-                response_reasoning: None,
-                reasoning: None,
-                signature: None,
-            }))
-            .await
-            .map_err(model_capability_error)?;
-        Ok(HostManagedModelResponse::capability_calls(
-            vec![candidate],
-            "",
-        ))
+        Self::call_tool(
+            capabilities,
+            shell_id,
+            "shell-call-1",
+            serde_json::json!({"command": "printf railway-sandbox-marker"}),
+        )
+        .await
     }
 }
 
@@ -3263,6 +3295,9 @@ impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTra
 #[derive(Debug, Default)]
 struct ShellRecordingSandboxTransport {
     requests: StdMutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
+    workspace_write_requests:
+        StdMutex<Vec<ironclaw_host_api::process::SandboxWorkspaceFileWriteRequest>>,
+    sandbox_files: StdMutex<HashMap<String, Vec<u8>>>,
     shutdown_calls: AtomicUsize,
 }
 
@@ -3311,11 +3346,94 @@ impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandb
     }
 }
 
+#[async_trait]
+impl ironclaw_host_api::process::SandboxWorkspaceFileTransport for ShellRecordingSandboxTransport {
+    async fn read_file(
+        &self,
+        request: ironclaw_host_api::process::SandboxWorkspaceFileReadRequest,
+    ) -> Result<
+        ironclaw_host_api::process::SandboxWorkspaceFileReadOutput,
+        ironclaw_host_api::process::SandboxWorkspaceFileError,
+    > {
+        use sha2::{Digest as _, Sha256};
+
+        let files = self
+            .sandbox_files
+            .lock()
+            .expect("sandbox files lock poisoned");
+        let bytes = files
+            .get(&request.path)
+            .cloned()
+            .ok_or(ironclaw_host_api::process::SandboxWorkspaceFileError::NotFound)?;
+        if bytes.len() > request.max_bytes {
+            return Err(
+                ironclaw_host_api::process::SandboxWorkspaceFileError::TooLarge {
+                    max_bytes: request.max_bytes,
+                },
+            );
+        }
+        Ok(ironclaw_host_api::process::SandboxWorkspaceFileReadOutput {
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            bytes,
+        })
+    }
+
+    async fn write_file(
+        &self,
+        request: ironclaw_host_api::process::SandboxWorkspaceFileWriteRequest,
+    ) -> Result<
+        ironclaw_host_api::process::SandboxWorkspaceFileWriteOutput,
+        ironclaw_host_api::process::SandboxWorkspaceFileError,
+    > {
+        use sha2::{Digest as _, Sha256};
+
+        let digest = hex::encode(Sha256::digest(&request.bytes));
+        let mut files = self
+            .sandbox_files
+            .lock()
+            .expect("sandbox files lock poisoned");
+        let already_present = match files.get(&request.path) {
+            Some(existing) if existing == &request.bytes => true,
+            Some(_) if !request.overwrite => {
+                return Err(ironclaw_host_api::process::SandboxWorkspaceFileError::Conflict);
+            }
+            _ => false,
+        };
+        files.insert(request.path.clone(), request.bytes.clone());
+        self.workspace_write_requests
+            .lock()
+            .expect("workspace write request lock poisoned")
+            .push(request.clone());
+        Ok(
+            ironclaw_host_api::process::SandboxWorkspaceFileWriteOutput {
+                bytes_written: request.bytes.len(),
+                sha256: digest,
+                already_present,
+            },
+        )
+    }
+}
+
 #[tokio::test]
-async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+async fn railway_sandbox_profile_exposes_shell_and_workspace_copy() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(SandboxShellCallingGateway::default());
     let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
+    sandbox_transport
+        .sandbox_files
+        .lock()
+        .expect("sandbox files lock poisoned")
+        .insert(
+            "/workspace/outbound.txt".to_string(),
+            b"sandbox-result\0bytes".to_vec(),
+        );
+    let runtime_process_binding =
+        RebornRuntimeProcessBinding::user_sandbox_with_workspace_file_transport(
+            Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
+                sandbox_transport.clone(),
+            )),
+            sandbox_transport.clone(),
+        );
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_filesystem_build_input_with_profile(
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
@@ -3326,13 +3444,12 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
             crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
                 .expect("hosted sandbox policy resolves"),
         )
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
-            ironclaw_host_runtime::UserSandboxProcessPort::new(sandbox_transport.clone()),
-        )))
+        .with_runtime_process_binding(runtime_process_binding)
         .with_supplemental_builtin_shell_guidance(
             ironclaw_extension_support::RAILWAY_SHELL_CAPABILITY_GUIDANCE,
         ),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-railway-shell-tenant".to_string(),
         agent_id: "runtime-railway-shell-agent".to_string(),
@@ -3363,7 +3480,10 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
     .expect("sandbox shell turn succeeds");
 
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
-    assert_eq!(reply.text.as_deref(), Some("sandbox shell ok"));
+    assert_eq!(
+        reply.text.as_deref(),
+        Some("sandbox shell and workspace copy ok")
+    );
     {
         let requests = sandbox_transport
             .requests

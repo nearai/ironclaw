@@ -52,15 +52,29 @@ use ironclaw_extension_contracts::state::InstallationState;
 #[test]
 fn supplemental_shell_guidance_is_input_specific() {
     let baseline =
-        production_builtin_extension_registry(ProcessBackendKind::UserSandbox, None, None)
+        production_builtin_extension_registry(ProcessBackendKind::UserSandbox, None, false, None)
             .expect("baseline registry builds");
     let guided = production_builtin_extension_registry(
         ProcessBackendKind::UserSandbox,
         Some("Railway Sandbox guidance keeps this separate from the IronClaw workspace."),
+        false,
         None,
     )
     .expect("guided registry builds");
+    let with_workspace_copy =
+        production_builtin_extension_registry(ProcessBackendKind::UserSandbox, None, true, None)
+            .expect("workspace-copy registry builds");
     let shell_id = CapabilityId::new("builtin.shell").expect("valid shell capability id");
+    let workspace_copy_id =
+        CapabilityId::new("builtin.sandbox_workspace_copy").expect("workspace copy id");
+
+    assert!(baseline.get_capability(&workspace_copy_id).is_none());
+    assert!(guided.get_capability(&workspace_copy_id).is_none());
+    assert!(
+        with_workspace_copy
+            .get_capability(&workspace_copy_id)
+            .is_some()
+    );
 
     assert!(
         !baseline
@@ -152,6 +166,17 @@ async fn production_backend_projects_user_sandbox_shell_constraints() {
         shell.network,
         CapabilityNetworkProfile::SandboxDirectPreview
     );
+    let workspace_copy = services
+        .capability_policy_for_test()
+        .grants
+        .iter()
+        .find(|grant| grant.capability.as_str() == "builtin.sandbox_workspace_copy")
+        .expect("Railway workspace-copy grant");
+    for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
+        assert!(workspace_copy.effects.contains(&effect));
+    }
+    assert_eq!(workspace_copy.mounts, CapabilityMountProfile::Workspace);
+    assert_eq!(workspace_copy.network, CapabilityNetworkProfile::Default);
 }
 
 #[tokio::test]
@@ -2852,6 +2877,7 @@ fn allowed_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::SpawnProcess,
         EffectKind::DeleteFilesystem,
         EffectKind::Network,
     ]

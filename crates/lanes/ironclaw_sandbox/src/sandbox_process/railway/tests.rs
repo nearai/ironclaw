@@ -1,16 +1,25 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    path::Path,
+    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
+use base64::Engine as _;
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, TenantId, UserId},
     mount::MountView,
+    process::{
+        SandboxWorkspaceFileError, SandboxWorkspaceFileReadRequest, SandboxWorkspaceFileTransport,
+        SandboxWorkspaceFileWriteRequest,
+    },
     resource::ResourceScope,
 };
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt as _;
 
 use super::*;
 
@@ -25,10 +34,13 @@ struct FakeRailwayCli {
     failed_bootstrap_execs: AtomicUsize,
     failed_worker_execs: AtomicUsize,
     malformed_worker_outputs: AtomicUsize,
+    malformed_file_outputs: AtomicUsize,
     failed_checkpoint_creates: AtomicUsize,
+    failed_file_execs: AtomicUsize,
     failed_destroys: AtomicUsize,
     malformed_checkpoint_lists: AtomicUsize,
     checkpoint_timeouts: Mutex<Vec<Duration>>,
+    workspace_files: Mutex<HashMap<(String, String), Vec<u8>>>,
     delay: Option<Duration>,
 }
 
@@ -44,10 +56,13 @@ impl FakeRailwayCli {
             failed_bootstrap_execs: AtomicUsize::new(0),
             failed_worker_execs: AtomicUsize::new(0),
             malformed_worker_outputs: AtomicUsize::new(0),
+            malformed_file_outputs: AtomicUsize::new(0),
             failed_checkpoint_creates: AtomicUsize::new(0),
+            failed_file_execs: AtomicUsize::new(0),
             failed_destroys: AtomicUsize::new(0),
             malformed_checkpoint_lists: AtomicUsize::new(0),
             checkpoint_timeouts: Mutex::new(Vec::new()),
+            workspace_files: Mutex::new(HashMap::new()),
             delay: None,
         }
     }
@@ -79,12 +94,20 @@ impl FakeRailwayCli {
         self.malformed_worker_outputs.store(1, Ordering::SeqCst);
     }
 
+    fn malform_next_file_output(&self) {
+        self.malformed_file_outputs.store(1, Ordering::SeqCst);
+    }
+
     fn fail_next_bootstrap_exec(&self) {
         self.failed_bootstrap_execs.store(1, Ordering::SeqCst);
     }
 
     fn fail_next_checkpoint_create(&self) {
         self.failed_checkpoint_creates.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_file_exec(&self) {
+        self.failed_file_execs.store(1, Ordering::SeqCst);
     }
 
     fn fail_next_destroy(&self) {
@@ -221,6 +244,91 @@ impl RailwayCli for FakeRailwayCli {
                 stderr: String::new(),
             });
         }
+        if matches!(
+            invocation.operation,
+            RailwayCliOperation::ReadWorkspaceFile | RailwayCliOperation::WriteWorkspaceFile
+        ) && self.failed_file_execs.swap(0, Ordering::SeqCst) > 0
+        {
+            return Err(RuntimeProcessError::Timeout(timeout));
+        }
+        if invocation.operation == RailwayCliOperation::WriteWorkspaceFile {
+            let root = invocation.args.get(invocation.args.len().saturating_sub(8));
+            let path = invocation.args.get(invocation.args.len().saturating_sub(7));
+            let overwrite = invocation.args.get(invocation.args.len().saturating_sub(6));
+            let (Some(root), Some(path), Some(overwrite), Some(bytes)) =
+                (root, path, overwrite, invocation.stdin.as_ref())
+            else {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "fake workspace write invocation was malformed".into(),
+                ));
+            };
+            let key = (root.clone(), path.clone());
+            let mut files = self.workspace_files.lock().await;
+            let already_present = match files.get(&key) {
+                Some(existing) if existing == bytes => true,
+                Some(_) if overwrite == "0" => {
+                    return Ok(RailwayCliOutput {
+                        stdout: serde_json::json!({"status":"error","code":"conflict"}).to_string(),
+                        stderr: String::new(),
+                    });
+                }
+                Some(_) | None => false,
+            };
+            if !already_present {
+                files.insert(key, bytes.clone());
+            }
+            if self.malformed_file_outputs.swap(0, Ordering::SeqCst) > 0 {
+                return Ok(RailwayCliOutput {
+                    stdout: "truncated workspace write response".into(),
+                    stderr: String::new(),
+                });
+            }
+            return Ok(RailwayCliOutput {
+                stdout: serde_json::json!({
+                    "status": "ok",
+                    "bytes_written": bytes.len(),
+                    "sha256": hex::encode(Sha256::digest(bytes)),
+                    "already_present": already_present,
+                })
+                .to_string(),
+                stderr: String::new(),
+            });
+        }
+        if invocation.operation == RailwayCliOperation::ReadWorkspaceFile {
+            let root = invocation.args.get(invocation.args.len().saturating_sub(3));
+            let path = invocation.args.get(invocation.args.len().saturating_sub(2));
+            let max_bytes = invocation
+                .args
+                .last()
+                .and_then(|value| value.parse::<usize>().ok());
+            let (Some(root), Some(path), Some(max_bytes)) = (root, path, max_bytes) else {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "fake workspace read invocation was malformed".into(),
+                ));
+            };
+            let files = self.workspace_files.lock().await;
+            let Some(bytes) = files.get(&(root.clone(), path.clone())) else {
+                return Ok(RailwayCliOutput {
+                    stdout: serde_json::json!({"status":"error","code":"not_found"}).to_string(),
+                    stderr: String::new(),
+                });
+            };
+            if bytes.len() > max_bytes {
+                return Ok(RailwayCliOutput {
+                    stdout: serde_json::json!({"status":"error","code":"too_large"}).to_string(),
+                    stderr: String::new(),
+                });
+            }
+            return Ok(RailwayCliOutput {
+                stdout: serde_json::json!({
+                    "status": "ok",
+                    "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    "sha256": hex::encode(Sha256::digest(bytes)),
+                })
+                .to_string(),
+                stderr: String::new(),
+            });
+        }
         if invocation
             .args
             .starts_with(&["sandbox".into(), "destroy".into()])
@@ -266,6 +374,608 @@ fn request(tenant: &str, user: &str, command: &str) -> CommandExecutionRequest {
 
 fn user_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
     RebornSandboxUserKey::from_scope(&request(tenant, user, "true").scope)
+}
+
+fn read_request(
+    tenant: &str,
+    user: &str,
+    path: &str,
+    max_bytes: usize,
+) -> SandboxWorkspaceFileReadRequest {
+    SandboxWorkspaceFileReadRequest {
+        scope: request(tenant, user, "true").scope,
+        path: path.into(),
+        max_bytes,
+    }
+}
+
+fn write_request(
+    tenant: &str,
+    user: &str,
+    path: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> SandboxWorkspaceFileWriteRequest {
+    SandboxWorkspaceFileWriteRequest {
+        scope: request(tenant, user, "true").scope,
+        path: path.into(),
+        bytes: bytes.to_vec(),
+        overwrite,
+    }
+}
+
+#[test]
+fn workspace_file_requests_serialize_the_typed_resource_scope() {
+    let scope = request("tenant", "user", "true").scope;
+    let read = SandboxWorkspaceFileReadRequest {
+        scope: scope.clone(),
+        path: "/workspace/data.bin".into(),
+        max_bytes: 42,
+    };
+    let write = SandboxWorkspaceFileWriteRequest {
+        scope,
+        path: "/workspace/data.bin".into(),
+        bytes: vec![0, 255, 1],
+        overwrite: false,
+    };
+
+    let read_json = serde_json::to_value(&read).unwrap();
+    let write_json = serde_json::to_value(&write).unwrap();
+    assert_eq!(read_json["scope"]["tenant_id"], "tenant");
+    assert_eq!(read_json["scope"]["user_id"], "user");
+    assert_eq!(write_json["scope"]["tenant_id"], "tenant");
+    assert_eq!(write_json["bytes"], serde_json::json!([0, 255, 1]));
+    assert_eq!(
+        serde_json::from_value::<SandboxWorkspaceFileReadRequest>(read_json).unwrap(),
+        read
+    );
+    assert_eq!(
+        serde_json::from_value::<SandboxWorkspaceFileWriteRequest>(write_json).unwrap(),
+        write
+    );
+}
+
+#[tokio::test]
+async fn workspace_file_paths_are_rejected_before_remote_provisioning() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    for path in [
+        "/workspace",
+        "/workspace/../secret",
+        "/workspace-link/file",
+        "relative/file",
+        "/workspace/file\0tail",
+    ] {
+        assert_eq!(
+            transport
+                .write_file(write_request("tenant", "user", path, b"data", false))
+                .await,
+            Err(SandboxWorkspaceFileError::InvalidPath)
+        );
+        assert_eq!(
+            transport
+                .read_file(read_request("tenant", "user", path, 32))
+                .await,
+            Err(SandboxWorkspaceFileError::InvalidPath)
+        );
+    }
+    assert!(cli.invocations().await.is_empty());
+}
+
+#[tokio::test]
+async fn oversized_workspace_file_paths_are_rejected_before_remote_provisioning() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let oversized_component = format!("/workspace/{}", "a".repeat(256));
+    let oversized_path = format!("/workspace/{}/file", "a/".repeat(2_043));
+
+    for path in [oversized_component, oversized_path] {
+        assert_eq!(
+            transport
+                .write_file(write_request("tenant", "user", &path, b"data", false))
+                .await,
+            Err(SandboxWorkspaceFileError::InvalidPath)
+        );
+        assert_eq!(
+            transport
+                .read_file(read_request("tenant", "user", &path, 32))
+                .await,
+            Err(SandboxWorkspaceFileError::InvalidPath)
+        );
+    }
+    assert!(cli.invocations().await.is_empty());
+}
+
+#[tokio::test]
+async fn workspace_upload_uses_fixed_argv_and_binary_stdin_then_checkpoints() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let bytes = [0, 255, b'\n', 1, 2, 3];
+
+    let output = transport
+        .write_file(write_request(
+            "tenant",
+            "user",
+            "/workspace/nested/data.bin",
+            &bytes,
+            false,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(output.bytes_written, bytes.len());
+    assert_eq!(output.sha256, hex::encode(Sha256::digest(bytes)));
+    assert!(!output.already_present);
+    let invocations = cli.invocations().await;
+    let upload = invocations
+        .iter()
+        .find(|call| call.operation == RailwayCliOperation::WriteWorkspaceFile)
+        .expect("workspace upload invocation");
+    assert_eq!(upload.stdin.as_deref(), Some(bytes.as_slice()));
+    let remote_command = &upload.args[upload
+        .args
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("Railway exec command separator")
+        + 1..];
+    assert_eq!(&remote_command[..3], ["docker", "run", "--rm"]);
+    assert!(remote_command.iter().any(|arg| arg == "-i"));
+    assert_pair(remote_command, "--network", "none");
+    assert!(remote_command.iter().any(|arg| arg == "--read-only"));
+    assert!(!remote_command.iter().any(|arg| arg == "--user"));
+    assert_pair(remote_command, "--cap-drop", "ALL");
+    for capability in ["CHOWN", "DAC_OVERRIDE", "FOWNER"] {
+        assert!(
+            remote_command
+                .windows(2)
+                .any(|pair| pair == ["--cap-add", capability])
+        );
+    }
+    assert!(remote_command.iter().any(|arg| {
+        arg.starts_with("type=bind,src=/workspace/ironclaw-users/")
+            && arg.ends_with(",dst=/workspace")
+    }));
+    assert!(
+        remote_command
+            .windows(2)
+            .any(|pair| { pair[0] == transport.config.worker_image && pair[1] == "python3" })
+    );
+    assert!(
+        upload
+            .args
+            .iter()
+            .any(|arg| arg == "/workspace/nested/data.bin")
+    );
+    assert!(!upload.args.iter().any(|arg| arg.as_bytes() == bytes));
+    assert!(
+        upload
+            .args
+            .iter()
+            .any(|arg| arg == WORKSPACE_FILE_WRITE_HELPER)
+    );
+    let protocol = &upload.args[upload.args.len() - 8..];
+    assert_eq!(protocol[4], bytes.len().to_string());
+    assert_eq!(protocol[5], hex::encode(Sha256::digest(bytes)));
+    assert_eq!(protocol[6], "1000");
+    assert_eq!(protocol[7], "1000");
+    assert_eq!(count_checkpoint_creates(&invocations), 1);
+}
+
+#[tokio::test]
+async fn workspace_upload_no_clobber_accepts_identical_retry_and_rejects_difference() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+    let request = write_request("tenant", "user", "/workspace/data.bin", b"original", false);
+
+    assert!(
+        !transport
+            .write_file(request.clone())
+            .await
+            .unwrap()
+            .already_present
+    );
+    assert!(transport.write_file(request).await.unwrap().already_present);
+    assert_eq!(
+        transport
+            .write_file(write_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                b"different",
+                false,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::Conflict)
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_failure_after_upload_is_recoverable_by_identical_retry() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_checkpoint_create();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let request = write_request(
+        "tenant",
+        "user",
+        "/workspace/data.bin",
+        b"durable after retry",
+        false,
+    );
+
+    assert_eq!(
+        transport.write_file(request.clone()).await,
+        Err(SandboxWorkspaceFileError::CheckpointFailed)
+    );
+    let retry = transport.write_file(request).await.unwrap();
+    assert!(retry.already_present);
+    assert_eq!(count_checkpoint_creates(&cli.invocations().await), 2);
+}
+
+#[tokio::test]
+async fn workspace_download_decodes_binary_bytes_and_enforces_requested_bound() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let bytes = [0, 255, 7, 8, 9];
+    transport
+        .write_file(write_request(
+            "tenant",
+            "user",
+            "/workspace/data.bin",
+            &bytes,
+            false,
+        ))
+        .await
+        .unwrap();
+
+    let output = transport
+        .read_file(read_request(
+            "tenant",
+            "user",
+            "/workspace/data.bin",
+            bytes.len(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(output.bytes, bytes);
+    assert_eq!(output.sha256, hex::encode(Sha256::digest(bytes)));
+    let invocations = cli.invocations().await;
+    let download = invocations
+        .iter()
+        .find(|call| call.operation == RailwayCliOperation::ReadWorkspaceFile)
+        .expect("workspace download invocation");
+    let remote_command = &download.args[download
+        .args
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("Railway exec command separator")
+        + 1..];
+    assert_eq!(&remote_command[..3], ["docker", "run", "--rm"]);
+    assert!(!remote_command.iter().any(|arg| arg == "-i"));
+    assert!(remote_command.iter().any(|arg| {
+        arg.starts_with("type=bind,src=/workspace/ironclaw-users/")
+            && arg.ends_with(",dst=/workspace,readonly")
+    }));
+    assert!(
+        remote_command
+            .windows(2)
+            .any(|pair| { pair[0] == transport.config.worker_image && pair[1] == "python3" })
+    );
+    assert_eq!(
+        transport
+            .read_file(read_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                bytes.len() - 1,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::TooLarge {
+            max_bytes: bytes.len() - 1,
+        })
+    );
+}
+
+#[tokio::test]
+async fn workspace_download_stdout_ceiling_covers_ten_mib_base64_expansion() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    transport
+        .write_file(write_request(
+            "tenant",
+            "user",
+            "/workspace/data.bin",
+            b"x",
+            false,
+        ))
+        .await
+        .unwrap();
+
+    transport
+        .read_file(read_request(
+            "tenant",
+            "user",
+            "/workspace/data.bin",
+            10 * 1024 * 1024,
+        ))
+        .await
+        .unwrap();
+
+    let invocation = cli
+        .invocations()
+        .await
+        .into_iter()
+        .find(|call| call.operation == RailwayCliOperation::ReadWorkspaceFile)
+        .unwrap();
+    assert!(invocation.output_limit >= 13_981_528);
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn workspace_file_transport_failure_logs_operation_and_sanitized_cause() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_file_exec();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+
+    assert_eq!(
+        transport
+            .write_file(write_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                b"content",
+                false,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::TransportFailed)
+    );
+    assert!(logs_contain("write sandbox workspace file"));
+    assert!(logs_contain("Timeout"));
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn malformed_workspace_file_response_logs_bounded_metadata() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.malform_next_file_output();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+
+    assert_eq!(
+        transport
+            .write_file(write_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                b"content",
+                false,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::InvalidResponse)
+    );
+    assert!(logs_contain("Railway workspace file response was rejected"));
+    assert!(logs_contain("write sandbox workspace file"));
+    assert!(logs_contain("stdout_bytes=34"));
+}
+
+#[tokio::test]
+async fn workspace_file_transport_failure_destroys_before_reprovisioning() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_file_exec();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let request = write_request("tenant", "user", "/workspace/data.bin", b"content", false);
+
+    assert_eq!(
+        transport.write_file(request.clone()).await,
+        Err(SandboxWorkspaceFileError::TransportFailed)
+    );
+    assert_eq!(count_destroys(&cli.invocations().await), 1);
+    transport.write_file(request).await.unwrap();
+    assert_eq!(count_creates(&cli.invocations().await), 2);
+}
+
+#[tokio::test]
+async fn fixed_python_helpers_reject_symlink_and_directory_targets() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+    std::fs::create_dir(root.path().join("directory")).unwrap();
+
+    let escaped = run_write_helper(root.path(), "/workspace/escape/file", b"secret").await;
+    assert_eq!(escaped["code"], "invalid_path");
+    assert!(!outside.path().join("file").exists());
+
+    let directory = run_write_helper(root.path(), "/workspace/directory", b"data").await;
+    assert_eq!(directory["code"], "not_regular_file");
+
+    let read_directory = run_read_helper(root.path(), "/workspace/directory", 32).await;
+    assert_eq!(read_directory["code"], "not_regular_file");
+}
+
+#[tokio::test]
+async fn shortened_upload_stdin_never_publishes_and_full_retry_recovers() {
+    let root = tempfile::tempdir().unwrap();
+    let expected = b"complete payload";
+    let shortened = &expected[..expected.len() - 3];
+
+    let rejected = run_write_helper_with_expected(
+        root.path(),
+        "/workspace/nested/data.bin",
+        shortened,
+        expected,
+    )
+    .await;
+    assert_eq!(rejected["code"], "input_mismatch");
+    assert!(!root.path().join("nested/data.bin").exists());
+
+    let recovered = run_write_helper(root.path(), "/workspace/nested/data.bin", expected).await;
+    assert_eq!(recovered["status"], "ok");
+    assert_eq!(
+        std::fs::read(root.path().join("nested/data.bin")).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn upload_helper_sets_nested_directories_and_file_to_requested_worker_owner() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    let output =
+        run_write_helper_for_owner(root.path(), "/workspace/a/b/data.bin", b"owned", uid, gid)
+            .await;
+    assert_eq!(output["status"], "ok");
+    for relative in ["a", "a/b", "a/b/data.bin"] {
+        let metadata = std::fs::metadata(root.path().join(relative)).unwrap();
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(metadata.gid(), gid);
+    }
+}
+
+#[tokio::test]
+async fn identical_no_clobber_retry_repairs_legacy_file_owner_and_mode() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("data.bin");
+    std::fs::write(&path, b"identical").unwrap();
+    // The production helper runs as root and can open a legacy mode-000 file.
+    // This unprivileged helper regression uses read-only owner mode to reach
+    // the same identical-file repair branch without requiring test elevation.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+
+    let output =
+        run_write_helper_for_owner(root.path(), "/workspace/data.bin", b"identical", uid, gid)
+            .await;
+
+    assert_eq!(output["status"], "ok");
+    assert_eq!(output["already_present"], true);
+    let metadata = std::fs::metadata(path).unwrap();
+    assert_eq!(metadata.uid(), uid);
+    assert_eq!(metadata.gid(), gid);
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn ambiguous_upload_response_destroys_uncheckpointed_sandbox() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.malform_next_file_output();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    assert_eq!(
+        transport
+            .write_file(write_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                b"content",
+                false,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::InvalidResponse)
+    );
+    let invocations = cli.invocations().await;
+    assert_eq!(count_checkpoint_creates(&invocations), 0);
+    assert_eq!(count_destroys(&invocations), 1);
+}
+
+async fn run_write_helper(root: &Path, path: &str, bytes: &[u8]) -> serde_json::Value {
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    run_write_helper_for_owner(root, path, bytes, uid, gid).await
+}
+
+async fn run_write_helper_for_owner(
+    root: &Path,
+    path: &str,
+    bytes: &[u8],
+    uid: u32,
+    gid: u32,
+) -> serde_json::Value {
+    run_write_helper_with_protocol(root, path, bytes, bytes.len(), &sha256_hex(bytes), uid, gid)
+        .await
+}
+
+async fn run_write_helper_with_expected(
+    root: &Path,
+    path: &str,
+    stdin: &[u8],
+    expected: &[u8],
+) -> serde_json::Value {
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    run_write_helper_with_protocol(
+        root,
+        path,
+        stdin,
+        expected.len(),
+        &sha256_hex(expected),
+        uid,
+        gid,
+    )
+    .await
+}
+
+async fn run_write_helper_with_protocol(
+    root: &Path,
+    path: &str,
+    stdin: &[u8],
+    expected_len: usize,
+    expected_sha256: &str,
+    uid: u32,
+    gid: u32,
+) -> serde_json::Value {
+    let root = root.to_string_lossy().into_owned();
+    let expected_len = expected_len.to_string();
+    let uid = uid.to_string();
+    let gid = gid.to_string();
+    run_python_helper(
+        WORKSPACE_FILE_WRITE_HELPER,
+        &[
+            &root,
+            path,
+            "0",
+            "10485760",
+            &expected_len,
+            expected_sha256,
+            &uid,
+            &gid,
+        ],
+        stdin,
+    )
+    .await
+}
+
+async fn run_read_helper(root: &Path, path: &str, max_bytes: usize) -> serde_json::Value {
+    let root = root.to_string_lossy().into_owned();
+    let max_bytes = max_bytes.to_string();
+    run_python_helper(WORKSPACE_FILE_READ_HELPER, &[&root, path, &max_bytes], &[]).await
+}
+
+async fn run_python_helper(script: &str, args: &[&str], stdin: &[u8]) -> serde_json::Value {
+    let mut child = tokio::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin).await.unwrap();
+    input.shutdown().await.unwrap();
+    drop(input);
+    let output = child.wait_with_output().await.unwrap();
+    assert!(
+        output.status.success(),
+        "python helper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[tokio::test]

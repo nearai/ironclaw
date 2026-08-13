@@ -7,7 +7,10 @@ use std::{collections::HashMap, process::Command};
 
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, TenantId, UserId},
-    process::{CommandExecutionRequest, SandboxCommandTransport},
+    process::{
+        CommandExecutionRequest, SandboxCommandTransport, SandboxWorkspaceFileReadRequest,
+        SandboxWorkspaceFileTransport, SandboxWorkspaceFileWriteRequest,
+    },
     resource::ResourceScope,
 };
 use ironclaw_sandbox::{
@@ -152,6 +155,43 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
             .contains("IRONCLAW_RAILWAY_SANDBOX_ISOLATION_OK")
     );
     assert!(write.sandboxed);
+
+    let downloaded = first
+        .read_file(SandboxWorkspaceFileReadRequest {
+            scope: scope.clone(),
+            path: "/workspace/state.txt".to_string(),
+            max_bytes: 1024,
+        })
+        .await
+        .expect("Railway file bridge reads shell-created workspace state");
+    assert_eq!(downloaded.bytes, marker.as_bytes());
+
+    let bridge_marker = format!("ironclaw-railway-file-bridge-{unique}");
+    let uploaded = first
+        .write_file(SandboxWorkspaceFileWriteRequest {
+            scope: scope.clone(),
+            path: "/workspace/bridge-upload.txt".to_string(),
+            bytes: bridge_marker.as_bytes().to_vec(),
+            overwrite: false,
+        })
+        .await
+        .expect("Railway file bridge writes host-provided workspace state");
+    assert_eq!(uploaded.bytes_written, bridge_marker.len());
+    assert!(!uploaded.already_present);
+
+    let bridge_visible = first
+        .run_command(request(
+            &scope,
+            "python -c 'from pathlib import Path; print(Path(\"bridge-upload.txt\").read_text())'",
+        ))
+        .await
+        .expect("Railway shell sees file bridge upload");
+    assert_eq!(
+        bridge_visible.exit_code, 0,
+        "bridge read failed: {}",
+        bridge_visible.output
+    );
+    assert!(bridge_visible.output.contains(&bridge_marker));
 
     let write_b = first
         .run_command(request(

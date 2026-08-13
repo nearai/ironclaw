@@ -222,6 +222,10 @@ loc_observed_date = "2026-08-11"
 # 2026-08-11 release re-seed: the release base and this PR both measure 832;
 # this PR adds no Arc<dyn> sites. Move the ceiling by one so the existing
 # 15-site working tolerance records the exact release-head observation.
-arc_dyn_ceiling = 817
+# 2026-08-12 Railway workspace copy: 832 -> 836 for the optional typed file
+# transport carried through composition plus its production-shaped test fake.
+# Railway and the fake are distinct implementations of the same host port;
+# composition only conditionally wires the capability and handler together.
+arc_dyn_ceiling = 821
 arc_dyn_tolerance = 15
-arc_dyn_observed = 832
+arc_dyn_observed = 836

@@ -158,8 +158,10 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
+    append_sandbox_workspace_copy_capability,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
+    register_sandbox_workspace_copy_first_party_handler,
 };
 use ironclaw_identity::projects::ProjectRepository;
 use ironclaw_identity::projects::RebornProjectService;
@@ -1130,6 +1132,7 @@ fn insert_bound_memory_package(
 fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
     supplemental_builtin_shell_guidance: Option<&str>,
+    sandbox_workspace_copy_enabled: bool,
     memory_package: Option<&ironclaw_extension_registry::ExtensionPackage>,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = ExtensionRegistry::new();
@@ -1145,6 +1148,13 @@ fn production_builtin_extension_registry(
                 reason: format!("supplemental built-in shell guidance is invalid: {error}"),
             },
         )?;
+    }
+    if sandbox_workspace_copy_enabled {
+        package = append_sandbox_workspace_copy_capability(package).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("sandbox workspace copy package is invalid: {error}"),
+            }
+        })?;
     }
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -1185,8 +1195,11 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
+    sandbox_workspace_file_transport: Option<
+        Arc<dyn ironclaw_host_api::process::SandboxWorkspaceFileTransport>,
+    >,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
@@ -1194,7 +1207,15 @@ fn production_first_party_registry_with_trigger_create_hook(
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
-    })
+    })?;
+    if let Some(transport) = sandbox_workspace_file_transport {
+        register_sandbox_workspace_copy_first_party_handler(&mut registry, transport).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("sandbox workspace copy handler is invalid: {error}"),
+            },
+        )?;
+    }
+    Ok(registry)
 }
 
 fn manifest_channel_account_setup_descriptors(

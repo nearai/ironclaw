@@ -15,10 +15,19 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::{io::AsyncReadExt, process::Command, sync::Mutex};
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    sync::Mutex,
+};
 
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+    SandboxWorkspaceFileError, SandboxWorkspaceFileReadOutput, SandboxWorkspaceFileReadRequest,
+    SandboxWorkspaceFileTransport, SandboxWorkspaceFileWriteOutput,
+    SandboxWorkspaceFileWriteRequest,
 };
 
 use crate::sandbox_process::RebornSandboxUserKey;
@@ -41,17 +50,159 @@ const REMOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(120);
 // produces invalid JSON and therefore fails closed instead of treating an
 // existing durable checkpoint as absent.
 const PROVIDER_LIST_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const MAX_WORKSPACE_FILE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_WORKSPACE_FILE_PATH_BYTES: usize = 4_096;
+const MAX_WORKSPACE_FILE_COMPONENT_BYTES: usize = 255;
+const WORKSPACE_FILE_JSON_OVERHEAD: usize = 512;
 const MAX_TRACKED_USERS: usize = 4_096;
 const WORKSPACE_ROOT: &str = "/workspace";
 const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
 const EXIT_SENTINEL: &str = "__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=";
 const WORKSPACE_BOOTSTRAP_MARKER: &str = "ironclaw-railway-workspace-bootstrap";
+const WORKSPACE_WORKER_UID: u32 = 1000;
+const WORKSPACE_WORKER_GID: u32 = 1000;
 const CHECKPOINT_FAILURE_WARNING: &str = "[IronClaw warning: command completed, but the Railway workspace checkpoint failed; recent state may not survive sandbox restart.]";
 
 // The complete Docker command arrives as distinct argv values. In particular,
 // the model command is the final argv value and is never interpolated into
 // this shell program.
 const OUTER_EXEC_WRAPPER: &str = "set +e\n\"$@\"\nstatus=$?\nprintf '\\n__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=%s\\n' \"$status\"\nexit 0";
+
+// Host-authored helpers. The untrusted workspace path is passed as one
+// positional argv value and file bytes travel only over stdin.
+const WORKSPACE_FILE_WRITE_HELPER: &str = r#"import hashlib, json, os, stat, sys, uuid
+def result(value):
+ print(json.dumps(value,separators=(",",":"))); raise SystemExit(0)
+def fail(code): result({"status":"error","code":code})
+root=os.path.realpath(sys.argv[1]); model_path=sys.argv[2]; overwrite=sys.argv[3]=="1"; max_bytes=int(sys.argv[4]); expected_len=int(sys.argv[5]); expected_digest=sys.argv[6]; worker_uid=int(sys.argv[7]); worker_gid=int(sys.argv[8]); prefix="/workspace/"
+if not model_path.startswith(prefix): fail("invalid_path")
+parts=model_path[len(prefix):].split("/")
+if not parts or any(part in ("",".","..") for part in parts): fail("invalid_path")
+if expected_len>max_bytes: fail("too_large")
+data=sys.stdin.buffer.read(max_bytes+1)
+digest=hashlib.sha256(data).hexdigest()
+if len(data)!=expected_len or digest!=expected_digest: fail("input_mismatch")
+try: root_stat=os.lstat(root)
+except OSError: fail("invalid_path")
+if not stat.S_ISDIR(root_stat.st_mode) or os.path.islink(root): fail("invalid_path")
+flags=os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)
+try: parent_fd=os.open(root,flags)
+except OSError: fail("invalid_path")
+if not stat.S_ISDIR(os.fstat(parent_fd).st_mode): fail("invalid_path")
+for part in parts[:-1]:
+ try: item=os.stat(part,dir_fd=parent_fd,follow_symlinks=False)
+ except FileNotFoundError:
+  try: os.mkdir(part,0o700,dir_fd=parent_fd)
+  except FileExistsError: pass
+  item=os.stat(part,dir_fd=parent_fd,follow_symlinks=False)
+ if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode): fail("invalid_path")
+ try: next_fd=os.open(part,flags,dir_fd=parent_fd)
+ except OSError: fail("invalid_path")
+ if not stat.S_ISDIR(os.fstat(next_fd).st_mode): fail("invalid_path")
+ os.fchown(next_fd,worker_uid,worker_gid); os.fchmod(next_fd,0o700)
+ os.close(parent_fd); parent_fd=next_fd
+leaf=parts[-1]
+def existing_bytes():
+ try: item=os.stat(leaf,dir_fd=parent_fd,follow_symlinks=False)
+ except FileNotFoundError: return None
+ if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode): fail("not_regular_file")
+ try: fd=os.open(leaf,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+ except OSError: fail("not_regular_file")
+ opened=os.fstat(fd)
+ if not stat.S_ISREG(opened.st_mode): fail("not_regular_file")
+ value=b""
+ while len(value)<=max_bytes:
+  chunk=os.read(fd,min(65536,max_bytes+1-len(value)))
+  if not chunk: break
+  value+=chunk
+ os.close(fd); return (value,opened.st_dev,opened.st_ino)
+def repair_existing(existing):
+ value,expected_dev,expected_ino=existing
+ try: fd=os.open(leaf,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+ except OSError: fail("not_regular_file")
+ opened=os.fstat(fd)
+ if not stat.S_ISREG(opened.st_mode) or opened.st_dev!=expected_dev or opened.st_ino!=expected_ino: fail("verification_failed")
+ os.fchown(fd,worker_uid,worker_gid); os.fchmod(fd,0o600); os.fsync(fd)
+ repaired=os.fstat(fd); os.close(fd)
+ if repaired.st_uid!=worker_uid or repaired.st_gid!=worker_gid or stat.S_IMODE(repaired.st_mode)!=0o600: fail("verification_failed")
+ return value
+present=existing_bytes()
+if present is not None and not overwrite:
+ value=present[0]
+ if len(value)==len(data) and hashlib.sha256(value).hexdigest()==digest:
+  repair_existing(present); result({"status":"ok","bytes_written":len(data),"sha256":digest,"already_present":True})
+ fail("conflict")
+temporary=".ironclaw-upload-"+uuid.uuid4().hex; temporary_created=False
+try:
+ fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=parent_fd); temporary_created=True; offset=0
+ while offset<len(data): offset+=os.write(fd,data[offset:])
+ os.fchown(fd,worker_uid,worker_gid); os.fchmod(fd,0o600)
+ os.fsync(fd)
+ temporary_stat=os.fstat(fd)
+ if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_uid!=worker_uid or temporary_stat.st_gid!=worker_gid: fail("verification_failed")
+ os.close(fd)
+ if overwrite:
+  os.replace(temporary,leaf,src_dir_fd=parent_fd,dst_dir_fd=parent_fd); temporary_created=False
+ else:
+  try:
+   os.link(temporary,leaf,src_dir_fd=parent_fd,dst_dir_fd=parent_fd,follow_symlinks=False); os.unlink(temporary,dir_fd=parent_fd); temporary_created=False
+  except FileExistsError:
+   present=existing_bytes()
+   if present is None or len(present[0])!=len(data) or hashlib.sha256(present[0]).hexdigest()!=digest: fail("conflict")
+   repair_existing(present)
+ verified=existing_bytes()
+ if verified is None or len(verified[0])!=len(data) or hashlib.sha256(verified[0]).hexdigest()!=digest: fail("verification_failed")
+ result({"status":"ok","bytes_written":len(data),"sha256":digest,"already_present":present is not None and not overwrite})
+finally:
+ if temporary_created:
+  try: os.unlink(temporary,dir_fd=parent_fd)
+  except OSError: pass
+ os.close(parent_fd)
+"#;
+
+const WORKSPACE_FILE_READ_HELPER: &str = r#"import base64, hashlib, json, os, stat, sys
+def result(value):
+ print(json.dumps(value,separators=(",",":"))); raise SystemExit(0)
+def fail(code): result({"status":"error","code":code})
+root=os.path.realpath(sys.argv[1]); model_path=sys.argv[2]; max_bytes=int(sys.argv[3]); prefix="/workspace/"
+if not model_path.startswith(prefix): fail("invalid_path")
+parts=model_path[len(prefix):].split("/")
+if not parts or any(part in ("",".","..") for part in parts): fail("invalid_path")
+try: root_stat=os.lstat(root)
+except OSError: fail("invalid_path")
+if not stat.S_ISDIR(root_stat.st_mode) or os.path.islink(root): fail("invalid_path")
+flags=os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)
+try: parent_fd=os.open(root,flags)
+except OSError: fail("invalid_path")
+if not stat.S_ISDIR(os.fstat(parent_fd).st_mode): fail("invalid_path")
+for part in parts[:-1]:
+ try: item=os.stat(part,dir_fd=parent_fd,follow_symlinks=False)
+ except FileNotFoundError: fail("not_found")
+ if stat.S_ISLNK(item.st_mode): fail("invalid_path")
+ if not stat.S_ISDIR(item.st_mode): fail("not_regular_file")
+ try: next_fd=os.open(part,flags,dir_fd=parent_fd)
+ except OSError: fail("invalid_path")
+ if not stat.S_ISDIR(os.fstat(next_fd).st_mode): fail("invalid_path")
+ os.close(parent_fd); parent_fd=next_fd
+leaf=parts[-1]
+try: item=os.stat(leaf,dir_fd=parent_fd,follow_symlinks=False)
+except FileNotFoundError: fail("not_found")
+if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode): fail("not_regular_file")
+try: fd=os.open(leaf,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+except OSError: fail("not_regular_file")
+opened=os.fstat(fd)
+if not stat.S_ISREG(opened.st_mode): fail("not_regular_file")
+if opened.st_size>max_bytes: fail("too_large")
+data=b""
+while len(data)<=max_bytes:
+ chunk=os.read(fd,min(65536,max_bytes+1-len(data)))
+ if not chunk: break
+ data+=chunk
+after=os.fstat(fd); os.close(fd); os.close(parent_fd)
+if len(data)>max_bytes: fail("too_large")
+if after.st_size!=len(data) or after.st_ino!=opened.st_ino or after.st_dev!=opened.st_dev: fail("verification_failed")
+result({"status":"ok","bytes":base64.b64encode(data).decode("ascii"),"sha256":hashlib.sha256(data).hexdigest()})
+"#;
 
 /// Explicit, host-only configuration for the preview transport.
 ///
@@ -438,9 +589,73 @@ impl RailwayPreviewSandboxTransport {
         invocation: RailwayCliInvocation,
         deadline: Instant,
     ) -> Result<RailwayCliOutput, RuntimeProcessError> {
-        self.cli
+        let operation = invocation.operation;
+        let result = self
+            .cli
             .execute(invocation, deadline_remaining(deadline)?)
+            .await;
+        if let Err(error) = &result {
+            // SystemRailwayCli constructs this error only after redacting CLI
+            // stderr and configured credentials. Keep the operation alongside
+            // that sanitized cause so provider, preflight, and remote-command
+            // failures remain distinguishable in deployment logs.
+            tracing::error!(
+                operation = operation.label(),
+                ?error,
+                "Railway preview CLI operation failed"
+            );
+        }
+        result
+    }
+
+    async fn live_sandbox_for_file_operation(
+        &self,
+        key: &RebornSandboxUserKey,
+        state: &mut UserSandboxState,
+        deadline: Instant,
+        output_limit: usize,
+    ) -> Result<String, RuntimeProcessError> {
+        if let UserSandboxLifecycle::CleanupPending(sandbox_id) = &state.lifecycle {
+            let sandbox_id = sandbox_id.clone();
+            let prior_error = RuntimeProcessError::ExecutionFailed(
+                "Railway preview sandbox cleanup was previously unconfirmed".to_string(),
+            );
+            self.destroy_after_failed_execution(&sandbox_id, output_limit, &prior_error)
+                .await?;
+            state.lifecycle = UserSandboxLifecycle::Absent;
+        }
+        if let UserSandboxLifecycle::Live(sandbox_id) = &state.lifecycle {
+            let sandbox_id = sandbox_id.clone();
+            if !self.sandbox_is_live(&sandbox_id, deadline).await? {
+                state.lifecycle = UserSandboxLifecycle::Absent;
+            }
+        }
+        match &state.lifecycle {
+            UserSandboxLifecycle::Live(id) => Ok(id.clone()),
+            UserSandboxLifecycle::Absent => {
+                self.provision(key, state, deadline, output_limit).await
+            }
+            UserSandboxLifecycle::CleanupPending(_) => Err(RuntimeProcessError::ExecutionFailed(
+                "Railway preview sandbox cleanup remains pending".to_string(),
+            )),
+        }
+    }
+
+    async fn cleanup_after_file_transport_failure(
+        &self,
+        state: &mut UserSandboxState,
+        sandbox_id: &str,
+        output_limit: usize,
+        execution_error: &RuntimeProcessError,
+    ) {
+        state.lifecycle = UserSandboxLifecycle::CleanupPending(sandbox_id.to_string());
+        if self
+            .destroy_after_failed_execution(sandbox_id, output_limit, execution_error)
             .await
+            .is_ok()
+        {
+            state.lifecycle = UserSandboxLifecycle::Absent;
+        }
     }
 }
 
@@ -559,6 +774,179 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
     }
 }
 
+#[async_trait]
+impl SandboxWorkspaceFileTransport for RailwayPreviewSandboxTransport {
+    async fn read_file(
+        &self,
+        request: SandboxWorkspaceFileReadRequest,
+    ) -> Result<SandboxWorkspaceFileReadOutput, SandboxWorkspaceFileError> {
+        validate_workspace_file_path(&request.path)?;
+        if request.max_bytes == 0 || request.max_bytes > MAX_WORKSPACE_FILE_BYTES {
+            return Err(SandboxWorkspaceFileError::InvalidLimit);
+        }
+        let output_limit = workspace_read_output_limit(request.max_bytes);
+        let deadline = Instant::now() + MAX_COMMAND_TIMEOUT;
+        let key = RebornSandboxUserKey::from_scope(&request.scope);
+        let state = self
+            .state_for(key.clone())
+            .await
+            .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?;
+        let mut state = state.lock().await;
+        let sandbox_id = self
+            .live_sandbox_for_file_operation(&key, &mut state, deadline, output_limit)
+            .await
+            .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?;
+        let invocation = RailwayCliInvocation::new(
+            self.config.cli_path.clone(),
+            RailwayCliOperation::ReadWorkspaceFile,
+            sandbox_exec_argv(
+                &self.config,
+                &sandbox_id,
+                deadline_remaining(deadline)
+                    .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?,
+                workspace_file_read_argv(
+                    &self.config,
+                    &railway_workspace_path(&key),
+                    &request.path,
+                    request.max_bytes,
+                ),
+            ),
+            output_limit,
+        );
+        let output = match self.execute_cli(invocation, deadline).await {
+            Ok(output) => output,
+            Err(error) => {
+                self.cleanup_after_file_transport_failure(
+                    &mut state,
+                    &sandbox_id,
+                    output_limit,
+                    &error,
+                )
+                .await;
+                return Err(SandboxWorkspaceFileError::TransportFailed);
+            }
+        };
+        match parse_workspace_file_read_output(&output.stdout, request.max_bytes) {
+            Err(error @ SandboxWorkspaceFileError::InvalidResponse) => {
+                log_workspace_file_response_rejection(
+                    RailwayCliOperation::ReadWorkspaceFile,
+                    &output,
+                    &error,
+                );
+                Err(error)
+            }
+            result => result,
+        }
+    }
+
+    async fn write_file(
+        &self,
+        request: SandboxWorkspaceFileWriteRequest,
+    ) -> Result<SandboxWorkspaceFileWriteOutput, SandboxWorkspaceFileError> {
+        validate_workspace_file_path(&request.path)?;
+        if request.bytes.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(SandboxWorkspaceFileError::TooLarge {
+                max_bytes: MAX_WORKSPACE_FILE_BYTES,
+            });
+        }
+        let output_limit = DEFAULT_OUTPUT_LIMIT;
+        let deadline = Instant::now() + MAX_COMMAND_TIMEOUT;
+        let key = RebornSandboxUserKey::from_scope(&request.scope);
+        let state = self
+            .state_for(key.clone())
+            .await
+            .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?;
+        let mut state = state.lock().await;
+        let sandbox_id = self
+            .live_sandbox_for_file_operation(&key, &mut state, deadline, output_limit)
+            .await
+            .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?;
+        state.checkpoint_current = false;
+        let invocation = RailwayCliInvocation::new(
+            self.config.cli_path.clone(),
+            RailwayCliOperation::WriteWorkspaceFile,
+            sandbox_exec_argv(
+                &self.config,
+                &sandbox_id,
+                deadline_remaining(deadline)
+                    .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?,
+                workspace_file_write_argv(
+                    &self.config,
+                    &railway_workspace_path(&key),
+                    &request.path,
+                    request.overwrite,
+                    request.bytes.len(),
+                    &sha256_hex(&request.bytes),
+                ),
+            ),
+            output_limit,
+        )
+        .with_stdin(request.bytes.clone());
+        let output = match self.execute_cli(invocation, deadline).await {
+            Ok(output) => output,
+            Err(error) => {
+                self.cleanup_after_file_transport_failure(
+                    &mut state,
+                    &sandbox_id,
+                    output_limit,
+                    &error,
+                )
+                .await;
+                return Err(SandboxWorkspaceFileError::TransportFailed);
+            }
+        };
+        let output = match parse_workspace_file_write_output(&output.stdout, &request.bytes) {
+            Ok(output) => output,
+            Err(SandboxWorkspaceFileError::InvalidResponse) => {
+                let error = RuntimeProcessError::ExecutionFailed(
+                    "Railway workspace write returned an ambiguous verification response"
+                        .to_string(),
+                );
+                log_workspace_file_response_rejection(
+                    RailwayCliOperation::WriteWorkspaceFile,
+                    &output,
+                    &SandboxWorkspaceFileError::InvalidResponse,
+                );
+                self.cleanup_after_file_transport_failure(
+                    &mut state,
+                    &sandbox_id,
+                    output_limit,
+                    &error,
+                )
+                .await;
+                return Err(SandboxWorkspaceFileError::InvalidResponse);
+            }
+            Err(error) => return Err(error),
+        };
+        if self
+            .checkpoint(&key, &sandbox_id, output_limit)
+            .await
+            .is_err()
+        {
+            return Err(SandboxWorkspaceFileError::CheckpointFailed);
+        }
+        state.checkpoint_current = true;
+        Ok(output)
+    }
+}
+
+fn log_workspace_file_response_rejection(
+    operation: RailwayCliOperation,
+    output: &RailwayCliOutput,
+    error: &SandboxWorkspaceFileError,
+) {
+    // Do not log response content: the file bridge can carry arbitrary user
+    // data. Byte counts plus the typed parse failure are enough to distinguish
+    // a malformed helper response from a provider or remote-command failure.
+    tracing::error!(
+        operation = operation.label(),
+        stdout_bytes = output.stdout.len(),
+        stderr_bytes = output.stderr.len(),
+        ?error,
+        "Railway workspace file response was rejected"
+    );
+}
+
 #[cfg(test)]
 mod constructor_test_support {
     use super::*;
@@ -611,6 +999,7 @@ struct RailwayCliInvocation {
     program: PathBuf,
     operation: RailwayCliOperation,
     args: Vec<String>,
+    stdin: Option<Vec<u8>>,
     output_limit: usize,
 }
 
@@ -620,6 +1009,8 @@ enum RailwayCliOperation {
     ListSandboxes,
     CreateSandbox,
     ExecuteSandboxCommand,
+    ReadWorkspaceFile,
+    WriteWorkspaceFile,
     CreateCheckpoint,
     DestroySandbox,
 }
@@ -631,6 +1022,8 @@ impl RailwayCliOperation {
             Self::ListSandboxes => "list sandboxes",
             Self::CreateSandbox => "create sandbox",
             Self::ExecuteSandboxCommand => "execute sandbox command",
+            Self::ReadWorkspaceFile => "read sandbox workspace file",
+            Self::WriteWorkspaceFile => "write sandbox workspace file",
             Self::CreateCheckpoint => "create checkpoint",
             Self::DestroySandbox => "destroy sandbox",
         }
@@ -650,8 +1043,14 @@ impl RailwayCliInvocation {
             program,
             operation,
             args,
+            stdin: None,
             output_limit: output_limit.saturating_add(EXIT_SENTINEL.len() + 32),
         }
+    }
+
+    fn with_stdin(mut self, stdin: Vec<u8>) -> Self {
+        self.stdin = Some(stdin);
+        self
     }
 }
 
@@ -786,7 +1185,11 @@ impl RailwayCli for SystemRailwayCli {
             .env_clear()
             .envs(&environment)
             .env("HOME", cli_home.path()?)
-            .stdin(Stdio::null())
+            .stdin(if invocation.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = match command.spawn() {
@@ -799,9 +1202,32 @@ impl RailwayCli for SystemRailwayCli {
                 ));
             }
         };
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let result = tokio::time::timeout(timeout, async {
+            let stdin = async {
+                match (stdin, invocation.stdin) {
+                    (Some(mut stream), Some(bytes)) => {
+                        stream.write_all(&bytes).await.map_err(|error| {
+                            tracing::error!(?error, "trusted Railway CLI stdin write failed");
+                            RuntimeProcessError::ExecutionFailed(
+                                "Railway preview could not write trusted CLI input".to_string(),
+                            )
+                        })?;
+                        stream.shutdown().await.map_err(|error| {
+                            tracing::error!(?error, "trusted Railway CLI stdin close failed");
+                            RuntimeProcessError::ExecutionFailed(
+                                "Railway preview could not close trusted CLI input".to_string(),
+                            )
+                        })
+                    }
+                    (None, None) => Ok(()),
+                    _ => Err(RuntimeProcessError::ExecutionFailed(
+                        "Railway preview CLI input pipe was unavailable".to_string(),
+                    )),
+                }
+            };
             let stdout = async {
                 match stdout {
                     Some(stream) => read_stream_bounded(stream, invocation.output_limit).await,
@@ -814,13 +1240,14 @@ impl RailwayCli for SystemRailwayCli {
                     None => Ok(String::new()),
                 }
             };
-            let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
+            let (stdin, stdout, stderr, status) = tokio::join!(stdin, stdout, stderr, child.wait());
             let status = status.map_err(|error| {
                 tracing::error!(?error, "trusted Railway CLI process wait failed");
                 RuntimeProcessError::ExecutionFailed(
                     "Railway preview CLI command did not complete".to_string(),
                 )
             })?;
+            stdin?;
             let stdout = stdout?;
             let stderr = stderr?;
             if !status.success() {
@@ -859,7 +1286,13 @@ fn railway_cli_status_error(
     environment: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> RuntimeProcessError {
-    if operation == RailwayCliOperation::ExecuteSandboxCommand && exit_code == Some(124) {
+    if matches!(
+        operation,
+        RailwayCliOperation::ExecuteSandboxCommand
+            | RailwayCliOperation::ReadWorkspaceFile
+            | RailwayCliOperation::WriteWorkspaceFile
+    ) && exit_code == Some(124)
+    {
         return RuntimeProcessError::Timeout(timeout);
     }
     RuntimeProcessError::ExecutionFailed(railway_cli_failure_message(
@@ -1019,6 +1452,79 @@ fn workspace_bootstrap_argv(workspace: &str) -> Vec<String> {
     ]
 }
 
+fn workspace_file_write_argv(
+    config: &RailwayPreviewSandboxConfig,
+    railway_workspace: &str,
+    path: &str,
+    overwrite: bool,
+    expected_len: usize,
+    expected_sha256: &str,
+) -> Vec<String> {
+    workspace_file_helper_argv(
+        config,
+        railway_workspace,
+        true,
+        WORKSPACE_FILE_WRITE_HELPER,
+        vec![
+            WORKSPACE_ROOT.into(),
+            path.into(),
+            if overwrite { "1" } else { "0" }.into(),
+            MAX_WORKSPACE_FILE_BYTES.to_string(),
+            expected_len.to_string(),
+            expected_sha256.into(),
+            WORKSPACE_WORKER_UID.to_string(),
+            WORKSPACE_WORKER_GID.to_string(),
+        ],
+    )
+}
+
+fn workspace_file_read_argv(
+    config: &RailwayPreviewSandboxConfig,
+    railway_workspace: &str,
+    path: &str,
+    max_bytes: usize,
+) -> Vec<String> {
+    workspace_file_helper_argv(
+        config,
+        railway_workspace,
+        false,
+        WORKSPACE_FILE_READ_HELPER,
+        vec![WORKSPACE_ROOT.into(), path.into(), max_bytes.to_string()],
+    )
+}
+
+fn workspace_file_helper_argv(
+    config: &RailwayPreviewSandboxConfig,
+    railway_workspace: &str,
+    attach_stdin: bool,
+    script: &str,
+    protocol: Vec<String>,
+) -> Vec<String> {
+    let mut command = vec!["docker".into(), "run".into(), "--rm".into()];
+    if attach_stdin {
+        command.push("-i".into());
+    }
+    command.extend(
+        super::worker_spec::DockerWorkerSecuritySpec::new(Some("none".to_string()))
+            .trusted_root_helper_docker_run_args(),
+    );
+    command.extend([
+        "--mount".into(),
+        format!(
+            "type=bind,src={railway_workspace},dst={WORKSPACE_ROOT}{}",
+            if attach_stdin { "" } else { ",readonly" }
+        ),
+        "--memory".into(),
+        "128m".into(),
+        config.worker_image.clone(),
+        "python3".into(),
+        "-c".into(),
+        script.into(),
+    ]);
+    command.extend(protocol);
+    command
+}
+
 fn ephemeral_worker_argv(
     config: &RailwayPreviewSandboxConfig,
     railway_workspace: &str,
@@ -1111,6 +1617,136 @@ fn validated_workdir(workdir: Option<&str>) -> Result<String, RuntimeProcessErro
         }
     }
     Ok(workdir.into())
+}
+
+fn validate_workspace_file_path(path: &str) -> Result<(), SandboxWorkspaceFileError> {
+    if path.len() > MAX_WORKSPACE_FILE_PATH_BYTES || path.as_bytes().contains(&0) {
+        return Err(SandboxWorkspaceFileError::InvalidPath);
+    }
+    let Some(relative) = path.strip_prefix("/workspace/") else {
+        return Err(SandboxWorkspaceFileError::InvalidPath);
+    };
+    if relative.is_empty()
+        || relative.split('/').any(|component| {
+            component.is_empty()
+                || component.len() > MAX_WORKSPACE_FILE_COMPONENT_BYTES
+                || matches!(component, "." | "..")
+        })
+        || Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(SandboxWorkspaceFileError::InvalidPath);
+    }
+    Ok(())
+}
+
+fn workspace_read_output_limit(max_bytes: usize) -> usize {
+    max_bytes
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4)
+        .saturating_add(WORKSPACE_FILE_JSON_OVERHEAD)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn workspace_file_error_from_code(code: &str, max_bytes: usize) -> SandboxWorkspaceFileError {
+    match code {
+        "invalid_path" => SandboxWorkspaceFileError::InvalidPath,
+        "too_large" => SandboxWorkspaceFileError::TooLarge { max_bytes },
+        "not_found" => SandboxWorkspaceFileError::NotFound,
+        "not_regular_file" => SandboxWorkspaceFileError::NotRegularFile,
+        "conflict" => SandboxWorkspaceFileError::Conflict,
+        "verification_failed" => SandboxWorkspaceFileError::InvalidResponse,
+        _ => SandboxWorkspaceFileError::InvalidResponse,
+    }
+}
+
+fn parse_workspace_file_write_output(
+    stdout: &str,
+    expected_bytes: &[u8],
+) -> Result<SandboxWorkspaceFileWriteOutput, SandboxWorkspaceFileError> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|_| SandboxWorkspaceFileError::InvalidResponse)?;
+    if value.get("status").and_then(serde_json::Value::as_str) == Some("error") {
+        let code = value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+        return Err(workspace_file_error_from_code(
+            code,
+            MAX_WORKSPACE_FILE_BYTES,
+        ));
+    }
+    if value.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
+        return Err(SandboxWorkspaceFileError::InvalidResponse);
+    }
+    let bytes_written = value
+        .get("bytes_written")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+    let sha256 = value
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+    let already_present = value
+        .get("already_present")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+    let expected_sha256 = sha256_hex(expected_bytes);
+    if bytes_written != expected_bytes.len() || sha256 != expected_sha256 {
+        return Err(SandboxWorkspaceFileError::InvalidResponse);
+    }
+    Ok(SandboxWorkspaceFileWriteOutput {
+        bytes_written,
+        sha256: expected_sha256,
+        already_present,
+    })
+}
+
+fn parse_workspace_file_read_output(
+    stdout: &str,
+    max_bytes: usize,
+) -> Result<SandboxWorkspaceFileReadOutput, SandboxWorkspaceFileError> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|_| SandboxWorkspaceFileError::InvalidResponse)?;
+    if value.get("status").and_then(serde_json::Value::as_str) == Some("error") {
+        let code = value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+        return Err(workspace_file_error_from_code(code, max_bytes));
+    }
+    if value.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
+        return Err(SandboxWorkspaceFileError::InvalidResponse);
+    }
+    let encoded = value
+        .get("bytes")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| SandboxWorkspaceFileError::InvalidResponse)?;
+    if bytes.len() > max_bytes {
+        return Err(SandboxWorkspaceFileError::TooLarge { max_bytes });
+    }
+    let sha256 = value
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SandboxWorkspaceFileError::InvalidResponse)?;
+    let expected_sha256 = sha256_hex(&bytes);
+    if sha256 != expected_sha256 {
+        return Err(SandboxWorkspaceFileError::InvalidResponse);
+    }
+    Ok(SandboxWorkspaceFileReadOutput {
+        bytes,
+        sha256: expected_sha256,
+    })
 }
 
 fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {

@@ -55,9 +55,18 @@ pub fn build_railway_user_sandbox_binding(
             .with_worker_image(worker_image)
             .map_err(invalid_railway_config)?;
     }
-    Ok(binding(Arc::new(RailwayPreviewSandboxTransport::new(
-        config,
-    ))))
+    let transport = Arc::new(RailwayPreviewSandboxTransport::new(config));
+    let process_transport: Arc<dyn ironclaw_host_api::process::SandboxCommandTransport> =
+        transport.clone();
+    let workspace_file_transport: Arc<
+        dyn ironclaw_host_api::process::SandboxWorkspaceFileTransport,
+    > = transport;
+    Ok(
+        RebornRuntimeProcessBinding::user_sandbox_with_workspace_file_transport(
+            Arc::new(UserSandboxProcessPort::new(process_transport)),
+            workspace_file_transport,
+        ),
+    )
 }
 
 fn invalid_railway_config(error: impl std::fmt::Display) -> RebornBuildError {

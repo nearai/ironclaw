@@ -105,13 +105,34 @@ pub(crate) struct OAuthDcrCallbackConfig {
     pub(crate) callback_origin: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
     UserSandbox {
         process_port: Arc<UserSandboxProcessPort>,
+        workspace_file_transport:
+            Option<Arc<dyn ironclaw_host_api::process::SandboxWorkspaceFileTransport>>,
     },
+}
+
+impl std::fmt::Debug for RebornRuntimeProcessBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => formatter.write_str("None"),
+            Self::UserSandbox {
+                workspace_file_transport,
+                ..
+            } => formatter
+                .debug_struct("UserSandbox")
+                .field("process_port", &"<user sandbox process port>")
+                .field(
+                    "workspace_file_transport",
+                    &workspace_file_transport.as_ref().map(|_| "<configured>"),
+                )
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +161,34 @@ impl RebornRuntimeProcessBinding {
     }
 
     pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
-        Self::UserSandbox { process_port }
+        Self::UserSandbox {
+            process_port,
+            workspace_file_transport: None,
+        }
+    }
+
+    pub fn user_sandbox_with_workspace_file_transport(
+        process_port: Arc<UserSandboxProcessPort>,
+        workspace_file_transport: Arc<
+            dyn ironclaw_host_api::process::SandboxWorkspaceFileTransport,
+        >,
+    ) -> Self {
+        Self::UserSandbox {
+            process_port,
+            workspace_file_transport: Some(workspace_file_transport),
+        }
+    }
+
+    pub(crate) fn workspace_file_transport(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_host_api::process::SandboxWorkspaceFileTransport>> {
+        match self {
+            Self::None => None,
+            Self::UserSandbox {
+                workspace_file_transport,
+                ..
+            } => workspace_file_transport.clone(),
+        }
     }
 
     pub(crate) fn validate_for_production_policy(

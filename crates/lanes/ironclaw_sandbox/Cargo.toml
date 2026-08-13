@@ -15,6 +15,7 @@ rcgen = "0.14"
 libc = "0.2"
 time = { version = "0.3", default-features = false }
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 futures-util = "0.3"
@@ -49,4 +50,5 @@ ironclaw_resources = { path = "../../kernel/ironclaw_resources" }
 rust_decimal_macros = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 x509-parser = { version = "0.18", features = ["verify"] }

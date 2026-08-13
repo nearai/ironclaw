@@ -11,6 +11,7 @@ pub mod coding;
 mod gsuite;
 mod latency;
 pub mod packages;
+pub mod sandbox_workspace_copy;
 pub mod skills;
 pub mod web_access;
 
