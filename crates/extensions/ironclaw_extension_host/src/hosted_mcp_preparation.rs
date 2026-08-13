@@ -641,10 +641,11 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         }
-        let refreshed = {
-            let catalog = self.catalog.read().await;
-            catalog.refreshed_resolved_manifest(&finalized)?
-        };
+        // Serialize the read/replace decision against catalog imports and
+        // removals. The guard spans lifecycle synchronization, but the catalog
+        // itself is not mutated until that fallible step succeeds.
+        let mut catalog = self.catalog.write().await;
+        let refreshed = catalog.refreshed_resolved_manifest(&finalized)?;
         let replacement = match refreshed {
             Some(refreshed) => Some(refreshed),
             None if finalized.manifest().source == ManifestSource::UserRegistered => {
@@ -661,10 +662,7 @@ impl HostedMcpPreparationService {
         };
         self.sync_lifecycle_package(extension_id).await?;
         if let Some(replacement) = replacement {
-            self.catalog
-                .write()
-                .await
-                .extend(AvailableExtensionCatalog::from_packages(vec![replacement]));
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![replacement]));
         }
         Ok(None)
     }
