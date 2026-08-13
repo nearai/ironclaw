@@ -5,6 +5,8 @@
 per-crate change inventory) · [PLAN.md](PLAN.md) (execution order and PR slicing)
 · [CHECKLIST.md](CHECKLIST.md) (definition of done)
 · [ADR-device-link-auth-hook.md](ADR-device-link-auth-hook.md) (the auth-hook decision and what it costs)
+· [AUTO-CHANNEL-IDENTITY.md](AUTO-CHANNEL-IDENTITY.md) (approved follow-on:
+device linking becomes the Telegram bot channel identity ceremony)
 **Supersedes for Telegram:** [`../2026-08-07-linked-accounts-design.md`](../2026-08-07-linked-accounts-design.md),
 which remains the reference for WhatsApp/Signal and the deferred inbound/mirror
 work.
