@@ -79,12 +79,14 @@ use ironclaw_processes::{
     ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
-use ironclaw_product_contracts::operator_llm::ActiveModelReader;
+use ironclaw_product_contracts::operator_llm::{
+    ActiveModelReader, LlmConfigService, LlmConfigServiceError,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
-use ironclaw_product_contracts::surface::ProductSurface;
+use ironclaw_product_contracts::surface::{ProductSurface, ProductSurfaceCaller};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
-    SessionThreadService, ThreadHistoryRequest, ThreadScope,
+    AcceptInboundMessageRequest, EnsureThreadRequest, InboundMessageReplayMetadata, MessageContent,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turn_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -534,6 +536,23 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     fn from(value: DefaultPlannedRuntimeBuildError) -> Self {
         Self::InvalidArgument {
             reason: value.to_string(),
+        }
+    }
+}
+
+fn cli_model_resolution_error(error: LlmConfigServiceError) -> RebornRuntimeError {
+    match error {
+        LlmConfigServiceError::InvalidRequest { reason, .. } => {
+            RebornRuntimeError::TurnRejected { reason }
+        }
+        LlmConfigServiceError::NotFound => RebornRuntimeError::TurnRejected {
+            reason: "requested model is unavailable".to_string(),
+        },
+        LlmConfigServiceError::Unavailable => {
+            RebornRuntimeError::LlmProvider("model selection is unavailable".to_string())
+        }
+        LlmConfigServiceError::Internal => {
+            RebornRuntimeError::LlmProvider("model selection failed".to_string())
         }
     }
 }
@@ -2173,25 +2192,44 @@ impl RebornRuntime {
             return Err(error);
         }
         let scope = self.turn_scope_for(&conversation.0);
+        let resolved_model = match self.llm_config_service.as_ref() {
+            Some(service) => service
+                .resolve_user_model(
+                    ProductSurfaceCaller::new(
+                        self.thread_scope.tenant_id.clone(),
+                        self.actor_user_id.clone(),
+                        Some(self.thread_scope.agent_id.clone()),
+                        self.thread_scope.project_id.clone(),
+                    ),
+                    None,
+                )
+                .await
+                .map_err(cli_model_resolution_error)?,
+            None => None,
+        };
         let accept_started_at = live_latency_started_at();
+        let accept_request = AcceptInboundMessageRequest {
+            scope: self.thread_scope.clone(),
+            thread_id: conversation.0.clone(),
+            actor_id: self.actor_user_id.as_str().to_string(),
+            source_binding_id: Some(self.source_binding_ref.as_str().to_string()),
+            reply_target_binding_id: Some(self.reply_target_binding_ref.as_str().to_string()),
+            // This task-level API does not receive an upstream stable
+            // event id, so mint a best-effort unique id scoped to the
+            // caller-provided source binding.
+            external_event_id: Some(format!(
+                "{}:{}",
+                self.source_binding_ref.as_str(),
+                Uuid::new_v4()
+            )),
+            content: MessageContent::text(text.to_string()),
+        };
         let accepted = match self
             .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: conversation.0.clone(),
-                actor_id: self.actor_user_id.as_str().to_string(),
-                source_binding_id: Some(self.source_binding_ref.as_str().to_string()),
-                reply_target_binding_id: Some(self.reply_target_binding_ref.as_str().to_string()),
-                // This task-level API does not receive an upstream stable
-                // event id, so mint a best-effort unique id scoped to the
-                // caller-provided source binding.
-                external_event_id: Some(format!(
-                    "{}:{}",
-                    self.source_binding_ref.as_str(),
-                    Uuid::new_v4()
-                )),
-                content: MessageContent::text(text.to_string()),
-            })
+            .accept_inbound_message_with_replay_metadata(
+                accept_request,
+                InboundMessageReplayMetadata { resolved_model },
+            )
             .await
         {
             Ok(accepted) => {
@@ -2278,7 +2316,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
-                requested_model: None,
+                requested_model: accepted.replay_metadata.resolved_model.clone(),
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
