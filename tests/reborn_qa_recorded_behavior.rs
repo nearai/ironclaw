@@ -1182,7 +1182,7 @@ fn append_fired_routine_reply(trace: &mut LlmTrace) {
         steps: vec![TraceStep {
             request_hint: None,
             response: TraceResponse::Text {
-                content: "qa fired routine ok".to_string(),
+                content: "qa fired routine ok.".to_string(),
                 input_tokens: 1,
                 output_tokens: 1,
             },
