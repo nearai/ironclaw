@@ -84,6 +84,12 @@ use ironclaw_product_contracts::inbound::{
     AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
 };
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelPreference,
+};
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
@@ -595,6 +601,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(in_memory_backed_outbound_state_store());
     // The production shape: composition builds ONE product-side workflow
     // factory and the assembly names no product type at all (§12.11 D-A).
+    let model_preferences = Arc::new(ChannelModelPreferences::default());
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
         ironclaw_assistant::RebornChannelWorkflowServices {
             filesystem: Arc::new(InMemoryBackend::new()),
@@ -602,6 +609,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             turn_coordinator: Arc::new(coordinator.clone()),
             inbound_attachments: Arc::new(InertAttachmentLander),
             input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
+            llm_config: Some(Arc::clone(&model_preferences) as Arc<dyn LlmConfigService>),
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
@@ -658,7 +666,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
-    let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
+    let command_executions = Arc::new(RecordingCommandExecutionSurface::new(model_preferences));
     let command_surface_set = assembly.set_product_command_surface(Arc::clone(&command_executions)
         as Arc<dyn ironclaw_product_contracts::surface::ProductSurface>);
     assert!(command_surface_set); // safety: this file is included only by cfg(test).
@@ -3090,6 +3098,7 @@ struct RecordingTurnState {
     submitted_scopes: Vec<TurnScope>,
     submitted_actors: Vec<TurnActor>,
     submitted_channel_contexts: Vec<Option<String>>,
+    submitted_requested_models: Vec<Option<String>>,
 }
 
 impl RecordingTurnCoordinator {
@@ -3103,6 +3112,7 @@ impl RecordingTurnCoordinator {
                 submitted_scopes: Vec::new(),
                 submitted_actors: Vec::new(),
                 submitted_channel_contexts: Vec::new(),
+                submitted_requested_models: Vec::new(),
             })),
             threads,
             mode,
@@ -3128,6 +3138,14 @@ impl RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .submitted_turn_count
+    }
+
+    fn submitted_requested_models(&self) -> Vec<Option<String>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .submitted_requested_models
+            .clone()
     }
 
     /// Scopes of submitted turns in submission order — shared-channel
@@ -3374,6 +3392,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .product_context
             .as_ref()
             .and_then(|context| context.channel_context.clone());
+        let submitted_requested_model = request.requested_model.clone();
         let status = match &self.mode {
             TurnMode::Complete { assistant_text } => {
                 append_final_assistant_message(
@@ -3434,6 +3453,9 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         state
             .submitted_channel_contexts
             .push(submitted_channel_context);
+        state
+            .submitted_requested_models
+            .push(submitted_requested_model);
         state.active_run_id = Some(run_id);
         if matches!(
             status,
@@ -3785,11 +3807,156 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 /// Web API responses — the transport-seam analog of the old protocol-egress
 /// recorder.
 #[derive(Default)]
+struct ChannelModelPreferences {
+    preferences: Mutex<std::collections::HashMap<(String, String), String>>,
+}
+
+impl ChannelModelPreferences {
+    fn key(caller: &ironclaw_product_contracts::surface::ProductSurfaceCaller) -> (String, String) {
+        (
+            caller.tenant_id.as_str().to_string(),
+            caller.user_id.as_str().to_string(),
+        )
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for ChannelModelPreferences {
+    async fn snapshot(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn set_active(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn list_models(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn user_model_preference(
+        &self,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Ok(UserModelPreference {
+            model: self
+                .preferences
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&Self::key(&caller))
+                .cloned(),
+        })
+    }
+
+    async fn set_user_model_preference(
+        &self,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let mut preferences = self
+            .preferences
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = Self::key(&caller);
+        match request.model.clone() {
+            Some(model) => {
+                preferences.insert(key, model);
+            }
+            None => {
+                preferences.remove(&key);
+            }
+        }
+        Ok(UserModelPreference {
+            model: request.model,
+        })
+    }
+
+    async fn resolve_user_model(
+        &self,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        Ok(requested_model.or_else(|| {
+            self.preferences
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&Self::key(&caller))
+                .cloned()
+        }))
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+}
+
 struct RecordingCommandExecutionSurface {
     invokes: Mutex<Vec<(String, String, serde_json::Value)>>,
+    model_preferences: Arc<ChannelModelPreferences>,
 }
 
 impl RecordingCommandExecutionSurface {
+    fn new(model_preferences: Arc<ChannelModelPreferences>) -> Self {
+        Self {
+            invokes: Mutex::new(Vec::new()),
+            model_preferences,
+        }
+    }
+
     fn invokes(&self) -> Vec<(String, String, serde_json::Value)> {
         self.invokes
             .lock()
@@ -3814,14 +3981,46 @@ impl ironclaw_product_contracts::surface::ProductSurface for RecordingCommandExe
         } else {
             "Model"
         };
+        let model_command =
+            if operation_id == ironclaw_assistant::PRODUCT_MODEL_COMMAND_OPERATION_ID {
+                Some(
+                    serde_json::from_value::<ironclaw_assistant::ProductModelCommandInput>(
+                        request.input.clone(),
+                    )
+                    .expect("model command input"),
+                )
+            } else {
+                None
+            };
         self.invokes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push((
-                operation_id,
+                operation_id.clone(),
                 caller.user_id.as_str().to_string(),
                 request.input,
             ));
+        if let Some(input) = model_command {
+            match input.action {
+                ironclaw_assistant::ProductModelCommand::Use { model } => {
+                    self.model_preferences
+                        .set_user_model_preference(
+                            caller.clone(),
+                            SetUserModelPreferenceRequest { model: Some(model) },
+                        )
+                        .await?;
+                }
+                ironclaw_assistant::ProductModelCommand::Default => {
+                    self.model_preferences
+                        .set_user_model_preference(
+                            caller.clone(),
+                            SetUserModelPreferenceRequest { model: None },
+                        )
+                        .await?;
+                }
+                _ => {}
+            }
+        }
         Ok(
             ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse {
                 output: serde_json::json!({
@@ -4304,6 +4503,22 @@ const DM_MODEL_SET: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-command-model-set",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model set fake-model","ts":"1710000000.000027"}
+	}"#;
+
+const DM_MODEL_USE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-model-use",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model use model-b","ts":"1710000000.000028"}
+	}"#;
+
+const DM_AFTER_MODEL_USE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-after-model-use",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"use my saved model","ts":"1710000000.000029"}
 	}"#;
 
 const DM_UNKNOWN_COMMAND: &str = r#"{
@@ -5680,6 +5895,34 @@ async fn admin_dm_model_set_executes_via_command_surface() {
         harness.coordinator.submitted_turn_count(),
         0,
         "product commands are not turns"
+    );
+}
+
+/// A caller-scoped preference selected through the real channel command path
+/// must be resolved for the next ordinary message from the same bound user.
+#[tokio::test]
+async fn model_use_command_applies_to_the_next_channel_turn() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "done".to_string(),
+    })
+    .await;
+
+    let command = harness.post_event(DM_MODEL_USE).await;
+    assert_eq!(command.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "model commands are not turns"
+    );
+
+    let message = harness.post_event(DM_AFTER_MODEL_USE).await;
+    assert_eq!(message.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_requested_models(),
+        vec![Some("model-b".to_string())]
     );
 }
 

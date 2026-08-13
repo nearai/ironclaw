@@ -61,6 +61,7 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
     WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
     WEBUI_V2_PATTERN_USER_MODEL_CATALOG, WEBUI_V2_PATTERN_USER_MODEL_POLICY,
+    WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
 };
 use crate::webui_v2::handlers;
 use crate::webui_v2::sse_capacity::SseCapacity;
@@ -276,6 +277,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
             get(handlers::get_user_model_catalog),
+        )
+        .route(
+            WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+            get(handlers::get_user_model_preference).put(handlers::set_user_model_preference),
         )
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_LOGS, get(handlers::query_logs))

@@ -14,10 +14,9 @@ export const primaryRoutes = [
   // /projects route registered (direct URL + breadcrumb/title resolution) while
   // suppressing the now-duplicate top-nav entry. Its lib/projects-api.ts calls
   // the real v2 `/api/webchat/v2/projects` endpoints (list/create/read/update/
-  // delete + membership ACL); per-project missions/threads remain stubbed.
+  // delete + membership ACL) and the project-filtered thread list.
   { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
-  { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
   { id: "automations", path: "/automations", labelKey: "nav.automations" },
   { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
@@ -33,7 +32,9 @@ export const primaryRoutes = [
 export const routeSectionDefs = [
   {
     labelKey: "nav.sectionWork",
-    ids: ["chat", "workspace", "projects", "jobs", "routines", "automations", "missions"],
+    ids: primaryRoutes
+      .filter(({ id }) => !["extensions", "logs", "settings", "admin"].includes(id))
+      .map(({ id }) => id),
   },
   {
     labelKey: "nav.sectionSystem",
@@ -66,9 +67,7 @@ export const EXTENSIONS_SUB_ROUTES = [
   { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
 ];
 
-// Only the Users tab ships in this admin port. The dashboard and usage tabs
-// are usage/analytics surfaces, deliberately out of scope here (their
-// components remain in the tree but are not routed).
+// Only supported Admin surfaces are registered here.
 export const ADMIN_SUB_ROUTES = [
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
   { id: "configuration", labelKey: "admin.tab.configuration", icon: "tool" },

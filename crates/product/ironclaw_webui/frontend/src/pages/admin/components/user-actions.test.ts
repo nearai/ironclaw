@@ -185,12 +185,10 @@ function loadDetailModule(harness) {
       SelectMenu: function SelectMenu() {},
       useAdminUserDetail: () => ({}),
       useAdminUsers: () => baseAdminState(),
-      useUsage: () => ({}),
       UserSecretsPanel: function UserSecretsPanel() {},
       ThreadScrapingPanel,
       formatRelativeTime: () => "never",
       formatCost: () => "$0",
-      formatTokenCount: () => "0",
       truncateId: (id) => id,
       statusTone: () => "muted",
       roleTone: () => "muted",
@@ -232,7 +230,6 @@ test("user detail exposes thread scraping only when the deployment gate is enabl
   const props = {
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState: baseAdminState(),
   };
 
@@ -432,7 +429,6 @@ test("admin confirmations ignore repeated submissions while requests are in flig
   const detailProps = {
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState: deleteState,
   };
   rendered = deleteHarness.render(UserDetailView, detailProps);
@@ -461,7 +457,6 @@ test("opening and cancelling delete preserves unrelated action errors", () => {
   const props = {
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState,
   };
 
@@ -491,7 +486,6 @@ test("user detail surfaces status and role failures", () => {
   const props = (adminState) => ({
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState,
   });
 
@@ -519,7 +513,6 @@ test("delete failure keeps the dialog open and does not navigate away", async ()
   const props = {
     onBack: () => { backCalls += 1; },
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState,
   };
 

@@ -2,7 +2,8 @@
 
 The deployment-operator control plane: LLM provider administration (registry
 write side, operator-scoped keys, active provider+model selection, catalog
-overlay, live reload, NEAR AI / OpenAI Codex logins), the operator log ring,
+overlay, tenant policy, user-scoped model preferences, live reload, and NEAR AI
+/ OpenAI Codex logins), the operator log ring,
 and OS service lifecycle. A different kind of "operator" than an installed
 extension's own management surface — this is the person running the
 deployment, not a channel. It implements ports declared in
@@ -27,6 +28,7 @@ Implementations of the operator-service ports declared in
 | --- | --- |
 | `LlmConfigService` (`operator_llm`) | `llm_admin::llm_config_service::RebornLlmConfigService` |
 | `ModelSelectionPolicyStore` (`operator_llm`) | `llm_admin::model_selection_policy_store::FilesystemModelSelectionPolicyStore` |
+| `UserModelPreferenceStore` (`operator_llm`) | `llm_admin::user_model_preference_store::FilesystemUserModelPreferenceStore` |
 | `ActiveModelReader` (`operator_llm`) | `llm_admin::active_model::ProviderActiveModelReader` |
 | `OperatorLogsService` (`operator_service`) | `operator_logs::OperatorLogBuffer` |
 | `OperatorServiceLifecycleService` (`operator_service`) | `operator_service_lifecycle::OperatorServiceLifecycle` |

@@ -27,6 +27,8 @@ use ironclaw_product_contracts::inbound::{
     AcceptedTurnSubmission, BusyRunSnapshot, ProductInboundAck, ProductInboundBindingDirective,
     ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductSourceChannel,
 };
+use ironclaw_product_contracts::operator_llm::{LlmConfigService, LlmConfigServiceError};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
@@ -291,6 +293,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     thread_service: T,
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    llm_config: Option<Arc<dyn LlmConfigService>>,
     input_enqueue: Arc<dyn HostInputEnqueuePort>,
     session_skill_activation: Option<SessionSkillActivationPorts>,
 }
@@ -317,9 +320,39 @@ where
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            llm_config: None,
             input_enqueue,
             session_skill_activation: None,
         }
+    }
+
+    /// Resolve explicit model hints and caller-scoped saved preferences before
+    /// a message crosses the durable acceptance boundary.
+    pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
+        self.llm_config = Some(llm_config);
+        self
+    }
+
+    async fn resolve_user_model(
+        &self,
+        binding: &ResolvedBinding,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, ProductSurfaceFailure> {
+        let Some(llm_config) = self.llm_config.as_ref() else {
+            return Ok(requested_model);
+        };
+        llm_config
+            .resolve_user_model(
+                ProductSurfaceCaller::new(
+                    binding.tenant_id.clone(),
+                    binding.actor_user_id.clone(),
+                    binding.agent_id.clone(),
+                    binding.project_id.clone(),
+                ),
+                requested_model,
+            )
+            .await
+            .map_err(inbound_model_resolution_failure)
     }
 
     /// Wire the port that lands inline attachment bytes into project storage
@@ -549,9 +582,21 @@ where
             attachments,
         )?;
 
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
-            .await
-            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
+        let requested_model = self
+            .resolve_user_model(
+                &prepared_for_turn.binding,
+                rewritten_payload.requested_model.clone(),
+            )
+            .await?;
+
+        self.accept_prepared_user_message(
+            prepared_for_turn,
+            envelope_for_turn,
+            attachments,
+            requested_model,
+        )
+        .await
+        .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 
     async fn prepare_user_message(
@@ -800,6 +845,7 @@ where
         prepared: PreparedUserMessage,
         envelope: &ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
+        requested_model: Option<String>,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
@@ -855,15 +901,20 @@ where
         let reply_target_binding_id = prepared.reply_target_binding_id.clone();
         let accepted = match self
             .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: prepared.thread_scope.clone(),
-                thread_id: prepared.binding.thread_id.clone(),
-                actor_id: prepared.binding.actor_user_id.as_str().to_string(),
-                source_binding_id: Some(prepared.source_binding_id.clone()),
-                reply_target_binding_id: Some(reply_target_binding_id.clone()),
-                external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content,
-            })
+            .accept_inbound_message_with_replay_metadata(
+                AcceptInboundMessageRequest {
+                    scope: prepared.thread_scope.clone(),
+                    thread_id: prepared.binding.thread_id.clone(),
+                    actor_id: prepared.binding.actor_user_id.as_str().to_string(),
+                    source_binding_id: Some(prepared.source_binding_id.clone()),
+                    reply_target_binding_id: Some(reply_target_binding_id.clone()),
+                    external_event_id: Some(envelope.external_event_id().as_str().to_string()),
+                    content,
+                },
+                ironclaw_threads::InboundMessageReplayMetadata {
+                    resolved_model: requested_model,
+                },
+            )
             .await
         {
             Ok(accepted) => accepted,
@@ -906,7 +957,7 @@ where
                 adapter_id: prepared.adapter_id,
                 source_channel: prepared.source_channel,
                 surface_type: prepared.surface_type,
-                requested_model: payload.requested_model.clone(),
+                requested_model: accepted.replay_metadata.resolved_model,
                 lane: prepared.lane,
                 skill_activation_text: prepared.skill_activation_text,
                 channel_context: payload.channel_context.clone(),
@@ -1025,6 +1076,29 @@ fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFail
     ProductSurfaceFailure::InboundAttachmentFailed {
         reason: reason.into(),
         retryable: false,
+    }
+}
+
+fn inbound_model_resolution_failure(error: LlmConfigServiceError) -> ProductSurfaceFailure {
+    match error {
+        LlmConfigServiceError::InvalidRequest { reason, .. } => {
+            ProductSurfaceFailure::InboundModelResolutionFailed {
+                reason,
+                retryable: false,
+            }
+        }
+        LlmConfigServiceError::NotFound => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "requested model was not found".into(),
+            retryable: false,
+        },
+        LlmConfigServiceError::Unavailable => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "model selection is temporarily unavailable".into(),
+            retryable: true,
+        },
+        LlmConfigServiceError::Internal => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "model selection failed".into(),
+            retryable: true,
+        },
     }
 }
 
@@ -1252,10 +1326,7 @@ impl ProductInboundTurnHandoff {
                 adapter_id,
                 source_channel,
                 surface_type,
-                // The requested model is not persisted in the message store, so an
-                // idempotent resubmission of an accepted message falls back to the
-                // deployment's active model rather than recovering the original hint.
-                requested_model: None,
+                requested_model: replay.replay_metadata.resolved_model,
                 lane,
                 skill_activation_text,
                 // Channel conversation context is likewise not persisted in the
