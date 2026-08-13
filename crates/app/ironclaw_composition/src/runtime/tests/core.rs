@@ -6565,7 +6565,10 @@ async fn stream_product_events(
 fn thread_stream_payload(
     envelope: &ironclaw_product_contracts::surface::ProductStreamEventEnvelope,
 ) -> &ProductOutboundPayload {
-    let ironclaw_product_contracts::surface::ProductStreamEvent::Thread(payload) = &envelope.event;
+    let ironclaw_product_contracts::surface::ProductStreamEvent::Thread(payload) = &envelope.event
+    else {
+        panic!("expected a thread stream event, got {:?}", envelope.event);
+    };
     payload
 }
 

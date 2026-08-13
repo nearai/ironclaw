@@ -52,7 +52,9 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
     WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
     WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN,
-    WEBUI_V2_PATTERN_RUN_AUTOMATION, WEBUI_V2_PATTERN_SEARCH_SKILLS,
+    WEBUI_V2_PATTERN_RUN_AUTOMATION, WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE,
+    WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT, WEBUI_V2_PATTERN_RUN_COMPLETION_THREAD_READ,
+    WEBUI_V2_PATTERN_RUN_COMPLETIONS_UNREAD, WEBUI_V2_PATTERN_SEARCH_SKILLS,
     WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE, WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
     WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
@@ -385,6 +387,22 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
             get(handlers::session_websocket),
+        )
+        .route(
+            WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT,
+            post(handlers::run_completion_intent),
+        )
+        .route(
+            WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE,
+            post(handlers::run_completion_acknowledge),
+        )
+        .route(
+            WEBUI_V2_PATTERN_RUN_COMPLETION_THREAD_READ,
+            post(handlers::run_completion_thread_read),
+        )
+        .route(
+            WEBUI_V2_PATTERN_RUN_COMPLETIONS_UNREAD,
+            get(handlers::run_completions_unread),
         )
         .route(WEBUI_V2_PATTERN_CANCEL_RUN, post(handlers::cancel_run))
         .route(WEBUI_V2_PATTERN_RESOLVE_GATE, post(handlers::resolve_gate))

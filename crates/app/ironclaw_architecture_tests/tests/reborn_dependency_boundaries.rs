@@ -1095,7 +1095,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // module (the single-use session-socket ticket record and storage
         // port; adapters live in webui/composition). Count read from this
         // gate.
-        ("ironclaw_product_contracts", 16_791),
+        // 16_791 -> 17_130 (2026-08-31, run-completion notifications): +339
+        // lines of vocabulary, no logic — the `run_completions` wire module
+        // (notice/grant/clear stream events, intent/acknowledge/thread-read
+        // request-responses, unread snapshot, operation descriptors, and
+        // their bounds). Store, ingest, arbitration, and stream behavior all
+        // live in `ironclaw_assistant::run_completions`; composition owns
+        // the observer/coordinator wiring. Count read from this gate.
+        ("ironclaw_product_contracts", 17_130),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.

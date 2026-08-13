@@ -44,6 +44,10 @@ pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_SESSION_WEBSOCKET_TICKET: &str = "webui.v2.session_websocket_ticket";
 pub const WEBUI_V2_ROUTE_SESSION_WEBSOCKET: &str = "webui.v2.session_websocket";
+pub const WEBUI_V2_ROUTE_RUN_COMPLETION_INTENT: &str = "webui.v2.run_completion_intent";
+pub const WEBUI_V2_ROUTE_RUN_COMPLETION_ACKNOWLEDGE: &str = "webui.v2.run_completion_acknowledge";
+pub const WEBUI_V2_ROUTE_RUN_COMPLETION_THREAD_READ: &str = "webui.v2.run_completion_thread_read";
+pub const WEBUI_V2_ROUTE_RUN_COMPLETIONS_UNREAD: &str = "webui.v2.run_completions_unread";
 pub const WEBUI_V2_ROUTE_LIST_COMMANDS: &str = "webui.v2.list_commands";
 pub const WEBUI_V2_ROUTE_EXECUTE_COMMAND: &str = "webui.v2.execute_command";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
@@ -181,6 +185,13 @@ pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{threa
 pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET: &str =
     "/api/webchat/v2/session/websocket-ticket";
 pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET: &str = "/api/webchat/v2/session/websocket";
+pub const WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT: &str =
+    "/api/webchat/v2/run-completions/intent";
+pub const WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE: &str =
+    "/api/webchat/v2/run-completions/acknowledge";
+pub const WEBUI_V2_PATTERN_RUN_COMPLETION_THREAD_READ: &str =
+    "/api/webchat/v2/run-completions/thread-read";
+pub const WEBUI_V2_PATTERN_RUN_COMPLETIONS_UNREAD: &str = "/api/webchat/v2/run-completions/unread";
 pub const WEBUI_V2_PATTERN_LIST_COMMANDS: &str = "/api/webchat/v2/commands";
 pub const WEBUI_V2_PATTERN_EXECUTE_COMMAND: &str = "/api/webchat/v2/threads/{thread_id}/commands";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
@@ -348,6 +359,10 @@ pub fn webui_v2_routes_with_artifact_flags(
         stream_events_descriptor(),
         session_websocket_ticket_descriptor(),
         session_websocket_descriptor(),
+        run_completion_intent_descriptor(),
+        run_completion_acknowledge_descriptor(),
+        run_completion_thread_read_descriptor(),
+        run_completions_unread_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         retry_run_descriptor(),
@@ -1158,6 +1173,65 @@ fn session_websocket_descriptor() -> IngressRouteDescriptor {
             effect_path: AllowedEffectPath::ProjectionOnly,
         })
         .expect("session websocket policy is statically valid"),
+    )
+}
+
+fn run_completion_intent_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RUN_COMPLETION_INTENT,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT,
+        // Notification mutations are ordinary authenticated product commands
+        // (2026-08-13 design §7.8): presentation intent offers ride HTTP, so
+        // the read-only session WebSocket never carries authority.
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn run_completion_acknowledge_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RUN_COMPLETION_ACKNOWLEDGE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn run_completion_thread_read_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RUN_COMPLETION_THREAD_READ,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_RUN_COMPLETION_THREAD_READ,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn run_completions_unread_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RUN_COMPLETIONS_UNREAD,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_RUN_COMPLETIONS_UNREAD,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
     )
 }
 

@@ -33,13 +33,18 @@ impl WebChatV2EventFrame {
     }
 }
 
-impl From<ProductStreamEventEnvelope> for WebChatV2EventFrame {
-    fn from(envelope: ProductStreamEventEnvelope) -> Self {
+impl WebChatV2EventFrame {
+    /// Build the thread-event browser frame. Non-thread stream families
+    /// (run completions) have their own frame vocabulary in the session
+    /// codec; this constructor is only for the per-thread transports.
+    pub fn from_thread_stream_event(envelope: ProductStreamEventEnvelope) -> Option<Self> {
         let ProductStreamEventEnvelope { cursor, event } = envelope;
-        let ProductStreamEvent::Thread(payload) = event;
-        Self {
-            cursor,
-            event: WebChatV2Event::from(payload),
+        match event {
+            ProductStreamEvent::Thread(payload) => Some(Self {
+                cursor,
+                event: WebChatV2Event::from(payload),
+            }),
+            ProductStreamEvent::RunCompletion(_) => None,
         }
     }
 }

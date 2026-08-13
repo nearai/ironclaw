@@ -126,6 +126,14 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //   JUSTIFIED (Bucket-3 by meaning): "hook-local id" — an identifier local to
     //     one hook, a genuine domain concept, not a deployment tier.
     "HookLocalId",
+    //   JUSTIFIED (Bucket-3 by meaning): the run-completion notification
+    //     `local_os` presentation lane (2026-08-13 design §5.4) — a browser
+    //     OS-notification intent kind mirroring the wire enum's `LocalOs`
+    //     variant, not a deployment tier. The policy trait gates whether a
+    //     `local_os` intent may win arbitration; `Deny*` is the fail-closed
+    //     Phase-1 default until validated grants land.
+    "DenyLocalOsIntents",
+    "LocalOsIntentPolicy",
     //   RebornLocal* composition family — standalone-as-type mode names in the
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):

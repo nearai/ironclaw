@@ -83,6 +83,12 @@ use ironclaw_product_contracts::admin_users::{
 use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
 };
+use ironclaw_product_contracts::run_completions::{
+    RUN_COMPLETION_ACKNOWLEDGE_COMMAND, RUN_COMPLETION_INTENT_COMMAND,
+    RUN_COMPLETION_THREAD_READ_COMMAND, RUN_COMPLETION_UNREAD_VIEW,
+    RunCompletionAcknowledgeRequest, RunCompletionIntentRequest, RunCompletionMutationResponse,
+    RunCompletionThreadReadRequest, RunCompletionUnreadRequest, RunCompletionUnreadResponse,
+};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
@@ -1958,6 +1964,70 @@ pub async fn delete_automation(
         RebornAutomationRequest { automation_id },
     )
     .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/run-completions/intent`
+///
+/// Presentation-intent offer for one run-completion notice (2026-08-13
+/// design §7.8). Notification mutations are ordinary authenticated product
+/// commands — the read-only session WebSocket never carries them.
+pub async fn run_completion_intent(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(request): Json<RunCompletionIntentRequest>,
+) -> Result<Json<RunCompletionMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        RUN_COMPLETION_INTENT_COMMAND,
+        request,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/run-completions/acknowledge`
+pub async fn run_completion_acknowledge(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(request): Json<RunCompletionAcknowledgeRequest>,
+) -> Result<Json<RunCompletionMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        RUN_COMPLETION_ACKNOWLEDGE_COMMAND,
+        request,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/run-completions/thread-read`
+pub async fn run_completion_thread_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(request): Json<RunCompletionThreadReadRequest>,
+) -> Result<Json<RunCompletionMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        RUN_COMPLETION_THREAD_READ_COMMAND,
+        request,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/run-completions/unread`
+pub async fn run_completions_unread(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RunCompletionUnreadResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = RUN_COMPLETION_UNREAD_VIEW
+        .query_on(&surface, RunCompletionUnreadRequest {}, None)
+        .await?;
     Ok(Json(response))
 }
 

@@ -206,7 +206,11 @@ impl ProductSurface for ProgrammableProductSurface {
         ProductSurfaceError,
     > {
         let ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } =
-            request.selector;
+            request.selector
+        else {
+            // This double backs thread-stream handler tests only.
+            return Err(ProductSurfaceError::not_found());
+        };
         let stream_request = RebornStreamEventsRequest {
             thread_id,
             after_cursor: request

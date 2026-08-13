@@ -242,7 +242,13 @@ async fn forward_stream_event(
     sender: &mpsc::Sender<SubscriptionEmit>,
     envelope: ironclaw_product_contracts::surface::ProductStreamEventEnvelope,
 ) -> bool {
-    let browser = codec::browser_frame(envelope);
+    let Some(browser) = codec::browser_frame(envelope) else {
+        tracing::debug!(
+            target: "ironclaw_webui_v2::session_socket",
+            "failed to serialize session event body",
+        );
+        return true;
+    };
     let cursor = browser.cursor_token.clone();
     match browser.event_body() {
         Ok(body) => sender
