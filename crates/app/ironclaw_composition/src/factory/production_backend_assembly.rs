@@ -643,10 +643,7 @@ pub(super) async fn build_backend_production(
     )
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
-    .with_production_reborn_event_stores_and_sink(
-        event_stores,
-        Arc::clone(&runtime_event_sink),
-    )
+    .with_production_reborn_event_stores_and_sink(event_stores, Arc::clone(&runtime_event_sink))
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress = match network_http_egress_for_test {

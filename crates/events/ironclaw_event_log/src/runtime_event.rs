@@ -1525,8 +1525,7 @@ mod tests {
             Some(MAX_RUNTIME_EVENT_DURATION_MS),
             "durable model durations must be clamped before serialization"
         );
-        let completed_wire =
-            serde_json::to_string(&completed).expect("serialize model completion");
+        let completed_wire = serde_json::to_string(&completed).expect("serialize model completion");
         let completed_round_trip: RuntimeEvent =
             serde_json::from_str(&completed_wire).expect("deserialize model completion");
         assert_eq!(completed_round_trip, completed);

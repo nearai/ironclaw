@@ -1076,8 +1076,14 @@ async fn terminal_only_model_stream_reaches_the_same_final_run_projection() {
     assert_eq!(terminal_only.runs.len(), 1);
     let historical_run = &historical.runs[0];
     let terminal_only_run = &terminal_only.runs[0];
-    assert_eq!(historical_run.invocation_id, terminal_only_run.invocation_id);
-    assert_eq!(historical_run.capability_id, terminal_only_run.capability_id);
+    assert_eq!(
+        historical_run.invocation_id,
+        terminal_only_run.invocation_id
+    );
+    assert_eq!(
+        historical_run.capability_id,
+        terminal_only_run.capability_id
+    );
     assert_eq!(historical_run.thread_id, terminal_only_run.thread_id);
     assert_eq!(historical_run.status, terminal_only_run.status);
     assert_eq!(historical_run.provider, terminal_only_run.provider);

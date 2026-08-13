@@ -3408,11 +3408,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: error.to_string(),
         })?;
-    let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
-        Arc::new(DurableLoopHostMilestoneSink::new(
-            Arc::clone(&runtime_event_sink),
-            milestone_scope,
-        ));
+    let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+        DurableLoopHostMilestoneSink::new(Arc::clone(&runtime_event_sink), milestone_scope),
+    );
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
