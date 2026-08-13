@@ -84,4 +84,4 @@ lifecycle state mapping.
 ## See also
 
 Working rules: `AGENTS.md` · family rules: `crates/product/AGENTS.md` · design
-record: `docs/reborn/target-architecture/families/product.md` (§6.9.2).
+record: `docs/internal/reborn/target-architecture/families/product.md` (§6.9.2).

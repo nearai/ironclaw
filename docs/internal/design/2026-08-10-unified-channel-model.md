@@ -10,7 +10,7 @@ being *removed*, not a pattern to copy.
 Owning families: `crates/extensions/` (adapters + host), `crates/contracts/ironclaw_extension_contracts`
 (the `ChannelAdapter` + descriptor vocabulary), `crates/product/` (the shared
 inbound/reply/notification core). Cross-ref:
-`docs/reborn/target-architecture/families/extensions.md`,
+`docs/internal/reborn/target-architecture/families/extensions.md`,
 `.claude/rules/gateway-events.md`, `.claude/rules/safety-and-sandbox.md`.
 
 ---

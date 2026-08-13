@@ -92,4 +92,4 @@ scripts/reborn-e2e-rust.sh                           # for production wiring cha
 
 Module spec: `CONTRACT.md` — named in the root `AGENTS.md` Module Specs table;
 the spec is the tiebreaker · family rules: `crates/app/AGENTS.md` · design
-record: `docs/reborn/target-architecture/families/app.md` (§6.10.1).
+record: `docs/internal/reborn/target-architecture/families/app.md` (§6.10.1).

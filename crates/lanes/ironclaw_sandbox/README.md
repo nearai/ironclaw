@@ -85,7 +85,7 @@ cargo test -p ironclaw_architecture_tests   # egress scan + layer matrix
 
 Working rules, wiring status, and known debt: [`AGENTS.md`](./AGENTS.md)
 (canonical). Family boundary: [`crates/lanes/AGENTS.md`](../AGENTS.md).
-Contracts: `docs/reborn/contracts/scripts.md`,
-`docs/reborn/contracts/processes.md`,
-`docs/reborn/contracts/runtime-workflows.md`,
-`docs/reborn/contracts/network.md`. Design record: PROPOSAL §6.6.4.
+Contracts: `docs/internal/reborn/contracts/scripts.md`,
+`docs/internal/reborn/contracts/processes.md`,
+`docs/internal/reborn/contracts/runtime-workflows.md`,
+`docs/internal/reborn/contracts/network.md`. Design record: PROPOSAL §6.6.4.

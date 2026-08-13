@@ -28,11 +28,6 @@ const ProjectsPage = React.lazy(() =>
     default: ProjectsPage,
   }))
 );
-const MissionsPage = React.lazy(() =>
-  import("../pages/missions/missions-page").then(({ MissionsPage }) => ({
-    default: MissionsPage,
-  }))
-);
 const JobsPage = React.lazy(() =>
   import("../pages/jobs/jobs-page").then(({ JobsPage }) => ({ default: JobsPage }))
 );
@@ -235,8 +230,6 @@ export function App() {
             path="projects/:projectId/threads/:threadId"
             element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
           />
-          <Route path="missions" element={(<LazyRoute><MissionsPage /></LazyRoute>)} />
-          <Route path="missions/:missionId" element={(<LazyRoute><MissionsPage /></LazyRoute>)} />
           <Route path="jobs" element={(<LazyRoute><JobsPage /></LazyRoute>)} />
           <Route path="jobs/:jobId" element={(<LazyRoute><JobsPage /></LazyRoute>)} />
           <Route path="automations" element={(<LazyRoute><AutomationsPage /></LazyRoute>)} />

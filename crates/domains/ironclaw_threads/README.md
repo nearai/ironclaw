@@ -79,5 +79,5 @@ cargo test -p ironclaw_threads --test filesystem_message_range_contract
 
 - Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
-- Design record: `docs/reborn/target-architecture/families/domains.md` and
+- Design record: `docs/internal/reborn/target-architecture/families/domains.md` and
   PROPOSAL §6.4.1.

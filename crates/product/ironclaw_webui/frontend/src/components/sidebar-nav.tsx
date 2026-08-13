@@ -11,7 +11,6 @@ const ROUTE_ICONS = {
   projects: "folder",
   jobs: "pulse",
   automations: "calendar",
-  missions: "flag",
   extensions: "plug",
   logs: "list",
   settings: "settings",

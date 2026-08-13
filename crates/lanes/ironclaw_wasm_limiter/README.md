@@ -66,6 +66,6 @@ cargo test -p ironclaw_wasm_limiter   # 3 unit tests: ceilings, aggregate growth
 ## See also
 
 Family boundary: [`crates/lanes/AGENTS.md`](../AGENTS.md) · design record:
-`docs/reborn/target-architecture/families/lanes.md` (§ `ironclaw_wasm_limiter`)
+`docs/internal/reborn/target-architecture/families/lanes.md` (§ `ironclaw_wasm_limiter`)
 and PROPOSAL §6.6.2 · the consuming hosts: `crates/lanes/ironclaw_wasm`,
 `crates/loop/ironclaw_hooks`.

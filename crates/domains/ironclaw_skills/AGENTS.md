@@ -8,7 +8,7 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these sources of truth before changing behavior:
 - `.claude/rules/skills.md`
-- `docs/reborn/contracts/extensions.md`
+- `docs/internal/reborn/contracts/extensions.md`
 
 ## What This Crate Owns
 

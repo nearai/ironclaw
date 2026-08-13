@@ -1,7 +1,7 @@
 # Agent Map — ironclaw_memory_native
 
 Canonical working-rules file for this package crate (`CLAUDE.md` here is a
-pointer; consolidated 2026-08-05 per `docs/reborn/guidance-conventions.md`
+pointer; consolidated 2026-08-05 per `docs/internal/reborn/guidance-conventions.md`
 rule 1).
 
 ## Start Here
@@ -14,9 +14,9 @@ rule 1).
   scope/path/context value types, prompt-safety vocabulary, audit/event
   contracts) lives in `crates/domains/ironclaw_memory`, which this crate
   implements and re-exports. Contracts of record:
-  - `docs/reborn/contracts/memory.md`
-  - `docs/reborn/contracts/storage-placement.md`
-  - `docs/reborn/contracts/kernel-boundary.md`
+  - `docs/internal/reborn/contracts/memory.md`
+  - `docs/internal/reborn/contracts/storage-placement.md`
+  - `docs/internal/reborn/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 

@@ -1,7 +1,7 @@
 //! In-memory-backed budget-gate store constructor for tests.
 //!
 //! The Reborn architecture-simplification note
-//! (`docs/reborn/contracts/resources.md`)
+//! (`docs/internal/reborn/contracts/resources.md`)
 //! replaces hand-written `InMemory*Store` parallel implementations with the one
 //! production `Filesystem*Store<F>` exercised over an in-memory backend:
 //! "in-memory" stops being a store and becomes a filesystem backend

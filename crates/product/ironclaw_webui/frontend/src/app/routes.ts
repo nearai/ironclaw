@@ -18,7 +18,6 @@ export const primaryRoutes = [
   { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
   { id: "automations", path: "/automations", labelKey: "nav.automations" },
-  { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
   { id: "logs", path: "/logs", labelKey: "nav.logs", hidden: true },
   { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },

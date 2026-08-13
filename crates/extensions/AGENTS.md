@@ -77,7 +77,7 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 
 Every installable extension is one self-contained directory under `packages/`,
 whether or not it carries a crate. Two rules from the family spec
-(`docs/reborn/target-architecture/families/extensions.md`, "What belongs here"),
+(`docs/internal/reborn/target-architecture/families/extensions.md`, "What belongs here"),
 restated because "does this need a crate?" must be answered the same way every
 time:
 
@@ -207,11 +207,11 @@ Verify any edge with `cargo metadata`, not by reading this file.
 
 ## Sources
 
-`docs/reborn/target-architecture/families/extensions.md` (the family spec —
+`docs/internal/reborn/target-architecture/families/extensions.md` (the family spec —
 charter, per-crate dispositions, security posture) · PROPOSAL §6.8.1–§6.8.4
 (dispositions + amendments), §8.1–§8.2 (layer/forbidden-edge matrix, vendor
-rule) · `docs/reborn/extension-runtime/overview.md` (manifest/adapters/flows) ·
-`docs/reborn/guidance-conventions.md` (this file's shape) · the
+rule) · `docs/internal/reborn/extension-runtime/overview.md` (manifest/adapters/flows) ·
+`docs/internal/reborn/guidance-conventions.md` (this file's shape) · the
 `reborn-extension-surfaces` skill (authoring walkthrough). Where this file and
 the design record disagree, the code and its gates win — file a dated
 correction both places.

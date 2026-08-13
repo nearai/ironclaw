@@ -80,5 +80,5 @@ cargo test -p ironclaw_architecture_tests       # allowlist, port-location scan,
   guidance; `CLAUDE.md` points here).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.1.4;
-  `docs/reborn/target-architecture/families/contracts.md`; the port
-  implementation chain in `docs/reborn/target-architecture/families/loop.md`.
+  `docs/internal/reborn/target-architecture/families/contracts.md`; the port
+  implementation chain in `docs/internal/reborn/target-architecture/families/loop.md`.

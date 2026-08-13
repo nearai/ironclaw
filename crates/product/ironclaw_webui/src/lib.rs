@@ -8,7 +8,7 @@
 //! assembly and the host-owned serve loop helper that binds a `TcpListener`
 //! and runs graceful shutdown.
 //!
-//! Path A (`docs/reborn/how-to-port-channel-to-reborn.md`) native
+//! Path A (`docs/internal/reborn/how-to-port-channel-to-reborn.md`) native
 //! host-surface invariants:
 //!
 //! - Host auth stays host-owned: `WebuiAuthenticator` implementations
