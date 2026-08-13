@@ -53,7 +53,7 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
     CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
     HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    IDCP_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
@@ -70,7 +70,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
-    register_native_memory_tools,
+    register_native_memory_tools, set_test_idcp_helper_base_override,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -94,6 +94,9 @@ use ironclaw_trust::{
 };
 use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
+
+static IDCP_HELPER_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[tokio::test]
 async fn builtin_first_party_package_declares_expected_capabilities() {
@@ -422,6 +425,10 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
     assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     assert!(ids.contains(&ECHO_CAPABILITY_ID));
     assert!(
+        ids.contains(&IDCP_CAPABILITY_ID),
+        "builtin.idcp must stay visible when process_backend is none"
+    );
+    assert!(
         !package
             .manifest
             .capabilities
@@ -437,6 +444,7 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
     assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(IDCP_CAPABILITY_ID)));
 }
 
 #[tokio::test]
@@ -3452,6 +3460,95 @@ async fn builtin_echo_invokes_through_host_runtime() {
         .await
         .unwrap();
     assert_eq!(output, Value::String("hello reborn".to_string()));
+}
+
+#[tokio::test]
+async fn builtin_idcp_calls_loopback_helper_and_redacts_jwt() {
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use tokio::net::TcpListener;
+
+    let _guard = IDCP_HELPER_TEST_LOCK.lock().await;
+
+    async fn info() -> Json<Value> {
+        Json(json!({
+            "ok": true,
+            "homeBase": "https://api.identyclaw.com",
+            "jwt": "aaaa.bbbb.ccccdddd",
+            "contract": "test-helper"
+        }))
+    }
+    async fn me() -> Json<Value> {
+        Json(json!({
+            "ok": true,
+            "status": 200,
+            "body": {
+                "tokenId": "cdcqsfbrsncj",
+                "dn": { "displayName": "Ron Carl" },
+                "access_token": "should-not-leak"
+            }
+        }))
+    }
+    async fn ensure_session(Json(_body): Json<Value>) -> Json<Value> {
+        Json(json!({
+            "ok": true,
+            "tokenId": "cdcqsfbrsncj",
+            "jwt_length": 1920,
+            "cached": true
+        }))
+    }
+
+    let app = Router::new()
+        .route("/v1/info", get(info))
+        .route("/v1/me", get(me))
+        .route("/v1/ensure_session", post(ensure_session));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    set_test_idcp_helper_base_override(Some(format!("http://127.0.0.1:{}", addr.port())));
+
+    let info_out = invoke(IDCP_CAPABILITY_ID, json!({ "op": "info" }))
+        .await
+        .unwrap();
+    assert_eq!(info_out["ok"], json!(true));
+    assert_eq!(info_out["jwt"], json!("[redacted]"));
+    assert_eq!(info_out["contract"], json!("test-helper"));
+
+    let me_out = invoke(IDCP_CAPABILITY_ID, json!({ "op": "me" }))
+        .await
+        .unwrap();
+    assert_eq!(me_out["body"]["tokenId"], json!("cdcqsfbrsncj"));
+    assert_eq!(me_out["body"]["dn"]["displayName"], json!("Ron Carl"));
+    assert_eq!(me_out["body"]["access_token"], json!("[redacted]"));
+
+    let session_out = invoke(IDCP_CAPABILITY_ID, json!({ "op": "ensure_session" }))
+        .await
+        .unwrap();
+    assert_eq!(session_out["ok"], json!(true));
+    assert_eq!(session_out["jwt_length"], json!(1920));
+
+    set_test_idcp_helper_base_override(None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn builtin_idcp_reports_unreachable_helper_without_failing_the_run() {
+    let _guard = IDCP_HELPER_TEST_LOCK.lock().await;
+
+    set_test_idcp_helper_base_override(Some("http://127.0.0.1:1".to_string()));
+
+    let output = invoke(IDCP_CAPABILITY_ID, json!({ "op": "me" }))
+        .await
+        .unwrap();
+    assert_eq!(output["ok"], json!(false));
+    assert_eq!(output["error"], json!("identyclaw_helper_unreachable"));
+
+    set_test_idcp_helper_base_override(None);
 }
 
 #[tokio::test]
@@ -10197,6 +10294,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         JSON_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID,
+        IDCP_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         TRACE_COMMONS_ONBOARD_CAPABILITY_ID,

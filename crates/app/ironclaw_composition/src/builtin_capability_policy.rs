@@ -574,6 +574,13 @@ mod tests {
             policy
                 .approval_gate_exempt_capabilities()
                 .iter()
+                .any(|capability| capability.as_str() == "builtin.idcp"),
+            "builtin.idcp must skip AskAlways — host-mediated helper, no model-visible secrets"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
                 .any(|capability| { capability.as_str() == "builtin.admin_configuration_replace" }),
             "the API-only operator save gesture must not open a second approval gate"
         );
@@ -733,6 +740,14 @@ mod tests {
             memory_profile_set.network,
             CapabilityNetworkProfile::Default
         );
+
+        // Processless IdentyClaw helper (loopback) — DispatchCapability only.
+        let idcp = policy
+            .grant(&CapabilityId::new("builtin.idcp").expect("capability id"))
+            .expect("builtin.idcp grant must be present");
+        assert_eq!(idcp.effects, vec![EffectKind::DispatchCapability]);
+        assert_eq!(idcp.mounts, CapabilityMountProfile::Ambient);
+        assert_eq!(idcp.network, CapabilityNetworkProfile::Default);
 
         // profile_token writes profile_token.jwt (0600), so its grant carries
         // WriteFilesystem; trace_commons.profile_set only reads policy + posts, so it does not.

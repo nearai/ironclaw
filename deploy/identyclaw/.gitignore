@@ -1,0 +1,4 @@
+node_modules/
+vendor/hola-client/node_modules/
+package-lock.json
+data/

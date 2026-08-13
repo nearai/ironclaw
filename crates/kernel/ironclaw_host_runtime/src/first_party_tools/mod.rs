@@ -8,6 +8,7 @@
 mod echo;
 mod http;
 mod http_output;
+mod idcp;
 mod json;
 mod memory;
 mod model_visible_output;
@@ -58,6 +59,9 @@ pub(crate) use self::schemas::{
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
+pub use idcp::{
+    IDCP_CAPABILITY_ID, set_test_helper_base_override as set_test_idcp_helper_base_override,
+};
 pub use ironclaw_memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
@@ -227,6 +231,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     json::manifest()?,
                     http::manifest()?,
                     http::save_manifest()?,
+                    idcp::manifest()?,
                     shell::manifest()?,
                     spawn_subagent::manifest()?,
                     trace_commons::onboard_manifest()?,
@@ -537,6 +542,7 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(IDCP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
@@ -713,6 +719,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 network_egress_bytes = result.network_egress_bytes;
                 (result.output, None)
             }
+            IDCP_CAPABILITY_ID => (idcp::dispatch(&request.input).await?, None),
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
                 let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);

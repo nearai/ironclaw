@@ -1,0 +1,21 @@
+{
+  "name": "@rodit/hola-client",
+  "version": "0.1.0",
+  "license": "MIT-0",
+  "description": "Create and parse IdentyClaw HOLA handshake lines (uppercase canonicalization, base32, mod-23 checksum)",
+  "type": "commonjs",
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "bs58": "^5.0.0",
+    "hi-base32": "^0.5.1",
+    "tweetnacl": "^1.0.3"
+  }
+}

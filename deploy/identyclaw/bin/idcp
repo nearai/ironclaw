@@ -1,0 +1,261 @@
+#!/bin/sh
+# idcp — agent-facing IdentyClaw CLI (Hermes-shaped verbs).
+# Talks to the private host helper sidecar over loopback. Never prints JWTs/keys.
+#
+# Usage:
+#   idcp enroll
+#   idcp ensure_session [--base URL]
+#   idcp list_sessions
+#   idcp me [--base URL]
+#   idcp request METHOD /api/path [--body JSON] [--base URL]
+#   idcp create_hola [--recipient ID] [--base URL]
+#   idcp verify_hola --hola '…' [--expected MUNDO] [--base URL]
+#   idcp info
+#   idcp agents [--limit N]
+#
+# Dry-run (tests): IDCP_PRINT_PLAN=1 idcp ensure_session
+#   prints METHOD\tPATH\tBODY_JSON then exits 0 without calling curl.
+
+set -eu
+
+HELPER="${IDENTYCLAW_HELPER_BASE:-http://127.0.0.1:3921}"
+HELPER="${HELPER%/}"
+
+usage() {
+  cat <<'EOF'
+idcp — IdentyClaw Passport helpers (IronClaw)
+
+Commands:
+  enroll
+  ensure_session [--base URL]
+  list_sessions
+  me [--base URL]
+  request METHOD /api/path [--body JSON] [--base URL]
+  create_hola [--recipient ID] [--base URL]
+  verify_hola --hola '...' [--expected MUNDO] [--base URL]
+  agents [--limit N]
+  info
+EOF
+}
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+need_curl() {
+  command -v curl >/dev/null 2>&1 || die "curl is required on PATH for idcp"
+}
+
+# Emit or execute an HTTP call. Args: METHOD PATH [BODY_JSON]
+call() {
+  method="$1"
+  path="$2"
+  body="${3-}"
+
+  if [ "${IDCP_PRINT_PLAN:-0}" = "1" ]; then
+    printf '%s\t%s\t%s\n' "$method" "$path" "${body:-}"
+    return 0
+  fi
+
+  need_curl
+  url="${HELPER}${path}"
+  if [ -n "$body" ]; then
+    curl -sS -f -X "$method" "$url" \
+      -H 'content-type: application/json' \
+      -H 'accept: application/json' \
+      -d "$body"
+    printf '\n'
+  else
+    curl -sS -f -X "$method" "$url" \
+      -H 'accept: application/json'
+    printf '\n'
+  fi
+}
+
+json_escape() {
+  # Minimal JSON string escape for shell-built payloads.
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+base_url=""
+recipient="MUNDO"
+hola=""
+expected=""
+body_json=""
+limit="20"
+method=""
+api_path=""
+pos1=""
+pos2=""
+
+cmd="${1:-}"
+[ -n "$cmd" ] || { usage; exit 1; }
+shift || true
+
+case "$cmd" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base|--api-endpoint)
+      [ $# -ge 2 ] || die "missing value for $1"
+      base_url="$2"
+      shift 2
+      ;;
+    --recipient)
+      [ $# -ge 2 ] || die "missing value for --recipient"
+      recipient="$2"
+      shift 2
+      ;;
+    --hola)
+      [ $# -ge 2 ] || die "missing value for --hola"
+      hola="$2"
+      shift 2
+      ;;
+    --expected|--expected-recipient)
+      [ $# -ge 2 ] || die "missing value for $1"
+      expected="$2"
+      shift 2
+      ;;
+    --body)
+      [ $# -ge 2 ] || die "missing value for --body"
+      body_json="$2"
+      shift 2
+      ;;
+    --limit)
+      [ $# -ge 2 ] || die "missing value for --limit"
+      limit="$2"
+      shift 2
+      ;;
+    --method)
+      [ $# -ge 2 ] || die "missing value for --method"
+      method="$2"
+      shift 2
+      ;;
+    --path)
+      [ $# -ge 2 ] || die "missing value for --path"
+      api_path="$2"
+      shift 2
+      ;;
+    --*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [ -z "$pos1" ]; then
+        pos1="$1"
+      elif [ -z "$pos2" ]; then
+        pos2="$1"
+      else
+        die "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+ensure_body_with_base() {
+  if [ -n "$base_url" ]; then
+    printf '{"apiEndpoint":"%s"}' "$(json_escape "$base_url")"
+  else
+    printf '{}'
+  fi
+}
+
+case "$cmd" in
+  enroll)
+    # Enrollment needs host Node + credentials dir; agent should ask the operator.
+    if [ "${IDCP_PRINT_PLAN:-0}" = "1" ]; then
+      printf '%s\t%s\t%s\n' "HOST" "enroll" ""
+      exit 0
+    fi
+    die "enroll must run on the host: ./ironclaw.sh idcp enroll"
+    ;;
+  ensure_session|ensure-session)
+    call POST /v1/ensure_session "$(ensure_body_with_base)"
+    ;;
+  list_sessions|list-sessions)
+    call GET /v1/sessions
+    ;;
+  me)
+    if [ -n "$base_url" ]; then
+      # server.mjs accepts apiEndpoint as query param on GET /v1/me
+      enc=$(printf '%s' "$base_url" | sed 's/:/%3A/g; s/\//%2F/g')
+      call GET "/v1/me?apiEndpoint=${enc}"
+    else
+      call GET /v1/me
+    fi
+    ;;
+  info)
+    call GET /v1/info
+    ;;
+  agents)
+    call GET "/v1/agents?limit=$(json_escape "$limit")"
+    ;;
+  request)
+    # Prefer Hermes form: idcp request METHOD /api/path
+    # Also accept: idcp request --method GET --path /api/...
+    if [ -n "$pos1" ] && [ -n "$pos2" ]; then
+      method="$pos1"
+      api_path="$pos2"
+    fi
+    [ -n "$method" ] || die "usage: idcp request METHOD /api/path [--body JSON]"
+    [ -n "$api_path" ] || die "usage: idcp request METHOD /api/path [--body JSON]"
+    case "$api_path" in
+      /*) ;;
+      *) die "path must start with /" ;;
+    esac
+    if [ -n "$base_url" ]; then
+      if [ -n "$body_json" ]; then
+        payload=$(printf '{"method":"%s","path":"%s","apiEndpoint":"%s","body":%s}' \
+          "$(json_escape "$method")" "$(json_escape "$api_path")" \
+          "$(json_escape "$base_url")" "$body_json")
+      else
+        payload=$(printf '{"method":"%s","path":"%s","apiEndpoint":"%s"}' \
+          "$(json_escape "$method")" "$(json_escape "$api_path")" \
+          "$(json_escape "$base_url")")
+      fi
+    else
+      if [ -n "$body_json" ]; then
+        payload=$(printf '{"method":"%s","path":"%s","body":%s}' \
+          "$(json_escape "$method")" "$(json_escape "$api_path")" "$body_json")
+      else
+        payload=$(printf '{"method":"%s","path":"%s"}' \
+          "$(json_escape "$method")" "$(json_escape "$api_path")")
+      fi
+    fi
+    call POST /v1/request "$payload"
+    ;;
+  create_hola|create-hola)
+    if [ -n "$base_url" ]; then
+      payload=$(printf '{"recipient":"%s","apiEndpoint":"%s"}' \
+        "$(json_escape "$recipient")" "$(json_escape "$base_url")")
+    else
+      payload=$(printf '{"recipient":"%s"}' "$(json_escape "$recipient")")
+    fi
+    call POST /v1/create_hola "$payload"
+    ;;
+  verify_hola|verify-hola)
+    [ -n "$hola" ] || die "--hola is required"
+    if [ -n "$expected" ] && [ -n "$base_url" ]; then
+      payload=$(printf '{"hola":"%s","expectedRecipient":"%s","apiEndpoint":"%s"}' \
+        "$(json_escape "$hola")" "$(json_escape "$expected")" "$(json_escape "$base_url")")
+    elif [ -n "$expected" ]; then
+      payload=$(printf '{"hola":"%s","expectedRecipient":"%s"}' \
+        "$(json_escape "$hola")" "$(json_escape "$expected")")
+    elif [ -n "$base_url" ]; then
+      payload=$(printf '{"hola":"%s","apiEndpoint":"%s"}' \
+        "$(json_escape "$hola")" "$(json_escape "$base_url")")
+    else
+      payload=$(printf '{"hola":"%s"}' "$(json_escape "$hola")")
+    fi
+    call POST /v1/verify_hola "$payload"
+    ;;
+  *)
+    die "unknown command: $cmd (try: idcp --help)"
+    ;;
+esac

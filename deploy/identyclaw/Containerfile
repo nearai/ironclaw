@@ -1,0 +1,28 @@
+# IdentyClaw host helper (login / HOLA) — loopback only, same Podman pod as reborn.
+FROM docker.io/node:22.23.1-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4
+
+WORKDIR /app
+
+COPY package.json ./
+COPY vendor ./vendor
+COPY src ./src
+
+# Prefer registry @rodit/rodit-auth-be when available; wire login works without it.
+RUN npm install --omit=dev \
+  && (npm install --omit=dev @rodit/rodit-auth-be@9.14.1 || true) \
+  && npm install --omit=dev --prefix ./vendor/hola-client \
+  && npm install --omit=dev
+
+ENV IDENTYCLAW_HELPER_HOST=127.0.0.1 \
+    IDENTYCLAW_HELPER_PORT=3921 \
+    IDENTYCLAW_BASE_URL=https://api.identyclaw.com \
+    LOG_LEVEL=error \
+    SUPPRESS_NO_CONFIG_WARNING=true \
+    SUPPRESS_STRICTNESS_CHECK=true
+
+# Run as container root. Under rootless Podman the host uid maps to container
+# uid 0, so host-owned secrets/near-credentials and sessions stay readable/
+# writable. USER node (1000) maps to a subordinate host uid and gets EACCES on
+# those mounts. Loopback-only bind; deploy-pod also passes --user 0:0.
+EXPOSE 3921
+CMD ["node", "src/server.mjs"]
