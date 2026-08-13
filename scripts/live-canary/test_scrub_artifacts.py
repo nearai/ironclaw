@@ -404,11 +404,16 @@ class ScrubArtifactsTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertFalse(bundled.exists())
+            self.assertIn(
+                "scrub: pruned source-identical bundled skill snapshot:",
+                result.stdout,
+            )
 
     def test_strict_scrub_still_scans_marker_less_divergent_skill(self) -> None:
         """A marker-less snapshot that DIVERGES from the source bundle is not
         provably repository content — secret-shaped material in it must still
-        fail the strict lane."""
+        fail the strict lane, and the verdict must name the mismatch so a red
+        lane is diagnosable from the step log alone."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "artifacts"
             root.mkdir()
@@ -427,6 +432,14 @@ class ScrubArtifactsTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertFalse((bundled / "SKILL.md").exists())
+            self.assertIn(
+                "scrub: kept skill snapshot for scanning (not source-identical):",
+                result.stdout,
+            )
+            self.assertIn(
+                "staged bundle content differs from trusted source at SKILL.md",
+                result.stdout + (result.stderr or ""),
+            )
 
     def test_strict_scrub_still_scans_unmanaged_system_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
