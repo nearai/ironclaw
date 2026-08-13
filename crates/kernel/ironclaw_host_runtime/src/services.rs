@@ -61,10 +61,10 @@ use ironclaw_turns::{
     AgentTurnRuntimePort, DefaultTurnCoordinator, NoopTurnRunWakeNotifier, TurnRunWakeNotifier,
 };
 use ironclaw_wasm::{
-    DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
-    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    DenyWasmHostHttp, DenyWasmHostNostr, EmptyWasmRuntimeCredentials, PreparedWitTool,
+    WasmError, WasmHostError, WasmHostNostr, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter,
+    WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost,
+    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use secrecy::ExposeSecret;
 
@@ -159,6 +159,7 @@ where
     managed_process_port: bool,
     user_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+    nostr_host: Option<Arc<dyn WasmHostNostr>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
@@ -471,6 +472,7 @@ where
             managed_process_port: true,
             user_sandbox_process_port: None,
             wasm_credential_provider: None,
+            nostr_host: None,
             runtime_health: None,
             runtime_policy: None,
             process_sandbox_executor: None,

@@ -62,6 +62,7 @@ where
             managed_process_port,
             user_sandbox_process_port,
             wasm_credential_provider,
+            nostr_host,
             runtime_health,
             runtime_policy,
             process_sandbox_executor,
@@ -106,6 +107,7 @@ where
             managed_process_port,
             user_sandbox_process_port,
             wasm_credential_provider,
+            nostr_host,
             runtime_health,
             runtime_policy,
             process_sandbox_executor,
@@ -169,6 +171,7 @@ where
             managed_process_port,
             user_sandbox_process_port,
             wasm_credential_provider,
+            nostr_host,
             runtime_health,
             runtime_policy,
             process_sandbox_executor,
@@ -215,6 +218,7 @@ where
             managed_process_port,
             user_sandbox_process_port,
             wasm_credential_provider,
+            nostr_host,
             runtime_health,
             runtime_policy,
             process_sandbox_executor,
@@ -878,6 +882,7 @@ where
             Arc::clone(&self.runtime_http_egress),
             self.wasm_credential_provider.clone(),
             Arc::clone(&self.secret_injection_store),
+            self.nostr_host.clone(),
         )?);
         Ok(self.with_wasm_runtime(adapter))
     }

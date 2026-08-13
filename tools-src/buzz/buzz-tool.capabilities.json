@@ -1,0 +1,5 @@
+{
+  "nostr": {
+    "secret_name": "buzz_private_key"
+  }
+}

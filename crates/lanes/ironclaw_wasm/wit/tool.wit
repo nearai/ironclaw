@@ -1,9 +1,15 @@
-package near:agent@0.3.0;
+package near:agent@0.4.0;
 
 // WASM Tool Sandbox Interface
 //
 // Defines the contract between sandboxed tools and the host runtime.
 // Tools export the `tool` interface; the host provides the `host` interface.
+//
+// Version history:
+//   0.4.0 — Added Nostr host functions (nostr-sign-event, nostr-publish-event,
+//            nostr-subscribe-events). Breaking change from 0.3.x: all components
+//            must be recompiled against this WIT before deployment.
+//   0.3.x — Initial stable ABI (HTTP, workspace, secrets, tools, logging).
 //
 // Security Model:
 // - WASM tools are untrusted and run in a sandbox
@@ -103,6 +109,52 @@ interface host {
     ///
     /// Returns true if the secret exists and is accessible to this tool.
     secret-exists: func(name: string) -> bool;
+
+    // ==================== Nostr Capability ====================
+
+    /// Sign a Nostr event using the host-held private key.
+    ///
+    /// The WASM tool provides an unsigned event JSON with fields:
+    /// `pubkey`, `created_at`, `kind`, `tags`, `content`.
+    /// The host validates the event, signs it with a Schnorr signature
+    /// (BIP-340, as specified in NIP-01), and returns the complete
+    /// signed event JSON with `id` and `sig` fields added.
+    ///
+    /// The private key is held entirely by the host; WASM never sees it.
+    /// The `pubkey` in the unsigned event must match the keypair derived
+    /// from the host-held secret.
+    ///
+    /// Returns the full signed event JSON string, or Err on failure.
+    nostr-sign-event: func(unsigned-event-json: string) -> result<string, string>;
+
+    /// Publish a signed Nostr event to a relay via WebSocket.
+    ///
+    /// The WASM tool provides a relay URL and a pre-signed event JSON.
+    /// The host opens a WebSocket connection, sends the EVENT message,
+    /// and waits for the relay's OK/NACK response.
+    ///
+    /// Security:
+    /// - Relay URLs are validated against SSRF (private IP rejection)
+    /// - Only ws:// and wss:// schemes are allowed
+    /// - Connection has a 10s timeout
+    ///
+    /// Returns the event ID on success, or Err with error message.
+    nostr-publish-event: func(relay-url: string, signed-event-json: string) -> result<string, string>;
+
+    /// Subscribe to Nostr events from a relay via WebSocket.
+    ///
+    /// The WASM tool provides a relay URL, a JSON array of NIP-01 filters,
+    /// and a timeout in milliseconds. The host opens a WebSocket, sends a
+    /// REQ subscription, collects matching events until the timeout expires,
+    /// then sends CLOSE and returns the collected events.
+    ///
+    /// Security:
+    /// - Relay URLs are validated against SSRF (private IP rejection)
+    /// - Only ws:// and wss:// schemes are allowed
+    /// - Maximum 5000 events collected per subscription
+    ///
+    /// Returns a JSON array of matching event objects, or Err on failure.
+    nostr-subscribe-events: func(relay-url: string, filter-json: string, timeout-ms: u32) -> result<string, string>;
 }
 
 /// Tool interface that sandboxed tools must implement.
