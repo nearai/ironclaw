@@ -555,12 +555,12 @@ pub struct StopStrategyState {
     /// finalization.
     #[serde(default)]
     pub trailing_rejected_replies: u32,
-    /// Consecutive completed capability-batch turns whose typed result
-    /// progress reported no new evidence/state.
+    /// Deprecated checkpoint tombstone retained for rollback compatibility.
+    /// The default stop strategy always writes zero and never reads it.
     #[serde(default)]
     pub trailing_no_progress_results: u32,
-    /// Pending or rendered repeated-call warning that must be shown to the
-    /// model before repeated calls can terminalize as no-progress.
+    /// Pending or rendered advisory shown when the same capability call is
+    /// repeated consecutively. This warning never authorizes a heuristic stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_call_warning: Option<RepeatedCallWarningState>,
 }
@@ -597,6 +597,8 @@ impl RepeatedCallWarningState {
     }
 
     pub fn terminal_ready(signature: CapabilityCallSignature) -> Self {
+        // Kept so tests and older checkpoint producers can exercise the legacy
+        // wire value. Runtime observation normalizes it back to `Rendered`.
         Self {
             signature,
             phase: RepeatedCallWarningPhase::TerminalReady,
@@ -609,6 +611,7 @@ impl RepeatedCallWarningState {
 pub enum RepeatedCallWarningPhase {
     PendingRender,
     Rendered,
+    /// Legacy checkpoint value. New runtime policy never creates this phase.
     TerminalReady,
 }
 

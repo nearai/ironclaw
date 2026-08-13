@@ -22,8 +22,8 @@ pub use slots::{
     RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
     ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
+pub(crate) use terminal_warning::TerminalWarningObservation;
 pub use terminal_warning::TerminalWarningState;
-pub(crate) use terminal_warning::{TerminalWarningKind, TerminalWarningObservation};
 
 use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_host_api::turn::CapabilityActivityId;
@@ -63,15 +63,14 @@ pub struct LoopExecutionState {
 
     // executor-observed (populated by executor; read-only to strategies)
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
+    /// Deprecated checkpoint field retained for rolling-upgrade and rollback
+    /// compatibility. The default loop policy no longer records or reads
+    /// output digests when deciding whether to continue.
     #[serde(default)]
     pub seen_capability_output_digests: BoundedRing<CapabilityOutputObservation, 64>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,
-    /// Rolling window of assistant-output token counts (from
-    /// `LoopModelResponse::usage.output_tokens`). The default stop
-    /// strategy uses this to detect diminishing-returns loops:
-    /// `noprogress_window` consecutive turns whose output stays at or
-    /// below `min_delta_tokens` → `StopKind::NoProgressDetected`
-    /// (#3841 follow-up F1).
+    /// Provider-reported assistant-output token counts retained in checkpoint
+    /// payloads for compatibility. No default stop decision reads this ring.
     pub recent_output_token_counts: BoundedRing<u32, 8>,
 
     /// Cumulative provider-reported token usage across this run's model calls,

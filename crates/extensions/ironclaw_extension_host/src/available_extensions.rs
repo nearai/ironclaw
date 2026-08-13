@@ -74,7 +74,7 @@ impl HostManagedCredentialExtension {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvailableExtensionAsset {
     pub path: String,
     pub content: AvailableExtensionAssetContent,
@@ -84,12 +84,12 @@ pub struct AvailableExtensionAsset {
 /// remove -> reinstall re-materializes from the entry alone (a `Filesystem`
 /// path-pointer variant existed before that invariant and dangled after
 /// `remove` deleted the extension dir).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AvailableExtensionPackage {
     pub package_ref: LifecyclePackageRef,
     pub manifest_toml: String,
@@ -477,6 +477,72 @@ impl AvailableExtensionCatalog {
                 self.packages.push(package);
             }
         }
+    }
+
+    /// Refresh runtime-derived package data after hosted discovery while
+    /// retaining the catalog metadata injected by the original loader.
+    pub(crate) fn refresh_resolved_manifest(
+        &mut self,
+        record: &ExtensionManifestRecord,
+    ) -> Result<bool, ProductOperationFailure> {
+        let Some(refreshed) = self.refreshed_resolved_manifest(record)? else {
+            return Ok(false);
+        };
+        self.extend(Self::from_packages(vec![refreshed]));
+        Ok(true)
+    }
+
+    /// Build a replacement catalog entry without mutating the catalog, so a
+    /// caller can complete other fallible synchronization before committing
+    /// the refresh.
+    pub(crate) fn refreshed_resolved_manifest(
+        &self,
+        record: &ExtensionManifestRecord,
+    ) -> Result<Option<AvailableExtensionPackage>, ProductOperationFailure> {
+        let extension_id = &record.resolved().id;
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())?;
+        let Some(existing) = self.resolve_optional(&package_ref)? else {
+            return Ok(None);
+        };
+        if existing.source != record.manifest().source {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} changed manifest source during runtime discovery",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let manifest: ironclaw_extension_registry::ExtensionManifest =
+            record.manifest().clone().try_into().map_err(|error| {
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} discovered an invalid manifest: {error}",
+                        extension_id.as_str()
+                    ),
+                }
+            })?;
+        let mut package = crate::generic_host::rebuild_package_from_resolved(
+            manifest,
+            record.resolved(),
+            extension_id.as_str(),
+        )
+        .map_err(|reason| ProductOperationFailure::InvalidBindingRequest { reason })?;
+        // Discovery changes only runtime-derived descriptors. Retain the
+        // loader-computed digest that pins trust to the bundled manifest bytes.
+        package.manifest_digest = existing.package.manifest_digest.clone();
+        let surface_kinds = surface_kinds_from_manifest_record(record, extension_id.as_str())?;
+        let channel_directions =
+            channel_directions_from_manifest_record(record, extension_id.as_str())?;
+        let channel_presentation = channel_presentation_from_manifest_record(record);
+        let mut refreshed = existing.as_ref().clone();
+        refreshed.manifest_toml = record.raw_toml().to_string();
+        refreshed.resolved_manifest = Arc::new(record.resolved().clone());
+        refreshed.package = package;
+        refreshed.surface_kinds = surface_kinds;
+        refreshed.channel_directions = channel_directions;
+        refreshed.channel_presentation = channel_presentation;
+        Ok(Some(refreshed))
     }
 
     pub(crate) fn remove(
@@ -2323,6 +2389,30 @@ handle = "web_token"
         // gmail migrated to the inventory; its digest (still sha256-token) is
         // asserted through the trust policy in
         // `factory::tests::builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory`.
+    }
+
+    #[test]
+    fn refreshing_bundled_runtime_descriptors_preserves_manifest_digest() {
+        let mut catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").unwrap();
+        let original = catalog.resolve(&package_ref).unwrap();
+        let original_digest = original
+            .package
+            .manifest_digest()
+            .expect("bundled manifest digest");
+        let record = ExtensionManifestRecord::from_resolved(
+            original.manifest_toml.clone(),
+            original.source,
+            original.resolved_manifest.as_ref().clone(),
+            None,
+        )
+        .expect("bundled manifest record");
+
+        assert!(catalog.refresh_resolved_manifest(&record).unwrap());
+
+        let refreshed = catalog.resolve(&package_ref).unwrap();
+        assert_eq!(refreshed.package.manifest_digest(), Some(original_digest));
     }
 
     #[test]

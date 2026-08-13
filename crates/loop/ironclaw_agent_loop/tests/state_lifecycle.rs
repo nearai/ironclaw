@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
@@ -8,8 +10,8 @@ use ironclaw_agent_loop::{
         RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
     },
     test_support::{
-        LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
-        test_run_context,
+        LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, ScriptedCapabilityCall,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, capability_id, test_run_context,
     },
 };
 use ironclaw_loop_contracts::{LoopExit, LoopFailureKind, LoopRunInfoPort};
@@ -286,6 +288,85 @@ fn repeated_call_warning_state_survives_serialization() {
         .expect("warning should round-trip");
     assert_eq!(warning.signature, signature);
     assert_eq!(warning.phase, RepeatedCallWarningPhase::Rendered);
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_terminal_ready_warning_resumes_as_advisory_only() {
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .script(ScenarioScript {
+            model_responses: VecDeque::from([
+                ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+                ScriptedModelResponse::Reply {
+                    text: "completed after legacy warning".to_string(),
+                },
+            ]),
+            capability_outcomes: VecDeque::from([vec![
+                ScriptedCapabilityOutcome::completed_no_change("result:legacy-warning"),
+            ]]),
+            single_call_retry_outcomes: VecDeque::new(),
+            pending_inputs: VecDeque::new(),
+        })
+        .build();
+    let signature = CapabilityCallSignature::from_call(
+        capability_id("demo.echo"),
+        &json!({ "input_ref": "input:demo-echo" }),
+    )
+    .expect("signature should build");
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    for _ in 0..3 {
+        state.recent_call_signatures.push(signature.clone());
+    }
+    state.stop_state.repeated_call_warning =
+        Some(RepeatedCallWarningState::terminal_ready(signature));
+    let mut value = serde_json::to_value(state).expect("state should serialize");
+    value
+        .as_object_mut()
+        .expect("state serializes as object")
+        .insert(
+            "terminal_warning_state".to_string(),
+            json!({
+                "attempted": ["no_progress_detected"],
+                "active": "no_progress_detected"
+            }),
+        );
+    let restored: LoopExecutionState =
+        serde_json::from_value(value).expect("legacy warning state should deserialize");
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, restored)
+        .await
+        .expect("legacy warning should resume");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["completed after legacy warning"]
+    );
+    let payloads = host.staged_checkpoint_payloads();
+    let checkpoint_states = payloads
+        .iter()
+        .map(|payload| {
+            serde_json::from_slice::<LoopExecutionState>(payload)
+                .expect("staged checkpoint payload should decode")
+        })
+        .collect::<Vec<_>>();
+    let normalized_at = checkpoint_states
+        .iter()
+        .position(|state| {
+            state
+                .stop_state
+                .repeated_call_warning
+                .as_ref()
+                .is_some_and(|warning| warning.phase == RepeatedCallWarningPhase::Rendered)
+        })
+        .expect("a live checkpoint should record the normalized rendered warning");
+    assert!(checkpoint_states[normalized_at..].iter().all(|state| {
+        state
+            .stop_state
+            .repeated_call_warning
+            .as_ref()
+            .is_none_or(|warning| warning.phase != RepeatedCallWarningPhase::TerminalReady)
+    }));
 }
 
 #[test]

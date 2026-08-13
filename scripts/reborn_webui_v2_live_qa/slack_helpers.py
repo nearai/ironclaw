@@ -78,6 +78,15 @@ def _slack_extension_manifest_path() -> Path:
 # never silently skip. Today no default-wired case hard-requires it; the bot
 # token is actor B wherever a bot can act.
 SLACK_SECOND_USER_TOKEN_ENV = "AUTH_LIVE_SLACK_SECOND_USER_TOKEN"
+# The seeded account's STORED grant, kept in lockstep with the slack
+# manifest's [[tools.credentials]] scope union
+# (crates/extensions/packages/slack/manifest.toml). Runtime account selection
+# requires the stored grant to carry every tool's manifest scopes, so a
+# stale list here parks slack activation on the auth gate and the connect
+# cases never reach installation_state=active (exactly what turned QA lanes
+# red when the eight new standard ops widened the union). The LIVE canary
+# Slack app must also grant the write additions to its user token for the
+# reaction/DM ops to succeed vendor-side.
 SLACK_PERSONAL_OAUTH_SCOPES = [
     "search:read",
     "channels:history",
@@ -90,6 +99,9 @@ SLACK_PERSONAL_OAUTH_SCOPES = [
     "mpim:read",
     "users:read",
     "chat:write",
+    "reactions:read",
+    "reactions:write",
+    "im:write",
 ]
 SIGNED_SLACK_EVENT_CASES = {
     "qa_5d_slack_strategy_doc_answer",

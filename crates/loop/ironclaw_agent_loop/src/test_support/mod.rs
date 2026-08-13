@@ -60,6 +60,7 @@ pub struct MockAgentLoopDriverHost {
     visible_capabilities: Vec<CapabilityDescriptorView>,
     prompt_compaction_indexes: Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>,
     staged_iterations: Mutex<VecDeque<u32>>,
+    staged_checkpoint_payloads: Mutex<Vec<Vec<u8>>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_transcript_with: Mutex<Option<AgentLoopHostErrorKind>>,
@@ -83,6 +84,11 @@ impl MockAgentLoopDriverHost {
     /// Returns the ordered host call log captured so far.
     pub fn call_log(&self) -> Vec<MockHostCall> {
         clone_mutex_vec(&self.call_log)
+    }
+
+    /// Returns checkpoint payloads in the order they were staged.
+    pub fn staged_checkpoint_payloads(&self) -> Vec<Vec<u8>> {
+        clone_mutex_vec(&self.staged_checkpoint_payloads)
     }
 
     /// Returns how many model stream calls the executor made.
@@ -256,6 +262,7 @@ impl MockAgentLoopDriverHostBuilder {
                 visible_capabilities: self.visible_capabilities,
                 prompt_compaction_indexes: Mutex::new(self.prompt_compaction_indexes),
                 staged_iterations: Mutex::new(VecDeque::new()),
+                staged_checkpoint_payloads: Mutex::new(Vec::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
                 fail_transcript_with: Mutex::new(self.fail_transcript_with),
@@ -955,6 +962,7 @@ impl ironclaw_loop_contracts::LoopCheckpointPort for MockAgentLoopDriverHost {
         let iteration = serde_json::from_slice::<LoopExecutionState>(&request.payload)
             .map(|state| state.iteration)
             .unwrap_or_default();
+        lock_or_panic(&self.staged_checkpoint_payloads).push(request.payload.clone());
         lock_or_panic(&self.staged_iterations).push_back(iteration);
         let ordinal = self.checkpoints.sequence().len();
         LoopCheckpointStateRef::for_run(&self.run_context, format!("state-{ordinal}"))
