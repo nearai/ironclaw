@@ -684,7 +684,6 @@ fn push_postgres_idle_statements(output: &mut String, idle: &crate::db_probe::Db
         "{:<18} {:<8} {:<30} {:>+9}",
         "TOTAL", "", "", idle.postgres_statement_calls_total,
     );
-
 }
 
 fn push_db_size_metric(

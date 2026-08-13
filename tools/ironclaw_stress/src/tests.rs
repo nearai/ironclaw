@@ -1271,19 +1271,13 @@ fn postgres_write_delta_aggregates_tables_queries_and_totals() {
     assert_eq!(summary.delta.postgres_table_writes_total.total(), 8);
     assert_eq!(summary.delta.postgres_statement_calls[0].calls, 7);
     assert_eq!(summary.delta.postgres_statement_calls_total, 7);
-    assert_eq!(
-        summary.delta.postgres_statement_calls_by_table[0].calls,
-        7
-    );
+    assert_eq!(summary.delta.postgres_statement_calls_by_table[0].calls, 7);
     let json = serde_json::to_value(&summary).expect("serialize measurement summary");
     assert_eq!(
         json["measurement"]["workload"],
         "single-tool-heavy-user-turn"
     );
-    assert_eq!(
-        json["before"]["postgres_table_writes"][0]["inserts"],
-        10
-    );
+    assert_eq!(json["before"]["postgres_table_writes"][0]["inserts"], 10);
     assert_eq!(json["after"]["postgres_statement_calls"][0]["calls"], 12);
     assert_eq!(
         json["delta"]["postgres_statement_calls_by_table"][0]["calls"],
@@ -1317,9 +1311,11 @@ fn postgres_statement_aggregation_groups_normalized_queries_without_sql_text() {
     assert!(statements.iter().any(|statement| {
         statement.tables == ["root_filesystem_entries"] && statement.calls == 7
     }));
-    assert!(statements
-        .iter()
-        .any(|statement| statement.tables == ["trigger_records"] && statement.calls == 2));
+    assert!(
+        statements
+            .iter()
+            .any(|statement| statement.tables == ["trigger_records"] && statement.calls == 2)
+    );
     let serialized = serde_json::to_string(&statements).expect("serialize statement counters");
     assert!(!serialized.contains("secret-value"));
     assert!(!serialized.contains("other-secret"));

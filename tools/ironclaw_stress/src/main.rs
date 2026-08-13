@@ -1114,9 +1114,7 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
     }
-    if args.db_write_reset_stats
-        && !matches!(args.preset, Some(StressPreset::DbWriteMeasurement))
-    {
+    if args.db_write_reset_stats && !matches!(args.preset, Some(StressPreset::DbWriteMeasurement)) {
         return Err(
             "--db-write-reset-stats requires --preset db-write-measurement because it resets \
              shared current-database statistics"
@@ -2013,8 +2011,7 @@ async fn run_user_turn_in_process(
         let _ = run_user_turn_tasks(Arc::clone(&workload), &warmup_args, Arc::clone(&identities))
             .await?;
     }
-    let measurement_enabled =
-        matches!(args.preset, Some(StressPreset::DbWriteMeasurement));
+    let measurement_enabled = matches!(args.preset, Some(StressPreset::DbWriteMeasurement));
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let db_probe_before = if measurement_enabled {
         db_probe::begin_measurement(args).await?
@@ -2023,8 +2020,7 @@ async fn run_user_turn_in_process(
     };
     let started = Instant::now();
     let target = workload.target().to_string();
-    let samples =
-        run_user_turn_tasks(Arc::clone(&workload), args, identities).await?;
+    let samples = run_user_turn_tasks(Arc::clone(&workload), args, identities).await?;
     let elapsed = started.elapsed();
     let process = metrics.finish();
     let db_probe = if measurement_enabled {

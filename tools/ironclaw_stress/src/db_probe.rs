@@ -85,7 +85,6 @@ impl PostgresWriteCounts {
             .saturating_add(self.updates)
             .saturating_add(self.deletes)
     }
-
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +142,6 @@ impl PostgresWriteDelta {
     pub(crate) fn total(&self) -> i128 {
         self.inserts + self.updates + self.deletes
     }
-
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,7 +332,6 @@ async fn try_capture_postgres(
     let _ = connection_handle.await;
     Ok(normalize_snapshot(snapshot))
 }
-
 
 async fn ensure_pg_stat_statements(client: &Client, url: &str) -> Result<(), String> {
     let installed: bool = client
@@ -680,10 +677,7 @@ fn statement_call_delta(
         .collect()
 }
 
-pub(crate) fn pg_stat_statements_unavailable(
-    url: &str,
-    detail: impl std::fmt::Display,
-) -> String {
+pub(crate) fn pg_stat_statements_unavailable(url: &str, detail: impl std::fmt::Display) -> String {
     format!(
         "postgres DB write measurement requires a loaded pg_stat_statements extension: {detail}. \
          Run CREATE EXTENSION pg_stat_statements in the target database, add pg_stat_statements \
