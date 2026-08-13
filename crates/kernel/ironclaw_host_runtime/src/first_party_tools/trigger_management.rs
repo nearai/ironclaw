@@ -40,6 +40,15 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
+/// Grounding description for the read path (issue #7246): the model was
+/// observed fabricating automation status ("your digest routine is running")
+/// while the Automations page showed none. Mirrors the outbound
+/// targets-list pattern — the description states the positive
+/// check-before-assert rule tied to the exact claims the model must not
+/// fabricate, and bridges the user vocabulary ("automation", "routine") to
+/// this trigger capability.
+const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, and any active hold. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
+
 const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine. The prompt is the full task each fire performs, written for a future run with no memory of this conversation. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write that as an explicit step in the prompt naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so end the prompt with the reply itself and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
@@ -53,7 +62,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             TRIGGER_LIST_CAPABILITY_ID,
-            "List scheduled triggers owned by the current caller scope",
+            TRIGGER_LIST_DESCRIPTION,
             vec![EffectKind::DispatchCapability],
             PermissionMode::Allow,
             resource_profile(),
@@ -455,6 +464,12 @@ async fn list_triggers(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    // #7246/#7474 review: `limit: 0` would return an empty list while routines
+    // exist, and the description tells the model an empty list proves absence.
+    // Reject zero (schema declares `minimum: 1`) so empty is always evidence.
+    if input.limit == Some(0) {
+        return Err(input_error());
+    }
     let limit = input
         .limit
         .unwrap_or(TRIGGER_LIST_MAX_LIMIT)

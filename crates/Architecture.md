@@ -6,10 +6,10 @@ capability work flow through host ports, and where each component is allowed
 to depend. The workspace itself is arranged as ten family directories — the
 inventory is `crates/README.md`, the routing map and the enforced seven-layer
 dependency matrix are `crates/AGENTS.md`, and the design record is
-`docs/reborn/target-architecture/`. This file names crates by package name
+`docs/internal/reborn/target-architecture/`. This file names crates by package name
 (`ironclaw_turns`); their directories are `crates/<family>/<package>`.
 
-For behavior-changing work, prefer the contract docs in `docs/reborn/contracts/`
+For behavior-changing work, prefer the contract docs in `docs/internal/reborn/contracts/`
 and the family/crate guidance (`crates/<family>/AGENTS.md`, crate `README.md`,
 module specs) as the authoritative sources.
 
@@ -607,8 +607,11 @@ Important invariants:
 - `submit_turn` creates queued work, but no model/tool side effect runs before
   the process claim succeeds.
 - Heartbeats require the matching runner id and lease token.
-- Expired running leases move to terminal `Failed` (sanitized
-  `lease_expired`); expired cancel-requested leases move to `Cancelled`.
+- An expired running lease whose latest checkpoint replays no side effect
+  (`BeforeModel`, `BeforeBlock`) is requeued for resume, after a full lease TTL
+  of grace so a still-live worker cannot be duplicated; every other expired
+  running lease moves to terminal `Failed` (sanitized `lease_expired`).
+  Expired cancel-requested leases move to `Cancelled`.
   Never automatic retry of side-effecting work. (`TurnStatus::RecoveryRequired`
   survives only as a legacy variant.)
 - `LoopExit` is a driver claim, not trusted durable state.
@@ -656,14 +659,22 @@ recovery over pretending the run was safely cancelled.
 ```text
 runner crashes or stops heartbeating
   -> reconciler sees expired Running/CancelRequested lease
-  -> Running          => terminal Failed (sanitized "lease_expired")
+  -> Running, checkpoint replays no side effect, expired > one lease TTL
+                      => Queued (resumed from the checkpoint), bounded budget
+  -> Running, otherwise
+                      => terminal Failed (sanitized "lease_expired")
   -> CancelRequested  => terminal Cancelled
   -> the terminal transition releases the active-thread lock
 ```
 
 Reborn does not automatically retry uncertain side-effecting work after a lost
-lease — expiry is terminal, and the user resubmits explicitly. `RecoveryRequired`
-is legacy-only and is not the Reborn lease-expiry path.
+lease. What makes work certain is its latest checkpoint kind: a run parked
+before a model call or a gate has committed nothing externally, so it is
+requeued once the lease has been expired for a full lease TTL — long enough that
+a worker still running would have renewed it. Anything else, including a
+checkpoint whose kind is unknown, stays terminal and the user resubmits
+explicitly. `RecoveryRequired` is legacy-only and is not the Reborn
+lease-expiry path.
 
 ### Invalid Loop Exit
 
@@ -1029,19 +1040,19 @@ channel packages in particular have shipped since it was written):
 
 - `crates/AGENTS.md` (routing map + the enforced layer matrix) and
   `crates/<family>/AGENTS.md` (family boundaries)
-- `docs/reborn/target-architecture/README.md` and
-  `docs/reborn/target-architecture/families/` (the design record)
-- `docs/reborn/contracts/turns-agent-loop.md`
-- `docs/reborn/contracts/turn-runner.md`
-- `docs/reborn/contracts/loop-exit.md`
-- `docs/reborn/contracts/turn-persistence.md`
-- `docs/reborn/contracts/runtime-profiles.md`
-- `docs/reborn/contracts/capabilities.md`
-- `docs/reborn/contracts/host-runtime.md`
-- `docs/reborn/contracts/events.md`
-- `docs/reborn/contracts/events-projections.md`
-- `docs/reborn/contracts/network.md`
-- `docs/reborn/contracts/secrets.md`
+- `docs/internal/reborn/target-architecture/README.md` and
+  `docs/internal/reborn/target-architecture/families/` (the design record)
+- `docs/internal/reborn/contracts/turns-agent-loop.md`
+- `docs/internal/reborn/contracts/turn-runner.md`
+- `docs/internal/reborn/contracts/loop-exit.md`
+- `docs/internal/reborn/contracts/turn-persistence.md`
+- `docs/internal/reborn/contracts/runtime-profiles.md`
+- `docs/internal/reborn/contracts/capabilities.md`
+- `docs/internal/reborn/contracts/host-runtime.md`
+- `docs/internal/reborn/contracts/events.md`
+- `docs/internal/reborn/contracts/events-projections.md`
+- `docs/internal/reborn/contracts/network.md`
+- `docs/internal/reborn/contracts/secrets.md`
 - `crates/kernel/ironclaw_turns/src/lib.rs`
 - `crates/kernel/ironclaw_turns/src/runner.rs`
 - `crates/contracts/ironclaw_loop_contracts/src/driver.rs`

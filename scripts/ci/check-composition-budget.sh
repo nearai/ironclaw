@@ -22,7 +22,7 @@
 # NAME at whatever depth its Cargo.toml sits, so the target-architecture family
 # move (crates/<family>/ironclaw_*, PROPOSAL §5) does not take this ratchet dark.
 # Both failure directions are gated below: an empty denominator and a zero-LOC
-# numerator are errors, never a 0.00% "pass" (docs/reborn/target-architecture/
+# numerator are errors, never a 0.00% "pass" (docs/internal/reborn/target-architecture/
 # CHECKLIST.md WS10, #6963).
 #
 # Test/override env vars (used by test-check-composition-budget.sh; unset in prod):

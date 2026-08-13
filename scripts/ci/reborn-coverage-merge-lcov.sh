@@ -25,7 +25,7 @@
 # a pattern keyed to today's flat layout stops matching the moment crates move
 # into family directories, and this script would then merge zero files, write
 # an empty tracefile, and exit 0 — coverage dark, CI green. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 #
 # Test/override env vars (used by test-reborn-coverage.sh; unset in prod):
 #   IRONCLAW_REPO_ROOT  repository root whose crate tree defines the filter
@@ -151,7 +151,7 @@ if not files:
         f"  crate directories discovered under {repo_root}: {len(crate_dirs)}\n"
         "  Either the lane tracefiles are empty/for the wrong build, or the crate tree "
         "moved and the paths inside them no longer resolve. Refusing to write an empty "
-        "coverage report (docs/reborn/target-architecture/CHECKLIST.md WS10).",
+        "coverage report (docs/internal/reborn/target-architecture/CHECKLIST.md WS10).",
         file=sys.stderr,
     )
     sys.exit(1)

@@ -9,7 +9,7 @@ extension-registry crate that needs a policy-validated trust ceiling)
 This document is the source-of-truth contract for the trust-policy
 substrate. It is co-located with the crate so changes to the contract
 are reviewed alongside changes to the implementation. The Reborn-track
-docs at `docs/reborn/contracts/host-api.md` and `extensions.md` (in the
+docs at `docs/internal/reborn/contracts/host-api.md` and `extensions.md` (in the
 staging branch) cover the broader Reborn vocabulary; this file is the
 authoritative description of *how trust evaluation works* and how the
 `PackageIdentity` / `RequestedTrustClass` / `EffectiveTrustClass` /
@@ -259,7 +259,7 @@ against `max_resource_ceiling`, before authorizing dispatch.
 
 This matches the broader Reborn rule that registered capabilities are
 only possibilities; dispatch still requires grants/leases (see
-`docs/reborn/contracts/capability-access.md` §2 in the staging-track
+`docs/internal/reborn/contracts/capability-access.md` §2 in the staging-track
 docs).
 
 ---

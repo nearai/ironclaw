@@ -48,9 +48,11 @@ pub struct RigAdapter<M: CompletionModel> {
     input_cost: Decimal,
     output_cost: Decimal,
     /// Prompt cache retention policy (Anthropic only).
-    /// When not `CacheRetention::None`, injects top-level `cache_control`
-    /// via `additional_params` for Anthropic automatic caching. Also controls
-    /// the cost multiplier for cache-creation tokens.
+    /// When not `CacheRetention::None`, emits explicit `cache_control`
+    /// breakpoints (last tool via `additional_params.tools`, plus rig's
+    /// system/last-message markers under `Short`) and the top-level
+    /// automatic-caching marker — see `build_rig_request` and issue #6984.
+    /// Also controls the cost multiplier for cache-creation tokens.
     cache_retention: CacheRetention,
     /// Parameter names that this provider does not support (e.g., `"temperature"`).
     /// These are stripped from requests before sending to avoid 400 errors.
@@ -297,9 +299,12 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// - `Short` — 5-minute TTL via `{"type": "ephemeral"}`, 1.25× write surcharge.
     /// - `Long` — 1-hour TTL via `{"type": "ephemeral", "ttl": "1h"}`, 2.0× write surcharge.
     ///
-    /// Cache injection uses Anthropic's **automatic caching** — a top-level
-    /// `cache_control` field in `additional_params` that gets `#[serde(flatten)]`'d
-    /// into the request body by rig-core.
+    /// Cache injection combines explicit breakpoints with Anthropic's
+    /// automatic caching: `build_rig_request` marks the last tool definition
+    /// (via `additional_params.tools`) and injects the top-level
+    /// `cache_control` field, while `Short` retention additionally enables
+    /// rig's typed system/last-message breakpoints at provider construction
+    /// (`create_anthropic_from_registry`). See issue #6984.
     ///
     /// If the configured model does not support caching (e.g. claude-2),
     /// a warning is logged once at construction and caching is disabled.
@@ -926,6 +931,21 @@ fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
 }
 
+/// Downgrade a requested cache retention to `None` for models without
+/// prompt-cache support. Shared by both Anthropic transports so the
+/// construction-time decision (rig `prompt_caching` flag, OAuth breakpoint
+/// application) always agrees with `with_cache_retention`'s validation.
+pub(crate) fn effective_cache_retention(
+    retention: CacheRetention,
+    model_name: &str,
+) -> CacheRetention {
+    if retention != CacheRetention::None && !supports_prompt_cache(model_name) {
+        CacheRetention::None
+    } else {
+        retention
+    }
+}
+
 /// Returns `true` if the model supports Anthropic prompt caching.
 ///
 /// Per Anthropic docs, only Claude 3+ models support prompt caching.
@@ -1076,17 +1096,32 @@ fn merge_additional_params(rig_req: &mut RigRequest, defaults: Option<&serde_jso
 
 /// Build a rig-core CompletionRequest from our internal types.
 ///
-/// When `cache_retention` is not `None`, injects a top-level `cache_control`
-/// field via `additional_params`. Rig-core's `AnthropicCompletionRequest`
-/// uses `#[serde(flatten)]` on `additional_params`, so the field lands at
-/// the request root — which is exactly what Anthropic's **automatic caching**
-/// expects. The API auto-places the cache breakpoint at the last cacheable
-/// block and moves it forward as conversations grow.
+/// When `cache_retention` is not `None`, emits Anthropic cache markers
+/// (issue #6984):
+///
+/// - A top-level `cache_control` field via `additional_params` (rig-core's
+///   `AnthropicCompletionRequest` uses `#[serde(flatten)]` on
+///   `additional_params`, so the field lands at the request root). This is
+///   Anthropic's **automatic caching**: the API places a breakpoint at the
+///   last cacheable block and moves it forward as conversations grow.
+/// - An explicit breakpoint on the **last tool definition**, so the tool
+///   prefix stays cached even when later parts of the prompt change. rig's
+///   typed `ToolDefinition` cannot carry `cache_control`, so the last tool
+///   is moved into `additional_params.tools` in Anthropic's native shape —
+///   rig appends raw `additional_params.tools` entries after the typed
+///   tools, preserving order.
+///
+/// The system-prompt and last-message-block breakpoints are rig's own
+/// `prompt_caching` flag, set at provider construction for `Short` retention
+/// only: rig's typed markers are always plain 5m ephemeral, and a 5m block
+/// marker combined with a 1h automatic marker is rejected by the API (TTL
+/// conflict on the last block), so `Long` relies on the automatic marker for
+/// the conversation tail.
 #[allow(clippy::too_many_arguments)]
 fn build_rig_request(
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
-    tools: Vec<RigToolDefinition>,
+    mut tools: Vec<RigToolDefinition>,
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
@@ -1102,15 +1137,23 @@ fn build_rig_request(
         reason: format!("Failed to build chat history: {}", e),
     })?;
 
-    // Inject top-level cache_control for Anthropic automatic prompt caching.
-    let additional_params = match cache_retention {
-        CacheRetention::None => None,
-        CacheRetention::Short => Some(serde_json::json!({
-            "cache_control": {"type": "ephemeral"}
-        })),
-        CacheRetention::Long => Some(serde_json::json!({
-            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-        })),
+    let additional_params = match cache_retention.cache_control_json() {
+        None => None,
+        Some(marker) => {
+            let mut params = serde_json::json!({ "cache_control": marker.clone() });
+            if let Some(last_tool) = tools.pop() {
+                // Anthropic-native tool shape: rig maps `parameters` →
+                // `input_schema` only for typed tools; raw entries pass
+                // through verbatim.
+                params["tools"] = serde_json::json!([{
+                    "name": last_tool.name,
+                    "description": last_tool.description,
+                    "input_schema": last_tool.parameters,
+                    "cache_control": marker,
+                }]);
+            }
+            Some(params)
+        }
     };
 
     Ok(RigRequest {
@@ -3709,6 +3752,311 @@ mod tests {
         assert!(
             req.additional_params.is_none(),
             "additional_params should be None when cache is disabled"
+        );
+    }
+
+    fn two_rig_tools() -> Vec<RigToolDefinition> {
+        vec![
+            RigToolDefinition {
+                name: "alpha".to_string(),
+                description: "First tool".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } }
+                }),
+            },
+            RigToolDefinition {
+                name: "beta".to_string(),
+                description: "Second tool".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "b": { "type": "string" } }
+                }),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_build_rig_request_marks_last_tool_short() {
+        let req = build_rig_request(
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            two_rig_tools(),
+            None,
+            None,
+            None,
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        // The last tool moves into additional_params.tools (rig appends those
+        // after the typed tools, preserving order) carrying the explicit
+        // cache breakpoint in Anthropic's native shape.
+        assert_eq!(req.tools.len(), 1, "last tool moves to additional_params");
+        assert_eq!(req.tools[0].name, "alpha");
+        let params = req.additional_params.expect("additional_params");
+        let moved = params["tools"].as_array().expect("raw tools array");
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0]["name"], "beta");
+        assert_eq!(moved[0]["description"], "Second tool");
+        assert!(
+            moved[0].get("input_schema").is_some(),
+            "moved tool must use Anthropic's input_schema key: {moved:?}"
+        );
+        assert!(moved[0].get("parameters").is_none());
+        assert_eq!(moved[0]["cache_control"]["type"], "ephemeral");
+        assert!(moved[0]["cache_control"].get("ttl").is_none());
+    }
+
+    #[test]
+    fn test_build_rig_request_marks_last_tool_long_with_ttl() {
+        let req = build_rig_request(
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            two_rig_tools(),
+            None,
+            None,
+            None,
+            CacheRetention::Long,
+        )
+        .unwrap();
+
+        let params = req.additional_params.expect("additional_params");
+        let moved = params["tools"].as_array().expect("raw tools array");
+        assert_eq!(moved[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(moved[0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn test_effective_cache_retention_downgrades_unsupported_models() {
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "claude-2.1"),
+            CacheRetention::None
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Long, "claude-instant-1.2"),
+            CacheRetention::None
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "claude-opus-4-6"),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Long, "anthropic/claude-sonnet-4-5"),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::None, "claude-opus-4-6"),
+            CacheRetention::None
+        );
+    }
+
+    #[test]
+    fn test_build_rig_request_keeps_tools_typed_when_none() {
+        let req = build_rig_request(
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            two_rig_tools(),
+            None,
+            None,
+            None,
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        assert_eq!(req.tools.len(), 2, "no tool moves when caching is off");
+        assert!(req.additional_params.is_none());
+    }
+
+    /// Wire-level pin for the Anthropic explicit-breakpoint layout under
+    /// `Short` retention (issue #6984): system prompt, last tool, and last
+    /// message block each carry an ephemeral marker, and the request-level
+    /// automatic-caching marker is retained (it no-ops on the already-marked
+    /// last block per Anthropic's compatibility rule).
+    #[tokio::test]
+    async fn anthropic_short_retention_places_explicit_cache_breakpoints() {
+        use rig::client::CompletionClient;
+        use rig::providers::anthropic;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build Anthropic client");
+        let mut model = client.completion_model("claude-opus-4-6");
+        // Mirrors create_anthropic_from_registry: Short retention enables
+        // rig's typed system/last-message breakpoints.
+        model.prompt_caching = true;
+        let adapter =
+            RigAdapter::new(model, "claude-opus-4-6").with_cache_retention(CacheRetention::Short);
+
+        let request = ToolCompletionRequest::new(
+            vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("First question"),
+                ChatMessage::assistant("First answer"),
+                ChatMessage::user("Second question"),
+            ],
+            vec![
+                IronToolDefinition {
+                    name: "alpha".to_string(),
+                    description: "First tool".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": { "a": { "type": "string" } }
+                    }),
+                },
+                IronToolDefinition {
+                    name: "beta".to_string(),
+                    description: "Second tool".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": { "b": { "type": "string" } }
+                    }),
+                },
+            ],
+        );
+        let _ = adapter.complete_with_tools(request).await;
+
+        let body: serde_json::Value =
+            serde_json::from_str(&captured_request_body(captured_body).await)
+                .expect("captured body is JSON");
+
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
+        assert!(body["cache_control"].get("ttl").is_none());
+
+        let system = body["system"]
+            .as_array()
+            .expect("system serialized as blocks");
+        assert_eq!(
+            system.last().expect("system block")["cache_control"]["type"],
+            "ephemeral"
+        );
+
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2, "both tools reach the wire: {body}");
+        assert_eq!(tools[0]["name"], "alpha");
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["name"], "beta", "order preserved after the move");
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+        assert!(
+            tools[1].get("input_schema").is_some(),
+            "moved tool keeps Anthropic's input_schema key: {tools:?}"
+        );
+
+        let messages = body["messages"].as_array().expect("messages");
+        let last_content = messages.last().expect("last message")["content"]
+            .as_array()
+            .expect("last message content blocks");
+        assert_eq!(
+            last_content.last().expect("content block")["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    /// Wire-level pin for `Long` retention: rig's typed markers cannot carry
+    /// a TTL, so only the request-level automatic marker and the raw last-tool
+    /// marker are emitted, both at 1h. Mixing a 5m block marker with a 1h
+    /// automatic marker would be rejected by the API (TTL conflict on the
+    /// last block), so system/message blocks must stay unmarked.
+    #[tokio::test]
+    async fn anthropic_long_retention_uses_1h_markers_without_block_conflicts() {
+        use rig::client::CompletionClient;
+        use rig::providers::anthropic;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build Anthropic client");
+        let model = client.completion_model("claude-opus-4-6");
+        let adapter =
+            RigAdapter::new(model, "claude-opus-4-6").with_cache_retention(CacheRetention::Long);
+
+        let request = ToolCompletionRequest::new(
+            vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("Question"),
+            ],
+            vec![IronToolDefinition {
+                name: "alpha".to_string(),
+                description: "First tool".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } }
+                }),
+            }],
+        );
+        let _ = adapter.complete_with_tools(request).await;
+
+        let body: serde_json::Value =
+            serde_json::from_str(&captured_request_body(captured_body).await)
+                .expect("captured body is JSON");
+
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["cache_control"]["ttl"], "1h");
+
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["cache_control"]["ttl"], "1h");
+
+        for block in body["system"].as_array().expect("system blocks") {
+            assert!(
+                block.get("cache_control").is_none(),
+                "no 5m block marker may precede the 1h automatic marker: {body}"
+            );
+        }
+        for message in body["messages"].as_array().expect("messages") {
+            if let Some(blocks) = message["content"].as_array() {
+                for block in blocks {
+                    assert!(
+                        block.get("cache_control").is_none(),
+                        "message blocks must stay unmarked under Long retention: {body}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Wire-level pin: retention `None` emits no cache_control anywhere.
+    #[tokio::test]
+    async fn anthropic_no_retention_emits_no_cache_control() {
+        use rig::client::CompletionClient;
+        use rig::providers::anthropic;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build Anthropic client");
+        let adapter = RigAdapter::new(
+            client.completion_model("claude-opus-4-6"),
+            "claude-opus-4-6",
+        );
+
+        let request = ToolCompletionRequest::new(
+            vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("Question"),
+            ],
+            vec![IronToolDefinition {
+                name: "alpha".to_string(),
+                description: "First tool".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } }
+                }),
+            }],
+        );
+        let _ = adapter.complete_with_tools(request).await;
+
+        let body = captured_request_body(captured_body).await;
+        assert!(
+            !body.contains("cache_control"),
+            "no cache_control may be emitted when caching is off: {body}"
         );
     }
 

@@ -376,12 +376,24 @@ pub struct AcceptInboundMessageRequest {
     pub content: MessageContent,
 }
 
+/// Internal acceptance metadata that must remain stable across retries and
+/// accepted-message replay. This is deliberately separate from transcript
+/// content so product/UI history never renders submission-routing state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundMessageReplayMetadata {
+    /// Model selected by product policy before the message crossed the durable
+    /// acceptance boundary. `None` preserves the default-model route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedInboundMessage {
     pub thread_id: ThreadId,
     pub message_id: ThreadMessageId,
     pub sequence: u64,
     pub idempotent_replay: bool,
+    pub replay_metadata: InboundMessageReplayMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +407,7 @@ pub struct AcceptedInboundMessageReplay {
     pub source_binding_id: Option<String>,
     pub reply_target_binding_id: Option<String>,
     pub turn_run_id: Option<String>,
+    pub replay_metadata: InboundMessageReplayMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -717,6 +730,32 @@ impl ContextMessage {
 pub struct ContextWindow {
     pub thread_id: ThreadId,
     pub messages: Vec<ContextMessage>,
+    /// Exact boundary of the recent model-visible suffix omitted by
+    /// `max_messages`. Callers may retain explicitly pinned messages older
+    /// than this boundary in addition to the suffix.
+    pub recent_window_truncation: Option<ContextWindowTruncation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextWindowTruncation {
+    pub omitted_through_sequence: u64,
+    pub omitted_through_kind: MessageKind,
+}
+
+pub(crate) fn truncate_context_window(
+    mut messages: Vec<ContextMessage>,
+    max_messages: usize,
+) -> (Vec<ContextMessage>, Option<ContextWindowTruncation>) {
+    if max_messages >= messages.len() {
+        return (messages, None);
+    }
+    let start = messages.len() - max_messages;
+    let boundary = &messages[start - 1];
+    let truncation = ContextWindowTruncation {
+        omitted_through_sequence: boundary.sequence,
+        omitted_through_kind: boundary.kind,
+    };
+    (messages.split_off(start), Some(truncation))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

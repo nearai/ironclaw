@@ -121,6 +121,11 @@ where
 /// Validated durable stores required before upper runtime assembly begins.
 pub(crate) struct ProductionStoreBundle {
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
+    /// Filesystem the process journal writes through. Defaults to the
+    /// data-plane `filesystem`; a Postgres deployment replaces it with one over
+    /// a dedicated connection pool so heartbeats never queue behind data-plane
+    /// traffic (`process_journal_root_filesystem`).
+    pub(crate) process_journal_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) resource_governor: ComposedResourceGovernor,
     pub(crate) leases: Arc<ComposedCapabilityLeaseStore>,
@@ -184,6 +189,7 @@ impl ProductionStoreBundle {
         let resource_governor = warm_resource_governor(resource_governor).await?;
 
         Ok(Self {
+            process_journal_filesystem: Arc::clone(&filesystem),
             filesystem,
             scoped_filesystem,
             resource_governor,
@@ -192,6 +198,20 @@ impl ProductionStoreBundle {
             secret_credentials,
             event_store,
         })
+    }
+}
+
+impl ProductionStoreBundle {
+    /// Route the process journal through its own filesystem handle. Callers that
+    /// have no separate handle leave the shared one in place.
+    pub(crate) fn with_process_journal_filesystem(
+        mut self,
+        filesystem: Option<Arc<CompositeRootFilesystem>>,
+    ) -> Self {
+        if let Some(filesystem) = filesystem {
+            self.process_journal_filesystem = filesystem;
+        }
+        self
     }
 }
 

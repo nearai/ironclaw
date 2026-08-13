@@ -13,9 +13,10 @@ use ironclaw_loop_contracts::{CompactionInitiator, LoopRunContext, PromptContext
 /// compact through. State mutation, transcript reads, inference, persistence,
 /// and progress events stay in the executor and host compaction port.
 ///
-/// `Trigger.drop_through_seq` must point at a model-visible user message. The
-/// host compaction port rejects non-user terminal boundaries so custom
-/// strategies cannot compact through assistant, summary, or reference messages.
+/// `Trigger.drop_through_seq` normally points at a model-visible user message.
+/// Window-eviction recovery may instead use a finalized tool-result boundary
+/// after the host reports a typed eviction watermark; the host validates that
+/// special case.
 pub(crate) trait CompactionStrategy: Send + Sync {
     fn should_compact(
         &self,
@@ -117,6 +118,13 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         }
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
         if state.compaction_state.force_compact_on_next_iteration {
+            if state.compaction_state.force_compact_initiator
+                == Some(CompactionInitiator::WindowEviction)
+            {
+                return eligible_window_eviction_boundary(state, prompt_fingerprint, None)
+                    .map(|sequence| self.trigger_at(state, sequence))
+                    .unwrap_or(CompactionDecision::Skip);
+            }
             return latest_eligible_user_boundary(state, prompt_fingerprint)
                 .map(|sequence| self.trigger_at(state, sequence))
                 .unwrap_or(CompactionDecision::Skip);
@@ -132,6 +140,45 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         .map(|sequence| self.trigger_at(state, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
+}
+
+pub(super) fn eligible_window_eviction_boundary(
+    state: &LoopExecutionState,
+    prompt_fingerprint: u64,
+    before_sequence: Option<u64>,
+) -> Option<u64> {
+    let watermark = state.compaction_state.window_eviction.as_ref()?;
+    let eligible_kind = matches!(
+        watermark.omitted_through_kind,
+        ironclaw_loop_contracts::LoopContextCompactionKind::User
+            | ironclaw_loop_contracts::LoopContextCompactionKind::ToolResult
+    );
+    let matches_deferred_boundary = state
+        .compaction_state
+        .last_deferred
+        .is_some_and(|deferred| deferred.prompt_fingerprint == prompt_fingerprint);
+    if !eligible_kind || matches_deferred_boundary {
+        return None;
+    }
+    state
+        .compaction_prompt
+        .message_index
+        .iter()
+        .rev()
+        .find(|entry| {
+            matches!(
+                entry.kind,
+                IndexedMessageKind::User | IndexedMessageKind::ToolResult
+            ) && before_sequence.is_none_or(|before| entry.sequence < before)
+                && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+        })
+        .map(|entry| entry.sequence)
+        .or_else(|| {
+            (Some(watermark.omitted_through_sequence)
+                > state.compaction_state.last_compacted_through_seq)
+                .then_some(watermark.omitted_through_sequence)
+                .filter(|sequence| before_sequence.is_none_or(|before| *sequence < before))
+        })
 }
 
 fn latest_eligible_user_boundary(

@@ -471,8 +471,6 @@ fn pairing_admission_for(
     actor_id: &str,
 ) -> InboundAdmission {
     InboundAdmission {
-        channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
-        channel_egress: None,
         extension_id: EXT.to_string(),
         installation_id: installation_id.to_string(),
         message: direct_message(&format!("/start {}", code.as_str()), actor_id),
@@ -1158,6 +1156,7 @@ fn direct_message(text: &str, actor_id: &str) -> NormalizedInboundMessage {
         text: text.to_string(),
         trigger: ProductTriggerReason::DirectChat,
         attachments: Vec::new(),
+        conversation_context: None,
         reply_context: None,
     }
 }

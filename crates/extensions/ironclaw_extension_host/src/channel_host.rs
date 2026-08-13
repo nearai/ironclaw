@@ -109,7 +109,11 @@ pub fn evidence_mint_for_verification(
                 header: recipe.header.clone(),
             })
         }
-        IngressVerificationRecipe::None => None,
+        // No webhook-signature evidence is minted at this layer for either: a
+        // `none` recipe has no trusted claim (route fails closed), and an
+        // `authenticated_session` channel mounts no webhook route at all — its
+        // T1 evidence is minted by the host's authenticated transport, not here.
+        IngressVerificationRecipe::AuthenticatedSession | IngressVerificationRecipe::None => None,
     }
 }
 
@@ -479,7 +483,7 @@ impl GenericChannelHostAssembly {
         for extension_id in snapshot.extension_ids() {
             if let Some(active) = snapshot.extension(&extension_id)
                 && let Some(channel) = active.resolved.channel.as_ref()
-                && channel.inbound
+                && channel.supports_inbound()
                 && channel.ingress.is_some()
             {
                 desired

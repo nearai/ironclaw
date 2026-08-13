@@ -1,7 +1,7 @@
 // Project endpoints now call the real WebChat v2 `/api/webchat/v2/projects`
 // surface (list/create/read/update/delete + membership ACL) plus the v2
-// project-filtered thread list. Mission/widget reads remain TODO stubs until
-// those v2 project child endpoints land.
+// project-filtered thread list. Widget reads remain a TODO stub until that v2
+// project child endpoint lands.
 
 import {
   addProjectMember as apiAddProjectMember,
@@ -109,11 +109,6 @@ export function removeProjectMember(projectId, userId) {
   return apiRemoveProjectMember({ projectId, userId });
 }
 
-// --- Still-stubbed: per-project missions/threads/widgets (need v2 endpoints) ---
-
-export function fetchProjectMissions(_projectId) {
-  return Promise.resolve({ missions: [], todo: true });
-}
 export async function fetchProjectThreads(projectId) {
   if (!projectId) return { threads: [] };
   const response = await apiListThreads({ projectId, limit: 200 });
@@ -125,18 +120,6 @@ export async function fetchProjectThreads(projectId) {
 export function fetchProjectWidgets(_projectId) {
   return Promise.resolve({ widgets: [], todo: true });
 }
-export function fetchMissionDetail(_missionId) {
-  return Promise.resolve(null);
-}
 export function fetchThreadDetail(_threadId) {
   return Promise.resolve(null);
-}
-export function fireMission(_missionId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 missions endpoint" });
-}
-export function pauseMission(_missionId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 missions endpoint" });
-}
-export function resumeMission(_missionId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 missions endpoint" });
 }

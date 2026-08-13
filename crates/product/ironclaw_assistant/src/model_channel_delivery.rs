@@ -544,6 +544,27 @@ fn classify_delivery_outcome(
             durably_recorded: true,
             already_delivered: false,
         }),
+        // A stream reply is delivered by the projection pipeline, and the
+        // cursor is the durable proof the user can see it. There is no vendor
+        // message ref because no vendor was involved — reporting the cursor
+        // as a ref would fabricate a provider identifier, so the evidence is
+        // honestly ref-free. Reachable only if a model-requested delivery
+        // ever resolves to a stream channel; the coordinator routes model
+        // deliveries on the delivery axis, so today it does not.
+        CoordinatedDeliveryOutcome::StreamDelivered { .. } => Ok(ModelChannelDeliveryEvidence {
+            target,
+            provider_message_refs: Vec::new(),
+            durably_recorded: true,
+            already_delivered: false,
+        }),
+        CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed { .. } => {
+            Ok(ModelChannelDeliveryEvidence {
+                target,
+                provider_message_refs: Vec::new(),
+                durably_recorded: false,
+                already_delivered: false,
+            })
+        }
         // The send happened (the refs are real) but the durable confirmation
         // write failed. Success-shaped so the model never resends; the
         // evidence carries the honest weaker claim.
@@ -578,7 +599,8 @@ fn classify_delivery_outcome(
 /// Pure coordinator-error classification (contract bullet 6).
 fn classify_coordinator_error(error: CoordinatedDeliveryError) -> ModelChannelDeliveryError {
     match error {
-        CoordinatedDeliveryError::ChannelUnavailable { .. } => ModelChannelDeliveryError::Failed {
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+        | CoordinatedDeliveryError::ReplyContextUnavailable => ModelChannelDeliveryError::Failed {
             kind: DeliveryFailureKind::TransportUnavailable,
         },
         // Model-correctable classes stay model-visible (rules/tools.md): a

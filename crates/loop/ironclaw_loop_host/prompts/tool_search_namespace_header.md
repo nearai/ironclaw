@@ -1,0 +1,1 @@
+These {{total_tools}} tools are available on demand across {{namespace_count}} authorized namespaces. Search results include complete schemas when schema_complete=true; otherwise use tool_describe. Never report a capability unavailable before searching. Namespaces:

@@ -1,13 +1,14 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
-    AgentLoopDriverError, AgentLoopHostError, CommunicationContextProvider,
-    InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant,
-    LoopModelPolicyGuard, LoopRunContext, MemoryPromptContextService, RunProfileResolver,
+    AgentLoopDriverError, AgentLoopHostError, CapabilitySurfaceProfileId,
+    CommunicationContextProvider, InstructionSafetyContext, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+    MemoryPromptContextService, RunProfileResolver,
 };
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
@@ -94,6 +95,52 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
+/// Environment variable that enables bounded concurrent capability batches.
+pub const REBORN_PARALLEL_TOOL_BATCH_ENV: &str = "REBORN_PARALLEL_TOOL_BATCH";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ParallelToolBatchMode {
+    #[default]
+    Off,
+    On,
+}
+
+impl ParallelToolBatchMode {
+    pub fn from_env() -> Self {
+        match std::env::var(REBORN_PARALLEL_TOOL_BATCH_ENV) {
+            Ok(value) => Self::from_raw(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::Off,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
+                    "REBORN_PARALLEL_TOOL_BATCH is not valid UTF-8; falling back to Off"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("on" | "1" | "true") => Self::On,
+            None | Some("" | "off" | "0" | "false") => Self::Off,
+            Some(_) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
+                    "unrecognized REBORN_PARALLEL_TOOL_BATCH value; falling back to Off"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    fn enables_parallel_batches(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -113,6 +160,12 @@ pub struct DefaultPlannedRuntimeConfig {
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
+    /// Rollout switch for bounded concurrent execution of batches whose
+    /// capability descriptors all permit parallel execution.
+    pub parallel_tool_batch: ParallelToolBatchMode,
+    /// Profile-owned visibility preferences, keyed by capability-surface
+    /// profile id. Values are canonical capability ids and never grant access.
+    pub tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Override for the default family's model availability-retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
@@ -132,10 +185,98 @@ impl Default for DefaultPlannedRuntimeConfig {
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
+            parallel_tool_batch: ParallelToolBatchMode::from_env(),
+            tool_disclosure_profile_pins: HashMap::new(),
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
         }
     }
+}
+
+pub const REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV: &str = "REBORN_TOOL_DISCLOSURE_PROFILE_PINS";
+
+impl DefaultPlannedRuntimeConfig {
+    /// Resolve operator-controlled environment configuration for production
+    /// startup. Programmatic `Default` remains deterministic; the composition
+    /// root calls this fallible boundary so a malformed pin map cannot silently
+    /// disable an intended optimization.
+    pub fn try_from_env() -> Result<Self, DefaultPlannedRuntimeConfigError> {
+        Ok(Self {
+            tool_disclosure_profile_pins: tool_disclosure_profile_pins_from_env()?,
+            ..Self::default()
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DefaultPlannedRuntimeConfigError {
+    #[error("{REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV} is not valid UTF-8")]
+    ProfilePinsNotUnicode,
+    #[error("{REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV} is invalid: {source}")]
+    ProfilePins {
+        #[source]
+        source: ToolDisclosureProfilePinsParseError,
+    },
+}
+
+fn tool_disclosure_profile_pins_from_env()
+-> Result<HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>, DefaultPlannedRuntimeConfigError>
+{
+    let raw = match std::env::var(REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return Ok(HashMap::new()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(DefaultPlannedRuntimeConfigError::ProfilePinsNotUnicode);
+        }
+    };
+    parse_tool_disclosure_profile_pins(&raw)
+        .map_err(|source| DefaultPlannedRuntimeConfigError::ProfilePins { source })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolDisclosureProfilePinsParseError {
+    #[error("profile-pin JSON is invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("profile id {profile:?} is invalid: {reason}")]
+    Profile { profile: String, reason: String },
+    #[error("capability id {capability:?} for profile {profile:?} is invalid: {reason}")]
+    Capability {
+        profile: String,
+        capability: String,
+        reason: String,
+    },
+}
+
+fn parse_tool_disclosure_profile_pins(
+    raw: &str,
+) -> Result<
+    HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
+    ToolDisclosureProfilePinsParseError,
+> {
+    let parsed = serde_json::from_str::<HashMap<String, Vec<String>>>(raw)?;
+    let mut resolved = HashMap::new();
+    for (profile, pins) in parsed {
+        let profile_id = CapabilitySurfaceProfileId::new(profile.clone()).map_err(|reason| {
+            ToolDisclosureProfilePinsParseError::Profile {
+                profile: profile.clone(),
+                reason,
+            }
+        })?;
+        let pins = pins
+            .into_iter()
+            .map(|capability| {
+                CapabilityId::new(capability.clone()).map_err(|error| {
+                    ToolDisclosureProfilePinsParseError::Capability {
+                        profile: profile.clone(),
+                        capability,
+                        reason: error.to_string(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        resolved.insert(profile_id, pins);
+    }
+    Ok(resolved)
 }
 
 /// Map the configured worker count into a scheduler-semaphore permit count.
@@ -546,6 +687,7 @@ where
     let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
         parts.config.planned_model_availability_retry_attempts,
+        parts.config.parallel_tool_batch.enables_parallel_batches(),
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
@@ -632,7 +774,11 @@ where
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let agent_turn_runtime_port: Arc<dyn AgentTurnRuntimePort> = agent_turn_runtime.clone();
+    // The host factory needs the spawn-tree superset: besides cancellation
+    // observation it reads the claimed run's journal record to fence transcript
+    // writes on the lease the run was actually claimed under.
+    let agent_turn_runtime_port: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
+        agent_turn_runtime.clone();
     let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
         Arc::new(GateBackedSubagentPromptMaterialSource::new(
             process_system.inputs(),
@@ -661,13 +807,15 @@ where
             parts.capability_surface_resolver,
             Arc::clone(&subagent_prompt_source),
         ));
-    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_bridged() {
+    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_enabled() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            "reborn tool disclosure decorator wired (bridged)"
+            mode = ?parts.config.tool_disclosure,
+            "reborn tool disclosure decorator wired"
         );
         Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
             Arc::clone(&parts.capability_result_writer),
+            parts.config.tool_disclosure,
         )))
     } else {
         None
@@ -695,6 +843,7 @@ where
             tool_disclosure_decorator,
             global_denied,
             scheduled_trigger_denied,
+            tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins,
         });
     let safety_context = parts
         .safety_context
@@ -842,6 +991,7 @@ struct RuntimeProfiledCapabilityPortFactory {
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
     global_denied: Vec<CapabilityId>,
     scheduled_trigger_denied: Vec<CapabilityId>,
+    tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
 }
 
 #[async_trait::async_trait]
@@ -873,8 +1023,21 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         capabilities = self.spawn_decorator.decorate(run_context, capabilities);
         capabilities = apply_capability_surface_policy(capabilities, Arc::clone(&policy));
         if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
-            capabilities =
-                decorator.decorate_with_policy(run_context, capabilities, Arc::clone(&policy));
+            let pins = self
+                .tool_disclosure_profile_pins
+                .get(
+                    &run_context
+                        .resolved_run_profile
+                        .capability_surface_profile_id,
+                )
+                .cloned()
+                .unwrap_or_default();
+            capabilities = decorator.decorate_with_policy_and_pins(
+                run_context,
+                capabilities,
+                Arc::clone(&policy),
+                pins,
+            );
         }
         Ok(capabilities)
     }
@@ -932,14 +1095,17 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     use super::{
-        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+        DefaultPlannedRuntimeConfig, ParallelToolBatchMode,
+        REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV, RuntimeProfiledCapabilityPortFactory,
+        SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
+        ToolDisclosureMode, parse_tool_disclosure_profile_pins, scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -954,9 +1120,10 @@ mod tests {
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryRunProfileResolver, LoopCapabilityPort,
-        LoopRequest, LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
-        RunProfileResolver, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, ConcurrencyHint,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+        LoopRunContext, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
@@ -965,6 +1132,38 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn parallel_tool_batch_mode_fails_closed_to_off() {
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(None),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(Some("")),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(Some("garbage")),
+            ParallelToolBatchMode::Off
+        );
+        assert_eq!(
+            ParallelToolBatchMode::from_raw(Some("off")),
+            ParallelToolBatchMode::Off
+        );
+        assert!(!ParallelToolBatchMode::Off.enables_parallel_batches());
+    }
+
+    #[test]
+    fn parallel_tool_batch_mode_accepts_explicit_on_values() {
+        for raw in ["on", "ON", "1", "true", "TRUE"] {
+            assert_eq!(
+                ParallelToolBatchMode::from_raw(Some(raw)),
+                ParallelToolBatchMode::On
+            );
+        }
+        assert!(ParallelToolBatchMode::On.enables_parallel_batches());
+    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {
@@ -994,6 +1193,72 @@ mod tests {
         assert_eq!(permits, tokio::sync::Semaphore::MAX_PERMITS);
         // Must not panic.
         let _ = tokio::sync::Semaphore::new(permits);
+    }
+
+    #[test]
+    fn profile_pin_config_parses_typed_capability_ids() {
+        let parsed = parse_tool_disclosure_profile_pins(
+            r#"{"interactive_tools":["github.search_code","gmail.list_messages"]}"#,
+        )
+        .expect("valid profile-pin configuration");
+
+        assert_eq!(
+            parsed[&CapabilitySurfaceProfileId::new("interactive_tools")
+                .expect("valid test profile id")]
+                .iter()
+                .map(CapabilityId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["github.search_code", "gmail.list_messages"]
+        );
+    }
+
+    #[test]
+    fn profile_pin_config_rejects_the_entire_map_when_any_id_is_invalid() {
+        assert!(
+            parse_tool_disclosure_profile_pins(
+                r#"{"interactive_tools":["github.search_code"],"mission":["invalid"]}"#,
+            )
+            .is_err()
+        );
+        assert!(parse_tool_disclosure_profile_pins("[]").is_err());
+        assert!(
+            parse_tool_disclosure_profile_pins(r#"{"INVALID PROFILE":["github.search_code"]}"#,)
+                .is_err(),
+            "profile identities must be validated at the environment boundary"
+        );
+    }
+
+    #[test]
+    fn profile_pin_environment_rejects_invalid_configuration_at_runtime_startup() {
+        const CHILD_MARKER: &str = "IRONCLAW_PROFILE_PIN_CONFIG_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let error = DefaultPlannedRuntimeConfig::try_from_env()
+                .expect_err("invalid profile pins must reject runtime configuration");
+            assert!(
+                error.to_string().contains("is invalid"),
+                "startup error must retain configuration context: {error}"
+            );
+            return;
+        }
+
+        for invalid in ["{", r#"{"interactive_tools":["invalid"]}"#] {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "profile_pin_environment_rejects_invalid_configuration_at_runtime_startup",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV, invalid)
+            .output()
+            .expect("child test process executes");
+            assert!(
+                output.status.success(),
+                "runtime startup must reject invalid pin config: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     async fn test_run_context() -> LoopRunContext {
@@ -1308,9 +1573,11 @@ mod tests {
             }),
             tool_disclosure_decorator: Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
                 Arc::new(UnusedResultWriter),
+                ToolDisclosureMode::Bridged,
             ))),
             global_denied: vec![denied_id.clone()],
             scheduled_trigger_denied: Vec::new(),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         factory
@@ -1452,6 +1719,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied,
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         let scheduled_ids =
@@ -1509,6 +1777,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         let scheduled_ids =

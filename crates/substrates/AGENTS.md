@@ -131,7 +131,7 @@ All gates below run with `cargo test -p ironclaw_architecture_tests`.
 
 ## Sources
 
-[`docs/reborn/target-architecture/families/substrates.md`](../../docs/reborn/target-architecture/families/substrates.md)
+[`docs/internal/reborn/target-architecture/families/substrates.md`](../../docs/internal/reborn/target-architecture/families/substrates.md)
 (full charter, boundaries, security posture) · PROPOSAL §6.2 (per-crate
 contracts), §8 (dependency model), §11.2.6 (persistence rule) · the gates named
 above.

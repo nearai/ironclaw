@@ -4,7 +4,7 @@
 in the root `AGENTS.md` Module Specs table): the guardrails, the WebUI v2
 surface, product-auth wiring rules, security invariants, and tests. Code
 follows the spec; the spec is the tiebreaker. Consolidated per
-`docs/reborn/guidance-conventions.md`, this file is a pointer, not a second
+`docs/internal/reborn/guidance-conventions.md`, this file is a pointer, not a second
 copy.
 
 - Orientation (what this crate is, entry points, measured deps/consumers, the

@@ -27,6 +27,9 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "mpim:read",
     "users:read",
     "chat:write",
+    "reactions:read",
+    "reactions:write",
+    "im:write",
 ];
 
 fn github_webhook_normalization_call() -> RebornScriptedReply {
@@ -786,10 +789,10 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
 /// at the gateway (`CapabilitySurfacePolicyFilter`, before
-/// `register_provider_tool_call` ever stages an invocation). The loop must
-/// surface the precise `outside_capability_surface` observation to the model,
-/// let it repair the response on the next call, and complete without ever
-/// dispatching or reporting the rejected call as successful.
+/// `register_provider_tool_call` ever stages an invocation). The gateway must
+/// return precise batch-rejection feedback to the model, let it repair the
+/// response on the next call, and complete without ever dispatching or
+/// reporting the rejected call as successful.
 #[tokio::test]
 async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     let h = RebornIntegrationHarness::test_default()
@@ -810,12 +813,14 @@ async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     h.assert_reply_contains("continue without it")
         .await
         .expect("repaired reply is finalized");
-    h.assert_model_request_contains(
-        "model error observation: invalid_output reason=outside_capability_surface; \
-         repair the response and continue",
-    )
+    h.assert_model_message_content_in_order(&[
+        "Tool call batch rejected by host:",
+        "model returned a tool call outside the advertised capability surface",
+        "None of this response's tool calls were executed.",
+        "Retry with an available capability",
+    ])
     .await
-    .expect("the retry tells the model precisely why its tool call was rejected");
+    .expect("the gateway tells the model precisely why its tool-call batch was rejected");
 
     h.assert_tool_not_invoked("builtin.spawn_subagent")
         .await
@@ -950,6 +955,67 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
             .await
             .is_err(),
         "raw payload tail must not reach the model-visible tool-result transcript"
+    );
+}
+
+/// Secret labels in structured file output must redact their paired values
+/// before the preview vocabulary hides the label itself. Otherwise the next
+/// model request sees `"[redacted]": "opaque-value"` and no later scanner can
+/// recover that the surviving value was credential material.
+#[tokio::test]
+async fn durable_read_file_result_redacts_structured_credential_value() {
+    let canary = "never-before-uploaded-canary-integration";
+    let marker = "structured-credential-redaction-marker";
+    let content = serde_json::json!({
+        "marker": marker,
+        "password": canary,
+        "secretary": "Treasury contact",
+    })
+    .to_string();
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.read_file",
+                json!({"path": "/workspace/structured-secret.json"}),
+            ),
+            RebornScriptedReply::text("read it"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let workspace_path = h
+        .capability_recorder
+        .workspace_file_path("structured-secret.json")
+        .expect("durable file-tools harness exposes its workspace");
+    std::fs::write(&workspace_path, content)
+        .expect("structured fixture is seeded outside the model");
+
+    h.submit_turn("read the structured file")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("builtin.read_file")
+        .await
+        .expect("read_file ran");
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, marker)
+        .await
+        .expect("benign structured content survives in the model-visible result");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "Treasury contact",
+    )
+    .await
+    .expect("credential substrings in benign keys do not cause false-positive redaction");
+    assert!(
+        h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, canary)
+            .await
+            .is_err(),
+        "the credential value must not survive in the model-visible tool result"
+    );
+    assert!(
+        h.assert_model_request_contains(canary).await.is_err(),
+        "the credential value must never reach a model request"
     );
 }
 

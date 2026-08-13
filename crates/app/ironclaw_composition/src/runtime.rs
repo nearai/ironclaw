@@ -79,12 +79,14 @@ use ironclaw_processes::{
     ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
-use ironclaw_product_contracts::operator_llm::ActiveModelReader;
+use ironclaw_product_contracts::operator_llm::{
+    ActiveModelReader, LlmConfigService, LlmConfigServiceError,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
-use ironclaw_product_contracts::surface::ProductSurface;
+use ironclaw_product_contracts::surface::{ProductSurface, ProductSurfaceCaller};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
-    SessionThreadService, ThreadHistoryRequest, ThreadScope,
+    AcceptInboundMessageRequest, EnsureThreadRequest, InboundMessageReplayMetadata, MessageContent,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turn_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -93,8 +95,8 @@ use ironclaw_turn_runner::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
 use ironclaw_turn_runner::runtime::{
-    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    ProcessRuntimeSystem, build_default_planned_runtime,
+    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeConfigError,
+    DefaultPlannedRuntimeParts, ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_turn_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -136,7 +138,9 @@ use crate::outbound::{
     OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
-use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::root::default_system_prompt::{
+    DefaultSystemPromptIdentitySource, SystemPromptProtocols,
+};
 use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_assistant::{
     OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID, RebornOutboundPreferencesService,
@@ -508,6 +512,8 @@ pub enum RebornRuntimeError {
     InvalidArgument { reason: String },
     #[error("malformed runtime configuration: {reason}")]
     MalformedConfig { reason: String },
+    #[error("malformed planned-runtime configuration: {0}")]
+    PlannedRuntimeConfig(#[from] DefaultPlannedRuntimeConfigError),
     #[error("llm provider construction failed: {0}")]
     LlmProvider(String),
     #[error("turn-runner worker is no longer running")]
@@ -534,6 +540,23 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     }
 }
 
+fn cli_model_resolution_error(error: LlmConfigServiceError) -> RebornRuntimeError {
+    match error {
+        LlmConfigServiceError::InvalidRequest { reason, .. } => {
+            RebornRuntimeError::TurnRejected { reason }
+        }
+        LlmConfigServiceError::NotFound => RebornRuntimeError::TurnRejected {
+            reason: "requested model is unavailable".to_string(),
+        },
+        LlmConfigServiceError::Unavailable => {
+            RebornRuntimeError::LlmProvider("model selection is unavailable".to_string())
+        }
+        LlmConfigServiceError::Internal => {
+            RebornRuntimeError::LlmProvider("model selection failed".to_string())
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) struct OutboundTestStores {
     state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
@@ -554,6 +577,7 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) llm_config_service: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
@@ -598,6 +622,10 @@ pub struct RebornRuntime {
         Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
+    pub(crate) session_inbound_ledger: Arc<dyn ironclaw_assistant::IdempotencyLedger>,
+    pub(crate) session_channel_directory:
+        Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
+    pub(crate) session_channel_extension_id: Option<String>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -623,9 +651,19 @@ pub struct RebornRuntime {
         Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
-    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
+    /// Host-owned per-user delivery registrations (design §8). Always wired:
+    /// a coordinator that cannot answer "is this user enrolled?" must still
+    /// answer it, and a deployment with no enrollment-requiring channel gets
+    /// the no-op that answers "nobody is".
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes the non-secret bootstrap document a channel's client needs
+    /// in order to enroll — the public half of a credential the host already
+    /// holds, published generically rather than through a per-channel status
+    /// document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -845,6 +883,12 @@ pub(crate) fn staged_capability_io_with_observer_for_test(
 }
 
 impl RebornRuntime {
+    /// The deployment's authenticated-session channel extension id, when
+    /// exactly one is declared. The serve path advertises it to the SPA.
+    pub fn session_channel_extension_id(&self) -> Option<&str> {
+        self.session_channel_extension_id.as_deref()
+    }
+
     pub fn readiness(&self) -> &RebornReadiness {
         &self.readiness
     }
@@ -1154,6 +1198,7 @@ impl RebornRuntime {
                     thread_service,
                     turn_coordinator,
                     input_enqueue: self.webui_input_enqueue(),
+                    llm_config: self.llm_config_service.clone(),
                     approval_interaction: None,
                     auth_interaction: None,
                     identity,
@@ -1743,28 +1788,13 @@ impl RebornRuntime {
     pub(crate) fn generic_channel_connection_facade(
         &self,
     ) -> Option<Arc<dyn ironclaw_auth::ChannelConnectionService>> {
-        let identity_store = self.channel_identity_store.clone();
-        let installation_store = Some(self.extension_management.installation_store_handle());
-        let credential_cleanup = Some(Arc::clone(&self.product_auth)
-            as Arc<dyn ironclaw_extension_host::channel_connection::ChannelCredentialCleanup>);
-        let account_status_reader = Some(Arc::clone(&self.product_auth)
-            as Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>);
-        Some(Arc::new(
-            ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
-                self.thread_scope.tenant_id.clone(),
-                Vec::new(),
-                installation_store,
-                Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
-                identity_store
-                    as Arc<
-                        dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore,
-                    >,
-                credential_cleanup,
-                account_status_reader,
-                Some(self.channel_dm_target_store.clone()),
-                self.channel_pairing.clone(),
-            ),
+        Some(build_generic_channel_connection_facade(
+            self.thread_scope.tenant_id.clone(),
+            &self.extension_management,
+            &self.channel_identity_store,
+            &self.product_auth,
+            &self.channel_dm_target_store,
+            self.channel_pairing.clone(),
         ))
     }
 
@@ -2162,25 +2192,44 @@ impl RebornRuntime {
             return Err(error);
         }
         let scope = self.turn_scope_for(&conversation.0);
+        let resolved_model = match self.llm_config_service.as_ref() {
+            Some(service) => service
+                .resolve_user_model(
+                    ProductSurfaceCaller::new(
+                        self.thread_scope.tenant_id.clone(),
+                        self.actor_user_id.clone(),
+                        Some(self.thread_scope.agent_id.clone()),
+                        self.thread_scope.project_id.clone(),
+                    ),
+                    None,
+                )
+                .await
+                .map_err(cli_model_resolution_error)?,
+            None => None,
+        };
         let accept_started_at = live_latency_started_at();
+        let accept_request = AcceptInboundMessageRequest {
+            scope: self.thread_scope.clone(),
+            thread_id: conversation.0.clone(),
+            actor_id: self.actor_user_id.as_str().to_string(),
+            source_binding_id: Some(self.source_binding_ref.as_str().to_string()),
+            reply_target_binding_id: Some(self.reply_target_binding_ref.as_str().to_string()),
+            // This task-level API does not receive an upstream stable
+            // event id, so mint a best-effort unique id scoped to the
+            // caller-provided source binding.
+            external_event_id: Some(format!(
+                "{}:{}",
+                self.source_binding_ref.as_str(),
+                Uuid::new_v4()
+            )),
+            content: MessageContent::text(text.to_string()),
+        };
         let accepted = match self
             .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: conversation.0.clone(),
-                actor_id: self.actor_user_id.as_str().to_string(),
-                source_binding_id: Some(self.source_binding_ref.as_str().to_string()),
-                reply_target_binding_id: Some(self.reply_target_binding_ref.as_str().to_string()),
-                // This task-level API does not receive an upstream stable
-                // event id, so mint a best-effort unique id scoped to the
-                // caller-provided source binding.
-                external_event_id: Some(format!(
-                    "{}:{}",
-                    self.source_binding_ref.as_str(),
-                    Uuid::new_v4()
-                )),
-                content: MessageContent::text(text.to_string()),
-            })
+            .accept_inbound_message_with_replay_metadata(
+                accept_request,
+                InboundMessageReplayMetadata { resolved_model },
+            )
             .await
         {
             Ok(accepted) => {
@@ -2267,7 +2316,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
-                requested_model: None,
+                requested_model: accepted.replay_metadata.resolved_model.clone(),
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
@@ -2936,6 +2985,44 @@ impl RebornRuntime {
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
+/// Assemble the generic per-user channel-connection facade from its stores.
+///
+/// Shared by [`RebornRuntime::generic_channel_connection_facade`] (extensions
+/// card / product surface) and the communication-context provider wiring in
+/// `build_runtime_with_resource_governor` (#7247), so the model-facing
+/// "connected channels" truth and the extensions card consult the same
+/// connection service assembly.
+fn build_generic_channel_connection_facade(
+    tenant_id: ironclaw_host_api::ids::TenantId,
+    extension_management: &Arc<RebornLocalExtensionManagementPort>,
+    channel_identity_store: &Arc<ironclaw_extension_host::FilesystemChannelIdentityStore>,
+    product_auth: &Arc<RebornProductAuthServices>,
+    channel_dm_target_store: &Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
+    channel_pairing: Option<Arc<ChannelPairingRegistry>>,
+) -> Arc<dyn ironclaw_auth::ChannelConnectionService> {
+    let identity_store = Arc::clone(channel_identity_store);
+    let installation_store = Some(extension_management.installation_store_handle());
+    let credential_cleanup = Some(Arc::clone(product_auth)
+        as Arc<dyn ironclaw_extension_host::channel_connection::ChannelCredentialCleanup>);
+    let account_status_reader = Some(Arc::clone(product_auth)
+        as Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>);
+    Arc::new(
+        ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
+            tenant_id,
+            Vec::new(),
+            installation_store,
+            Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            identity_store
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
+            credential_cleanup,
+            account_status_reader,
+            Some(Arc::clone(channel_dm_target_store)),
+            channel_pairing,
+        ),
+    )
+}
+
 pub async fn build_reborn_runtime(
     input: RebornRuntimeInput,
 ) -> Result<RebornRuntime, RebornRuntimeError> {
@@ -3321,7 +3408,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let mut projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
-    );
+    )
+    .with_thread_service(Arc::clone(&thread_service));
     if let Some(local_runtime) = local_runtime {
         let approval_requests = &local_runtime.approval_requests;
         projection_services = projection_services
@@ -3573,11 +3661,32 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 ))
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))
                 .with_channel_config(Arc::clone(&local_runtime.channel_config_service));
+            // Per-caller truth ports (#7247): the same scope-gated credential
+            // status the extensions card and the runtime auth gate resolve
+            // through, plus the same channel-connection facade the product
+            // surface uses. Without them the provider must not — and does not
+            // — claim any credentialed extension or personal-connection
+            // channel is authenticated for the caller.
+            let extension_credentials = Arc::new(
+                ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup::new(
+                    Arc::clone(&local_runtime.product_auth),
+                ),
+            );
+            let channel_connections = build_generic_channel_connection_facade(
+                validated_identity.tenant_id.clone(),
+                &local_runtime.extension_management,
+                &local_runtime.channel_identity_store,
+                &local_runtime.product_auth,
+                &local_runtime.channel_dm_target_store,
+                local_runtime.channel_pairing.clone(),
+            );
             Some(Arc::new(
                 ironclaw_assistant::RuntimeCommunicationContextProvider::new(
                     outbound_preferences_facade,
                 )
-                .with_lifecycle_service(Arc::new(lifecycle_service)),
+                .with_lifecycle_service(Arc::new(lifecycle_service))
+                .with_extension_credentials(extension_credentials)
+                .with_channel_connections(channel_connections),
             )
                 as Arc<
                     dyn ironclaw_loop_contracts::CommunicationContextProvider,
@@ -3589,7 +3698,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // Resolve the disclosure mode once so the runtime config and the system-prompt
     // disclosure-protocol injection agree on a single value.
     let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
-    let default_runtime_config = DefaultPlannedRuntimeConfig::default();
+    let default_runtime_config = DefaultPlannedRuntimeConfig::try_from_env()?;
     // Resolve the bound memory provider once (issue #3537): the
     // profile source, prompt-context lane, and after-turn writer all fan out from
     // this single resolution, so they agree on the bound provider (native, or
@@ -3614,6 +3723,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         resolved_memory_provider,
         &memory_lifecycle,
     );
+    // The bound provider's own memory guidance for the model, if it ships any
+    // (#7185). The text is the provider's — it names that provider's tools and
+    // describes that provider's recall behavior — resolved generically at
+    // bundle-construction time against the BOUND provider's own asset table
+    // (`memory_provider_factory::resolve_memory_provider`), never by a
+    // host-side match on a specific provider's constants. Two conditions, both
+    // necessary: a provider must actually be resolved (a `Disabled` binding
+    // registers no package, so the model sees no `ironclaw.memory.*` tools and
+    // must not be told they exist), and that provider must declare a
+    // `guidance_doc`. Either missing ⇒ nothing is appended.
+    let memory_guidance = wired_memory_context_service
+        .is_some()
+        .then(|| {
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_guidance.clone())
+                .unwrap_or_default()
+        })
+        .flatten();
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -3732,6 +3859,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
+            parallel_tool_batch: default_runtime_config.parallel_tool_batch,
+            tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
@@ -3765,8 +3894,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     DefaultSystemPromptIdentitySource::try_new(
                         standalone_storage_root,
                         default_system_prompt_path,
-                        resolved_tool_disclosure.is_bridged(),
-                        bool_env_flag("BENCHMARKING_MODE"),
+                        SystemPromptProtocols {
+                            // `is_enabled()` (not `is_bridged()`): #7410 widened
+                            // the disclosure protocol to every enabled mode.
+                            disclosure: resolved_tool_disclosure.is_enabled(),
+                            benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
+                            // Provider-shipped, not host-owned: whatever the
+                            // bound memory extension declares as its guidance,
+                            // or nothing.
+                            memory_guidance,
+                        },
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
                         reason: error.to_string(),
@@ -3929,13 +4066,82 @@ pub(crate) async fn build_runtime_with_resource_governor(
     } else {
         projection_services
     };
+    if let Some(coordinator) = services.delivery_coordinator.as_ref() {
+        let bound = coordinator.bind_projection_stream(projection_services.product_event_stream());
+        if !bound {
+            tracing::debug!(
+                "delivery coordinator projection stream was already bound; keeping the first source"
+            );
+        }
+    }
 
+    // Durable idempotency ledger for the authenticated-session inbound lane
+    // (browser + API transports riding `submit_turn`): the session half of the
+    // same durable-admission discipline the per-extension channel ledgers
+    // provide, on the same filesystem substrate.
+    let session_inbound_ledger = ironclaw_assistant::build_session_inbound_ledger(
+        &(services.extension_filesystem.clone() as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+        &validated_identity.tenant_id,
+        ironclaw_host_api::resource::ResourceScope {
+            tenant_id: validated_identity.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(validated_identity.agent_id.clone()),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        },
+    )
+    .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
+    let session_channel_directory: Arc<
+        dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory,
+    > = Arc::new(
+        ironclaw_extension_host::session_ingress::DeploymentSessionChannelDirectory::new(
+            services.deployment_channels.clone(),
+        ),
+    );
+    // The deployment's session channel, advertised to the SPA on
+    // `GET /session`. Exactly one session channel resolves; zero or several
+    // resolve to none — fail closed, never guess.
+    let session_channel_extension_id = {
+        let session_ids: Vec<String> = services
+            .deployment_channels
+            .extension_ids()
+            .into_iter()
+            .filter(|extension_id| session_channel_directory.is_session_channel(extension_id))
+            .collect();
+        match session_ids.as_slice() {
+            [only] => Some(only.clone()),
+            [] => None,
+            // Ambiguous: fail closed rather than pick one. The built-in
+            // surface is not a safe answer here either, because a channel
+            // that believes it owns the session would silently stop
+            // receiving browser turns.
+            several => {
+                tracing::debug!(
+                    count = several.len(),
+                    "multiple session channels declared; advertising none"
+                );
+                None
+            }
+        }
+    };
+
+    let llm_config_service = crate::product_surface::compose_llm_config_service(
+        boot.as_ref(),
+        ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+            Arc::clone(&services.secret_store),
+        )),
+        Arc::clone(&scoped_filesystem),
+        llm_reload.as_ref(),
+    );
     let started_channel_host = crate::extension_host_assembly::build_runtime_channel_host(
         &services,
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
             turn_coordinator: Arc::clone(&planned_turn_coordinator),
             input_enqueue: Arc::clone(&host_input_enqueue),
+            llm_config: llm_config_service.clone(),
             approval_interaction: Arc::clone(&approval_interaction_service),
             auth_interaction: Arc::clone(&auth_interaction_service),
             thread_scope: &thread_scope,
@@ -4268,6 +4474,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: Arc::clone(&services.secret_store),
         scoped_filesystem,
+        llm_config_service,
         admin_secret_provisioner,
         project_service,
         diagnostic_store,
@@ -4291,6 +4498,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
+        session_inbound_ledger,
+        session_channel_directory,
+        session_channel_extension_id,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
@@ -4314,9 +4524,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_ingress: services.extension_ingress.clone(),
         #[cfg(any(test, feature = "test-support"))]
         deployment_channels: services.deployment_channels.clone(),
-        web_push: services.web_push.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
+        delivery_registrations: services.delivery_registrations.clone(),
+        delivery_client_bootstrap: services.delivery_client_bootstrap.clone(),
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,

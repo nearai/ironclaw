@@ -125,6 +125,7 @@ class ScrubArtifactsTests(unittest.TestCase):
         source_body: str,
         staged_body: str | None = None,
         marker: dict[str, object] | str | None = None,
+        include_marker: bool = True,
     ) -> tuple[Path, Path]:
         trusted_root = artifact_dir.parent / "trusted-skills"
         trusted_skill = trusted_root / "local-test"
@@ -146,20 +147,21 @@ class ScrubArtifactsTests(unittest.TestCase):
             source_body if staged_body is None else staged_body,
             encoding="utf-8",
         )
-        marker_payload = marker or {
-            "owner": "ironclaw_reborn_composition_bundled_skill",
-            "format": 1,
-            "content_hash": self.bundle_hash("local-test", trusted_skill),
-        }
-        marker_text = (
-            marker_payload
-            if isinstance(marker_payload, str)
-            else json.dumps(marker_payload)
-        )
-        (staged_skill / ".ironclaw-reborn-bundled.json").write_text(
-            marker_text,
-            encoding="utf-8",
-        )
+        if include_marker:
+            marker_payload = marker or {
+                "owner": "ironclaw_reborn_composition_bundled_skill",
+                "format": 1,
+                "content_hash": self.bundle_hash("local-test", trusted_skill),
+            }
+            marker_text = (
+                marker_payload
+                if isinstance(marker_payload, str)
+                else json.dumps(marker_payload)
+            )
+            (staged_skill / ".ironclaw-reborn-bundled.json").write_text(
+                marker_text,
+                encoding="utf-8",
+            )
         return trusted_root, staged_skill
 
     @staticmethod
@@ -380,6 +382,51 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertFalse(bundled.exists())
             self.assertTrue((unmanaged / "SKILL.md").exists())
+
+    def test_strict_scrub_prunes_marker_less_source_identical_skill(self) -> None:
+        """The backend-generic skill mount exports no runtime marker (#7171);
+        a snapshot byte-identical to the source bundle is still repository
+        content and must not fail the strict lane."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="docker run -e NEARAI_API_KEY=<your-key> ironclaw-test\n",
+                include_marker=False,
+            )
+
+            result = self.run_scrub(
+                root,
+                strict=True,
+                bundled_skills_root=trusted_root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(bundled.exists())
+
+    def test_strict_scrub_still_scans_marker_less_divergent_skill(self) -> None:
+        """A marker-less snapshot that DIVERGES from the source bundle is not
+        provably repository content — secret-shaped material in it must still
+        fail the strict lane."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="docker run ironclaw-test\n",
+                staged_body="api_key: live-secret-value\n",
+                include_marker=False,
+            )
+
+            result = self.run_scrub(
+                root,
+                strict=True,
+                bundled_skills_root=trusted_root,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertFalse((bundled / "SKILL.md").exists())
 
     def test_strict_scrub_still_scans_unmanaged_system_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

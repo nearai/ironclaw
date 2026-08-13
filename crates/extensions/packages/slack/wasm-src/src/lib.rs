@@ -12,14 +12,23 @@
 //!
 //! # Supported Actions
 //!
+//! All 16 core operations of the standardized messaging framework are bound:
+//!
 //! - `search_messages`: Search all messages the user can see
 //! - `list_conversations`: List channels, DMs, and group DMs the user is in
 //! - `get_conversation_info`: Retrieve one exact conversation by ID
 //! - `get_conversation_history`: Read history of any channel or DM
 //! - `get_thread_replies`: Read one thread's replies (not part of history)
+//! - `get_message`: Read one message by reference (history/thread lookup)
 //! - `get_user_info`: Get information about a Slack user
+//! - `resolve_user`: Search the workspace directory for people
+//! - `list_members`: List the members of a conversation
 //! - `whoami`: Resolve who the connected account is (auth.test)
 //! - `send_message`: Post a message as the user
+//! - `edit_message`: Replace the text of one of the user's messages
+//! - `delete_message`: Delete one of the user's messages
+//! - `add_reaction` / `remove_reaction`: React as the user
+//! - `open_dm`: Open (or fetch) the DM with one person
 //!
 //! # Example Usage
 //!
@@ -68,10 +77,12 @@ impl exports::near::agent::tool::Guest for SlackUserTool {
 
     fn description() -> String {
         "Slack personal tool that acts as you via a user token (xoxp-): search all your \
-         messages, list and read your DMs and group DMs, read channel history, look up users, \
-         and post as you. Requires a Slack user token with scopes such as search:read, \
-         channels:history, groups:history, im:history, mpim:history, users:read, and \
-         chat:write (for posting)."
+         messages, list and read your DMs and group DMs, read channel history, look up and \
+         search for people, list conversation members, and act as you — post, edit, delete, \
+         react, and open DMs. Requires a Slack user token with scopes such as search:read, \
+         channels:history, groups:history, im:history, mpim:history, users:read, chat:write \
+         (post/edit/delete), reactions:read and reactions:write (reactions), and im:write \
+         (opening DMs)."
             .to_string()
     }
 }
@@ -155,6 +166,54 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 api::send_message(&conversation, &text, thread.as_deref(), reply_to.as_ref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
+
+        SlackUserAction::EditMessage { message_ref, text } => {
+            let result = api::edit_message(&message_ref, &text)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::DeleteMessage { message_ref } => {
+            let result = api::delete_message(&message_ref)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::AddReaction { message_ref, emoji } => {
+            let result = api::add_reaction(&message_ref, &emoji)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::RemoveReaction { message_ref, emoji } => {
+            let result = api::remove_reaction(&message_ref, emoji.as_deref())?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::OpenDm { user_ref } => {
+            let result = api::open_dm(&user_ref)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::GetMessage { message_ref } => {
+            let result = api::get_message(&message_ref)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::ResolveUser {
+            query,
+            limit,
+            cursor,
+        } => {
+            let result = api::resolve_user(&query, limit, cursor.as_deref())?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::ListMembers {
+            conversation,
+            limit,
+            cursor,
+        } => {
+            let result = api::list_members(&conversation, limit, cursor.as_deref())?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
     };
 
     Ok(result)
@@ -175,6 +234,14 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "slack.get_user_info" => Ok("get_user_info"),
         "slack.whoami" => Ok("whoami"),
         "slack.send_message" => Ok("send_message"),
+        "slack.edit_message" => Ok("edit_message"),
+        "slack.delete_message" => Ok("delete_message"),
+        "slack.add_reaction" => Ok("add_reaction"),
+        "slack.remove_reaction" => Ok("remove_reaction"),
+        "slack.open_dm" => Ok("open_dm"),
+        "slack.get_message" => Ok("get_message"),
+        "slack.resolve_user" => Ok("resolve_user"),
+        "slack.list_members" => Ok("list_members"),
         _ => Err("unsupported_slack_user_capability".to_string()),
     }
 }
@@ -203,3 +270,81 @@ fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, S
 
 // Export the tool implementation.
 export!(SlackUserTool);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every capability id the manifest declares must resolve to the serde
+    /// action tag its params enum expects. A manifest entry without a mapping
+    /// arm here reaches the guest and dies as
+    /// `unsupported_slack_user_capability` at call time — an install-time
+    /// omission surfacing as a runtime failure, which this catches instead.
+    ///
+    /// The list is the manifest's 16 `[[tools]]` ids, which are also the 16
+    /// core standard messaging operations (the binding rule fixes a bound
+    /// tool's id at `<extension_id>.<op_name>`).
+    const CAPABILITY_IDS: &[(&str, &str)] = &[
+        ("slack.search_messages", "search_messages"),
+        ("slack.list_conversations", "list_conversations"),
+        ("slack.get_conversation_info", "get_conversation_info"),
+        ("slack.get_conversation_history", "get_conversation_history"),
+        ("slack.get_thread_replies", "get_thread_replies"),
+        ("slack.get_message", "get_message"),
+        ("slack.get_user_info", "get_user_info"),
+        ("slack.resolve_user", "resolve_user"),
+        ("slack.list_members", "list_members"),
+        ("slack.whoami", "whoami"),
+        ("slack.send_message", "send_message"),
+        ("slack.edit_message", "edit_message"),
+        ("slack.delete_message", "delete_message"),
+        ("slack.add_reaction", "add_reaction"),
+        ("slack.remove_reaction", "remove_reaction"),
+        ("slack.open_dm", "open_dm"),
+    ];
+
+    fn context(capability_id: &str) -> String {
+        serde_json::json!({ "capability_id": capability_id }).to_string()
+    }
+
+    #[test]
+    fn every_manifest_capability_id_maps_to_an_action() {
+        assert_eq!(
+            CAPABILITY_IDS.len(),
+            16,
+            "Slack binds all 16 core standard messaging operations"
+        );
+        for (capability_id, expected_action) in CAPABILITY_IDS {
+            let context = context(capability_id);
+            assert_eq!(
+                action_from_context(Some(&context)).expect(capability_id),
+                *expected_action,
+                "{capability_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_capability_id_is_rejected() {
+        let context = context("slack.pin_message");
+        assert!(action_from_context(Some(&context)).is_err());
+        assert!(action_from_context(None).is_err());
+    }
+
+    /// The host owns operation selection: params carrying their own `action`
+    /// key would let a caller invoke one operation through another's
+    /// authorization.
+    #[test]
+    fn params_cannot_smuggle_their_own_action() {
+        let smuggled = params_with_action(r#"{"action":"delete_message"}"#, "get_message");
+        assert!(smuggled.is_err(), "params must not carry an action key");
+
+        let injected = params_with_action(r#"{"message_ref":{}}"#, "get_message")
+            .expect("host-selected action is injected");
+        assert_eq!(injected["action"], serde_json::json!("get_message"));
+
+        // A no-parameter operation still gets a well-formed params object.
+        let empty = params_with_action("", "whoami").expect("empty params are an empty object");
+        assert_eq!(empty["action"], serde_json::json!("whoami"));
+    }
+}

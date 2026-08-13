@@ -90,8 +90,8 @@ use ironclaw_threads::SessionThreadService;
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turn_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_turn_runner::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
-    build_default_planned_runtime,
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ParallelToolBatchMode,
+    ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_turn_runner::subagent::{
     await_edge::{
@@ -481,6 +481,7 @@ impl RebornIntegrationGroup {
             // General integration groups stay hermetic across production
             // default changes. Disclosure-specific tests opt into Bridged.
             tool_disclosure: ToolDisclosureMode::Off,
+            parallel_tool_batch: ParallelToolBatchMode::Off,
             narrowed_bridged_policy: None,
             budget: false,
             communication_context_provider: None,
@@ -828,6 +829,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
     /// `Bridged` only by `.with_tool_disclosure_bridged()`.
     tool_disclosure: ToolDisclosureMode,
+    parallel_tool_batch: ParallelToolBatchMode,
     /// #5647 RED-pin seam: opt-in override of the forced `CapabilitySurfacePolicy::allow_all()`
     /// for Bridged-mode groups. `None` preserves today's behavior; only
     /// consumed when `tool_disclosure == Bridged` (`into_group` fails fast otherwise).
@@ -1019,7 +1021,7 @@ impl RebornIntegrationGroupBuilder {
         // disclosure's synthetic bridge surface, so this is production parity,
         // not a bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure == ToolDisclosureMode::Bridged {
+            if self.tool_disclosure.is_enabled() {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     policy: self
                         .narrowed_bridged_policy
@@ -1238,6 +1240,15 @@ impl RebornIntegrationGroupBuilder {
                 // Enabler (b): test groups are hermetically pinned and never
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
+                parallel_tool_batch: self.parallel_tool_batch,
+                tool_disclosure_profile_pins: std::collections::HashMap::from([(
+                    ironclaw_loop_contracts::CapabilitySurfaceProfileId::new("interactive_tools")
+                        .expect("valid integration capability profile id"),
+                    vec![
+                        ironclaw_host_api::ids::CapabilityId::new("github.search_code")
+                            .expect("valid integration profile pin"),
+                    ],
+                )]),
                 // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
                 // production rides out provider outages for minutes (deep
                 // availability retries with long backoff), which would stall

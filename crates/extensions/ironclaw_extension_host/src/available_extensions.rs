@@ -119,9 +119,8 @@ pub struct AvailableExtensionPackage {
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
     pub channel_directions: Option<LifecycleChannelDirections>,
-    /// The channel surface's declared `[channel.presentation]` (markdown +
-    /// message cap), cached at construction like `channel_directions`. Fed into
-    /// prompt construction via the lifecycle summary (OUT-11).
+    /// How the model should format output for this channel. Cached at
+    /// construction like `channel_directions` and fed into prompt construction.
     pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
@@ -941,8 +940,8 @@ fn channel_directions_from_manifest_record(
     // Manifest v3: the resolved channel descriptor declares its directions.
     if let Some(channel) = &record.resolved().channel {
         return Ok(Some(LifecycleChannelDirections {
-            inbound: channel.inbound,
-            outbound: channel.outbound,
+            inbound: channel.supports_inbound(),
+            outbound: channel.supports_outbound(),
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.
@@ -968,10 +967,8 @@ fn channel_directions_from_manifest_record(
     Ok(directions)
 }
 
-/// The channel surface's declared `[channel.presentation]` (markdown support +
-/// message length cap). Only manifest v3 declares presentation via the resolved
-/// channel descriptor; v2 channels have none. Cached at construction like
-/// `channel_directions` and fed into prompt construction (OUT-11).
+/// The channel surface's presentation facts. Only manifest v3 declares a
+/// channel descriptor; v2 channels have none.
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
 ) -> Option<ironclaw_extension_contracts::channel::ChannelPresentation> {
@@ -1878,27 +1875,42 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
         assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
-        assert!(matches!(
-            &requirement.setup,
-            LifecycleExtensionCredentialSetup::OAuth { scopes }
-                if scopes.iter().cloned().collect::<BTreeSet<_>>()
-                    == [
-                        "channels:history",
-                        "channels:read",
-                        "chat:write",
-                        "groups:history",
-                        "groups:read",
-                        "im:history",
-                        "im:read",
-                        "mpim:history",
-                        "mpim:read",
-                        "search:read",
-                        "users:read",
-                    ]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<BTreeSet<_>>()
-        ));
+        // This is the exact set the user is asked to consent to at connect
+        // time, so it is pinned rather than merely sampled. `assert_eq!` on
+        // the sorted set, not `assert!(matches!(...))`: a mismatch has to
+        // print WHICH scope moved, or the next person to widen the grant gets
+        // a bare "assertion failed" and no delta.
+        let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+            panic!("slack projects an OAuth setup, got {:?}", requirement.setup);
+        };
+        assert_eq!(
+            scopes.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                // Reads: history and metadata for conversations and people.
+                "channels:history",
+                "channels:read",
+                "groups:history",
+                "groups:read",
+                "im:history",
+                "im:read",
+                "mpim:history",
+                "mpim:read",
+                "search:read",
+                "users:read",
+                // Writes, one per acting-as-the-user operation family:
+                // send/edit/delete, the reaction pair (read included, because
+                // removing "my reactions" has to see them first), and
+                // opening a DM.
+                "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>(),
+            "the Slack connect grant is the union of every tool's scopes"
+        );
     }
 
     #[test]
@@ -2156,15 +2168,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             .channel_presentation
             .as_ref()
             .expect("slack declares [channel.presentation]");
-        assert!(
-            presentation.supports_markdown,
-            "slack declares supports_markdown = true"
-        );
-        assert_eq!(
-            presentation.max_message_chars,
-            Some(40_000),
-            "slack declares max_message_chars = 40000"
-        );
+        assert!(presentation.supports_markdown, "slack declares markdown");
         assert_eq!(
             presentation.command_prefix.as_deref(),
             Some("/ironclaw "),

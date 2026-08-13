@@ -66,7 +66,10 @@ impl ApprovalInteractionRejectionKind {
         match self.surface_rejection_kind() {
             ProductSurfaceRejectionKind::ScopeNotFound => 404,
             ProductSurfaceRejectionKind::Unauthorized => 403,
-            ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => 409,
+            ProductSurfaceRejectionKind::Conflict
+            | ProductSurfaceRejectionKind::Ambiguous
+            | ProductSurfaceRejectionKind::DuplicateAction
+            | ProductSurfaceRejectionKind::ReplayUnavailable => 409,
             ProductSurfaceRejectionKind::Unavailable => 503,
             ProductSurfaceRejectionKind::InvalidRequest => 400,
             ProductSurfaceRejectionKind::ThreadBusy

@@ -47,7 +47,7 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "crates/ironclaw_host_runtime/src/memory_native_extension.rs",
         1,
         ReparseCategory::BundledAsset,
-        "native_memory_first_party_package — compiles the bundled ironclaw.memory manifest asset (include_str! of assets/memory_native/manifest.toml); a host-bundled descriptor has no installed resolved record to project from",
+        "native_memory_first_party_package — compiles the bundled ironclaw.memory manifest asset (include_str! of crates/extensions/packages/memory-native/manifest.toml since the WS2 colocation, #7037); a host-bundled descriptor has no installed resolved record to project from",
     ),
 ];
 

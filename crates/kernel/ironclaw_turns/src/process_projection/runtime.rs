@@ -568,6 +568,7 @@ impl AgentTurnProcessRuntime {
                     payload: source.payload,
                     created_at: Utc::now(),
                     link_to_process: true,
+                    kind: super::loop_checkpoint::process_checkpoint_kind(checkpoint_kind),
                     metadata: source.metadata,
                 },
             ))
@@ -802,6 +803,9 @@ impl TurnRunProcessExt for TurnRunRecord {
             status: process_status_from_turn_status(self.status),
             suspension: process_suspension_from_record(self),
             checkpoint_ref: self.checkpoint_id.map(process_checkpoint_ref),
+            // Legacy turn-record projection: the record carries only the
+            // checkpoint id, so the kind reads as unknown.
+            checkpoint_kind: None,
             input_ref: None,
             failure: self.failure.clone(),
             journal_cursor: ProcessJournalCursor(self.event_cursor.0),
@@ -830,6 +834,9 @@ impl TurnRunStateProcessExt for TurnRunState {
             status: process_status_from_turn_status(self.status),
             suspension: process_suspension_from_state(self),
             checkpoint_ref: self.checkpoint_id.map(process_checkpoint_ref),
+            // Legacy turn-record projection: the record carries only the
+            // checkpoint id, so the kind reads as unknown.
+            checkpoint_kind: None,
             input_ref: None,
             failure: self.failure.clone(),
             journal_cursor: ProcessJournalCursor(self.event_cursor.0),

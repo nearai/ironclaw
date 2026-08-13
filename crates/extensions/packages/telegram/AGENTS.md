@@ -9,11 +9,13 @@
 - Read `src/lib.rs` first, then:
   - `payload.rs` — Telegram Bot API payload normalization/DTO handling.
   - `render.rs` — Telegram outbound request rendering.
-  - `channel.rs` — the `TelegramChannelAdapter` (`ChannelAdapter`) implementation.
+  - `channel.rs` — the `TelegramChannelAdapter` implementations of
+    `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`.
   - `attachment_transfer.rs`, `preference_targets.rs` — attachment transfer and reply-target codec.
   - Re-derive this list with `ls crates/extensions/packages/telegram/src/`.
-- Read the contract before changing adapter behavior:
-  - `crates/contracts/ironclaw_extension_contracts/` — `ChannelAdapter` and the surface vocabulary.
+- Read the contract before changing channel behavior:
+  - `crates/contracts/ironclaw_extension_contracts/` — `ChannelIngress`,
+    `ChannelReply`, `ChannelDelivery`, and the surface vocabulary.
 
 ## What This Crate Owns
 
@@ -22,10 +24,11 @@
   former `ironclaw_telegram_v2_adapter` crate by Wave 2's package colocation
   (CHECKLIST WS2), which gave Telegram the one-crate-per-package shape Slack
   already had.
-- The Telegram `ChannelAdapter` implementation: live inbound/outbound plus the
-  webhook registration hooks. It is a plain native crate (no WASM target), and
-  the contract is `ironclaw_extension_contracts::ChannelAdapter` — there is no
-  `ProductAdapter` trait in this codebase.
+- Telegram's three channel capability implementations. `receive` completes the
+  two-hop Bot API file exchange through restricted egress; reply/delivery
+  render and send. Webhook registration/deregistration are manifest recipes
+  executed by the generic host. This is a plain native crate (no WASM target),
+  and there is no `ProductAdapter` trait in this codebase.
 - Adapter-specific mapping between Telegram shapes and the shared channel DTOs.
 - Staying free of raw token bytes: hosts run the manifest-declared
   `shared_secret_header` verification and inject credentials on mediated egress.
@@ -52,5 +55,5 @@ is linked only by the binary and by tests
 ## Agent Notes
 
 - Keep Telegram-specific parsing/rendering here; move reusable DTO concerns upstream.
-- Preserve adapter outputs as untrusted parsed DTOs until host/workflow stamps trusted context.
+- Preserve package outputs as untrusted complete DTOs until host/workflow validates and stamps trusted context.
 - Add tests before widening supported Telegram payload forms.

@@ -1,11 +1,11 @@
 // @ts-nocheck
-// Boot-time service-worker registration, isolated from the web-push
+// Boot-time service-worker registration, isolated from the device-push
 // enrollment lib on purpose. `main.tsx` calls this on every startup, so it
 // must stay dependency-free — pulling in the enrollment machinery
-// (`web-push.ts`, which imports the api client + WebCrypto digest helpers)
+// (`device-push.ts`, which imports the api client + WebCrypto digest helpers)
 // would drag all of it into the initial `/chat` bundle, which the bundle
 // budget gate rejects. The automations-page enrollment API lives in
-// `web-push.ts` and is imported only by that route's hook.
+// `device-push.ts` and is imported only by that route's hook.
 
 const SERVICE_WORKER_URL = "/sw.js";
 

@@ -1081,8 +1081,8 @@ async fn bespoke_send_note_coexists_with_standard_ops() {
 ### Task 11: Documentation
 
 **Files:**
-- Create: `docs/reborn/extension-runtime/standard-operations.md`
-- Modify: `docs/reborn/extension-runtime/overview.md` (add §3.4 pointer)
+- Create: `docs/internal/reborn/extension-runtime/standard-operations.md`
+- Modify: `docs/internal/reborn/extension-runtime/overview.md` (add §3.4 pointer)
 - Modify: `.claude/skills/reborn-extension-surfaces/SKILL.md`
 - Do NOT touch `openwiki/` (auto-generated)
 
@@ -1101,7 +1101,7 @@ async fn bespoke_send_note_coexists_with_standard_ops() {
 - [ ] **Step 3: Skill update** — in `.claude/skills/reborn-extension-surfaces/SKILL.md`
   "Adding a tool surface": add one bullet — messaging-shaped tools bind
   `standard_op = "<op>"` (closed vocabulary, host-canonical schemas; see
-  `docs/reborn/extension-runtime/standard-operations.md`). Fix the three stale
+  `docs/internal/reborn/extension-runtime/standard-operations.md`). Fix the three stale
   lines while present: `[channel.config]` → `[admin_configuration]` (operator
   fields; there is no `[channel.config]`); "5 `[[tools]]` entries" → 8;
   `ChannelAdapter` home → `crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`

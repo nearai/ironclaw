@@ -26,12 +26,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # The `ironclaw_telegram_v2_adapter` path dep is gone: Wave 2's package
 # colocation merged that crate's `payload`/`render` modules into this one, so
 # the protocol engine is now in-crate (`crate::payload`, `crate::render`).
-# What remains is exactly Slack's ironclaw-dependency set — host_api,
-# extension_contracts, product_contracts, attachments — which is the parity
-# CHECKLIST WS2 asks for.
+# What remains is the channel boundary itself: host_api,
+# extension_contracts, and attachments. Product view semantics are reduced to
+# `OutboundPart` before this package is called.
 ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
-ironclaw_product_contracts = { path = "../../../contracts/ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_attachments = { path = "../../../domains/ironclaw_attachments", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,14 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 # Property testing for the ingress boundary (#6524 workstream 9) — arrived
 # with the `payload` module in the Wave 2 merge.
 proptest = "1"
-# `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
-# used by the `adapter::tests` mod, and `ProtocolAuthEvidence::test_verified`,
-# which `payload::tests` uses to stand in for the host; both come from
-# `ironclaw_host_api`, which owns them. The `ironclaw_assistant` dev-dep that
-# used to sit here supplied neither and went with the crate's normal
-# `ironclaw_assistant` edge (WS1.3). WS1.5 removed the `host-auth-mint` opt-in:
-# minting is witness-gated and an adapter crate holds no grant, in tests or in
-# production.
+# `test-support` exposes the shared channel-adapter conformance fakes.
 ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
 # The exported channel-adapter conformance suite moved here with
 # `ChannelAdapter` (WS1.4); `tests/channel_conformance.rs` runs it.

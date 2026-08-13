@@ -1524,6 +1524,245 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     assert_eq!(scope.agent_id, Some(identity.agent_id));
 }
 
+/// The process journal must reach the same rows over a different connection.
+/// If the mount set drifted, a deployment's journal would silently move and every
+/// in-flight run would become invisible; if the handle were shared, the heartbeat
+/// would go back to queueing behind data-plane traffic.
+#[tokio::test]
+async fn process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_root() {
+    let data_plane_backend = Arc::new(InMemoryBackend::new());
+    let journal_backend = Arc::new(InMemoryBackend::new());
+    let data_plane = crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(
+        &data_plane_backend,
+    ))
+    .expect("data-plane composite");
+    let journal =
+        crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(&journal_backend))
+            .expect("journal composite");
+
+    let journal_roots: Vec<String> = journal
+        .mounts()
+        .await
+        .expect("journal mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    let data_plane_roots: Vec<String> = data_plane
+        .mounts()
+        .await
+        .expect("data-plane mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        journal_roots, data_plane_roots,
+        "the journal must resolve the same virtual roots, or its rows move"
+    );
+    assert!(
+        journal_roots.iter().any(|root| root == "/tenants"),
+        "process rows live under /tenants; got {journal_roots:?}"
+    );
+    assert!(
+        !Arc::ptr_eq(&data_plane, &journal),
+        "the journal must not be handed the data-plane filesystem"
+    );
+
+    // Both handles resolve a process-row path; in production they address the
+    // same database rows over different connection pools.
+    let path =
+        ironclaw_host_api::path::VirtualPath::new("/tenants/probe/processes").expect("probe path");
+    for (label, filesystem) in [("journal", &journal), ("data plane", &data_plane)] {
+        filesystem
+            .put(
+                &path,
+                ironclaw_filesystem::Entry::bytes(b"probe".to_vec()),
+                ironclaw_filesystem::CasExpectation::Any,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} handle must serve process-row paths: {error}"));
+        assert!(
+            filesystem
+                .get(&path)
+                .await
+                .unwrap_or_else(|error| panic!("{label} read: {error}"))
+                .is_some(),
+            "{label} handle must read back its own write"
+        );
+    }
+}
+
+/// The caller-level Postgres leg of the pool split (Docker/testcontainers;
+/// skipped when unavailable, like the other Postgres composition tests). The
+/// two InMemory-backend handles above cannot prove that two pool-backed
+/// handles reach the same rows — this drives the real production seam:
+/// `open_postgres_pools_from_source` over connection config, a journal store
+/// over the dedicated pool, a read of the same row over the data-plane pool,
+/// and a heartbeat that stays available while the data-plane pool is fully
+/// checked out.
+#[tokio::test]
+async fn postgres_process_journal_writes_are_visible_over_the_data_plane_and_survive_pool_exhaustion()
+ {
+    use ironclaw_processes::{ProcessJournalSource, ProcessSubmissionPort, ProcessTransitionPort};
+    let Some((_container, database_url)) = start_postgres_container_or_skip().await else {
+        return;
+    };
+    let pools = open_postgres_pools_from_source(PostgresPoolSource::Config(
+        crate::input::PostgresConnectionConfig {
+            url: ironclaw_secrets::SecretMaterial::from(database_url),
+            pool_max_size: 2,
+            tls_options: Default::default(),
+        },
+    ))
+    .expect("production pool opening must succeed");
+    let journal_pool = pools
+        .process_journal
+        .expect("the config path must open a dedicated journal pool");
+
+    // The data-plane filesystem migrates the shared database, exactly as
+    // `build_postgres_production` does; the journal pool never runs migrations
+    // itself and must address the same rows.
+    let data_plane_database = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+        pools.data_plane.clone(),
+    ));
+    data_plane_database
+        .run_migrations()
+        .await
+        .expect("data-plane migrations");
+    let data_plane_filesystem =
+        production_database_root_filesystem(data_plane_database, "pool-isolation-test")
+            .expect("data-plane composite");
+    let journal_filesystem = crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+        ironclaw_filesystem::PostgresRootFilesystem::new(journal_pool),
+    ))
+    .expect("journal composite");
+    assert!(
+        !Arc::ptr_eq(&data_plane_filesystem, &journal_filesystem),
+        "the journal must not be handed the data-plane filesystem"
+    );
+
+    let journal_store = ironclaw_processes::ProcessJournalStore::new(
+        crate::wrap_process_journal_scoped(Arc::clone(&journal_filesystem)),
+    );
+
+    // A process journal row written through the dedicated pool must be visible
+    // through the data-plane pool: the pools split connections, not rows.
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
+        UserId::new("pool-isolation-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let process_id = ironclaw_host_api::ids::ProcessId::new();
+    journal_store
+        .submit_process(ironclaw_processes::SubmitProcessRequest {
+            process_id,
+            process_kind: ironclaw_processes::ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("journal submit over the dedicated pool");
+    let data_plane_store = ironclaw_processes::ProcessJournalStore::new(crate::wrap_scoped(
+        Arc::clone(&data_plane_filesystem),
+    ));
+    let read_back = data_plane_store
+        .get_process_snapshot(ironclaw_processes::GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("the journal row must be visible over the data-plane pool");
+
+    // Claim through the journal pool, then exhaust every data-plane connection
+    // and prove the journal heartbeat checkout is still available — the exact
+    // starvation the pool split exists to prevent.
+    let claim = journal_store
+        .claim_next_processes(ironclaw_processes::ClaimProcessesRequest {
+            worker_id: ironclaw_processes::ProcessWorkerId::from_trusted("pool-isolation-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ironclaw_processes::ProcessKind::Internal),
+            max_processes: 1,
+        })
+        .await
+        .expect("journal claim")
+        .pop()
+        .expect("claimed process");
+    assert_eq!(read_back.process_id, process_id);
+
+    let held_a = pools.data_plane.get().await.expect("data-plane checkout a");
+    let held_b = pools.data_plane.get().await.expect("data-plane checkout b");
+    let heartbeat = journal_store
+        .heartbeat_process(ironclaw_processes::ProcessLeaseRequest {
+            process_id,
+            worker_id: claim.worker_id,
+            lease_token: claim.lease_token,
+        })
+        .await
+        .expect("the journal heartbeat must not queue behind an exhausted data-plane pool");
+    let _ = (held_a, held_b);
+    assert!(heartbeat.0 > 0, "heartbeat advances the journal cursor");
+}
+
+/// Start a Postgres testcontainer, or skip (return `None`) when
+/// Docker/testcontainers is unavailable — the same convention as the crate's
+/// other Postgres composition tests.
+async fn start_postgres_container_or_skip() -> Option<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    String,
+)> {
+    use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+    let image = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine");
+    let container = match image.start().await {
+        Ok(container) => container,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres pool-isolation test: docker/testcontainers unavailable ({error})"
+            );
+            return None;
+        }
+    };
+    let host = match container.get_host().await {
+        Ok(host) => host,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres pool-isolation test: could not resolve container host ({error})"
+            );
+            return None;
+        }
+    };
+    let port = match container.get_host_port_ipv4(5432).await {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres pool-isolation test: could not resolve container port ({error})"
+            );
+            return None;
+        }
+    };
+    Some((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
+}
+
 #[tokio::test]
 async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
     let filesystem =

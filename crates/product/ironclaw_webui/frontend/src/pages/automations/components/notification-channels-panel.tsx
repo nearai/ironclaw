@@ -4,13 +4,8 @@ import { Badge, Panel } from "../../../design-system/primitives";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
-import { useWebPushDevice } from "../hooks/useWebPushDevice";
-
-// The web-push catalog row's channel label (mirrors
-// `ironclaw_web_push::WEB_PUSH_CHANNEL_NAME`). The row itself toggles like
-// any other channel; matching on the channel only adds the per-browser
-// device block underneath it.
-const WEB_PUSH_CHANNEL = "web-push";
+import { getSessionChannelExtensionId } from "../../../lib/api";
+import { useDevicePush } from "../hooks/useDevicePush";
 
 /**
  * Resolve a Badge tone for a notification-channel row.
@@ -24,31 +19,31 @@ function rowTone(status) {
 }
 
 /**
- * The per-browser device state rendered under the "Web app" channel row.
+ * The per-browser device state rendered under the session channel's row.
  * Account-level routing (the checkbox) and device enrollment (this block)
  * are deliberately separate dimensions: selecting the channel routes
  * notifications to the account's enrolled browsers, and this block manages
  * whether THIS browser is one of them.
  */
-function WebPushDeviceBlock({ device, t }) {
+function DevicePushBlock({ device, t }) {
   const state = device.browser?.state || "checking";
   const hasStatusError = Boolean(device.statusError);
   let stateCopy;
   if (state === "unsupported") {
-    stateCopy = t("automations.notificationChannels.webPush.unsupported");
+    stateCopy = t("automations.notificationChannels.devicePush.unsupported");
   } else if (state === "permission-denied") {
-    stateCopy = t("automations.notificationChannels.webPush.permissionDenied");
+    stateCopy = t("automations.notificationChannels.devicePush.permissionDenied");
   } else if (state === "enrolled" || state === "enrolled-unverified") {
     // "enrolled-unverified" (correlation unavailable — e.g. the status query
     // failed) renders the enrolled copy but exposes no disable action; the
     // status-error line below explains why the panel knows less than usual.
-    stateCopy = t("automations.notificationChannels.webPush.enrolled");
+    stateCopy = t("automations.notificationChannels.devicePush.enrolled");
   } else if (state === "enrolled-other-account") {
-    stateCopy = t("automations.notificationChannels.webPush.enrolledOtherAccount");
+    stateCopy = t("automations.notificationChannels.devicePush.enrolledOtherAccount");
   } else if (state === "not-enrolled") {
-    stateCopy = t("automations.notificationChannels.webPush.notEnrolled");
+    stateCopy = t("automations.notificationChannels.devicePush.notEnrolled");
   } else {
-    stateCopy = t("automations.notificationChannels.webPush.checking");
+    stateCopy = t("automations.notificationChannels.devicePush.checking");
   }
   // The enroll flow also serves "enable for this account" when another
   // account's subscription occupies this browser: the same backend register
@@ -66,18 +61,18 @@ function WebPushDeviceBlock({ device, t }) {
       className="rounded-[10px] border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-muted)]"
     >
       <div className="font-semibold text-[var(--v2-text-strong)]">
-        {t("automations.notificationChannels.webPush.deviceHeading")}
+        {t("automations.notificationChannels.devicePush.deviceHeading")}
       </div>
       <div className="mt-1">{stateCopy}</div>
       {hasStatusError
         ? (
           <div role="alert" className="mt-1 text-red-300">
-            {t("automations.notificationChannels.webPush.statusFailed")}
+            {t("automations.notificationChannels.devicePush.statusFailed")}
           </div>
         )
         : (
           <div className="mt-1 text-[var(--v2-text-faint)]">
-            {t("automations.notificationChannels.webPush.deviceCount", {
+            {t("automations.notificationChannels.devicePush.deviceCount", {
               count: device.subscriptionCount,
             })}
           </div>
@@ -94,8 +89,8 @@ function WebPushDeviceBlock({ device, t }) {
               onClick={() => device.enroll().catch(() => {})}
             >
               {state === "enrolled-other-account"
-                ? t("automations.notificationChannels.webPush.enableForAccount")
-                : t("automations.notificationChannels.webPush.enroll")}
+                ? t("automations.notificationChannels.devicePush.enableForAccount")
+                : t("automations.notificationChannels.devicePush.enroll")}
             </Button>
           )}
           {state === "enrolled" &&
@@ -106,7 +101,7 @@ function WebPushDeviceBlock({ device, t }) {
               disabled={!canUnenroll}
               onClick={() => device.unenroll().catch(() => {})}
             >
-              {t("automations.notificationChannels.webPush.unenroll")}
+              {t("automations.notificationChannels.devicePush.unenroll")}
             </Button>
           )}
         </div>
@@ -114,7 +109,7 @@ function WebPushDeviceBlock({ device, t }) {
       {device.actionError &&
       (
         <div role="alert" className="mt-2 text-red-300">
-          {t("automations.notificationChannels.webPush.actionFailed")}
+          {t("automations.notificationChannels.devicePush.actionFailed")}
         </div>
       )}
     </div>
@@ -122,18 +117,95 @@ function WebPushDeviceBlock({ device, t }) {
 }
 
 /**
- * Thin wrapper that owns the web-push device hook so it runs ONLY when a
- * web-push row is present (it is mounted for that row alone in
- * NotificationChannelsPanel). Keeping the hook here — instead of at the panel
- * top, where it fired the account status query and per-browser probe for every
- * automations view, including users and deployments with no web-push channel —
- * scopes that work to the one row that uses it. `WebPushDeviceBlock` stays a
- * pure, prop-driven view.
+ * The label markup every channel row shares: checkbox, name/description, and
+ * the status pill. Deliberately a plain function, not a component — called
+ * inline it renders its checkbox directly into the panel, which is what the
+ * generic rows need. The session channel's row wraps it (see
+ * `SessionChannelRow`) to add the device hook and enrollment gating.
  */
-function WebPushDeviceRow() {
-  const t = useT();
-  const device = useWebPushDevice();
-  return <WebPushDeviceBlock device={device} t={t} />;
+function renderChannelRowLabel({
+  targetId,
+  displayName,
+  description,
+  isSelected,
+  disabled,
+  muted,
+  badgeTone,
+  badgeLabel,
+  onToggle,
+}) {
+  return (
+    <label
+      className={cn(
+        "flex items-start gap-3.5 rounded-xl border px-4 py-3.5",
+        disabled ? "cursor-default" : "cursor-pointer",
+        "transition-colors duration-100",
+        muted
+          ? "border-dashed bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)] opacity-70"
+          : "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)] hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+        isSelected &&
+          !muted &&
+          "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
+      )}
+    >
+      <input
+        type="checkbox"
+        checked={isSelected}
+        disabled={disabled}
+        onChange={() => onToggle(targetId)}
+        className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
+          {displayName}
+        </div>
+        {description &&
+        (<div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
+          {description}
+        </div>)}
+      </div>
+      <Badge tone={badgeTone} label={badgeLabel} className="self-center shrink-0" />
+    </label>
+  );
+}
+
+/**
+ * The session channel's row — the channel this SPA itself fronts, matched by
+ * the `GET /session`-advertised extension id (never a channel name). Owns
+ * the device-push hook so the account setup-status query mounts ONLY when
+ * this row is present (not at the panel top, where it would fire for every
+ * automations view, including deployments with no session channel), and
+ * gates the row on the channel's generic setup status: not set up means
+ * there is nowhere to deliver, so the channel cannot be newly SELECTED — the
+ * checkbox is disabled and the pill drops from "Ready". An already-stored
+ * selection stays deselectable (disabled only when unchecked), so a browser
+ * that unsubscribes never leaves a locked-on checkbox. The device block
+ * underneath manages whether THIS browser is one of the enrolled ones.
+ */
+function SessionChannelRow({ row, isSelected, isEditingLocked, onToggle, t }) {
+  const device = useDevicePush({ extensionId: row.channel });
+  const isPending = device.isStatusLoading;
+  const enrolled = device.subscriptionCount > 0;
+  return (
+    <div className="flex flex-col gap-2">
+      {renderChannelRowLabel({
+        targetId: row.target_id,
+        displayName: row.display_name,
+        description: row.description,
+        isSelected,
+        disabled: isEditingLocked || (!isSelected && (isPending || !enrolled)),
+        muted: !isPending && !enrolled,
+        badgeTone: isPending ? "neutral" : enrolled ? "success" : "warning",
+        badgeLabel: isPending
+          ? t("automations.notificationChannels.devicePush.checking")
+          : enrolled
+            ? t("automations.notificationChannels.pill.ready")
+            : t("automations.notificationChannels.pill.unavailable"),
+        onToggle,
+      })}
+      <DevicePushBlock device={device} t={t} />
+    </div>
+  );
 }
 
 export function NotificationChannelsPanel({ channelsState }) {
@@ -275,50 +347,39 @@ export function NotificationChannelsPanel({ channelsState }) {
           )}
           {rows.map((row) => {
             const isSelected = draftIds.has(row.target_id);
+            // The session channel's row owns its own hook + setup gating;
+            // every other channel renders the shared label directly (its
+            // checkbox must stay inline in the panel, not behind a child
+            // component).
+            const sessionChannel = getSessionChannelExtensionId();
+            if (sessionChannel && row.channel === sessionChannel) {
+              return (
+                <SessionChannelRow
+                  key={row.target_id}
+                  row={row}
+                  isSelected={isSelected}
+                  isEditingLocked={isEditingLocked}
+                  onToggle={toggle}
+                  t={t}
+                />
+              );
+            }
             const isUnavailable = row.status === "unavailable";
-            const isWebPushRow = row.channel === WEB_PUSH_CHANNEL;
-            const rowLabel = (
-              <label
-                className={cn(
-                  "flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer",
-                  "transition-colors duration-100",
-                  isUnavailable
-                    ? "border-dashed bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)] opacity-70"
-                    : "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)] hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
-                  isSelected &&
-                    !isUnavailable &&
-                    "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={isSelected}
-                  disabled={isEditingLocked}
-                  onChange={() => toggle(row.target_id)}
-                  className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
-                    {row.display_name}
-                  </div>
-                  {row.description &&
-                  (<div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
-                    {row.description}
-                  </div>)}
-                </div>
-                <Badge
-                  tone={rowTone(row.status)}
-                  label={isUnavailable
-                    ? t("automations.notificationChannels.pill.unavailable")
-                    : t("automations.notificationChannels.pill.ready")}
-                  className="self-center shrink-0"
-                />
-              </label>
-            );
             return (
               <div key={row.target_id} className="flex flex-col gap-2">
-                {rowLabel}
-                {isWebPushRow && <WebPushDeviceRow />}
+                {renderChannelRowLabel({
+                  targetId: row.target_id,
+                  displayName: row.display_name,
+                  description: row.description,
+                  isSelected,
+                  disabled: isEditingLocked,
+                  muted: isUnavailable,
+                  badgeTone: rowTone(row.status),
+                  badgeLabel: isUnavailable
+                    ? t("automations.notificationChannels.pill.unavailable")
+                    : t("automations.notificationChannels.pill.ready"),
+                  onToggle: toggle,
+                })}
               </div>
             );
           })}
