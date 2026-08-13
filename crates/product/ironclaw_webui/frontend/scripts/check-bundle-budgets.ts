@@ -148,7 +148,17 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // but their lazy-route chunk hashes change the eager preload map enough to
 // perturb gzip by 16 bytes on the merged tree. Keep a sub-0.1 KB margin for
 // that hash-only variance without budgeting new eager product code.
-const CHAT_GZIP_BUDGET = 223_500;
+// Run-completion notifications (2026-08-31) then added the eager badge
+// cache (`lib/run-completions/store.ts` + `hooks/useRunCompletions.ts`),
+// the header merge in `gateway-layout.tsx`, and 4 `runCompletions.*` keys
+// in the eager `en.ts` fallback pack. Everything deferrable is deferred:
+// the orchestrator, wire protocol, tab coordination, and HTTP mutations
+// all live behind dynamic imports (client.ts graph), and the chat hot path
+// only gains a lazy-import stub for read evidence. The store's sequence
+// compare was inlined so the protocol module stays out of the eager graph.
+// Measured on the merged tree after the rebase; the budget below retains
+// about 1.5 KB of explicit headroom over that measurement.
+const CHAT_GZIP_BUDGET = 225_500;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

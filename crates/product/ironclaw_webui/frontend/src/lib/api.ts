@@ -743,6 +743,66 @@ export async function mintSessionSocketTicket() {
   return apiFetch(`/session/websocket-ticket`, { method: "POST" });
 }
 
+// --- Run-completion notifications (authenticated HTTP mutations; the
+// session socket only ever carries the read-only event stream) ---
+
+export async function fetchUnreadRunCompletions() {
+  return apiFetch(`/run-completions/unread`);
+}
+
+export async function submitRunCompletionIntent({
+  noticeId,
+  browserInstanceId,
+  tabId,
+  stateRevision,
+  focusEpoch,
+  intent,
+}) {
+  return apiFetch(`/run-completions/intent`, {
+    method: "POST",
+    body: JSON.stringify({
+      notice_id: noticeId,
+      browser_instance_id: browserInstanceId,
+      tab_id: tabId,
+      state_revision: stateRevision,
+      focus_epoch: focusEpoch,
+      intent,
+    }),
+  });
+}
+
+export async function acknowledgeRunCompletion({
+  noticeId,
+  grantId,
+  stateRevision,
+  outcome,
+}) {
+  return apiFetch(`/run-completions/acknowledge`, {
+    method: "POST",
+    body: JSON.stringify({
+      notice_id: noticeId,
+      grant_id: grantId,
+      state_revision: stateRevision,
+      outcome,
+    }),
+  });
+}
+
+export async function reportRunCompletionThreadRead({
+  threadId,
+  throughSequence,
+  browserInstanceId,
+}) {
+  return apiFetch(`/run-completions/thread-read`, {
+    method: "POST",
+    body: JSON.stringify({
+      thread_id: threadId,
+      through_sequence: throughSequence,
+      browser_instance_id: browserInstanceId,
+    }),
+  });
+}
+
 // --- Run cancellation ---
 
 export function cancelRun({

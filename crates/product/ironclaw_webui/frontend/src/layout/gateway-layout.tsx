@@ -3,6 +3,7 @@ import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
 import { useNotifications } from "../hooks/useNotifications";
+import { useRunCompletions } from "../hooks/useRunCompletions";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
 import { shouldRouteToOnboarding } from "../lib/onboarding-gate";
 import {
@@ -57,6 +58,29 @@ export function GatewayLayout({
     profile,
     enabled: Boolean(token),
   });
+  // Run-completion notices ride the durable owner-scoped stream and merge
+  // into the same bell: server-owned read state, so items disappear on the
+  // clear event rather than on local dismissal.
+  const runCompletions = useRunCompletions({
+    enabled: Boolean(token),
+    activeThreadId: activeRouteThreadId,
+  });
+  const mergedNotificationsState = React.useMemo(() => {
+    const runIds = new Set(runCompletions.messages.map((message) => message.id));
+    return {
+      ...notificationsState,
+      messages: [...runCompletions.messages, ...notificationsState.messages],
+      unreadIds: new Set([...runIds, ...notificationsState.unreadIds]),
+      unreadCount: notificationsState.unreadCount + runCompletions.unreadCount,
+      hasUnread:
+        notificationsState.hasUnread || runCompletions.unreadCount > 0,
+      dismissMessage: (messageId) => {
+        // Run-completion read state is server-owned (§9.3): navigation to
+        // the thread clears it; local dismissal only affects approval rows.
+        if (!runIds.has(messageId)) notificationsState.dismissMessage(messageId);
+      },
+    };
+  }, [notificationsState, runCompletions.messages, runCompletions.unreadCount]);
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
@@ -152,7 +176,7 @@ export function GatewayLayout({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <PageHeader
           threadsState={routeThreadsState}
-          notificationsState={notificationsState}
+          notificationsState={mergedNotificationsState}
           status={headerStatus}
           onToggleSidebar={sidebar.toggle}
           sidebarOpen={sidebar.currentOpen}

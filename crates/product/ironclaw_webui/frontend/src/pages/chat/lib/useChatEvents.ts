@@ -218,6 +218,15 @@ export function useChatEvents({
           if (turnRunId && latestRunIdRef) {
             latestRunIdRef.current = turnRunId;
           }
+          if (turnRunId) {
+            // Exact read evidence for run-completion notices (§9.3): the
+            // focused thread view consumed this run's finalized reply.
+            // Lazy import keeps the notification module out of this hot
+            // path's bundle; failures never affect chat rendering.
+            import("../../../lib/run-completions/client")
+              .then((runCompletions) => runCompletions.reportReplyRendered(turnRunId))
+              .catch(() => undefined);
+          }
           const replyMessage = {
             id: `reply-${turnRunId || Date.now()}`,
             role: "assistant",
