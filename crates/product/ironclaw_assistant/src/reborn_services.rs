@@ -5647,7 +5647,7 @@ where
             };
         }
         let response = RebornServices::stream_events(self, caller, request).await?;
-        encode_product_surface_stream_response(response)
+        Ok(encode_product_surface_stream_response(response))
     }
 }
 
@@ -5748,9 +5748,11 @@ where
                 return;
             };
             let response = match item {
-                Ok(event) => encode_product_surface_stream_response(RebornStreamEventsResponse {
-                    events: vec![event],
-                }),
+                Ok(event) => Ok(encode_product_surface_stream_response(
+                    RebornStreamEventsResponse {
+                        events: vec![event],
+                    },
+                )),
                 Err(error) => Err(map_projection_error(error)),
             };
             let stop = response.is_err();
@@ -5766,41 +5768,46 @@ where
 fn decode_product_surface_stream_request(
     request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
 ) -> Result<RebornStreamEventsRequest, ProductSurfaceError> {
-    let thread_id = request.stream_id.ok_or_else(|| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-    })?;
     let after_cursor = match request.after_cursor {
         Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
         })?),
         None => None,
     };
-    Ok(RebornStreamEventsRequest {
-        thread_id,
-        after_cursor,
-    })
+    match request.selector {
+        ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } => {
+            Ok(RebornStreamEventsRequest {
+                thread_id,
+                after_cursor,
+            })
+        }
+    }
 }
 
+/// Project the internal thread stream batch into the typed product stream
+/// envelope. The extension-delivery envelope's adapter/installation/target
+/// routing metadata stops here; only the cursor and the typed payload cross
+/// the product boundary.
 fn encode_product_surface_stream_response(
     response: RebornStreamEventsResponse,
-) -> Result<ironclaw_product_contracts::surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-{
+) -> ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
     let events = response
         .events
         .into_iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            tracing::error!(%error, "failed to encode product surface stream response");
-            ProductSurfaceError::internal()
-        })?;
-    Ok(
-        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-            subscription: None,
-        },
-    )
+        .map(
+            |envelope| ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+                cursor: envelope.projection_cursor,
+                event: ironclaw_product_contracts::surface::ProductStreamEvent::Thread(
+                    envelope.payload,
+                ),
+            },
+        )
+        .collect();
+    ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
+        events,
+        next_cursor: None,
+        subscription: None,
+    }
 }
 
 impl<I, V> RebornServices<I, V>

@@ -205,9 +205,9 @@ use ironclaw_product_contracts::projection::{
     ProjectionStreamSubscription, ProjectionSubscriptionRequest,
 };
 use ironclaw_product_contracts::surface::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
-    ProductSurfaceValidationCode,
+    ProductStreamEvent, ProductStreamEventEnvelope, ProductStreamSelector, ProductSurface,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest, ProductSurfaceValidationCode,
 };
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_threads::{
@@ -4350,7 +4350,9 @@ async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
         &services,
         web_caller.clone(),
         ProductSurfaceStreamRequest {
-            stream_id: Some("thread-alpha".to_string()),
+            selector: ProductStreamSelector::Thread {
+                thread_id: "thread-alpha".to_string(),
+            },
             after_cursor: None,
         },
     )
@@ -4363,7 +4365,10 @@ async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
 
     assert_eq!(
         response.events,
-        vec![serde_json::to_value(expected).expect("outbound event encodes")]
+        vec![ProductStreamEventEnvelope {
+            cursor: expected.projection_cursor.clone(),
+            event: ProductStreamEvent::Thread(expected.payload.clone()),
+        }]
     );
     assert_eq!(event_stream.subscription_count(), 1);
     assert_eq!(
@@ -4410,7 +4415,9 @@ async fn product_surface_subscription_bounds_a_silent_first_event() {
             services.as_ref(),
             web_caller,
             ProductSurfaceStreamRequest {
-                stream_id: Some("thread-alpha".to_string()),
+                selector: ProductStreamSelector::Thread {
+                    thread_id: "thread-alpha".to_string(),
+                },
                 after_cursor: None,
             },
         )
@@ -4459,7 +4466,9 @@ async fn product_surface_subscription_revalidates_visibility_without_blocking_ev
         &services,
         caller,
         ProductSurfaceStreamRequest {
-            stream_id: Some(trigger_thread_id.to_string()),
+            selector: ProductStreamSelector::Thread {
+                thread_id: trigger_thread_id.to_string(),
+            },
             after_cursor: None,
         },
     )

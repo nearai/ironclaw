@@ -35,10 +35,9 @@ use ironclaw_host_ingress::ProtectedRouteMount;
 use ironclaw_product_contracts::operator_llm::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
 };
-use ironclaw_product_contracts::outbound::ProductOutboundEnvelope;
 use ironclaw_product_contracts::surface::{
-    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceStreamRequest,
+    BoundProductSurface, ProductStreamEventEnvelope, ProductStreamSelector, ProductSurface,
+    ProductSurfaceCaller, ProductSurfaceStreamRequest,
 };
 
 use crate::{
@@ -237,64 +236,54 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
     async fn drain_chat(
         &self,
         request: OpenAiChatProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError> {
         let surface = BoundProductSurface::new(
             Arc::clone(&self.product_surface),
             product_surface_caller_from_openai_scope(&request.actor_scope),
         );
         let response = surface
             .stream_events(ProductSurfaceStreamRequest {
-                stream_id: Some(
-                    request
+                selector: ProductStreamSelector::Thread {
+                    thread_id: request
                         .projection_subscription
                         .scope
                         .thread_id
                         .as_str()
                         .to_string(),
-                ),
+                },
                 after_cursor: request
                     .after_cursor
                     .map(|cursor| cursor.as_str().to_string()),
             })
             .await?;
-        decode_product_outbound_events(response.events)
+        Ok(response.events)
     }
 
     async fn drain_response(
         &self,
         request: OpenAiResponseProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError> {
         let surface = BoundProductSurface::new(
             Arc::clone(&self.product_surface),
             product_surface_caller_from_openai_scope(&request.actor_scope),
         );
         let response = surface
             .stream_events(ProductSurfaceStreamRequest {
-                stream_id: Some(
-                    request
+                selector: ProductStreamSelector::Thread {
+                    thread_id: request
                         .projection_subscription
                         .scope
                         .thread_id
                         .as_str()
                         .to_string(),
-                ),
+                },
                 after_cursor: request
                     .after_cursor
                     .map(|cursor| cursor.as_str().to_string()),
             })
             .await?;
-        decode_product_outbound_events(response.events)
+        Ok(response.events)
     }
-}
-
-fn decode_product_outbound_events(
-    events: Vec<serde_json::Value>,
-) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-    events
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ProductSurfaceError::internal_from(error).into())
 }
 
 #[cfg(test)]

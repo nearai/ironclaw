@@ -9,10 +9,11 @@ use ironclaw_assistant::RebornGetRunStateResponse;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView, GatePromptView,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    ProductOutboundPayload, ProductProjectionState, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 use ironclaw_product_contracts::product_wire::{RebornCancelRunResponse, RebornSubmitTurnResponse};
+use ironclaw_product_contracts::surface::{ProductStreamEvent, ProductStreamEventEnvelope};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,10 +24,6 @@ pub struct WebChatV2EventFrame {
 }
 
 impl WebChatV2EventFrame {
-    pub fn from_outbound(envelope: ProductOutboundEnvelope) -> Self {
-        Self::from(envelope)
-    }
-
     pub fn cursor(&self) -> &ProjectionCursor {
         &self.cursor
     }
@@ -36,15 +33,12 @@ impl WebChatV2EventFrame {
     }
 }
 
-impl From<ProductOutboundEnvelope> for WebChatV2EventFrame {
-    fn from(envelope: ProductOutboundEnvelope) -> Self {
-        let ProductOutboundEnvelope {
-            projection_cursor,
-            payload,
-            ..
-        } = envelope;
+impl From<ProductStreamEventEnvelope> for WebChatV2EventFrame {
+    fn from(envelope: ProductStreamEventEnvelope) -> Self {
+        let ProductStreamEventEnvelope { cursor, event } = envelope;
+        let ProductStreamEvent::Thread(payload) = event;
         Self {
-            cursor: projection_cursor,
+            cursor,
             event: WebChatV2Event::from(payload),
         }
     }

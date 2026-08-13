@@ -2066,9 +2066,8 @@ impl ProductSurface for StubServices {
         ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
         ProductSurfaceError,
     > {
-        let thread_id = request.stream_id.ok_or_else(|| {
-            ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
-        })?;
+        let ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } =
+            request.selector;
         let after_cursor = request
             .after_cursor
             .map(ProjectionCursor::new)
@@ -2082,9 +2081,8 @@ impl ProductSurface for StubServices {
         let events = response
             .events
             .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProductSurfaceError::internal_from)?;
+            .map(typed_stream_event_envelope)
+            .collect();
         let subscription = if self.event_subscription_enabled.load(Ordering::Acquire) {
             self.subscribe_events_calls
                 .lock()
@@ -2100,18 +2098,14 @@ impl ProductSurface for StubServices {
             let (sender, receiver) = mpsc::channel(1);
             tokio::spawn(async move {
                 for response in responses {
-                    let response = response.and_then(|response| {
-                        let events = response
+                    let response = response.map(|response| ProductSurfaceStreamResponse {
+                        events: response
                             .events
                             .into_iter()
-                            .map(serde_json::to_value)
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(ProductSurfaceError::internal_from)?;
-                        Ok(ProductSurfaceStreamResponse {
-                            events,
-                            next_cursor: None,
-                            subscription: None,
-                        })
+                            .map(typed_stream_event_envelope)
+                            .collect(),
+                        next_cursor: None,
+                        subscription: None,
                     });
                     if sender.send(response).await.is_err() {
                         return;
@@ -2132,6 +2126,15 @@ impl ProductSurface for StubServices {
                 subscription,
             },
         )
+    }
+}
+
+fn typed_stream_event_envelope(
+    envelope: ironclaw_product_contracts::outbound::ProductOutboundEnvelope,
+) -> ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+    ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+        cursor: envelope.projection_cursor,
+        event: ironclaw_product_contracts::surface::ProductStreamEvent::Thread(envelope.payload),
     }
 }
 
@@ -8748,15 +8751,19 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         text_frames,
     );
 
-    // First two frames carry the projection envelopes, in order.
+    // First two frames carry the typed product stream envelopes, in order —
+    // cursor plus payload only, never adapter/installation/delivery routing
+    // metadata.
     let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
-    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
+    let expected_a: Value = serde_json::to_value(typed_stream_event_envelope(envelope_a.clone()))
+        .expect("envelope a value");
     assert_eq!(
         envelope_a_json, expected_a,
-        "first WS frame must carry the first ProductOutboundEnvelope verbatim",
+        "first WS frame must carry the first typed stream envelope verbatim",
     );
     let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
-    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
+    let expected_b: Value = serde_json::to_value(typed_stream_event_envelope(envelope_b.clone()))
+        .expect("envelope b value");
     assert_eq!(envelope_b_json, expected_b);
 
     // Third frame is the redacted error payload — `error` code +

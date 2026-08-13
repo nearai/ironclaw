@@ -31,8 +31,8 @@ use ironclaw_openai_compat::{
 use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
 };
-use ironclaw_product_contracts::outbound::ProductOutboundEnvelope;
 use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
+use ironclaw_product_contracts::surface::ProductStreamEventEnvelope;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
@@ -1602,14 +1602,14 @@ impl OpenAiCompatProjectionStreamer for EmptyProjectionStreamer {
     async fn drain_chat(
         &self,
         _request: OpenAiChatProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError> {
         Ok(Vec::new())
     }
 
     async fn drain_response(
         &self,
         _request: OpenAiResponseProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError> {
         Ok(Vec::new())
     }
 }

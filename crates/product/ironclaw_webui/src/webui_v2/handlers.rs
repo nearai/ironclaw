@@ -108,7 +108,7 @@ use ironclaw_product_contracts::operator_llm::{
     LLM_USER_MODEL_POLICY_SET_CAPABILITY, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY,
     USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
 };
-use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, project_public_lifecycle_states,
 };
@@ -1513,8 +1513,10 @@ struct SseErrorPayload {
     retryable: bool,
 }
 
-fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<Event> {
-    let frame = WebChatV2EventFrame::from_outbound(envelope);
+fn webchat_sse_event_from_envelope(
+    envelope: ironclaw_product_contracts::surface::ProductStreamEventEnvelope,
+) -> Option<Event> {
+    let frame = WebChatV2EventFrame::from(envelope);
     // Keep-alive frames are liveness pings, not durable resume positions.
     // The product seam stamps an advancing cursor into every envelope
     // (including `KeepAlive`), and the browser's `EventSource` echoes the
@@ -1615,7 +1617,9 @@ fn build_sse_stream(
                 result = tokio::time::timeout(
                     remaining,
                     surface.stream_events(ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
-                        stream_id: Some(thread_id.clone()),
+                        selector: ironclaw_product_contracts::surface::ProductStreamSelector::Thread {
+                            thread_id: thread_id.clone(),
+                        },
                         after_cursor: after_cursor
                             .as_ref()
                             .map(|cursor| cursor.as_str().to_string()),
@@ -1638,16 +1642,10 @@ fn build_sse_stream(
                 }
                 Ok(Ok(mut response)) => {
                     let subscription = response.subscription.take();
-                    let events = match decode_product_outbound_events(response.events) {
-                        Ok(events) => events,
-                        Err(error) => {
-                            yield Ok(sse_error_event(error));
-                            return;
-                        }
-                    };
+                    let events = response.events;
                     let had_events = !events.is_empty();
                     if let Some(latest) = events.last() {
-                        after_cursor = Some(latest.projection_cursor.clone());
+                        after_cursor = Some(latest.cursor.clone());
                     }
                     for envelope in events {
                         if let Some(event) = webchat_sse_event_from_envelope(envelope) {
@@ -1693,14 +1691,7 @@ fn build_sse_stream(
                                     return;
                                 }
                             };
-                            let events = match decode_product_outbound_events(response.events) {
-                                Ok(events) => events,
-                                Err(error) => {
-                                    yield Ok(sse_error_event(error));
-                                    return;
-                                }
-                            };
-                            for envelope in events {
+                            for envelope in response.events {
                                 if let Some(event) = webchat_sse_event_from_envelope(envelope) {
                                     yield Ok(event);
                                 }
@@ -3526,16 +3517,6 @@ async fn query_product_page(
     })
 }
 
-fn decode_product_outbound_events(
-    events: Vec<serde_json::Value>,
-) -> Result<Vec<ProductOutboundEnvelope>, ProductSurfaceError> {
-    events
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProductSurfaceError::internal_from)
-}
-
 async fn query_extension_admin_configuration(
     state: &WebUiV2State,
     caller: ProductSurfaceCaller,
@@ -4680,7 +4661,9 @@ async fn ws_drain_loop(
         }
         let service_call = surface.stream_events(
             ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
-                stream_id: Some(thread_id.clone()),
+                selector: ironclaw_product_contracts::surface::ProductStreamSelector::Thread {
+                    thread_id: thread_id.clone(),
+                },
                 after_cursor: after_cursor
                     .as_ref()
                     .map(|cursor| cursor.as_str().to_string()),
@@ -4714,30 +4697,10 @@ async fn ws_drain_loop(
                 return;
             }
             Ok(Ok(response)) => {
-                let events = match decode_product_outbound_events(response.events) {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let payload = SseErrorPayload {
-                            error: error.code,
-                            kind: error.kind,
-                            retryable: error.retryable,
-                        };
-                        if let Ok(text) = serde_json::to_string(&payload) {
-                            let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
-                            let _ = ws_send_with_timeout(
-                                &mut socket,
-                                Some(axum::extract::ws::Message::Text(text.into())),
-                                send_budget,
-                            )
-                            .await;
-                        }
-                        let _ = socket.close().await;
-                        return;
-                    }
-                };
+                let events = response.events;
                 let had_events = !events.is_empty();
                 if let Some(latest) = events.last() {
-                    after_cursor = Some(latest.projection_cursor.clone());
+                    after_cursor = Some(latest.cursor.clone());
                 }
                 for envelope in events {
                     match serde_json::to_string(&envelope) {
@@ -4766,7 +4729,7 @@ async fn ws_drain_loop(
                             tracing::debug!(
                                 target: "ironclaw_webui_v2::ws",
                                 error = %error,
-                                "failed to serialize ProductOutboundEnvelope for WS",
+                                "failed to serialize product stream event for WS",
                             );
                         }
                     }

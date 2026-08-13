@@ -6,9 +6,12 @@
 use serde_json::json;
 
 use ironclaw_host_api::turn::TurnRunId;
-use ironclaw_product_contracts::outbound::{ProductProjectionItem, ProductProjectionState};
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProjectionCursor,
+};
 use ironclaw_product_contracts::surface::{
-    ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
+    ProductStreamEvent, ProductStreamEventEnvelope, ProductStreamSelector,
+    ProductSurfaceEventSubscription, ProductSurfaceStreamRequest, ProductSurfaceStreamResponse,
 };
 
 #[test]
@@ -46,10 +49,57 @@ fn projection_text_distinguishes_live_from_finalized_transcript_rows() {
 }
 
 #[test]
+fn product_stream_selector_wire_shape_is_typed_and_tagged() {
+    let request = ProductSurfaceStreamRequest {
+        selector: ProductStreamSelector::Thread {
+            thread_id: "thread-1".to_string(),
+        },
+        after_cursor: Some("cursor-1".to_string()),
+    };
+    let encoded = serde_json::to_value(&request).expect("stream request serializes");
+    assert_eq!(
+        encoded,
+        json!({
+            "selector": {"kind": "thread", "thread_id": "thread-1"},
+            "after_cursor": "cursor-1"
+        }),
+        "the selector is a closed tagged vocabulary, not a magic string"
+    );
+    let decoded: ProductSurfaceStreamRequest =
+        serde_json::from_value(encoded).expect("stream request deserializes");
+    assert_eq!(decoded, request);
+}
+
+#[test]
+fn product_stream_events_stay_typed_through_the_response_envelope() {
+    let cursor = ProjectionCursor::new("cursor-1").expect("bounded cursor");
+    let envelope = ProductStreamEventEnvelope {
+        cursor: cursor.clone(),
+        event: ProductStreamEvent::Thread(ProductOutboundPayload::KeepAlive),
+    };
+    let encoded = serde_json::to_value(&envelope).expect("stream event envelope serializes");
+    assert_eq!(
+        encoded,
+        json!({
+            "cursor": "cursor-1",
+            "event": {"kind": "thread", "payload": "keep_alive"}
+        }),
+        "each event carries its own cursor and a kind-tagged typed payload"
+    );
+    let decoded: ProductStreamEventEnvelope =
+        serde_json::from_value(encoded).expect("stream event envelope deserializes");
+    assert_eq!(decoded, envelope);
+}
+
+#[test]
 fn product_stream_continuation_is_process_local_not_wire_state() {
     let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let cursor = ProjectionCursor::new("cursor-1").expect("bounded cursor");
     let response = ProductSurfaceStreamResponse {
-        events: vec![json!({"kind": "projection_update"})],
+        events: vec![ProductStreamEventEnvelope {
+            cursor,
+            event: ProductStreamEvent::Thread(ProductOutboundPayload::KeepAlive),
+        }],
         next_cursor: Some("cursor-1".to_string()),
         subscription: Some(ProductSurfaceEventSubscription::new(receiver)),
     };
@@ -58,7 +108,10 @@ fn product_stream_continuation_is_process_local_not_wire_state() {
     assert_eq!(
         encoded,
         json!({
-            "events": [{"kind": "projection_update"}],
+            "events": [{
+                "cursor": "cursor-1",
+                "event": {"kind": "thread", "payload": "keep_alive"}
+            }],
             "next_cursor": "cursor-1"
         }),
         "the in-process continuation handle must never cross the wire"
