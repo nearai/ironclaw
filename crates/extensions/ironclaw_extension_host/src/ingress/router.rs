@@ -97,7 +97,8 @@ pub enum InboundAdmissionAck {
 }
 
 /// A failed admission. `retryable` selects 503 (vendor should redeliver)
-/// versus 400 (permanent rejection).
+/// versus an acknowledged discard (the same message re-fails on every
+/// redelivery, so the router 2xx-acks it away and warn-logs the drop).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("inbound admission failed: {reason}")]
 pub struct InboundSinkError {
@@ -192,6 +193,11 @@ pub struct IngressResponse {
     pub body: Vec<u8>,
 }
 
+/// Body marker for [`IngressResponse::acknowledged_discarded`]. The batch
+/// processor keys its terminal-state decision on it, and operators reading
+/// HTTP captures can tell a discard from an ordinary ack.
+const ACKNOWLEDGED_DISCARDED_BODY: &[u8] = br#"{"status":"acknowledged_discarded"}"#;
+
 impl IngressResponse {
     fn error(status: u16, category: &str) -> Self {
         Self {
@@ -206,6 +212,20 @@ impl IngressResponse {
             status: 200,
             content_type: Some("text/plain".to_string()),
             body: b"ok".to_vec(),
+        }
+    }
+
+    /// 2xx acknowledgment for a verified update the host consciously drops.
+    /// Deterministic failures replay identically on redelivery, and vendors
+    /// with ordered webhook queues redeliver any non-2xx update and hold
+    /// every later update in the conversation behind it — one unusable
+    /// update bricked a whole chat. Every discard is logged at warn by its
+    /// call site; nothing is admitted.
+    fn acknowledged_discarded() -> Self {
+        Self {
+            status: 200,
+            content_type: Some("application/json".to_string()),
+            body: ACKNOWLEDGED_DISCARDED_BODY.to_vec(),
         }
     }
 }
@@ -459,29 +479,27 @@ impl ExtensionIngressRouter {
                 .await
             {
                 Ok(Ok(outcome)) => outcome,
-                Ok(Err(ChannelError::Configuration { .. })) => {
+                // Transient failures earn a 5xx so the vendor's redelivery
+                // can succeed later. Every other adapter failure is
+                // deterministic — redelivery replays the same bytes into the
+                // same failure, and vendors with ordered webhook queues hold
+                // every later update in the conversation behind a non-2xx'd
+                // one — so the host acks and discards instead.
+                Ok(Err(error)) if channel_error_is_transient(&error) => {
                     tracing::debug!(
                         extension_id = %binding.extension_id(),
-                        "channel adapter host configuration is unavailable"
-                    );
-                    return IngressResponse::error(503, "temporarily_unavailable");
-                }
-                Ok(Err(ChannelError::AttachmentTransfer {
-                    retryable: true, ..
-                })) => {
-                    tracing::debug!(
-                        extension_id = %binding.extension_id(),
-                        "channel adapter attachment transfer is temporarily unavailable"
+                        error = %error,
+                        "channel adapter failed transiently; vendor redelivery may succeed"
                     );
                     return IngressResponse::error(503, "temporarily_unavailable");
                 }
                 Ok(Err(error)) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         extension_id = %binding.extension_id(),
                         error = %error,
-                        "channel adapter rejected verified inbound request"
+                        "acknowledging and discarding verified inbound update after a deterministic adapter failure"
                     );
-                    return IngressResponse::error(400, "malformed_payload");
+                    return IngressResponse::acknowledged_discarded();
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -587,6 +605,21 @@ impl RestrictedEgress for UnavailableRestrictedEgress {
     }
 }
 
+/// Transient failures may succeed on vendor redelivery; everything else is
+/// deterministic and is acknowledged-and-discarded by ingress (see
+/// [`IngressResponse::acknowledged_discarded`]).
+fn channel_error_is_transient(error: &ChannelError) -> bool {
+    matches!(
+        error,
+        ChannelError::Configuration { .. }
+            | ChannelError::VendorWiring { .. }
+            | ChannelError::AttachmentTransfer {
+                retryable: true,
+                ..
+            }
+    )
+}
+
 async fn admit_messages(
     deps: &ExtensionIngressRouterDeps,
     extension_id: &str,
@@ -598,12 +631,12 @@ async fn admit_messages(
     }
     for message in messages {
         if let Err(error) = message.validate() {
-            tracing::debug!(
+            tracing::warn!(
                 extension_id,
                 error = %error,
-                "channel adapter emitted an out-of-bounds normalized message"
+                "acknowledging and discarding an out-of-bounds normalized message"
             );
-            return IngressResponse::error(400, "malformed_payload");
+            return IngressResponse::acknowledged_discarded();
         }
         // reply_context is stored host-side, keyed to the conversation
         // source binding, before the admission commit — the delivery
@@ -644,12 +677,16 @@ async fn admit_messages(
                 return IngressResponse::error(503, "temporarily_unavailable");
             }
             Err(error) => {
-                tracing::debug!(
+                // A permanent admission rejection is deterministic: the same
+                // message re-fails on every redelivery, so a non-2xx would
+                // wedge ordered vendors behind it. Acking drops a verified
+                // user message — the loudest non-fatal log level it gets.
+                tracing::warn!(
                     extension_id,
                     error = %error,
-                    "inbound admission rejected permanently"
+                    "acknowledging and discarding a message the admission sink permanently rejected"
                 );
-                return IngressResponse::error(400, "rejected");
+                return IngressResponse::acknowledged_discarded();
             }
         }
     }
@@ -674,12 +711,12 @@ impl InboundBatchProcessor {
         fragment: InboundBatchFragment,
     ) -> IngressResponse {
         if let Err(error) = fragment.validate() {
-            tracing::debug!(
+            tracing::warn!(
                 extension_id,
                 error = %error,
-                "channel adapter emitted invalid inbound batch metadata"
+                "acknowledging and discarding an inbound batch fragment with invalid metadata"
             );
-            return IngressResponse::error(400, "malformed_payload");
+            return IngressResponse::acknowledged_discarded();
         }
         let request = InboundBatchStageRequest {
             key: InboundBatchKey {
@@ -700,7 +737,13 @@ impl InboundBatchProcessor {
             }
             Ok(InboundBatchStageOutcome::AlreadyCompleted) => IngressResponse::ok(),
             Ok(InboundBatchStageOutcome::Rejected) => {
-                IngressResponse::error(400, "malformed_payload")
+                // The batch is durably tombstoned; redelivering the fragment
+                // can only re-fail, so ack it away.
+                tracing::warn!(
+                    extension_id,
+                    "acknowledging and discarding a fragment the staged batch rejected"
+                );
+                IngressResponse::acknowledged_discarded()
             }
             Err(error) if error.retryable => {
                 tracing::debug!(
@@ -711,12 +754,12 @@ impl InboundBatchProcessor {
                 IngressResponse::error(503, "temporarily_unavailable")
             }
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     extension_id,
                     error = %error,
-                    "inbound batch staging rejected the payload"
+                    "acknowledging and discarding a fragment inbound batch staging permanently rejected"
                 );
-                IngressResponse::error(400, "malformed_payload")
+                IngressResponse::acknowledged_discarded()
             }
         }
     }
@@ -783,7 +826,11 @@ impl InboundBatchProcessor {
                 }
             };
             if response.status == 200 {
-                self.finish_claim(&claim, true).await;
+                // An acknowledged discard is terminal but not a completion:
+                // the merged message was consciously dropped, so the batch
+                // record keeps the truthful `rejected` tombstone.
+                let completed = response.body != ACKNOWLEDGED_DISCARDED_BODY;
+                self.finish_claim(&claim, completed).await;
                 return;
             }
             if response.status != 503 {

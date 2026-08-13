@@ -462,8 +462,8 @@ fn validate_attachment_filename(value: &str) -> Result<(), ProductAdapterError> 
 /// kinds (`Image`, `Audio`, `Video`) claim exactly what the MIME base states,
 /// so a mismatch there is an adapter mislabel and is rejected. The semantic
 /// kinds (`Sticker`, `Voice`, `Document`, `Other`) carry vendor presentation
-/// meaning a MIME base cannot express — a Telegram sticker is `image/webp`,
-/// `video/webm`, or `application/x-tgsticker`; a voice note is `audio/ogg`; a
+/// meaning a MIME base cannot express — a sticker is `image/webp`,
+/// `video/webm`, or a vendor animated format; a voice note is `audio/ogg`; a
 /// document is any MIME "sent as file" — and accept any MIME. The previous
 /// reverse rule (media MIME forces the media kind) made those pairs
 /// unconstructible, which failed whole-update parsing at ingress and let one
@@ -573,9 +573,9 @@ mod tests {
 
     #[test]
     fn attachment_semantic_kinds_construct_for_real_vendor_shapes() {
-        // Regression: Telegram stickers (`image/webp` + `Sticker`) and voice
-        // notes (`audio/ogg` + `Voice`) were unconstructible, so the whole
-        // update failed parse, ingress answered non-2xx, and Telegram's
+        // Regression: stickers (`image/webp` + `Sticker`) and voice notes
+        // (`audio/ogg` + `Voice`) were unconstructible, so the whole update
+        // failed parse, ingress answered non-2xx, and the sending vendor's
         // in-order redelivery bricked the chat behind the poison update.
         let cases = [
             ("image/webp", ProductAttachmentKind::Sticker),
