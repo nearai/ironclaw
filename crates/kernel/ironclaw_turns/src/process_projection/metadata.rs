@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, ReplyTargetBindingRef,
-    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnRunRecord, TurnRunState,
-    runner::ClaimedTurnRun,
+    AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, RunProfileId, RunProfileVersion,
+    TurnActor, TurnRunRecord, TurnRunState, runner::ClaimedTurnRun,
 };
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRunProfile};
 
@@ -14,8 +13,6 @@ use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRu
 pub struct AgentTurnProcessMetadata {
     pub turn_id: crate::TurnId,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
     /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`,
@@ -44,8 +41,6 @@ impl AgentTurnProcessMetadata {
         Self {
             turn_id: record.turn_id,
             accepted_message_ref: record.accepted_message_ref.clone(),
-            source_binding_ref: record.source_binding_ref.clone(),
-            reply_target_binding_ref: record.reply_target_binding_ref.clone(),
             resolved_run_profile_id: record.profile.id.clone(),
             resolved_run_profile_version: record.profile.version,
             allow_steering: record.profile.allow_steering,
@@ -64,8 +59,6 @@ pub struct AgentTurnProcessStateMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<TurnActor>,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
     /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`.
@@ -100,8 +93,6 @@ impl AgentTurnProcessStateMetadata {
             turn_id: state.turn_id,
             actor: state.actor.clone(),
             accepted_message_ref: state.accepted_message_ref.clone(),
-            source_binding_ref: state.source_binding_ref.clone(),
-            reply_target_binding_ref: state.reply_target_binding_ref.clone(),
             resolved_run_profile_id: state.resolved_run_profile_id.clone(),
             resolved_run_profile_version: state.resolved_run_profile_version,
             allow_steering: state.allow_steering,

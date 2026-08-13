@@ -11,7 +11,7 @@ use ironclaw_host_api::product_adapter::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope,
+    TurnActor, TurnId, TurnRunId, TurnScope,
 };
 use ironclaw_openai_compat::{
     OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID, OpenAiCompatActorScope,
@@ -887,9 +887,6 @@ fn turn_run_state(
         status,
         accepted_message_ref: AcceptedMessageRef::new("message:openai-compat-test")
             .expect("accepted ref"),
-        source_binding_ref: SourceBindingRef::new("source:openai-compat-test").expect("source ref"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:openai-compat-test")
-            .expect("reply target"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,

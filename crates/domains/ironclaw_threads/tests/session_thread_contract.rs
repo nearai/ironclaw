@@ -4309,8 +4309,8 @@ async fn accept_inbound_message_rejects_oversized_extracted_text() {
     assert!(history.messages.is_empty());
 }
 
-/// Taxonomy baseline for detached turns: a thread whose scope carries NO
-/// `owner_user_id` (the shape the detached accept door mints) is structurally
+/// Taxonomy baseline for unbound turns: a thread whose scope carries NO
+/// `owner_user_id` (the shape the prepared-context accept door mints) is structurally
 /// invisible to owner-scoped listings — the listing filter is exact-tuple
 /// scope equality, and the owner axis differs. The reverse holds too: an
 /// ownerless-scope enumeration never surfaces a user's own threads.
@@ -4380,5 +4380,159 @@ async fn list_threads_for_scope_excludes_ownerless_threads_from_owner_scoped_lis
         ownerless_ids,
         ["t-ownerless-001"],
         "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
+
+fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
+    ironclaw_threads::PreparedContextRequest {
+        scope: ThreadScope {
+            owner_user_id: None,
+            ..scope(label)
+        },
+        actor_id: format!("user-{label}"),
+        system_prompt: "You are a background task.".to_string(),
+        messages: vec![ironclaw_llm::agent_message::AgentMessage {
+            role: ironclaw_llm::agent_message::AgentMessageRole::User,
+            content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                "do the thing",
+            )],
+        }],
+        declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
+            tools: Vec::new(),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({ "type": "object" }),
+            },
+            limits: ironclaw_host_api::prepared_context::TurnLimits {
+                max_model_calls: Some(4),
+                max_capability_invocations: None,
+            },
+        },
+        idempotency_key: key.to_string(),
+        thread_id: None,
+        title: None,
+        metadata_json: None,
+    }
+}
+
+/// The prepared-context accept door mints an unbound (ownerless) thread, seeds the
+/// caller's context as ordinary transcript rows in order, journals the
+/// declarations beside them, and pins the LAST seeded row as the accepted
+/// message ref.
+#[tokio::test]
+async fn accept_prepared_context_mints_seeds_and_journals() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("unbound", "unbound-key-1");
+
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    assert!(!accepted.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await
+        .expect("seeded thread history");
+    assert_eq!(
+        history.thread.scope.owner_user_id, None,
+        "thread is ownerless"
+    );
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("You are a background task.")
+    );
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(history.messages[1].status, MessageStatus::Accepted);
+    assert_eq!(history.messages[1].sequence, 2);
+    assert_eq!(
+        accepted.accepted_message_ref.as_str(),
+        format!("msg:{}", history.messages[1].message_id),
+        "the accepted ref pins the last seeded row"
+    );
+
+    let record = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect("declarations read-back")
+        .expect("record present");
+    assert_eq!(record.declarations, request.declarations);
+    assert_eq!(record.seeded_message_count, 2);
+
+    // Seeded rows are model-visible through the same context path every
+    // conversation uses.
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .expect("context window over seeded thread");
+    assert_eq!(window.messages.len(), 2);
+    assert_eq!(window.messages[0].kind, MessageKind::System);
+    assert_eq!(window.messages[1].kind, MessageKind::User);
+}
+
+/// Replay discipline: the same request converges on the SAME prepared
+/// context (no orphan threads, no duplicate rows); a different key mints a
+/// separate thread; a non-unbound thread reads back `None` declarations.
+#[tokio::test]
+async fn accept_prepared_context_replays_idempotently_without_orphans() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("unbound-replay", "unbound-key-replay");
+
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    let replay = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("replay accept");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.accepted_message_ref, first.accepted_message_ref);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: first.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2, "replay must not duplicate rows");
+
+    let mut second = prepared_request("unbound-replay", "unbound-key-other");
+    second.scope = request.scope.clone();
+    let other = service
+        .accept_prepared_context(second)
+        .await
+        .expect("second key accepts");
+    assert_ne!(other.thread_id, first.thread_id);
+
+    // An ordinary conversation thread is not a prepared context.
+    let plain_scope = scope("unbound-replay-plain");
+    let plain = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: plain_scope.clone(),
+            thread_id: Some(ThreadId::new("t-plain-001").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("plain thread");
+    assert!(
+        service
+            .read_prepared_context(&plain_scope, &plain.thread_id)
+            .await
+            .expect("read")
+            .is_none()
     );
 }

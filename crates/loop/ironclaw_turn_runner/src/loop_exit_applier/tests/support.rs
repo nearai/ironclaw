@@ -5,9 +5,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::{ProcessId, TenantId, ThreadId};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ReplyTargetBindingRef, RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor,
-    TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
-    TurnStatus,
+    RunProfileVersion, SanitizedFailure, TurnActor, TurnCheckpointId, TurnGateRef, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
 };
 use ironclaw_loop_contracts::{
     CheckpointSchemaId, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
@@ -174,8 +173,6 @@ pub(super) fn running_run_state(
         run_id,
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-        source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
@@ -419,8 +416,6 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             run_id: TurnRunId::new(),
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,

@@ -298,6 +298,12 @@ pub enum LoopFailureKind {
     PolicyDenied,
     /// System compaction failed after the loop exhausted the safe fallback path.
     CompactionUnavailable,
+    /// A gate fired on a profile that cannot render or resolve it (unbound
+    /// profiles expose non-gating surfaces; approval/auth/resource gates that
+    /// fire anyway — policy drift, auth expiry mid-run — fail the run instead
+    /// of parking it with no surface to resolve on). The gate kind rides the
+    /// sanitized failure detail.
+    GateNotSupported,
 }
 
 impl LoopFailureKind {
@@ -316,6 +322,7 @@ impl LoopFailureKind {
             Self::NoProgressDetected => "no_progress_detected",
             Self::PolicyDenied => "policy_denied",
             Self::CompactionUnavailable => "compaction_unavailable",
+            Self::GateNotSupported => "gate_not_supported",
         }
     }
 
@@ -423,6 +430,7 @@ mod tests {
             LoopFailureKind::NoProgressDetected => "no_progress_detected",
             LoopFailureKind::PolicyDenied => "policy_denied",
             LoopFailureKind::CompactionUnavailable => "compaction_unavailable",
+            LoopFailureKind::GateNotSupported => "gate_not_supported",
         };
         for kind in [
             LoopFailureKind::ModelError,
@@ -438,6 +446,7 @@ mod tests {
             LoopFailureKind::NoProgressDetected,
             LoopFailureKind::PolicyDenied,
             LoopFailureKind::CompactionUnavailable,
+            LoopFailureKind::GateNotSupported,
         ] {
             assert_eq!(kind.as_str(), expected(kind));
             assert_eq!(kind.to_sanitized_failure().category(), expected(kind));

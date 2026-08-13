@@ -1,6 +1,7 @@
 //! Stop-condition strategy contract.
 
 use async_trait::async_trait;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef};
 use ironclaw_loop_contracts::{CapabilityProgress, LoopFailureKind};
 
@@ -292,6 +293,9 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             } else {
                 0
             },
+            // Counted only by the unbound structured-output strategy; the
+            // default family leaves it at rest.
+            trailing_all_failed_batches: 0,
             repeated_call_warning: state.stop_state.repeated_call_warning.clone(),
         };
 
@@ -382,6 +386,90 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         }
 
         StopOutcome::Continue {}
+    }
+}
+
+/// Stop conditions for the unbound structured family (unbound turns
+/// design §4.5): the run completes when the host-owned result tool records a
+/// validated structured result — the completed-call signature in the batch
+/// summary is the completion signal — and a run of all-failed capability
+/// batches (repeated invalid result-tool arguments under a surface whose only
+/// tool is the result tool) fails as `invalid_model_output`. Everything else
+/// delegates to the default stop conditions.
+#[derive(Debug, Clone)]
+pub struct StructuredResultStopStrategy {
+    inner: DefaultStopConditionStrategy,
+    result_capability: CapabilityId,
+    /// Trailing all-failed capability batches required to abort.
+    all_failed_batch_threshold: usize,
+}
+
+impl StructuredResultStopStrategy {
+    pub fn new(result_capability: CapabilityId) -> Self {
+        Self {
+            inner: DefaultStopConditionStrategy::default(),
+            result_capability,
+            all_failed_batch_threshold: 3,
+        }
+    }
+
+    fn result_recorded(&self, summary: &TurnSummary) -> bool {
+        summary.kind == TurnEndKind::AfterCapabilityBatch
+            && summary
+                .capability_batch
+                .observed_signatures
+                .iter()
+                .any(|signature| signature.name == self.result_capability)
+    }
+}
+
+#[async_trait]
+impl StopConditionStrategy for StructuredResultStopStrategy {
+    async fn observe_completed_turn(
+        &self,
+        state: &LoopExecutionState,
+        just_completed: &TurnSummary,
+    ) -> StopStrategyState {
+        let mut stop_state = self
+            .inner
+            .observe_completed_turn(state, just_completed)
+            .await;
+        let all_failed = just_completed.kind == TurnEndKind::AfterCapabilityBatch
+            && just_completed.capability_batch.invocation_count > 0
+            && just_completed
+                .capability_batch
+                .observed_signatures
+                .is_empty();
+        stop_state.trailing_all_failed_batches = if all_failed {
+            state
+                .stop_state
+                .trailing_all_failed_batches
+                .saturating_add(1)
+        } else {
+            0
+        };
+        stop_state
+    }
+
+    async fn should_stop_after_observed_turn(
+        &self,
+        state: &LoopExecutionState,
+        just_completed: &TurnSummary,
+    ) -> StopOutcome {
+        if self.result_recorded(just_completed) {
+            return StopOutcome::Stop {
+                kind: StopKind::GracefulStop,
+            };
+        }
+        if state.stop_state.trailing_all_failed_batches as usize >= self.all_failed_batch_threshold
+        {
+            return StopOutcome::Stop {
+                kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput),
+            };
+        }
+        self.inner
+            .should_stop_after_observed_turn(state, just_completed)
+            .await
     }
 }
 

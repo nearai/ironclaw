@@ -63,6 +63,10 @@ pub enum SessionThreadError {
         context: &'static str,
         violation: TimestampViolation,
     },
+    #[error("invalid unbound context: {reason}")]
+    InvalidPreparedContext { reason: String },
+    #[error("unbound context replay key mismatch for thread {thread_id}")]
+    PreparedContextKeyMismatch { thread_id: ThreadId },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
     #[error("serialization error: {0}")]
@@ -88,6 +92,8 @@ impl SessionThreadError {
             Self::OverlappingSummaryRange { .. } => "overlapping_summary_range",
             Self::InvalidAttachment(_) => "invalid_attachment",
             Self::InvalidMessageTimestamp { .. } => "invalid_message_timestamp",
+            Self::InvalidPreparedContext { .. } => "invalid_prepared_context",
+            Self::PreparedContextKeyMismatch { .. } => "prepared_context_key_mismatch",
             Self::GeneratedThreadId(_) => "generated_thread_id",
             Self::Serialization(_) => "serialization",
             Self::Deserialization(_) => "deserialization",

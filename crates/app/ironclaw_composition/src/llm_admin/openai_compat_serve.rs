@@ -1131,8 +1131,6 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
                 actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
-                source_binding_ref: state.source_binding_ref.clone(),
-                reply_target_binding_ref: state.reply_target_binding_ref.clone(),
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedExternalToolGate,
                 resume_disposition: None,

@@ -34,9 +34,8 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
-    TurnSurfaceType,
+    AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnScope, TurnSurfaceType,
 };
 use uuid::Uuid;
 
@@ -900,7 +899,6 @@ where
                 thread_scope: prepared.thread_scope,
                 message_id: accepted.message_id,
                 source_binding_id: prepared.source_binding_id,
-                reply_target_binding_id,
                 idempotency_key_raw: prepared.submit_idempotency_key,
                 received_at: envelope.received_at(),
                 adapter_id: prepared.adapter_id,
@@ -1234,19 +1232,12 @@ impl ProductInboundTurnHandoff {
                 reason: "accepted replay missing source_binding_id".into(),
             }
         })?;
-        let reply_target_binding_id = replay.reply_target_binding_id.clone().ok_or_else(|| {
-            ProductSurfaceFailure::TurnSubmissionRejected {
-                reason: "accepted replay missing reply_target_binding_id".into(),
-            }
-        })?;
-
         Ok(Self::NeedsSubmission(Box::new(
             AcceptedProductInboundTurn {
                 binding,
                 thread_scope,
                 message_id: replay.message_id,
                 source_binding_id,
-                reply_target_binding_id,
                 idempotency_key_raw: submit_idempotency_key,
                 received_at,
                 adapter_id,
@@ -1370,7 +1361,6 @@ struct AcceptedProductInboundTurn {
     thread_scope: ThreadScope,
     message_id: ThreadMessageId,
     source_binding_id: String,
-    reply_target_binding_id: String,
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
     adapter_id: ProductAdapterId,
@@ -1399,7 +1389,6 @@ impl AcceptedProductInboundTurn {
             thread_scope,
             message_id,
             source_binding_id,
-            reply_target_binding_id,
             idempotency_key_raw,
             received_at,
             adapter_id,
@@ -1423,49 +1412,6 @@ impl AcceptedProductInboundTurn {
             Some(binding.actor_user_id.clone()),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        // Ref construction is lane-split:
-        // - Webhook: the conversation resolution minted canonical per-event
-        //   refs ("source:…"/"reply:…") that `accept_inbound_message` stored
-        //   verbatim — rebuild them directly; re-wrapping with a
-        //   `bounded_*("src"/"reply", …)` prefix would produce
-        //   "src:source:…" / "reply:reply:…" and no longer match the
-        //   per-event refs anchored to this event's thread.
-        // - Session: keeps the exact scheme the browser transport has always
-        //   written ("webui-src"/"webui-reply" prefixes, the raw client
-        //   action id as the coordinator idempotency key) so durable records
-        //   and replays stay byte-compatible.
-        let (source_binding_ref, reply_target_binding_ref) = match lane {
-            SubmissionLane::Webhook => (
-                SourceBindingRef::new(source_binding_id.clone()).map_err(|e| {
-                    ProductSurfaceFailure::TurnSubmissionRejected {
-                        reason: format!("invalid src ref: {e}"),
-                    }
-                })?,
-                ReplyTargetBindingRef::new(reply_target_binding_id.clone()).map_err(|e| {
-                    ProductSurfaceFailure::TurnSubmissionRejected {
-                        reason: format!("invalid reply ref: {e}"),
-                    }
-                })?,
-            ),
-            SubmissionLane::Session => (
-                bounded_source_binding_ref(
-                    SESSION_SOURCE_BINDING_PREFIX,
-                    &source_binding_id,
-                    DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-                )
-                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: format!("invalid src ref: {e}"),
-                })?,
-                bounded_reply_target_binding_ref(
-                    SESSION_REPLY_BINDING_PREFIX,
-                    &reply_target_binding_id,
-                    DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-                )
-                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: format!("invalid reply ref: {e}"),
-                })?,
-            ),
-        };
         let accepted_message_ref = accepted_message_ref(message_id)?;
         let idempotency_key = match lane {
             SubmissionLane::Webhook => bounded_idempotency_key(
@@ -1517,8 +1463,6 @@ impl AcceptedProductInboundTurn {
             scope: turn_scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
-            source_binding_ref,
-            reply_target_binding_ref,
             requested_run_profile: None,
             requested_model,
             idempotency_key,
@@ -1792,6 +1736,7 @@ fn binding_from_replay(
             }
         })?,
     };
+    use ironclaw_host_api::turn::{ReplyTargetBindingRef, SourceBindingRef};
     let source_binding_ref = replay
         .source_binding_id
         .as_deref()

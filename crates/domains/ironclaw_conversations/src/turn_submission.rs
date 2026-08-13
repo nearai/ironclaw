@@ -15,8 +15,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
-    SourceBindingRef, SubmitTurnResponse, TurnActor, TurnScope, TurnSurfaceType,
+    AcceptedMessageRef, IdempotencyKey, RunOriginAdapter, RunProfileRequest, SubmitTurnResponse,
+    TurnActor, TurnScope, TurnSurfaceType,
 };
 
 /// Trust classification of the ingress that produced a submission.
@@ -54,8 +54,6 @@ pub struct ConversationTurnSubmission {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: DateTime<Utc>,

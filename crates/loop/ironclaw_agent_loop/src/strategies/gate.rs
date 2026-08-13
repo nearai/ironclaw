@@ -45,6 +45,34 @@ impl GateHandlingStrategy for DefaultGateHandlingStrategy {
     }
 }
 
+/// Gate handling for unbound run profiles (unbound-turn design §4.6):
+/// unbound surfaces are non-gating, so an approval, auth, resource, or
+/// dependent-run gate that fires anyway — policy drift, auth expiry mid-run —
+/// fails the run with the typed `gate_not_supported` outcome instead of
+/// parking it with no surface to resolve on. The ONE deliberate exemption is
+/// the ExternalTool gate: its resolver is the submitting client itself, so it
+/// parks exactly like the default strategy.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateNotSupportedStrategy;
+
+#[async_trait]
+impl GateHandlingStrategy for GateNotSupportedStrategy {
+    async fn handle(&self, state: &LoopExecutionState, gate: &GateSummary) -> GateOutcome {
+        match gate.kind {
+            GateKind::ExternalTool => GateOutcome::Block {
+                gate: state.gate_state.clone(),
+            },
+            GateKind::Approval
+            | GateKind::Auth
+            | GateKind::Resource
+            | GateKind::AwaitDependentRun => GateOutcome::Abort {
+                gate: state.gate_state.clone(),
+                failure_kind: LoopFailureKind::GateNotSupported,
+            },
+        }
+    }
+}
+
 /// Loop-side projection of a host capability gate — kind + opaque ref only.
 /// The strategy never sees raw input, secrets, or auth state (per
 /// `contracts/turns-agent-loop.md` §6 + `contracts/lightweight-agent-loop.md`
@@ -340,6 +368,43 @@ mod tests {
                 other => panic!("expected Block for {kind:?}, got {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn unbound_gate_handling_fails_gates_typed_except_external_tool() {
+        let strategy = GateNotSupportedStrategy;
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+        state.gate_state = sample_gate();
+
+        for kind in [
+            GateKind::Approval,
+            GateKind::Auth,
+            GateKind::Resource,
+            GateKind::AwaitDependentRun,
+        ] {
+            let summary = GateSummary {
+                kind,
+                gate_ref: LoopGateRef::new("gate:unbound-test").expect("valid"),
+            };
+            match strategy.handle(&state, &summary).await {
+                GateOutcome::Abort { failure_kind, .. } => {
+                    assert_eq!(failure_kind, LoopFailureKind::GateNotSupported);
+                }
+                other => panic!("expected typed abort for {kind:?}, got {other:?}"),
+            }
+        }
+
+        let external = GateSummary {
+            kind: GateKind::ExternalTool,
+            gate_ref: LoopGateRef::new("gate:unbound-external").expect("valid"),
+        };
+        assert!(
+            matches!(
+                strategy.handle(&state, &external).await,
+                GateOutcome::Block { .. }
+            ),
+            "the external-tool gate parks: its resolver is the submitting client"
+        );
     }
 
     #[test]

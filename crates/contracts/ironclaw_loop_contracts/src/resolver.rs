@@ -236,6 +236,14 @@ impl RunProfileDefinition {
         self
     }
 
+    /// Override the profile's checkpoint policy. Unbound structured-output
+    /// profiles set `allow_no_reply_completion: true` — their terminal output
+    /// is a durable result record, not an assistant reply.
+    pub fn with_checkpoint_policy(mut self, policy: CheckpointPolicy) -> Self {
+        self.checkpoint_policy = policy;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);

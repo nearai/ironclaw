@@ -67,8 +67,6 @@ impl AwaitEdgeStore {
                     parent_run_context: submitted.parent_run_context,
                     tree_root_run_id: submitted.tree_root_run_id,
                     gate_ref: submitted.gate_ref,
-                    source_binding_ref: submitted.source_binding_ref,
-                    reply_target_binding_ref: submitted.reply_target_binding_ref,
                     subagent_kind: submitted.subagent_kind,
                     spawn_capability_id: submitted.spawn_capability_id,
                     spawn_provider_call_id: submitted.spawn_provider_call_id,
@@ -314,10 +312,7 @@ fn map_process_error(error: ironclaw_processes::ProcessJournalStoreError) -> Awa
 mod tests {
     use chrono::Utc;
     use ironclaw_host_api::ids::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
-    use ironclaw_host_api::turn::{
-        LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnGateRef, TurnRunId,
-        TurnScope,
-    };
+    use ironclaw_host_api::turn::{LoopResultRef, TurnActor, TurnGateRef, TurnRunId, TurnScope};
     use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
     use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
 
@@ -362,10 +357,6 @@ mod tests {
                 parent_run_context,
                 tree_root_run_id: parent_run_id,
                 gate_ref: TurnGateRef::new("gate:store-transition").expect("gate"),
-                source_binding_ref: SourceBindingRef::new("source:store-transition")
-                    .expect("source"),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:store-transition")
-                    .expect("reply"),
                 subagent_kind: SubagentKindId::new("general").expect("kind"),
                 spawn_capability_id: CapabilityId::new(
                     ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
@@ -482,8 +473,6 @@ mod tests {
             child_scope: edge.child_scope.clone(),
             child_run_id,
             child_thread_id: edge.child_thread_id.clone(),
-            source_binding_ref: edge.source_binding_ref.clone(),
-            reply_target_binding_ref: edge.reply_target_binding_ref.clone(),
             subagent_kind: edge.subagent_kind.clone(),
             spawn_capability_id: edge.spawn_capability_id.clone(),
             spawn_provider_call_id: edge.spawn_provider_call_id.clone(),

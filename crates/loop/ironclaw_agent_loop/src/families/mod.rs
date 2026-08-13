@@ -9,8 +9,13 @@ use crate::strategies::{
 };
 
 mod subagent;
+mod unbound;
 
 pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent, subagent_with_tool_batch_strategy};
+pub use unbound::{
+    UNBOUND_DEFAULT_FAMILY_DIGEST, UNBOUND_STRUCTURED_FAMILY_DIGEST, unbound_default,
+    unbound_structured,
+};
 
 /// Capability batch strategy selection, owned by the family layer.
 ///

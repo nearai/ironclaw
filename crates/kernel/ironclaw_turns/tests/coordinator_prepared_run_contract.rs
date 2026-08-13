@@ -4,15 +4,15 @@
 //! had no direct coverage: no production caller invokes `prepare_turn` today,
 //! and none of the reservation semantics — consume-once, the cross-scope
 //! `Unauthorized` rejection, the child-run exemption, `abort_prepared_turn`,
-//! the capacity cap — were pinned. Detached turns leans on `submit_turn`
+//! the capacity cap — were pinned. Unbound turns lean on `submit_turn`
 //! admission, so these semantics are pinned FIRST, against unmodified code.
 
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, DefaultTurnCoordinator, IdempotencyKey, ReplyTargetBindingRef,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, test_support::in_memory_agent_turn_runtime,
+    AcceptedMessageRef, DefaultTurnCoordinator, IdempotencyKey, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnRunId,
+    TurnScope, test_support::in_memory_agent_turn_runtime,
 };
 use std::sync::Arc;
 
@@ -38,8 +38,6 @@ fn submit_request(
         scope,
         actor: TurnActor::new(UserId::new("user-prepared-run").expect("user")),
         accepted_message_ref: AcceptedMessageRef::new("accepted-prepared-run").expect("accepted"),
-        source_binding_ref: SourceBindingRef::new("source-prepared-run").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-prepared-run").expect("reply"),
         requested_run_profile: None,
         requested_model: None,
         idempotency_key: IdempotencyKey::new(idempotency_key).expect("idempotency key"),

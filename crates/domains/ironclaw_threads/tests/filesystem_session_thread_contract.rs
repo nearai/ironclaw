@@ -5632,7 +5632,7 @@ async fn filesystem_mark_message_submitted_is_idempotent_for_same_run() {
     assert_eq!(history.messages[0].turn_run_id.as_deref(), Some("run-1"));
 }
 
-/// Taxonomy baseline for detached turns (filesystem twin of the in-memory
+/// Taxonomy baseline for unbound turns (filesystem twin of the in-memory
 /// pin): a thread whose scope carries NO `owner_user_id` lands under scope
 /// axes without an `/owners/<user>` segment, so an owner-scoped listing —
 /// which reads the per-axes thread index — is structurally unable to surface
@@ -5708,5 +5708,132 @@ async fn filesystem_list_threads_excludes_ownerless_threads_from_owner_scoped_li
         ownerless_ids,
         ["t-ownerless-001"],
         "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
+
+fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
+    ironclaw_threads::PreparedContextRequest {
+        scope: ThreadScope {
+            owner_user_id: None,
+            ..scope(label)
+        },
+        actor_id: format!("user-{label}"),
+        system_prompt: "You are a background task.".to_string(),
+        messages: vec![ironclaw_llm::agent_message::AgentMessage {
+            role: ironclaw_llm::agent_message::AgentMessageRole::User,
+            content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                "do the thing",
+            )],
+        }],
+        declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
+            tools: Vec::new(),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({ "type": "object" }),
+            },
+            limits: ironclaw_host_api::prepared_context::TurnLimits {
+                max_model_calls: Some(4),
+                max_capability_invocations: None,
+            },
+        },
+        idempotency_key: key.to_string(),
+        thread_id: None,
+        title: None,
+        metadata_json: None,
+    }
+}
+
+/// Filesystem twin of the in-memory accept-door pins: mint + seed + journal
+/// land durably, the accepted ref pins the last seeded row, and the
+/// journaled declarations read back.
+#[tokio::test]
+async fn filesystem_accept_prepared_context_mints_seeds_and_journals() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("unbound-fs", "unbound-fs-key-1");
+
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    assert!(!accepted.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await
+        .expect("seeded thread history");
+    assert_eq!(history.thread.scope.owner_user_id, None);
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(history.messages[1].status, MessageStatus::Accepted);
+    assert!(history.messages[0].sequence < history.messages[1].sequence);
+    assert_eq!(
+        accepted.accepted_message_ref.as_str(),
+        format!("msg:{}", history.messages[1].message_id)
+    );
+
+    let record = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect("declarations read-back")
+        .expect("record present");
+    assert_eq!(record.declarations, request.declarations);
+
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .expect("context window over seeded thread");
+    assert_eq!(window.messages.len(), 2);
+}
+
+/// Replay discipline on the durable backend: same request → same thread and
+/// pin, no duplicate rows; cross-scope reads stay non-enumerating.
+#[tokio::test]
+async fn filesystem_accept_prepared_context_replays_without_orphans() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("unbound-fs-replay", "unbound-fs-key-replay");
+
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    let replay = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("replay accept");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.accepted_message_ref, first.accepted_message_ref);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: first.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2, "replay must not duplicate rows");
+
+    let foreign_scope = ThreadScope {
+        owner_user_id: None,
+        ..scope("unbound-fs-foreign")
+    };
+    let missing = service
+        .read_prepared_context(&foreign_scope, &first.thread_id)
+        .await;
+    assert!(
+        matches!(missing, Err(SessionThreadError::UnknownThread { .. })),
+        "cross-scope reads must stay non-enumerating, got {missing:?}"
     );
 }

@@ -1206,7 +1206,6 @@ impl HostRuntimeCapabilityHarness {
         ironclaw_composition::test_support::rebind_standalone_trigger_source_turn_state_for_test(
             runtime,
             process_system.lifecycle(),
-            Arc::new(process_system.agent_turn_runtime()),
         )
         .map_err(Into::into)
     }

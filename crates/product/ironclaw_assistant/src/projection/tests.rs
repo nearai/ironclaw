@@ -11,8 +11,7 @@ use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, RunProfileId, RunProfileVersion, SourceBindingRef, TurnGateRef, TurnRunId,
-    TurnStatus,
+    AcceptedMessageRef, RunProfileId, RunProfileVersion, TurnGateRef, TurnRunId, TurnStatus,
 };
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkScheme, NetworkTarget},
@@ -454,8 +453,6 @@ fn turn_run_state(
         run_id,
         status: TurnStatus::BlockedAuth,
         accepted_message_ref: AcceptedMessageRef::new("message:auth-required").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source:auth-required").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:auth-required").unwrap(),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,

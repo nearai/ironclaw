@@ -6,9 +6,7 @@ pub mod store;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, ThreadId};
-use ironclaw_host_api::turn::{
-    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
-};
+use ironclaw_host_api::turn::{LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
@@ -69,10 +67,9 @@ impl EdgeTerminalKind {
 }
 
 /// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus
-/// five additive fields beyond the design doc's exact list (`gate_ref`, the
-/// `source_binding_ref`/`reply_target_binding_ref` pair, `parent_run_context`,
-/// `spawn_provider_call_id`, and `terminal_reason`), each named as a spec
-/// deviation in the PR:
+/// additive fields beyond the design doc's exact list (`gate_ref`,
+/// `parent_run_context`, `spawn_provider_call_id`, and `terminal_reason`),
+/// each named as a spec deviation in the PR:
 ///
 /// - `gate_ref` (D3): the pre-existing shared-batch-gate mechanism (one
 ///   `TurnGateRef` covering N children spawned in one call, parent resumes once
@@ -82,13 +79,6 @@ impl EdgeTerminalKind {
 ///   edges under the same `parent_run_id` sharing this field are one
 ///   settle-group (`resolver.rs`); listing is a cheap list+filter under the
 ///   ≤4-spawns/turn, ≤16-descendants caps this ever sees.
-/// - `source_binding_ref`/`reply_target_binding_ref`: these are pure
-///   deterministic functions of `(parent_run_id, child_run_id)` at spawn time
-///   (`ironclaw_loop_host::subagent_spawn_port`'s private `source_binding_ref`/
-///   `reply_target_binding_ref` helpers) — stored here rather than
-///   recomputed, to avoid duplicating that private format-string logic
-///   across the crate boundary and the drift risk of two copies going stale
-///   independently.
 /// - `spawn_provider_call_id`: pins settlement updates to the original spawn
 ///   transcript row when later `result_read` calls share its result reference.
 ///
@@ -115,8 +105,6 @@ pub struct AwaitEdge {
     pub parent_run_context: ironclaw_loop_contracts::LoopRunContext,
     pub tree_root_run_id: TurnRunId,
     pub gate_ref: TurnGateRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub subagent_kind: SubagentKindId,
     pub spawn_capability_id: CapabilityId,
     #[serde(default, skip_serializing_if = "Option::is_none")]

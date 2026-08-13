@@ -28,8 +28,7 @@ use ironclaw_event_projections::{
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::turn::{
-    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -1154,8 +1153,6 @@ impl RebornBinaryE2EHarness {
                 run_id,
                 gate_resolution_ref: gate_ref,
                 precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
-                source_binding_ref: SourceBindingRef::new("src:resume")?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
                 resume_disposition: None,
             })
@@ -1293,8 +1290,6 @@ impl RebornBinaryE2EHarness {
                 scope: self.turn_scope.clone(),
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
-                source_binding_ref: SourceBindingRef::new("src:retry")?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:retry")?,
                 idempotency_key: IdempotencyKey::new(format!("retry-{run_id}"))?,
             })
             .await?)

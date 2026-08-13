@@ -16,6 +16,7 @@ mod error;
 mod filesystem_service;
 mod identifiers;
 mod in_memory;
+mod prepared_context;
 mod service;
 mod stored_message;
 mod summary_artifacts;
@@ -57,6 +58,10 @@ pub use contract::{
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
+pub use prepared_context::{
+    AcceptedPreparedContext, PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PreparedContextRecord,
+    PreparedContextRequest, ThreadServicePreparedContextSource,
+};
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers
 // reach `AttachmentRef` through this crate without a direct `ironclaw_common`

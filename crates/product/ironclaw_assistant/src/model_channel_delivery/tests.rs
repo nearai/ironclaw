@@ -19,7 +19,6 @@ use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
 };
-use ironclaw_loop_contracts::RunProfileResolver;
 use ironclaw_outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryAttempt, OutboundDeliveryId,
     OutboundDeliveryStatus, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
@@ -27,12 +26,6 @@ use ironclaw_outbound::{
     OutboundPushCandidate, OutboundPushKind,
 };
 use ironclaw_product_contracts::delivery::{ChannelDeliveryResolver, ResolvedChannelDelivery};
-use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, ResumeTurnRequest,
-    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnError,
-    TurnId, TurnRunState, TurnStatus,
-};
 use std::collections::VecDeque as ReportQueue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -146,90 +139,96 @@ fn bare_provider(
     Arc::new(FakeTargetProvider(entries))
 }
 
-/// Scripted run-state lookup: either a fixed state, a `TurnError`, or a
-/// panic on call (proving a scenario never needed the origin check).
-enum ScriptedRunLookup {
-    State(Box<TurnRunState>),
+/// Scripted conversation-binding oracle for the same-origin check: either
+/// "the target ref is bound to the probed thread" (origin), a definitive
+/// not-a-conversation-route read, a backend error, or a panic on call
+/// (proving a scenario never needed the origin check).
+enum ScriptedBindingLookup {
+    Origin,
+    NotOrigin,
     Error,
     Unreachable,
 }
 
-struct ScriptedRunStateStore {
-    lookup: ScriptedRunLookup,
+struct ScriptedBindingService {
+    lookup: ScriptedBindingLookup,
 }
 
 #[async_trait]
-impl AgentTurnRuntimePort for ScriptedRunStateStore {
-    async fn submit_turn(
+impl ironclaw_conversations::ConversationBindingService for ScriptedBindingService {
+    async fn resolve_or_create_binding(
         &self,
-        _request: SubmitTurnRequest,
-        _admission_policy: &dyn TurnAdmissionPolicy,
-        _run_profile_resolver: &dyn RunProfileResolver,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        unreachable!("model channel delivery never submits turns")
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ironclaw_conversations::ConversationBindingResolution, InboundTurnError> {
+        unreachable!("model channel delivery never creates bindings")
     }
 
-    async fn resume_turn(
+    async fn resolve_or_create_binding_with_trusted_scope(
         &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unreachable!("model channel delivery never resumes turns")
+        _request: ironclaw_conversations::ResolveConversationRequest,
+        _trusted_agent_id: Option<AgentId>,
+        _trusted_project_id: Option<ProjectId>,
+        _trusted_owner_user_id: Option<UserId>,
+    ) -> Result<ironclaw_conversations::ConversationBindingResolution, InboundTurnError> {
+        unreachable!("model channel delivery never creates bindings")
     }
 
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unreachable!("model channel delivery never retries turns")
-    }
-
-    async fn request_cancel(
+    async fn lookup_binding(
         &self,
-        _request: CancelRunRequest,
-    ) -> Result<CancelRunResponse, TurnError> {
-        unreachable!("model channel delivery never cancels runs")
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ironclaw_conversations::ConversationBindingResolution, InboundTurnError> {
+        unreachable!("model channel delivery never looks up bindings by envelope")
     }
 
-    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+    async fn link_conversation_to_thread(
+        &self,
+        _request: ironclaw_conversations::LinkConversationRequest,
+    ) -> Result<ironclaw_conversations::LinkedConversationBinding, InboundTurnError> {
+        unreachable!("model channel delivery never links conversations")
+    }
+
+    async fn validate_reply_target(
+        &self,
+        _request: ironclaw_conversations::ValidateReplyTargetRequest,
+    ) -> Result<ironclaw_conversations::ReplyTargetBinding, InboundTurnError> {
+        unreachable!("model channel delivery never validates live reply targets")
+    }
+
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ironclaw_conversations::ResolveStoredReplyTargetRequest,
+    ) -> Result<ironclaw_conversations::StoredReplyTargetBinding, InboundTurnError> {
         match &self.lookup {
-            ScriptedRunLookup::State(state) => {
-                let mut state = state.clone();
-                state.scope = request.scope;
-                state.run_id = request.run_id;
-                Ok(*state)
-            }
-            ScriptedRunLookup::Error => Err(TurnError::Unavailable {
+            ScriptedBindingLookup::Origin => Ok(ironclaw_conversations::StoredReplyTargetBinding {
+                tenant_id: request.tenant_id,
+                actor_user_id: request.actor_user_id,
+                thread_id: request.current_thread_id,
+                adapter_kind: ironclaw_conversations::AdapterKind::new("scripted")
+                    .expect("adapter kind"),
+                adapter_installation_id: ironclaw_conversations::AdapterInstallationId::new(
+                    "scripted-install",
+                )
+                .expect("installation id"),
+                external_conversation_ref: ExternalConversationRef::new(
+                    None::<&str>,
+                    "scripted-conversation",
+                    None,
+                    None,
+                )
+                .expect("conversation ref"),
+                route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            }),
+            ScriptedBindingLookup::NotOrigin => Err(InboundTurnError::ThreadNotFound {
+                thread_id: request.reply_target_binding_ref.as_str().to_string(),
+            }),
+            ScriptedBindingLookup::Error => Err(InboundTurnError::DurableState {
                 reason: "scripted".to_string(),
             }),
-            ScriptedRunLookup::Unreachable => {
-                unreachable!("get_run_state should not be reached for this scenario")
+            ScriptedBindingLookup::Unreachable => {
+                unreachable!("resolve_stored_reply_target should not be reached for this scenario")
             }
         }
     }
-}
-
-fn turn_run_state_with_reply_target(target: ReplyTargetBindingRef) -> Box<TurnRunState> {
-    Box::new(TurnRunState {
-        allow_steering: false,
-        scope: TurnScope::new(tenant(), Some(agent()), Some(project()), thread()),
-        actor: None,
-        turn_id: TurnId::new(),
-        run_id: TurnRunId::new(),
-        status: TurnStatus::Completed,
-        accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("ref"),
-        source_binding_ref: SourceBindingRef::new("src:scripted").expect("ref"),
-        reply_target_binding_ref: target,
-        resolved_run_profile_id: RunProfileId::default_profile(),
-        resolved_run_profile_version: RunProfileVersion::new(1),
-        resolved_model_route: None,
-        model_usage: None,
-        received_at: Utc::now(),
-        checkpoint_id: None,
-        gate_ref: None,
-        blocked_activity_id: None,
-        credential_requirements: Vec::new(),
-        failure: None,
-        event_cursor: EventCursor(1),
-        product_context: None,
-        resume_disposition: None,
-    })
 }
 
 struct RecordingChannelAdapter {
@@ -364,7 +363,7 @@ struct Harness {
 
 fn build_harness(
     entries: Vec<OutboundDeliveryTargetEntry>,
-    lookup: ScriptedRunLookup,
+    lookup: ScriptedBindingLookup,
     reports: Vec<DeliveryReport>,
 ) -> Harness {
     build_harness_with_retry(
@@ -380,7 +379,7 @@ fn build_harness(
 
 fn build_harness_with_retry(
     entries: Vec<OutboundDeliveryTargetEntry>,
-    lookup: ScriptedRunLookup,
+    lookup: ScriptedBindingLookup,
     reports: Vec<DeliveryReport>,
     retry: DeliveryRetryPolicy,
 ) -> Harness {
@@ -397,7 +396,7 @@ fn build_harness_with_retry(
 /// service owner-scopes whatever it is handed.
 fn build_harness_with_provider(
     provider: Arc<dyn OutboundDeliveryTargetProvider>,
-    lookup: ScriptedRunLookup,
+    lookup: ScriptedBindingLookup,
 ) -> Harness {
     build_harness_with_parts(
         provider,
@@ -418,7 +417,7 @@ fn build_harness_with_provider(
 /// unit call — see `.claude/rules/testing.md`, "Test through the caller").
 fn build_harness_with_target_resolver(
     entries: Vec<OutboundDeliveryTargetEntry>,
-    lookup: ScriptedRunLookup,
+    lookup: ScriptedBindingLookup,
     target_resolver: Arc<dyn ProductOutboundTargetResolver>,
 ) -> Harness {
     build_harness_with_parts(
@@ -435,7 +434,7 @@ fn build_harness_with_target_resolver(
 
 fn build_harness_with_parts(
     registry: Arc<dyn OutboundDeliveryTargetProvider>,
-    lookup: ScriptedRunLookup,
+    lookup: ScriptedBindingLookup,
     reports: Vec<DeliveryReport>,
     retry: DeliveryRetryPolicy,
     target_resolver: Arc<dyn ProductOutboundTargetResolver>,
@@ -453,7 +452,8 @@ fn build_harness_with_parts(
         Arc::new(crate::NoDeliveryRegistrations),
         retry,
     ));
-    let run_state: Arc<dyn AgentTurnRuntimePort> = Arc::new(ScriptedRunStateStore { lookup });
+    let binding_service: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        Arc::new(ScriptedBindingService { lookup });
     let deliverer = CoordinatedModelChannelDelivery::new(ModelChannelDeliveryDeps {
         project_filesystem: Arc::new(crate::NoProjectFilesystem),
         fallback_agent_id: ironclaw_host_api::ids::AgentId::new("model-delivery-test")
@@ -462,7 +462,7 @@ fn build_harness_with_parts(
         coordinator,
         outbound_store: Arc::clone(&outbound_store),
         target_resolver,
-        run_state,
+        binding_service,
     });
     Harness {
         deliverer,
@@ -494,7 +494,7 @@ fn sample_attempt() -> OutboundDeliveryAttempt {
 
 #[tokio::test]
 async fn deliver_for_model_rejects_oversized_content() {
-    let harness = build_harness(vec![], ScriptedRunLookup::Unreachable, vec![]);
+    let harness = build_harness(vec![], ScriptedBindingLookup::Unreachable, vec![]);
     let oversized = "a".repeat(MODEL_DELIVERY_MAX_CONTENT_BYTES + 1);
     let request = base_request(target_id("acme-chat-1"), oversized);
     let error = harness
@@ -520,7 +520,7 @@ async fn deliver_for_model_rejects_oversized_content() {
 #[tokio::test]
 async fn deliver_for_model_rejects_unknown_target() {
     // Case 1: registry has no matching entry at all.
-    let harness = build_harness(vec![], ScriptedRunLookup::Unreachable, vec![]);
+    let harness = build_harness(vec![], ScriptedBindingLookup::Unreachable, vec![]);
     let request = base_request(target_id("does-not-exist"), "hello");
     let error = harness
         .deliverer
@@ -545,7 +545,7 @@ async fn deliver_for_model_rejects_unknown_target() {
         OutboundDeliveryTargetOwner::new(tenant(), UserId::new("someone-else").expect("user"));
     let harness = build_harness_with_provider(
         bare_provider(vec![foreign]),
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
     );
     let request = base_request(target_id("acme-chat-1"), "hello");
     let error = harness
@@ -563,10 +563,8 @@ async fn deliver_for_model_rejects_unknown_target() {
     // own still resolves, so Case 2 is proving owner scoping rather than
     // "a bare provider never resolves anything".
     let owned = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness_with_provider(
-        bare_provider(vec![owned]),
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
-    );
+    let harness =
+        build_harness_with_provider(bare_provider(vec![owned]), ScriptedBindingLookup::NotOrigin);
     let request = base_request(target_id("acme-chat-1"), "hello");
     harness
         .deliverer
@@ -580,13 +578,7 @@ async fn deliver_for_model_denies_origin_conversation_target() {
     // Same-origin conflict: the run's own reply-target binding equals the
     // requested explicit target.
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness(
-        vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref(
-            "reply:acme-chat-1",
-        ))),
-        vec![],
-    );
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::Origin, vec![]);
     let request = base_request(target_id("acme-chat-1"), "hello");
     let error = harness
         .deliverer
@@ -597,7 +589,7 @@ async fn deliver_for_model_denies_origin_conversation_target() {
 
     // Run-state read error: fail closed as Unavailable.
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness(vec![entry], ScriptedRunLookup::Error, vec![]);
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::Error, vec![]);
     let request = base_request(target_id("acme-chat-1"), "hello");
     let error = harness
         .deliverer
@@ -610,11 +602,7 @@ async fn deliver_for_model_denies_origin_conversation_target() {
 #[tokio::test]
 async fn deliver_for_model_enforces_per_run_cap() {
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness(
-        vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
-        vec![],
-    );
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::NotOrigin, vec![]);
     let run_id = RunId::new();
     for attempt in 0..MODEL_DELIVERY_PER_RUN_CAP {
         let mut request = base_request(target_id("acme-chat-1"), "hello");
@@ -638,11 +626,7 @@ async fn deliver_for_model_enforces_per_run_cap() {
 #[tokio::test]
 async fn deliver_for_model_scope_without_thread_id_fails_closed() {
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness(
-        vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
-        vec![],
-    );
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::NotOrigin, vec![]);
     let mut request = base_request(target_id("acme-chat-1"), "hello");
     request.scope.thread_id = None;
     let error = harness
@@ -663,11 +647,7 @@ async fn deliver_for_model_scope_without_thread_id_fails_closed() {
 #[tokio::test]
 async fn deliver_for_model_fifo_eviction_resets_an_evicted_runs_counter() {
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness(
-        vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
-        vec![],
-    );
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::NotOrigin, vec![]);
     let evicted_run = RunId::new();
     // Exhaust the evicted run's cap so a retained counter would reject it.
     for _ in 0..MODEL_DELIVERY_PER_RUN_CAP {
@@ -702,11 +682,7 @@ async fn deliver_for_model_fifo_eviction_resets_an_evicted_runs_counter() {
 #[tokio::test]
 async fn deliver_for_model_returns_provider_evidence() {
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
-    let harness = build_harness(
-        vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
-        vec![],
-    );
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::NotOrigin, vec![]);
     let request = base_request(target_id("acme-chat-1"), "hello there");
     let run_id = request.run_id;
     let invocation_id = request.scope.invocation_id;
@@ -925,7 +901,7 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
     let harness = build_harness(
         vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
         vec![DeliveryReport {
             prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Permanent {
@@ -956,11 +932,7 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         None,
     )
     .expect("summary");
-    let harness = build_harness(
-        vec![unresolvable],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
-        vec![],
-    );
+    let harness = build_harness(vec![unresolvable], ScriptedBindingLookup::NotOrigin, vec![]);
     let request = base_request(target_id("acme-chat-1"), "hello");
     let error = harness
         .deliverer
@@ -1122,7 +1094,7 @@ async fn codec_channel_target_resolver_decodes_or_fails_closed() {
             .expect("summary");
     let harness = build_harness_with_target_resolver(
         vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
         Arc::new(CodecChannelTargetResolver::new(vec![Arc::new(
             FakeGrammarCodec,
         )])),
@@ -1148,7 +1120,7 @@ async fn codec_channel_target_resolver_decodes_or_fails_closed() {
     let entry = external_target_entry("acme-chat-1", "reply:unknown-grammar:conv-77");
     let harness = build_harness_with_target_resolver(
         vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
         Arc::new(CodecChannelTargetResolver::new(vec![Arc::new(
             FakeGrammarCodec,
         )])),
@@ -1181,7 +1153,7 @@ async fn codec_channel_target_resolver_decodes_or_fails_closed() {
     let entry = external_target_entry("acme-chat-1", "reply:fake-codec:conv-77");
     let harness = build_harness_with_target_resolver(
         vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
         Arc::new(CodecChannelTargetResolver::new(Vec::new())),
     );
     let error = harness
@@ -1213,7 +1185,7 @@ async fn a_shared_route_participant_cannot_reach_a_legacy_owners_targets() {
 
     let harness = build_harness_with_target_resolver(
         vec![entry],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
         Arc::new(CodecChannelTargetResolver::new(vec![Arc::new(
             FakeGrammarCodec,
         )])),
@@ -1246,7 +1218,7 @@ async fn a_shared_route_participant_cannot_reach_a_legacy_owners_targets() {
     owned.owner = OutboundDeliveryTargetOwner::new(tenant(), subject.clone());
     let harness = build_harness_with_target_resolver(
         vec![owned],
-        ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
+        ScriptedBindingLookup::NotOrigin,
         Arc::new(CodecChannelTargetResolver::new(vec![Arc::new(
             FakeGrammarCodec,
         )])),

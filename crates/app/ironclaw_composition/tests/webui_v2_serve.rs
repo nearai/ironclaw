@@ -323,8 +323,8 @@ mod openai_compat_mount_tests {
         openai_compat_routes,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
-        SubmitTurnRequest, TurnCoordinator, TurnError, TurnRunId,
+        AcceptedMessageRef, IdempotencyKey, SubmitTurnRequest, TurnCoordinator, TurnError,
+        TurnRunId,
     };
 
     const AGENT: &str = "agent-alpha";
@@ -624,12 +624,6 @@ mod openai_compat_mount_tests {
                             scope,
                             actor: caller.actor(),
                             accepted_message_ref: accepted_message_ref.clone(),
-                            source_binding_ref: SourceBindingRef::new("source:openai-chat")
-                                .map_err(ProductSurfaceError::internal_from)?,
-                            reply_target_binding_ref: ReplyTargetBindingRef::new(
-                                "reply:openai-chat",
-                            )
-                            .map_err(ProductSurfaceError::internal_from)?,
                             requested_run_profile: None,
                             requested_model: input.model,
                             idempotency_key: IdempotencyKey::new(

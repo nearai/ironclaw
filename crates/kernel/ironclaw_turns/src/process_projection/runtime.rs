@@ -200,8 +200,6 @@ impl AgentTurnProcessRuntime {
             turn_id,
             actor: Some(request.actor.clone()),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            source_binding_ref: request.source_binding_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
             allow_steering: profile.allow_steering,
@@ -216,7 +214,10 @@ impl AgentTurnProcessRuntime {
             product_context: request.product_context,
             resume_disposition: None,
         };
-        let concurrency_class = process_concurrency_class(metadata.product_context.as_ref());
+        let concurrency_class = process_concurrency_class(
+            metadata.product_context.as_ref(),
+            &metadata.resolved_run_profile_id,
+        );
         let snapshot = self
             .submission
             .submit_process(SubmitProcessRequest {
@@ -248,7 +249,6 @@ impl AgentTurnProcessRuntime {
             resolved_run_profile_version: state.resolved_run_profile_version,
             event_cursor: state.event_cursor,
             accepted_message_ref: state.accepted_message_ref,
-            reply_target_binding_ref: state.reply_target_binding_ref,
         })
     }
 
@@ -278,8 +278,6 @@ impl AgentTurnProcessRuntime {
             scope: request.child_scope.clone(),
             actor: request.actor.clone(),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            source_binding_ref: request.source_binding_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             requested_run_profile: request.requested_run_profile.clone(),
             idempotency_key: request.idempotency_key.clone(),
             received_at: request.received_at,
@@ -305,8 +303,6 @@ impl AgentTurnProcessRuntime {
             turn_id: TurnId::new(),
             actor: Some(request.actor.clone()),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            source_binding_ref: request.source_binding_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
             allow_steering: profile.allow_steering,
@@ -318,7 +314,10 @@ impl AgentTurnProcessRuntime {
             product_context: parent_metadata.product_context,
             resume_disposition: None,
         };
-        let concurrency_class = process_concurrency_class(metadata.product_context.as_ref());
+        let concurrency_class = process_concurrency_class(
+            metadata.product_context.as_ref(),
+            &metadata.resolved_run_profile_id,
+        );
         let snapshot = self
             .submission
             .submit_process(SubmitProcessRequest {
@@ -351,7 +350,6 @@ impl AgentTurnProcessRuntime {
             resolved_run_profile_version: state.resolved_run_profile_version,
             event_cursor: state.event_cursor,
             accepted_message_ref: state.accepted_message_ref,
-            reply_target_binding_ref: state.reply_target_binding_ref,
         })
     }
 
@@ -517,11 +515,12 @@ impl AgentTurnProcessRuntime {
                 run_id: request.run_id,
             });
         }
-        metadata.source_binding_ref = request.source_binding_ref;
-        metadata.reply_target_binding_ref = request.reply_target_binding_ref;
         metadata.model_usage = None;
         metadata.resume_disposition = None;
-        let concurrency_class = process_concurrency_class(metadata.product_context.as_ref());
+        let concurrency_class = process_concurrency_class(
+            metadata.product_context.as_ref(),
+            &metadata.resolved_run_profile_id,
+        );
         let run_id = TurnRunId::new();
         let retry_process_id = process_id_from_turn_run_id(run_id);
         let initial_checkpoint = if let Some(source_ref) = snapshot.checkpoint_ref.as_ref() {
@@ -784,8 +783,6 @@ fn resumed_agent_turn_metadata(
     request: &ResumeTurnRequest,
 ) -> Result<Value, TurnError> {
     let mut metadata = agent_turn_metadata_from_process_snapshot(snapshot)?;
-    metadata.source_binding_ref = request.source_binding_ref.clone();
-    metadata.reply_target_binding_ref = request.reply_target_binding_ref.clone();
     metadata.resume_disposition = request.resume_disposition.clone();
     Ok(json!({ "agent_turn": metadata }))
 }
@@ -813,7 +810,10 @@ impl TurnRunProcessExt for TurnRunRecord {
             crash_reclaim_count: 0,
             created_at: self.received_at,
             owner_user_id: self.scope.explicit_owner_user_id().cloned(),
-            concurrency_class: process_concurrency_class(self.product_context.as_ref()),
+            concurrency_class: process_concurrency_class(
+                self.product_context.as_ref(),
+                &self.profile.id,
+            ),
             parent_process_id: self.parent_run_id.map(process_id_from_turn_run_id),
             root_process_id: self.spawn_tree_root_run_id.map(process_id_from_turn_run_id),
             metadata: json!({ "agent_turn": AgentTurnProcessMetadata::from_record(self) }),
@@ -848,7 +848,10 @@ impl TurnRunStateProcessExt for TurnRunState {
                 .explicit_owner_user_id()
                 .cloned()
                 .or_else(|| self.actor.as_ref().map(|actor| actor.user_id.clone())),
-            concurrency_class: process_concurrency_class(self.product_context.as_ref()),
+            concurrency_class: process_concurrency_class(
+                self.product_context.as_ref(),
+                &self.resolved_run_profile_id,
+            ),
             parent_process_id: None,
             root_process_id: None,
             metadata: json!({ "agent_turn": AgentTurnProcessStateMetadata::from_state(self) }),
@@ -891,7 +894,14 @@ fn process_checkpoint_ref(checkpoint_id: TurnCheckpointId) -> ProcessCheckpointR
 
 fn process_concurrency_class(
     product_context: Option<&ProductTurnContext>,
+    resolved_run_profile_id: &crate::RunProfileId,
 ) -> Option<ProcessConcurrencyClass> {
+    // Unbound runs get their own claim-time class regardless of product
+    // context, so a burst of background work cannot occupy every worker and
+    // delay live conversations (unbound-turn design §9, open question 2).
+    if resolved_run_profile_id.is_unbound() {
+        return Some(ProcessConcurrencyClass::from_trusted("unbound"));
+    }
     match product_context?.origin {
         TurnOriginKind::ScheduledTrigger => {
             Some(ProcessConcurrencyClass::from_trusted("scheduled_trigger"))
@@ -1082,8 +1092,6 @@ fn turn_run_record_from_process_snapshot(
         turn_id: state.turn_id,
         scope: state.scope,
         accepted_message_ref: state.accepted_message_ref,
-        source_binding_ref: state.source_binding_ref,
-        reply_target_binding_ref: state.reply_target_binding_ref,
         status: state.status,
         profile,
         resolved_model_route: state.resolved_model_route,
@@ -1131,8 +1139,6 @@ pub fn turn_run_state_from_process_snapshot(
         run_id: turn_run_id_from_process_id(snapshot.process_id),
         status,
         accepted_message_ref: metadata.accepted_message_ref,
-        source_binding_ref: metadata.source_binding_ref,
-        reply_target_binding_ref: metadata.reply_target_binding_ref,
         resolved_run_profile_id: metadata.resolved_run_profile_id,
         resolved_run_profile_version: metadata.resolved_run_profile_version,
         allow_steering: metadata.allow_steering,

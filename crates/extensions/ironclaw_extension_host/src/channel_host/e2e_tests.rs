@@ -1507,7 +1507,6 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     // Seed the creator's personal DM preference so the triggered approval prompt
     // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
-    let dm_target = dm_reply_target_binding_ref();
     seed_notification_channels(
         outbound.as_ref(),
         &tenant,
@@ -1553,7 +1552,6 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         blocked_run_id,
         TurnStatus::BlockedApproval,
         Some(TurnGateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
-        dm_target,
         AcceptedMessageRef::new("slack:triggered-approval").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
     let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
@@ -1786,7 +1784,6 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     // Seed the creator's personal auth-prompt preference so the triggered auth
     // prompt resolves to team T-A / channel D123 — a personal DM.
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
-    let dm_target = dm_reply_target_binding_ref();
     seed_notification_channels(
         outbound.as_ref(),
         &tenant,
@@ -1829,7 +1826,6 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         run_id,
         TurnStatus::BlockedAuth,
         Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
-        dm_target,
         AcceptedMessageRef::new("slack:triggered-auth").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
     let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
@@ -1940,7 +1936,6 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
 
     // The only notification channel is a shared channel (not a DM).
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
-    let dm_target = dm_reply_target_binding_ref();
     seed_notification_channels(
         outbound.as_ref(),
         &tenant,
@@ -1957,7 +1952,6 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
         run_id,
         TurnStatus::BlockedAuth,
         Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
-        dm_target,
         AcceptedMessageRef::new("slack:triggered-auth-not-dm").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
     let coordinator = Arc::new(ScriptedTriggerCoordinator::new(template));
@@ -3196,20 +3190,12 @@ impl RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (reply_target_binding_ref, accepted_message_ref) = state
+        let accepted_message_ref = state
             .runs
             .get(&run_id)
-            .map(|run| {
-                (
-                    run.reply_target_binding_ref.clone(),
-                    run.accepted_message_ref.clone(),
-                )
-            })
+            .map(|run| run.accepted_message_ref.clone())
             .unwrap_or_else(|| {
-                (
-                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
-                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
-                )
+                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref") // safety: static test accepted ref is valid.
             });
         state.runs.insert(
             run_id,
@@ -3219,7 +3205,6 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                reply_target_binding_ref,
                 accepted_message_ref,
             ),
         );
@@ -3326,20 +3311,12 @@ impl RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (reply_target_binding_ref, accepted_message_ref) = state
+        let accepted_message_ref = state
             .runs
             .get(&run_id)
-            .map(|run| {
-                (
-                    run.reply_target_binding_ref.clone(),
-                    run.accepted_message_ref.clone(),
-                )
-            })
+            .map(|run| run.accepted_message_ref.clone())
             .unwrap_or_else(|| {
-                (
-                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
-                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
-                )
+                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref") // safety: static test accepted ref is valid.
             });
         state.runs.insert(
             run_id,
@@ -3349,7 +3326,6 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                reply_target_binding_ref,
                 accepted_message_ref,
             ),
         );
@@ -3411,7 +3387,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor::default(),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         };
         let run_state = turn_state(
             request.scope,
@@ -3419,7 +3394,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             run_id,
             status,
             gate_ref,
-            request.reply_target_binding_ref,
             request.accepted_message_ref,
         );
         let mut state = self
@@ -3560,7 +3534,6 @@ fn turn_state(
     run_id: TurnRunId,
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
-    reply_target_binding_ref: ReplyTargetBindingRef,
     accepted_message_ref: AcceptedMessageRef,
 ) -> TurnRunState {
     TurnRunState {
@@ -3570,9 +3543,6 @@ fn turn_state(
         run_id,
         status,
         accepted_message_ref,
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("slack:source")
-            .expect("source binding"), // safety: static test source binding is valid.
-        reply_target_binding_ref,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
