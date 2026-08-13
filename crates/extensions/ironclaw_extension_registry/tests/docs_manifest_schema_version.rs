@@ -14,7 +14,7 @@
 //!      packages via `reborn_origin_gate_matrix_ratchet.rs`).
 //!
 //! Scope is the *published* tree: `docs/` minus the publication fence
-//! (`docs/.mintignore`: `internal/`, `reborn/`, `drafts/`, `*.draft.mdx`).
+//! (`docs/.mintignore`: `internal/`, `drafts/`, `*.draft.mdx`).
 //! The fenced areas keep historical plans and explicitly-labeled legacy
 //! examples, which legitimately name the retired literal; the pages users
 //! see must not. The fence patterns are mirrored here as constants rather
@@ -29,7 +29,7 @@ use ironclaw_extension_registry::MANIFEST_SCHEMA_VERSION_V3;
 const RETIRED_SCHEMA_LITERAL: &str = "reborn.extension_manifest.v2";
 
 /// Mirror of the frozen `docs/.mintignore` fence.
-const FENCED_PREFIXES: &[&str] = &["internal/", "reborn/", "drafts/"];
+const FENCED_PREFIXES: &[&str] = &["internal/", "drafts/"];
 const FENCED_SUFFIX: &str = ".draft.mdx";
 
 /// Fail-closed floor: ~130 published pages exist today. A walk that visits

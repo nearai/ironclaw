@@ -1692,8 +1692,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         docs files keep the prose classification."""
         for path in (
             "docs/internal/plans/2026-08-07-doc-truth-pipeline.md",
-            "docs/reborn/README.md",
-            "docs/reborn/contracts/extensions.md",
+            "docs/internal/reborn/README.md",
+            "docs/internal/reborn/contracts/extensions.md",
             "docs/drafts/upcoming.mdx",
             "docs/using/preview.draft.mdx",
             "docs/docs.json",
