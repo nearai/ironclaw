@@ -386,14 +386,10 @@ impl RebornLlmConfigService {
             return Ok(None);
         };
         let snapshot = self.build_provider_snapshot().await?;
-        Ok(policy
-            .provider_id
-            .eq(snapshot
-                .active
-                .as_ref()
-                .map(|active| active.provider_id.as_str())
-                .unwrap_or_default())
-            .then_some(policy))
+        Ok(matching_active_model_policy(
+            policy,
+            snapshot.active.as_ref(),
+        ))
     }
 
     async fn build_snapshot(
@@ -402,12 +398,8 @@ impl RebornLlmConfigService {
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let mut snapshot = self.build_provider_snapshot().await?;
         let stored = self.read_model_policy(caller).await?;
-        snapshot.user_model_policy = stored.filter(|policy| {
-            snapshot
-                .active
-                .as_ref()
-                .is_some_and(|active| active.provider_id == policy.provider_id)
-        });
+        snapshot.user_model_policy = stored
+            .and_then(|policy| matching_active_model_policy(policy, snapshot.active.as_ref()));
         Ok(snapshot)
     }
 
@@ -882,12 +874,12 @@ impl LlmConfigService for RebornLlmConfigService {
             .user_model_preference_store
             .as_ref()
             .ok_or(LlmConfigServiceError::Unavailable)?;
-        let policy = self
-            .active_model_policy(&caller)
-            .await?
-            .ok_or(LlmConfigServiceError::Unavailable)?;
         let model = match request.model {
             Some(model) => {
+                let policy = self
+                    .active_model_policy(&caller)
+                    .await?
+                    .ok_or(LlmConfigServiceError::Unavailable)?;
                 let model = validated_model_id("model", &model)?;
                 if !policy
                     .allowed_models
@@ -920,14 +912,14 @@ impl LlmConfigService for RebornLlmConfigService {
         let Some(active) = snapshot.active else {
             return Err(LlmConfigServiceError::Unavailable);
         };
-        if active.provider_id != policy.provider_id {
+        let Some(policy) = matching_active_model_policy(policy, Some(&active)) else {
             return match requested_model {
                 Some(_) => Err(invalid_model(
                     "the active provider's model policy is not configured",
                 )),
                 None => Ok(None),
             };
-        }
+        };
 
         let preference = if requested_model.is_none() {
             self.read_user_model_preference(&caller).await?.model
@@ -1559,6 +1551,15 @@ fn validated_model_policy(
     })
 }
 
+fn matching_active_model_policy(
+    policy: ModelSelectionPolicy,
+    active: Option<&LlmActiveSelection>,
+) -> Option<ModelSelectionPolicy> {
+    active
+        .is_some_and(|active| active.provider_id == policy.provider_id)
+        .then_some(policy)
+}
+
 fn validated_model_id(field: &'static str, model: &str) -> Result<String, LlmConfigServiceError> {
     let model = model.trim();
     if model.is_empty()
@@ -1961,6 +1962,61 @@ mod tests {
                 .await
                 .expect("workspace default"),
             Some("model-a".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_preference_can_be_reset_after_the_active_provider_changes() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        service
+            .set_user_model_policy(
+                user.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+        service
+            .admin()
+            .set_provider("openai", Some("gpt-test"))
+            .expect("switch active provider");
+
+        assert!(matches!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-a".to_string()),
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::Unavailable)
+        ));
+        assert_eq!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest { model: None },
+                )
+                .await
+                .expect("clear stale preference"),
+            UserModelPreference { model: None },
+        );
+        assert_eq!(
+            service
+                .user_model_preference(user)
+                .await
+                .expect("read cleared preference"),
+            UserModelPreference { model: None },
         );
     }
 

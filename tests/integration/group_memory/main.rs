@@ -16,6 +16,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod scenario_always_on_memory_recall_libsql;
 mod scenario_disabled_binding_offers_no_memory_tools;
 mod scenario_lifecycle_gates_host_memory_calls;
 mod scenario_memory_search_finds_seeded;
@@ -77,6 +78,15 @@ async fn memory_group_e2e() {
     report.record(
         "proactive_prompt_recall_libsql",
         scenario_proactive_prompt_recall_libsql::run().await,
+    );
+
+    // Scenario 7 (#7185): the recall case scenario 6 cannot cover — the reader
+    // opens on a topic sharing no vocabulary with the saved fact, so only the
+    // always-on curated `MEMORY.md` lane can put it in the prompt. Own group,
+    // same libSQL reason as scenario 6.
+    report.record(
+        "always_on_memory_recall_libsql",
+        scenario_always_on_memory_recall_libsql::run().await,
     );
 
     report.assert_all_passed();

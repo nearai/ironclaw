@@ -444,8 +444,8 @@ where
     /// Installs pre-resolved channel conversation history (UNTRUSTED
     /// third-party text from the run's product context). Each prompt build
     /// renders it as exactly ONE system-context block framed by the
-    /// channel-conversation trust preamble; content that fails prompt-safety
-    /// validation is omitted (advisory context never fails the run).
+    /// channel-conversation trust preamble; content that fails structural
+    /// prompt validation is omitted (advisory context never fails the run).
     pub fn with_channel_conversation_context(mut self, context: String) -> Self {
         self.channel_conversation_context = (!context.trim().is_empty()).then_some(context);
         self
@@ -590,7 +590,7 @@ where
 
         // Channel conversation context: exactly ONE framed system-context
         // block per prompt build, mirroring how identity context rides the
-        // same bundle. Content that cannot pass the bundle's prompt-safety
+        // same bundle. Content that cannot pass the bundle's structural
         // validation is dropped here (advisory context never fails the run).
         if let Some(snippet) = self.channel_conversation_context_snippet() {
             instruction_snippets.push(snippet);
@@ -660,10 +660,12 @@ where
 {
     /// The framed channel-conversation block for this run, or `None` when the
     /// run carries no channel context or the assembled block cannot pass the
-    /// same generic model-content validation the instruction bundle applies
-    /// at render time. Pre-validating with [`LoopInlineMessageBody`] (the
-    /// same rule, same crate) is what turns a would-be bundle failure into a
-    /// silent degrade — the memory-lane precedent for untrusted context.
+    /// same structural model-content validation the instruction bundle
+    /// applies at render time. Pre-validating with [`LoopInlineMessageBody`]
+    /// (the same rule, same crate) is what turns a would-be bundle failure
+    /// into a silent degrade — the memory-lane precedent for untrusted
+    /// context. Secret-like values remain intact at this raw context seam and
+    /// are redacted by the final model-gateway boundary.
     fn channel_conversation_context_snippet(&self) -> Option<LoopContextSnippet> {
         let text = self.channel_conversation_context.as_deref()?;
         let content = format!(
@@ -680,7 +682,7 @@ where
             Err(reason) => {
                 tracing::debug!(
                     reason,
-                    "channel conversation context failed prompt-safety validation; \
+                    "channel conversation context failed structural prompt validation; \
                      omitting it from this run"
                 );
                 None
@@ -1287,6 +1289,10 @@ pub struct EmptyLoopCapabilityPort;
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self) -> bool {
+        false
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -2978,7 +2984,21 @@ where
         return Ok(context);
     };
     if context.messages.len() >= max_messages {
-        let displaced = context.messages.remove(0);
+        let mut displaced = context.messages.remove(0);
+        // The pinned task consumes one recent-window slot. If that slot is the
+        // assistant half of a durable assistant/tool-result exchange, evict
+        // the adjacent finalized result as well. This keeps the newest omitted
+        // boundary exact while making it safe for window-eviction compaction;
+        // retaining an orphaned result would also give the model an incomplete
+        // exchange.
+        if displaced.kind == MessageKind::Assistant
+            && context
+                .messages
+                .first()
+                .is_some_and(|message| message.kind == MessageKind::ToolResultReference)
+        {
+            displaced = context.messages.remove(0);
+        }
         if context
             .recent_window_truncation
             .as_ref()
@@ -3145,11 +3165,12 @@ fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
     match kind {
         MessageKind::User => LoopContextCompactionKind::User,
         MessageKind::Assistant => LoopContextCompactionKind::Assistant,
+        MessageKind::ToolResultReference => LoopContextCompactionKind::ToolResult,
         MessageKind::System => LoopContextCompactionKind::System,
         MessageKind::Summary => LoopContextCompactionKind::Summary,
-        MessageKind::CheckpointReference
-        | MessageKind::ToolResultReference
-        | MessageKind::CapabilityDisplayPreview => LoopContextCompactionKind::Other,
+        MessageKind::CheckpointReference | MessageKind::CapabilityDisplayPreview => {
+            LoopContextCompactionKind::Other
+        }
     }
 }
 

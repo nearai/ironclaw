@@ -298,6 +298,69 @@ async fn thread_context_port_pins_the_run_accepted_task_ahead_of_the_recent_tail
 }
 
 #[tokio::test]
+async fn task_pin_evicts_complete_tool_exchange_at_a_compactable_boundary() {
+    let mut fixture = ThreadFixture::new_with_user_content("original task").await;
+    fixture.pin_initial_message_to_run();
+    fixture
+        .thread_service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            content: MessageContent::text("assistant tool call"),
+        })
+        .await
+        .unwrap();
+    fixture
+        .thread_service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            result_ref: "result:pin-boundary".to_string(),
+            safe_summary: ToolResultSafeSummary::new("tool output").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    fixture
+        .accept_user_message("event-4", "recent message")
+        .await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 3,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .messages
+            .iter()
+            .filter_map(|message| message.compaction.as_ref().map(|entry| entry.sequence))
+            .collect::<Vec<_>>(),
+        vec![1, 4]
+    );
+    assert_eq!(
+        bundle.recent_window_truncation,
+        Some(ironclaw_loop_contracts::LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        })
+    );
+}
+
+#[tokio::test]
 async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallback() {
     let fixture = ThreadFixture::new_with_user_content("old short").await;
     fixture
@@ -1361,10 +1424,12 @@ async fn context_port_renders_channel_conversation_context_as_one_framed_block()
 }
 
 #[tokio::test]
-async fn context_port_omits_channel_context_that_fails_prompt_safety() {
+async fn context_port_preserves_secret_like_channel_context_for_gateway_redaction() {
     let fixture = ThreadFixture::new().await;
-    // The loop prompt denylist rejects credential vocabulary; the port must
-    // degrade to no context instead of failing the prompt build later.
+    // The context port retains the raw conversation so false positives cannot
+    // erase useful context. The model gateway owns the final provider-bound
+    // redaction and its contract tests assert that the value never reaches the
+    // provider.
     let adapter = ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -1382,11 +1447,16 @@ async fn context_port_omits_channel_context_that_fails_prompt_safety() {
             mode: PromptMode::TextOnly,
         })
         .await
-        .expect("unsafe advisory context must never fail the context load");
+        .expect("secret-like advisory context must not fail the context load");
 
+    let snippet = bundle
+        .instruction_snippets
+        .iter()
+        .find(|snippet| snippet.snippet_ref == "channel-context:conversation")
+        .expect("channel context must remain available before gateway redaction");
     assert!(
-        bundle.instruction_snippets.is_empty(),
-        "unsafe channel context must be omitted, not rendered"
+        snippet.model_content.contains("the password is hunter2"),
+        "the raw context seam must preserve the original conversation"
     );
 }
 

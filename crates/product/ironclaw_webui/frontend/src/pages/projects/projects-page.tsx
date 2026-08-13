@@ -6,7 +6,6 @@ import { Button } from "../../design-system/button";
 import { EmptyPanel } from "../../design-system/primitives";
 import { useProjectsOverview } from "./hooks/useProjectsOverview";
 import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
-import { useProjectInspector } from "./hooks/useProjectInspector";
 import { FeedbackBanner } from "./components/feedback-banner";
 import { ProjectsSummaryStrip } from "./components/projects-summary-strip";
 import { ProjectsGrid } from "./components/projects-grid";
@@ -22,7 +21,6 @@ export function ProjectsPage() {
 
   const overviewState = useProjectsOverview();
   const workspaceState = useProjectWorkspace(projectId);
-  const inspectorState = useProjectInspector({ projectId, threadId });
 
   const filteredProjects = React.useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -162,7 +160,6 @@ export function ProjectsPage() {
             </div>
           )}
           <FeedbackBanner result={chatFlowError} onDismiss={() => setChatFlowError(null)} />
-          <FeedbackBanner result={inspectorState.actionResult} onDismiss={inspectorState.clearActionResult} />
           {!projectId &&
           (
             <ProjectsSummaryStrip overview={overviewState.overview} />

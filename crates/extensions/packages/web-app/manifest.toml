@@ -1,0 +1,113 @@
+# The web app's channel: browser chat inbound over the authenticated-session
+# entrypoint (the generic session-inbound route, keyed by this extension id)
+# plus outbound Web Push (RFC 8030/8291/8292) to the user's enrolled browsers.
+# Deployment-bound like Telegram — no pairing and no webhook mount; the
+# session transport's authentication IS the trust boundary, and the VAPID key
+# material is generated and seeded by the host at boot (never typed by an
+# operator).
+schema_version = "reborn.extension_manifest.v3"
+id = "web-app"
+name = "Web UI"
+version = "0.1.0"
+description = "Web Push notifications to the web UI's enrolled browsers"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "web-app.extension/v1"
+
+# The VAPID key material handle. A channel egress `credential_handle` MUST be
+# declared here (manifest invariant), so the field is present — but it is
+# `required = false` and NOT operator-supplied: composition generates the
+# keypair at boot and seeds it into the scoped secret store, which is where the
+# `vapid_authorization` egress injection and the notification-setup status
+# detail both read it
+# from (one canonical value, so the advertised `applicationServerKey` matches
+# the signing key). Do not hand-edit it: overwriting the material through
+# operator config rotates the signing key, and until a coherent
+# regenerate-and-republish rotation flow lands, enrollments made against the
+# previous `applicationServerKey` would need to re-enroll after the change
+# takes effect on restart.
+[admin_configuration]
+group_id = "extension.web-app"
+display_name = "Web app deployment configuration"
+description = "Auto-generated VAPID application-server key material for browser push (host-managed; not operator-supplied)."
+fields = [
+  { handle = "web_push_vapid", label = "VAPID key material (auto-generated)", secret = true, required = false, host_managed = true },
+]
+
+# ---- channel surface -------------------------------------------------------
+
+[channel]
+id = "notifications"
+display_name = "Web UI"
+conversation_model = "isolated"
+
+# The reply axis: answering the run's input, source-routed. Replies stream to
+# the browser over the durable projection pipeline (SSE/WebSocket) — the
+# existing WebChat event stream IS this channel's reply sink. `stream` means
+# the HOST publishes and this channel's adapter is never called for a reply,
+# which is why the package implements no reply half at all. That absence is
+# meaningful, not an omission.
+[channel.reply]
+transport = "stream"
+
+# The delivery axis: reaching the user out of band, target-resolved. This is
+# ORTHOGONAL to the reply above, not an alternative — one run can stream its
+# answer into an open tab AND fire a push because the user is not looking.
+# Push cannot deliver until the user has enrolled at least one browser.
+[channel.delivery]
+transport = "push"
+requires_enrollment = true
+
+# The authenticated-session entrypoint: no webhook mount, no route_suffix —
+# a browser request can never reach the webhook namespace. Trust is the host
+# transport's session authentication (T1).
+[channel.ingress]
+method = "post"
+
+[channel.ingress.verification]
+kind = "authenticated_session"
+
+# Exact push-service hosts, in lockstep with
+# `ironclaw_web_app::SUPPORTED_PUSH_SERVICE_HOSTS` (pinned by
+# `tests/manifest_lockstep.rs`). Endpoint paths are opaque per-subscription
+# capability tokens, so the path constraint is the whole-host prefix; the
+# host-level allowlist plus subscribe-time endpoint validation are the
+# security boundary. `vapid_authorization` injection computes the RFC 8292
+# `Authorization: vapid` header host-side from the seeded key material —
+# the adapter never sees key bytes.
+
+[[channel.egress]]
+scheme = "https"
+host = "fcm.googleapis.com"
+methods = ["post"]
+credential_handle = "web_push_vapid"
+path_prefixes = ["/"]
+request_body_limit_bytes = 8192
+response_body_limit_bytes = 65536
+injection = { type = "vapid_authorization" }
+
+[[channel.egress]]
+scheme = "https"
+host = "updates.push.services.mozilla.com"
+methods = ["post"]
+credential_handle = "web_push_vapid"
+path_prefixes = ["/"]
+request_body_limit_bytes = 8192
+response_body_limit_bytes = 65536
+injection = { type = "vapid_authorization" }
+
+[[channel.egress]]
+scheme = "https"
+host = "web.push.apple.com"
+methods = ["post"]
+credential_handle = "web_push_vapid"
+path_prefixes = ["/"]
+request_body_limit_bytes = 8192
+response_body_limit_bytes = 65536
+injection = { type = "vapid_authorization" }
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = false

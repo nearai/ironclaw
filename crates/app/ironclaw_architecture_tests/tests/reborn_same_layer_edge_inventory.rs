@@ -416,14 +416,14 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS6",
     },
     SameLayerEdge {
-        // The web-push subscription store rides the scoped-filesystem plane
+        // The web-app subscription store rides the scoped-filesystem plane
         // (per database.md), the same edge every persisting domain crate
         // carries; both sit at the substrates layer by family rule.
-        crate_name: "ironclaw_web_push",
+        crate_name: "ironclaw_web_app",
         dependency_name: "ironclaw_filesystem",
         layer: "substrates",
         owner: "domains/",
-        decided_in: "web-push channel (2026-08-08)",
+        decided_in: "web-app channel (2026-08-08)",
     },
     SameLayerEdge {
         crate_name: "ironclaw_attachments",
@@ -823,8 +823,8 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_telegram_extension", "products"),
     ("ironclaw_threads", "substrates"),
     ("ironclaw_triggers", "substrates"),
-    ("ironclaw_web_push", "substrates"),
-    ("ironclaw_web_push_extension", "products"),
+    ("ironclaw_web_app", "substrates"),
+    ("ironclaw_web_app_extension", "products"),
     ("ironclaw_trust", "kernel"),
     ("ironclaw_turns", "kernel"),
     ("ironclaw_wasm", "runtimes"),

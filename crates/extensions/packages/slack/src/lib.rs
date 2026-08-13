@@ -1,12 +1,13 @@
 //! Slack channel extension for Reborn (#3857).
 //!
 //! This crate owns Slack protocol parsing/rendering only. Hosts verify Slack
-//! request signatures, stamp trusted inbound context, and route through
-//! ProductSurface admission. The adapter never sees raw Slack signing secrets or bot
-//! tokens.
+//! request signatures, stamp trusted inbound context, and route the translated
+//! message through the host-owned channel workflow. The package sees only
+//! restricted egress handles, never raw Slack signing secrets or bot tokens.
 //!
-//! * [`channel`] — the generic-ingress `ChannelAdapter` (live inbound/outbound,
-//!   incl. `chat.postMessage` egress + mrkdwn rendering).
+//! * [`channel`] — `ChannelIngress`/`ChannelReply`/`ChannelDelivery`: complete
+//!   inbound translation (attachments + shared context) and Slack-native
+//!   output through restricted egress.
 //! * [`delivery`] — Slack Web API response classification and status mapping.
 //! * [`mrkdwn`] — Slack mrkdwn rendering and message chunking.
 //! * [`payload`] — Slack Events API payload normalization.
@@ -28,9 +29,7 @@ pub const SLACK_V2_ADAPTER_ID: &str = "slack_v2";
 pub use channel::SlackChannelAdapter;
 pub use payload::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackInboundEvent, SlackPayloadParseError,
-    SlackUrlVerificationChallenge, classify_channel_interaction_resolution,
-    classify_interaction_resolution, normalize_slack_event, parse_slack_event,
-    parse_slack_url_verification_challenge,
+    normalize_slack_event,
 };
 pub use preference_targets::{
     SlackPreferenceTargetCodec, SlackReplyTargetError,

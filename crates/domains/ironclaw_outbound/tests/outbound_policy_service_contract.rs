@@ -102,7 +102,7 @@ async fn subscription_access_policy_gates_cursor_checkpoint_creation() {
 }
 
 #[tokio::test]
-async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_identity() {
+async fn settled_delivery_replay_uses_the_authoritative_row_without_revalidation() {
     let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
@@ -121,41 +121,28 @@ async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_iden
     assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &candidate.target);
 
-    let second = service
-        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
+    service
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Delivered,
+            updated_at: now(),
+            failure_kind: None,
+        })
         .await
-        .expect("second authorized delivery attempt");
-    assert!(matches!(
-        &second,
-        OutboundDeliveryDecision::Authorized { .. }
-    ));
-    let OutboundDeliveryDecision::Authorized {
-        attempt: second_attempt,
-        ..
-    } = second
-    else {
-        unreachable!("matched above")
-    };
-    assert_eq!(second_attempt.delivery_id, attempt.delivery_id);
-    assert_eq!(
-        validator.calls(),
-        2,
-        "binding is revalidated before every push"
-    );
-
+        .expect("settle delivery");
     validator.deny(candidate.target.clone());
-    let rejected = service
+    let replay = service
         .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
         .await
-        .expect("authorization failure is recorded, not surfaced as send target");
-    let OutboundDeliveryDecision::Rejected { attempt } = rejected else {
-        panic!("expected rejected delivery decision");
+        .expect("settled delivery replay is authoritative");
+    let replayed_attempt = match replay {
+        OutboundDeliveryDecision::AlreadyRecorded { attempt } => attempt,
+        other => panic!("expected authoritative replay, got {other:?}"),
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Failed);
-    assert_eq!(
-        attempt.failure_kind,
-        Some(DeliveryFailureKind::AuthorizationRevoked)
-    );
+    assert_eq!(replayed_attempt.delivery_id, attempt.delivery_id);
+    assert_eq!(replayed_attempt.status, OutboundDeliveryStatus::Delivered);
+    assert_eq!(validator.calls(), 1, "a replay performs no new push");
 
     let attempts = store
         .list_delivery_attempts(scope)
@@ -163,7 +150,115 @@ async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_iden
         .expect("list delivery attempts");
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].delivery_id, attempt.delivery_id);
-    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Delivered);
+}
+
+#[tokio::test]
+async fn prepared_delivery_replay_revalidates_and_reauthorizes() {
+    // A row still `Prepared` means the process died between record and the
+    // Prepared -> Sending claim: no vendor egress happened
+    // (`OutboundDeliveryStatus::Prepared` pins "crash here -> safe to
+    // retry"). Regression: such rows replayed as `AlreadyRecorded` and the
+    // coordinator mapped them to `AlreadyInFlight` forever — the stable
+    // delivery identity was permanently wedged by a crash.
+    let store = in_memory_outbound_store();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let candidate = candidate(&scope, "reply-default", OutboundPushKind::FinalReply);
+
+    validator.allow(candidate.target.clone());
+    let first = service
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
+        .await
+        .expect("first authorized delivery attempt");
+    let OutboundDeliveryDecision::Authorized { attempt, .. } = first else {
+        panic!("expected authorized delivery decision");
+    };
+    // No Prepared -> Sending claim happens: the process "crashes" here.
+
+    let replay = service
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
+        .await
+        .expect("prepared replay re-authorizes");
+    let OutboundDeliveryDecision::Authorized {
+        attempt: replayed,
+        target,
+    } = replay
+    else {
+        panic!("a Prepared row must re-authorize, not wedge as already recorded");
+    };
+    assert_eq!(
+        replayed.delivery_id, attempt.delivery_id,
+        "the stable policy delivery identity is reused"
+    );
+    assert_eq!(replayed.status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(target.target(), &candidate.target);
+    assert_eq!(
+        validator.calls(),
+        2,
+        "a Prepared replay re-validates the live target"
+    );
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("list delivery attempts");
+    assert_eq!(attempts.len(), 1, "the replay reuses the stored row");
+}
+
+#[tokio::test]
+async fn prepared_delivery_replay_after_revocation_fails_closed() {
+    // Revocation between the crash and the replay: the live target no longer
+    // validates, so the replay must settle Rejected — and it must do so
+    // without mutating the stable Prepared row, which a concurrent claimer
+    // could be racing for (only the claim CAS may transition it).
+    let store = in_memory_outbound_store();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let candidate = candidate(&scope, "reply-default", OutboundPushKind::FinalReply);
+
+    validator.allow(candidate.target.clone());
+    let first = service
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
+        .await
+        .expect("first authorized delivery attempt");
+    let OutboundDeliveryDecision::Authorized { attempt, .. } = first else {
+        panic!("expected authorized delivery decision");
+    };
+    validator.deny(candidate.target.clone());
+
+    let replay = service
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
+        .await
+        .expect("revoked prepared replay settles rejected");
+    let OutboundDeliveryDecision::Rejected { attempt: audit } = replay else {
+        panic!("a revoked Prepared replay must reject, not authorize or wedge");
+    };
+    assert_ne!(
+        audit.delivery_id, attempt.delivery_id,
+        "the rejection is a distinct audit row; the stable identity stays claimable"
+    );
+    assert_eq!(audit.status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        audit.failure_kind,
+        Some(DeliveryFailureKind::AuthorizationRevoked)
+    );
+    let attempts = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("list delivery attempts");
+    let stable = attempts
+        .iter()
+        .find(|row| row.delivery_id == attempt.delivery_id)
+        .expect("stable row survives");
+    assert_eq!(
+        stable.status,
+        OutboundDeliveryStatus::Prepared,
+        "the stable row is untouched — only the claim CAS may transition it"
+    );
 }
 
 #[tokio::test]

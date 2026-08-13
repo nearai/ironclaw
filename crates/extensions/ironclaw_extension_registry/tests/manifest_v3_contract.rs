@@ -64,7 +64,7 @@ fn acme_record() -> ExtensionManifestRecord {
     parse_v3(ACME_MANIFEST).expect("acme fixture manifest must parse")
 }
 
-// ---------------------------------------------------------------------------
+// arch-exempt: large_file, manifest-v3 cases remain one conformance suite pending fixture split, plan #7477
 // Parsing the documented v3 shape
 // ---------------------------------------------------------------------------
 
@@ -146,7 +146,14 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
     assert_eq!(channel.id, "messages");
     assert_eq!(channel.conversation_model, ConversationModel::Continuous);
     let ingress = channel.ingress.as_ref().expect("ingress declared");
-    assert_eq!(ingress.route_suffix.as_str(), "events");
+    assert_eq!(
+        ingress
+            .route_suffix
+            .as_ref()
+            .expect("webhook ingress declares a route_suffix")
+            .as_str(),
+        "events"
+    );
 
     assert_eq!(resolved.auth.len(), 1);
     let auth = &resolved.auth[0];
@@ -187,15 +194,29 @@ fn admin_configuration_is_manifest_declared_and_resolved_without_installation_st
     assert_eq!(descriptor.fields.len(), 2);
     assert!(descriptor.fields[0].secret);
     assert!(descriptor.fields[1].secret);
+    assert_eq!(
+        descriptor.fields[0].description,
+        "Issued by the Acme developer console under Bot Settings.",
+        "a manifest-declared field description must survive resolution"
+    );
+    assert!(
+        descriptor.fields[1].description.is_empty(),
+        "a field without a declared description resolves to empty, not an error"
+    );
 }
 
 #[test]
 fn duplicate_admin_configuration_handles_fail_closed() {
-    let toml = ACME_MANIFEST.replace(
-        r#"fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+    let original_fields = r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]"#,
+]"#;
+    assert!(
+        ACME_MANIFEST.contains(original_fields),
+        "fixture fields block drifted; update this replacement source"
+    );
+    let toml = ACME_MANIFEST.replace(
+        original_fields,
         r#"fields = [
   { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
   { handle = "acme_client_id", label = "Duplicate", secret = true, required = true },
@@ -230,11 +251,16 @@ fn channel_runtime_configuration_comes_from_admin_configuration_alone() {
 
 #[test]
 fn channel_runtime_secret_references_must_be_declared_by_admin_configuration() {
-    let toml = ACME_MANIFEST.replace(
-        r#"fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+    let original_fields = r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]"#,
+]"#;
+    assert!(
+        ACME_MANIFEST.contains(original_fields),
+        "fixture fields block drifted; update this replacement source"
+    );
+    let toml = ACME_MANIFEST.replace(
+        original_fields,
         r#"fields = [
   { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
 ]"#,
@@ -348,12 +374,10 @@ fn undeclared_channel_connection_placeholder_fails_closed() {
     let toml = ACME_MANIFEST.replace(
         "[channel.presentation]\n\
          supports_markdown = true\n\
-         supports_threads = false\n\
-         max_message_chars = 4000\n",
+         supports_threads = false\n",
         "[channel.presentation]\n\
          supports_markdown = true\n\
-         supports_threads = false\n\
-         max_message_chars = 4000\n\n\
+         supports_threads = false\n\n\
          [channel.connection]\n\
          provider = \"acme\"\n\
          strategy = \"web_generated_code\"\n\

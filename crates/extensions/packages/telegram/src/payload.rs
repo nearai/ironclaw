@@ -1,18 +1,9 @@
 //! Telegram Bot API payload normalization.
 //!
-//! Inputs are raw webhook update bytes. Outputs are
-//! [`ParsedProductInbound`] values — the host stamps trusted context
-//! ([`TrustedInboundContext::from_verified_evidence`]) and wraps the
-//! result in a [`ProductInboundEnvelope`] outside this crate.
-//!
-//! Ignored-but-authenticated updates (ambient group messages, channel
-//! posts, edited-message kinds we don't act on, messages without a
-//! `from` we can't actor-ref) return `ParsedProductInbound { payload:
-//! ProductInboundPayload::NoOp, .. }` with synthetic external refs for
-//! the slots we genuinely have no source for. This matches the
-//! `ironclaw_assistant` contract that says NoOps must be a
-//! parsed inbound with the explicit `NoOp` payload variant, NOT an
-//! out-of-band `None` path.
+//! Inputs are raw, host-verified webhook update bytes. Outputs are the
+//! provider-neutral channel contract: a complete message, a batch fragment,
+//! or an authenticated ignore decision. Product envelopes are constructed
+//! only after this package boundary.
 
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAttachmentRef, InboundBatchFragment, NormalizedInboundMessage, ProductTriggerReason,
@@ -21,14 +12,11 @@ use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
     ProductAttachmentKind,
 };
-use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ProductAdapterError, ProtocolAuthEvidence,
-};
-use ironclaw_product_contracts::inbound::{
-    InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, UserMessagePayload,
-};
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::attachment_transfer::{ParsedTelegramBatchFragment, ParsedTelegramInboundMessage};
 
 pub const TELEGRAM_API_HOST: &str = "api.telegram.org";
 pub const TELEGRAM_FILE_API_HOST: &str = "api.telegram.org";
@@ -63,118 +51,6 @@ pub enum PayloadParseError {
     MissingUpdateId,
     #[error("invalid external reference: {kind}: {reason}")]
     InvalidExternalRef { kind: &'static str, reason: String },
-    #[error(
-        "auth evidence is not Verified — host MUST verify the webhook before \
-         calling parse_telegram_update"
-    )]
-    UnauthenticatedPayload,
-}
-
-/// Parse a Telegram webhook payload into a [`ParsedProductInbound`]. The
-/// host stamps trusted context outside this function and wraps the
-/// result in a `ProductInboundEnvelope` — that is the kernel/adapter
-/// trust boundary and must not be crossed inside the adapter itself.
-///
-/// Ignored-but-authenticated updates (no message, no `from`, ambient
-/// group chatter, etc.) return a parsed inbound with
-/// `payload = ProductInboundPayload::NoOp` and synthetic external refs
-/// for the slots that genuinely have no source. The webhook still
-/// acks 200 OK; the NoOp payload variant short-circuits inside the
-/// workflow service.
-pub fn parse_telegram_update(
-    raw_payload: &[u8],
-    auth_evidence: &ProtocolAuthEvidence,
-    installation_id: &AdapterInstallationId,
-    group_trigger_policy: &GroupTriggerPolicy,
-) -> Result<ParsedProductInbound, PayloadParseError> {
-    // `ProtocolAuthEvidence` is a sealed struct (formerly an enum). The
-    // host mints verified evidence; components cannot fabricate one.
-    // Reject anything else up front.
-    if !auth_evidence.is_verified() {
-        return Err(PayloadParseError::UnauthenticatedPayload);
-    }
-
-    let update: TelegramUpdate =
-        serde_json::from_slice(raw_payload).map_err(|err| PayloadParseError::InvalidJson {
-            reason: err.to_string(),
-        })?;
-    let update_id = update.update_id;
-    if update_id == 0 {
-        return Err(PayloadParseError::MissingUpdateId);
-    }
-
-    let event_id = build_event_id(installation_id, update_id)?;
-
-    // Choose the message variant. We act on `message` and explicitly drop
-    // `edited_message`, `channel_post`, and other update kinds — they
-    // become `ProductInboundPayload::NoOp` parsed inbounds with
-    // synthetic refs.
-    let Some(message) = update.message else {
-        return noop_parsed_inbound(event_id);
-    };
-
-    // `message.from` is optional in the Telegram schema (anonymous group
-    // admins, channel-style updates that slipped through). Without it we
-    // can't build a real `ExternalActorRef`; return a synthetic-ref NoOp
-    // so the webhook acks 200 OK rather than triggering retries.
-    if message.from.is_none() {
-        return noop_parsed_inbound(event_id);
-    }
-
-    let chat_kind = TelegramChatKind::from_str(message.chat.kind.as_str());
-    let trigger_outcome = classify_trigger(&message, chat_kind, group_trigger_policy);
-    let Some(trigger) = trigger_outcome else {
-        // Ambient group message / unsupported chat kind. We have the
-        // message context so the NoOp gets real refs.
-        let actor_ref = build_actor_ref(message.from.as_ref())?;
-        let conversation_ref = build_conversation_ref(&message)?;
-        return ParsedProductInbound::new(
-            event_id,
-            actor_ref,
-            conversation_ref,
-            ProductInboundPayload::NoOp,
-        )
-        .map_err(adapter_error_to_payload_error);
-    };
-
-    let actor_ref = build_actor_ref(message.from.as_ref())?;
-    let conversation_ref = build_conversation_ref(&message)?;
-    let payload = build_payload(message, trigger, group_trigger_policy)?;
-
-    ParsedProductInbound::new(event_id, actor_ref, conversation_ref, payload)
-        .map_err(adapter_error_to_payload_error)
-}
-
-/// Construct a `ParsedProductInbound { payload: NoOp, .. }` with
-/// synthetic external refs for adapter-side "I can't extract real
-/// context" cases (no `message` field, no `from` field). The synthetic
-/// actor/conversation kinds are deliberate sentinels so a workflow
-/// that mistakenly tries to route a NoOp produces a recognizable
-/// signal in logs.
-fn noop_parsed_inbound(
-    event_id: ExternalEventId,
-) -> Result<ParsedProductInbound, PayloadParseError> {
-    let actor = ExternalActorRef::new("telegram_system", "noop", None::<&str>).map_err(|err| {
-        PayloadParseError::InvalidExternalRef {
-            kind: "external_actor_ref",
-            reason: err.to_string(),
-        }
-    })?;
-    let conversation = ExternalConversationRef::new(None, "noop", None::<&str>, None::<&str>)
-        .map_err(|err| PayloadParseError::InvalidExternalRef {
-            kind: "external_conversation_ref",
-            reason: err.to_string(),
-        })?;
-    ParsedProductInbound::new(event_id, actor, conversation, ProductInboundPayload::NoOp)
-        .map_err(adapter_error_to_payload_error)
-}
-
-fn adapter_error_to_payload_error(err: ProductAdapterError) -> PayloadParseError {
-    // Surface the renderable message; the underlying error variants are
-    // already host-redacted by `ProductAdapterError`.
-    PayloadParseError::InvalidJson {
-        reason: err.to_string(),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,16 +246,15 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
 #[derive(Debug)]
 pub enum TelegramInboundEvent {
     Ignore,
-    Message(Box<NormalizedInboundMessage>),
-    BatchFragment(Box<InboundBatchFragment>),
+    Message(Box<ParsedTelegramInboundMessage>),
+    BatchFragment(Box<ParsedTelegramBatchFragment>),
 }
 
 /// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
 /// Pure protocol work — no I/O, no secrets; the host executed the
 /// `shared_secret_header` recipe before calling this. Applies the same
-/// forwarding rules as [`parse_telegram_update`]: private chats always
-/// forward; groups only on an explicit trigger; everything else is an
-/// authenticated no-op.
+/// forwarding rules: private chats always forward; groups only on an explicit
+/// trigger; everything else is an authenticated no-op.
 pub fn normalize_telegram_update(
     raw_payload: &[u8],
     installation_id: &AdapterInstallationId,
@@ -418,7 +293,7 @@ pub fn normalize_telegram_update(
     let conversation = build_conversation_ref(&message)?;
     let attachments = collect_attachments(&message)?;
     let text = normalize_forwarded_text(&message, group_trigger_policy);
-    let attachments = attachments
+    let pending_attachments = attachments
         .into_iter()
         .map(|descriptor| ChannelAttachmentRef {
             vendor_ref: descriptor.external_file_id.clone(),
@@ -431,14 +306,20 @@ pub fn normalize_telegram_update(
         event_id,
         text,
         trigger,
-        attachments,
+        attachments: Vec::new(),
+        conversation_context: None,
         // Reply routing rides the conversation ref's thread anchors
         // (pre-coordinator delivery path); adopted when the P5 delivery
         // coordinator consumes stored contexts.
         reply_context: None,
     };
     let Some(media_group_key) = scoped_media_group_key else {
-        return Ok(TelegramInboundEvent::Message(Box::new(normalized)));
+        return Ok(TelegramInboundEvent::Message(Box::new(
+            ParsedTelegramInboundMessage {
+                message: normalized,
+                pending_attachments,
+            },
+        )));
     };
     let order = u64::try_from(message.message_id).map_err(|error| {
         PayloadParseError::InvalidExternalRef {
@@ -460,7 +341,12 @@ pub fn normalize_telegram_update(
             kind: "telegram_media_group",
             reason: error.to_string(),
         })?;
-    Ok(TelegramInboundEvent::BatchFragment(Box::new(fragment)))
+    Ok(TelegramInboundEvent::BatchFragment(Box::new(
+        ParsedTelegramBatchFragment {
+            fragment,
+            pending_attachments,
+        },
+    )))
 }
 
 fn normalize_forwarded_text(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> String {
@@ -563,70 +449,11 @@ fn build_conversation_ref(
     })
 }
 
-fn build_payload(
-    message: TelegramMessage,
-    trigger: ProductTriggerReason,
-    policy: &GroupTriggerPolicy,
-) -> Result<ProductInboundPayload, PayloadParseError> {
-    // Emit `Command` whenever the message carries a recognized
-    // `bot_command` entity, regardless of why the message was forwarded.
-    // The `trigger` field still records the forwarding reason
-    // (DirectChat for DMs, BotMention/ReplyToBot for groups, etc.), but
-    // the payload kind is determined by whether a command entity is
-    // actually present. Previously this branch gated on
-    // `trigger == BotCommand` and silently downgraded `/help` to
-    // `UserMessage` in private chats and in mention-triggered group
-    // messages that also contained a `/command`.
-    if let Some((command, arguments)) = extract_first_bot_command(&message, policy) {
-        // Route through `InboundCommandPayload::new` so the shared
-        // `ironclaw_assistant` validation fires on the
-        // untrusted Telegram text: command-token shape and byte limit,
-        // arguments byte limit, control-character rejection. A struct
-        // literal here would bypass those checks and let oversized or
-        // NUL/control-containing arguments cross into the trusted
-        // inbound envelope. Mirrors the `UserMessagePayload::new` call
-        // shape below for the user-message arm.
-        let command_payload =
-            InboundCommandPayload::new(command, arguments, trigger).map_err(|err| {
-                PayloadParseError::InvalidExternalRef {
-                    kind: "inbound_command_payload",
-                    reason: err.to_string(),
-                }
-            })?;
-        return Ok(ProductInboundPayload::Command(command_payload));
-    }
-
-    let mut text = message
-        .text
-        .clone()
-        .or_else(|| message.caption.clone())
-        .unwrap_or_default();
-    text = strip_leading_mention(text, policy);
-    // In-chat gate commands (`approve`/`deny`/`auth deny <gate_ref>`) — the
-    // channel-neutral grammar shared with Slack. The busy/prompt copy the
-    // shared delivery driver posts to this chat advertises these commands,
-    // so they must resolve gates here instead of bouncing off a busy thread
-    // as plain user messages (Ben's 2026-07-17 phantom-affordance loop).
-    if let Some(resolution) =
-        ironclaw_product_contracts::interaction_commands::parse_interaction_resolution_text(
-            ironclaw_product_contracts::interaction_commands::strip_wrapping_inline_code(&text),
-            trigger,
-        )
-        .map_err(|err| PayloadParseError::InvalidExternalRef {
-            kind: "interaction_resolution_payload",
-            reason: err.to_string(),
-        })?
-    {
-        return Ok(resolution);
-    }
-    let attachments = collect_attachments(&message)?;
-    let user_message = UserMessagePayload::new(text, attachments, trigger).map_err(|err| {
-        PayloadParseError::InvalidExternalRef {
-            kind: "user_message_payload",
-            reason: err.to_string(),
-        }
-    })?;
-    Ok(ProductInboundPayload::UserMessage(user_message))
+fn extract_first_addressed_bot_command(
+    message: &TelegramMessage,
+    bot_username: &str,
+) -> Option<(String, String)> {
+    extract_first_matching_bot_command(message, bot_username, |_| true)
 }
 
 fn extract_first_bot_command(
@@ -639,13 +466,6 @@ fn extract_first_bot_command(
             .iter()
             .any(|recognized| recognized.eq_ignore_ascii_case(command))
     })
-}
-
-fn extract_first_addressed_bot_command(
-    message: &TelegramMessage,
-    bot_username: &str,
-) -> Option<(String, String)> {
-    extract_first_matching_bot_command(message, bot_username, |_| true)
 }
 
 fn extract_first_matching_bot_command(
@@ -971,13 +791,5 @@ fn _suppress_unused_field_warnings(update: &TelegramUpdate) {
 }
 
 #[cfg(test)]
-#[path = "tests/payload.rs"]
+#[path = "tests/payload_normalized.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "tests/payload_errors.rs"]
-mod payload_errors;
-
-#[cfg(test)]
-#[path = "tests/payload_ingress_properties.rs"]
-mod ingress_properties;

@@ -107,7 +107,7 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
             audience: CommandAudience::User,
             title: "Model",
             description: "Show or choose your preferred LLM model",
-            usage: "/model [use <model> | default | <model> | set-provider <provider> [--model <model>]]",
+            usage: "/model [use <model> | default]",
         },
         parse: parse_model_command,
     },

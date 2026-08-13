@@ -979,8 +979,6 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "AcmeChat messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -1139,8 +1137,6 @@ service = "pairchat.extension/v1"
 [channel]
 id = "messages"
 display_name = "PairChat messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]

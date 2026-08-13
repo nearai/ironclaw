@@ -158,7 +158,7 @@ already exists.
 - `ironclaw_host_api`: `ToolAdapter` (as in `overview.md` §4.1).
 - `ironclaw_product_adapters`: `ChannelAdapter` (§4.2) with normalized DTOs
   (`NormalizedInboundMessage`, `InboundOutcome`, `OutboundEnvelope`,
-  `DeliveryReport`, `TargetQuery`/`TargetCandidate`). Delete the metadata
+  `DeliveryReport`, `DirectTargetProvisionRequest`). Delete the metadata
   getters from the old `ProductAdapter`; a thin compatibility wrapper may keep
   current callers compiling until P4/P5 cut them over, then it is deleted.
 - New `ironclaw_extension_host`:

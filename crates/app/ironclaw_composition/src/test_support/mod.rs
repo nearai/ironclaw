@@ -61,6 +61,9 @@
 //!     binding over a composed harness's own stores, late-bound into the
 //!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
 //!     issue #6105).
+//! 16. [`session_channel`] — `with_test_authenticated_session_channel` — a
+//!     neutral manifest-backed session channel for composition tests that must
+//!     not link the concrete Web App package.
 
 /// Build the production runtime and return the exact resource governor wired
 /// into its capability path.
@@ -94,6 +97,8 @@ mod project_create;
 mod projection;
 mod refreshing_capability_port;
 mod result_read;
+#[cfg(feature = "test-support")]
+mod session_channel;
 mod skill_activation;
 mod standalone_boot;
 mod trace_capture;
@@ -153,6 +158,8 @@ pub use refreshing_capability_port::{
 };
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
+#[cfg(feature = "test-support")]
+pub use session_channel::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_session_channel};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,

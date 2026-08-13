@@ -95,6 +95,7 @@ async def _open_stubbed_auth_thread(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -520,7 +521,7 @@ async def test_reborn_legacy_auth_prompt_does_not_block_other_thread(
             ),
         )
 
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_B_ID}/messages", handle_send_b)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send_b)
 
     try:
         await _emit_auth_prompt(

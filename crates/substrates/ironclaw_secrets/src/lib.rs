@@ -1117,6 +1117,17 @@ pub trait SecretStorePort: Send + Sync {
         expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError>;
 
+    /// Atomically store a secret only when the scoped handle is absent.
+    /// Returns `true` for the sole writer that created it and `false` when a
+    /// value already exists. Intended for replica-safe generated credentials.
+    async fn put_if_absent(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<bool, SecretStoreError>;
+
     /// Returns redacted metadata for a secret without exposing material.
     async fn metadata(
         &self,

@@ -1,5 +1,5 @@
 //! Generic ingress router contract tests (extension-runtime P4, workstream E).
-//!
+// arch-exempt: large_file, ingress generations stay in one caller-level regression suite, plan #7477
 //! Drives [`ExtensionIngressRouter`] over a REAL `ExtensionHost` snapshot
 //! (activation publishes the route; removal unpublishes it — no router
 //! rebuild) and pins the per-request order: match → method/body/rate/deadline
@@ -7,6 +7,7 @@
 //! 2xx. Checklist: ING-1/2/5/6/7/8-unit/9/11-storage; the recipe byte
 //! semantics themselves are pinned by the verifier unit tests (ING-3/4).
 
+use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,14 +18,15 @@ use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, ChannelError, DeliveryReport, ImmediateResponse, InboundBatchFragment,
-    InboundOutcome, OutboundEnvelope, ProductTriggerReason, VerifiedInbound,
+    ChannelError, ImmediateResponse, InboundBatchFragment, InboundOutcome, ProductTriggerReason,
+    VerifiedInbound,
+};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelIngress, ChannelSurfaces, NormalizedInboundMessage,
 };
 use ironclaw_extension_contracts::external::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
-    ProductAttachmentKind,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_extension_host::inbound_batches::{
     InboundBatchKey, InboundBatchStageOutcome, InboundBatchStageRequest, InboundBatchStore,
@@ -42,6 +44,7 @@ use ironclaw_extension_host::{
     LoadContext, LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::attachment::InboundAttachment;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
 
 /// What the scripted adapter observed per call: forwarded headers, body,
@@ -76,8 +79,6 @@ module = "wasm/acme_chat.wasm"
 [channel]
 id = "messages"
 display_name = "Acme chat"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -139,8 +140,12 @@ struct ScriptedChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for ScriptedChannelAdapter {
-    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for ScriptedChannelAdapter {
+    async fn receive(
+        &self,
+        request: VerifiedInbound<'_>,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         self.inbound_calls.fetch_add(1, Ordering::SeqCst);
         self.seen.lock().expect("seen lock").push((
             request.headers.to_vec(),
@@ -178,16 +183,16 @@ impl ChannelAdapter for ScriptedChannelAdapter {
                 let event = value["event"].as_str().unwrap_or("event-1");
                 let conversation = value["conversation"].as_str().unwrap_or("conv-1");
                 let attachments = if self.mode == AdapterMode::BatchFragment {
-                    vec![ChannelAttachmentRef {
-                        descriptor: ProductAttachmentDescriptor::new(
-                            value["fragment"].as_str().unwrap_or("fragment"),
-                            "text/plain",
-                            value["filename"].as_str().map(str::to_string),
-                            Some(1),
-                            ProductAttachmentKind::Document,
-                        )
-                        .expect("attachment descriptor"),
-                        vendor_ref: value["fragment"].as_str().unwrap_or("fragment").to_string(),
+                    let id = value["fragment"].as_str().unwrap_or("fragment");
+                    let attachment_bytes = value["attachment_bytes"]
+                        .as_u64()
+                        .and_then(|size| usize::try_from(size).ok())
+                        .unwrap_or(1);
+                    vec![InboundAttachment {
+                        id: id.to_string(),
+                        mime_type: "text/plain".to_string(),
+                        filename: value["filename"].as_str().map(str::to_string),
+                        bytes: vec![1; attachment_bytes],
                     }]
                 } else {
                     Vec::new()
@@ -200,6 +205,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
                     text,
                     trigger: ProductTriggerReason::DirectChat,
                     attachments,
+                    conversation_context: None,
                     reply_context: matches!(self.mode, AdapterMode::MessageWithReplyContext)
                         .then(|| b"opaque-reply-route".to_vec()),
                 };
@@ -222,14 +228,6 @@ impl ChannelAdapter for ScriptedChannelAdapter {
                 }
             }
         }
-    }
-
-    async fn deliver(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        Err(ChannelError::Unsupported)
     }
 }
 
@@ -360,7 +358,8 @@ impl ExtensionLoader for FixedLoader {
             ) -> Result<ExtensionBindings, ironclaw_extension_host::BindError> {
                 Ok(ExtensionBindings {
                     tools: None,
-                    channel: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>),
+                    channel: ChannelSurfaces::default()
+                        .with_ingress(Arc::clone(&self.adapter) as Arc<dyn ChannelIngress>),
                 })
             }
         }
@@ -614,17 +613,13 @@ fn batch_fragment(
             event_id: ExternalEventId::new("recovery-event").expect("event"),
             text: text.to_string(),
             trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![ChannelAttachmentRef {
-                descriptor: ProductAttachmentDescriptor::new(
-                    fragment_id,
-                    "text/plain",
-                    Some(format!("{fragment_id}.txt")),
-                    Some(1),
-                    ProductAttachmentKind::Document,
-                )
-                .expect("descriptor"),
-                vendor_ref: fragment_id.to_string(),
+            attachments: vec![InboundAttachment {
+                id: fragment_id.to_string(),
+                mime_type: "text/plain".to_string(),
+                filename: Some(format!("{fragment_id}.txt")),
+                bytes: vec![order as u8],
             }],
+            conversation_context: None,
             reply_context: None,
         },
     }
@@ -691,9 +686,51 @@ async fn concurrent_provider_batch_fragments_admit_one_ordered_atomic_message() 
         admitted[0]
             .attachments
             .iter()
-            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .map(|attachment| attachment.filename.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("first.txt"), Some("second.txt")]
+    );
+}
+
+#[tokio::test]
+async fn provider_batch_rejects_aggregate_attachment_bytes_before_staging() {
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+
+    let fragment_bytes = DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes / 2 + 1;
+    let first_body = format!(
+        r#"{{"batch":"oversized-album","fragment":"file-1","order":1,"event":"oversized-event","conversation":"conv-1","text":"","settle_millis":250,"attachment_bytes":{fragment_bytes}}}"#
+    );
+    let second_body = format!(
+        r#"{{"batch":"oversized-album","fragment":"file-2","order":2,"event":"oversized-event","conversation":"conv-1","text":"read both","settle_millis":250,"attachment_bytes":{fragment_bytes}}}"#
+    );
+
+    let first = harness
+        .router
+        .handle(signed_request(first_body.as_bytes()))
+        .await;
+    assert_eq!(first.status, 200, "the first bounded fragment stages");
+    let second = harness
+        .router
+        .handle(signed_request(second_body.as_bytes()))
+        .await;
+    assert_eq!(
+        second.status, 400,
+        "the fragment that exceeds the batch-wide budget is a permanent rejection"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        harness
+            .admitted_messages
+            .lock()
+            .expect("admitted messages")
+            .is_empty(),
+        "an over-budget batch must never admit a partial message"
     );
 }
 
@@ -745,7 +782,7 @@ async fn sequential_provider_batch_fragments_ack_before_settle_and_admit_once() 
         admitted[0]
             .attachments
             .iter()
-            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .map(|attachment| attachment.filename.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("first.txt"), Some("second.txt")]
     );
@@ -826,7 +863,7 @@ async fn durably_staged_provider_batch_is_recovered_after_store_and_router_recre
         admitted[0]
             .attachments
             .iter()
-            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .map(|attachment| attachment.filename.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("first.txt"), Some("second.txt")]
     );
@@ -978,8 +1015,8 @@ async fn activation_rejects_collision_with_fixed_host_routes() {
     ));
 }
 
-/// ING-2: method, body limit, and rate limit are enforced BEFORE any
-/// verification (secrets untouched) or adapter work.
+/// ING-2: method/body limits run before verification, while the installation
+/// rate limit charges only authenticated vendor traffic before adapter work.
 #[tokio::test]
 async fn method_body_and_rate_limits_run_before_verification_and_adapter() {
     let mut options = HarnessOptions::default();
@@ -1004,8 +1041,15 @@ async fn method_body_and_rate_limits_run_before_verification_and_adapter() {
     assert_eq!(harness.secrets_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.adapter_calls.load(Ordering::SeqCst), 0);
 
-    // Rate limit (2 per window): the third POST is rejected before
-    // verification — secrets consulted exactly twice.
+    // Forged traffic must not spend the verified installation's bucket.
+    let mut forged = signed_request(body);
+    forged
+        .headers
+        .retain(|(name, _)| name != "X-Acme-Signature");
+    assert_eq!(harness.router.handle(forged).await.status, 401);
+
+    // Rate limit (2 per window): the third authenticated POST is rejected
+    // after verification but before adapter work.
     let body = br#"{"text":"hi","event":"ev-rate","conversation":"C-1"}"#;
     assert_eq!(
         harness.router.handle(signed_request(body)).await.status,
@@ -1019,7 +1063,7 @@ async fn method_body_and_rate_limits_run_before_verification_and_adapter() {
         harness.router.handle(signed_request(body)).await.status,
         429
     );
-    assert_eq!(harness.secrets_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.secrets_calls.load(Ordering::SeqCst), 4);
     assert_eq!(harness.adapter_calls.load(Ordering::SeqCst), 2);
 }
 
@@ -1430,8 +1474,12 @@ struct GenerationChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for GenerationChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for GenerationChannelAdapter {
+    async fn receive(
+        &self,
+        _request: VerifiedInbound<'_>,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         if let Some(entered) = &self.entered {
             entered.send(()).map_err(|error| ChannelError::Parse {
                 reason: error.to_string(),
@@ -1442,34 +1490,6 @@ impl ChannelAdapter for GenerationChannelAdapter {
                 reason: error.to_string(),
             })?;
         }
-        let descriptor = ProductAttachmentDescriptor::new(
-            format!("{}-attachment", self.generation),
-            "image/png",
-            Some(format!("{}.png", self.generation)),
-            Some(1),
-            ProductAttachmentKind::Image,
-        )
-        .expect("generation descriptor");
-        Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
-            actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
-            conversation: ExternalConversationRef::new(None, "C-1", None, None)
-                .expect("conversation"),
-            event_id: ExternalEventId::new(format!("event-{}", self.generation)).expect("event"),
-            text: "attachment".to_string(),
-            trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![ChannelAttachmentRef {
-                descriptor,
-                vendor_ref: self.generation.to_string(),
-            }],
-            reply_context: None,
-        }]))
-    }
-
-    async fn fetch_attachment(
-        &self,
-        attachment: &ChannelAttachmentRef,
-        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         egress
             .send(
                 ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest {
@@ -1486,25 +1506,27 @@ impl ChannelAdapter for GenerationChannelAdapter {
                 reason: error.to_string(),
                 retryable: true,
             })?;
-        Ok(ironclaw_host_api::attachment::InboundAttachment {
-            id: attachment.descriptor.external_file_id.clone(),
-            mime_type: attachment.descriptor.mime_type.clone(),
-            filename: attachment.descriptor.filename.clone(),
-            bytes: vec![self.generation.as_bytes()[0]],
-        })
-    }
-
-    async fn deliver(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        Err(ChannelError::Unsupported)
+        Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
+            actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
+            conversation: ExternalConversationRef::new(None, "C-1", None, None)
+                .expect("conversation"),
+            event_id: ExternalEventId::new(format!("event-{}", self.generation)).expect("event"),
+            text: "attachment".to_string(),
+            trigger: ProductTriggerReason::DirectChat,
+            attachments: vec![InboundAttachment {
+                id: format!("{}-attachment", self.generation),
+                mime_type: "image/png".to_string(),
+                filename: Some(format!("{}.png", self.generation)),
+                bytes: vec![self.generation.as_bytes()[0]],
+            }],
+            conversation_context: None,
+            reply_context: None,
+        }]))
     }
 }
 
 struct QueueLoader {
-    adapters: std::sync::Mutex<std::collections::VecDeque<Arc<dyn ChannelAdapter>>>,
+    adapters: std::sync::Mutex<std::collections::VecDeque<Arc<dyn ChannelIngress>>>,
 }
 
 #[async_trait]
@@ -1513,7 +1535,7 @@ impl ExtensionLoader for QueueLoader {
         &self,
         _ctx: &LoadContext,
     ) -> Result<LoadedExtension, ironclaw_extension_host::BindError> {
-        struct Entry(Arc<dyn ChannelAdapter>);
+        struct Entry(Arc<dyn ChannelIngress>);
         impl ExtensionEntrypoint for Entry {
             fn bind(
                 &self,
@@ -1521,7 +1543,8 @@ impl ExtensionLoader for QueueLoader {
             ) -> Result<ExtensionBindings, ironclaw_extension_host::BindError> {
                 Ok(ExtensionBindings {
                     tools: None,
-                    channel: Some(Arc::clone(&self.0)),
+                    channel: ChannelSurfaces::default()
+                        .with_ingress(Arc::clone(&self.0) as Arc<dyn ChannelIngress>),
                 })
             }
         }
@@ -1562,12 +1585,13 @@ impl ironclaw_extension_host::egress::ChannelEgressTransport for GenerationTrans
     }
 }
 
-struct FetchingAdmissionSink {
+struct CompleteAttachmentAdmissionSink {
     fetched_ids: std::sync::Mutex<Vec<String>>,
+    fetched_bytes: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 #[async_trait]
-impl InboundSink for FetchingAdmissionSink {
+impl InboundSink for CompleteAttachmentAdmissionSink {
     async fn admit(
         &self,
         admission: InboundAdmission,
@@ -1580,22 +1604,14 @@ impl InboundSink for FetchingAdmissionSink {
                 retryable: false,
                 reason: "missing attachment".to_string(),
             })?;
-        let egress = admission.channel_egress.ok_or_else(|| InboundSinkError {
-            retryable: true,
-            reason: "missing pinned egress".to_string(),
-        })?;
-        let fetched = admission
-            .channel_adapter
-            .fetch_attachment(attachment, egress.as_ref())
-            .await
-            .map_err(|error| InboundSinkError {
-                retryable: true,
-                reason: error.to_string(),
-            })?;
         self.fetched_ids
             .lock()
             .expect("fetched ids lock")
-            .push(fetched.id);
+            .push(attachment.id.clone());
+        self.fetched_bytes
+            .lock()
+            .expect("fetched bytes lock")
+            .push(attachment.bytes.clone());
         Ok(InboundAdmissionAck::Accepted)
     }
 }
@@ -1624,8 +1640,6 @@ module = "wasm/acme_chat.wasm"
 [channel]
 id = "messages"
 display_name = "Acme chat"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -1661,13 +1675,13 @@ methods = ["post"]
 async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upgrade() {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let old_adapter: Arc<dyn ChannelAdapter> = Arc::new(GenerationChannelAdapter {
+    let old_adapter: Arc<dyn ChannelIngress> = Arc::new(GenerationChannelAdapter {
         generation: "old",
         vendor_host: "old.api.acme.example",
         entered: Some(entered_tx),
         release: std::sync::Mutex::new(Some(release_rx)),
     });
-    let new_adapter: Arc<dyn ChannelAdapter> = Arc::new(GenerationChannelAdapter {
+    let new_adapter: Arc<dyn ChannelIngress> = Arc::new(GenerationChannelAdapter {
         generation: "new",
         vendor_host: "new.api.acme.example",
         entered: None,
@@ -1709,8 +1723,9 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
         .await
         .expect("activate old generation");
 
-    let sink = Arc::new(FetchingAdmissionSink {
+    let sink = Arc::new(CompleteAttachmentAdmissionSink {
         fetched_ids: std::sync::Mutex::new(Vec::new()),
+        fetched_bytes: std::sync::Mutex::new(Vec::new()),
     });
     let router = Arc::new(ExtensionIngressRouter::new(
         host.snapshot_watch(),
@@ -1773,6 +1788,13 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
             .expect("fetched ids lock")
             .as_slice(),
         ["old-attachment"]
+    );
+    assert_eq!(
+        sink.fetched_bytes
+            .lock()
+            .expect("fetched bytes lock")
+            .as_slice(),
+        [vec![b'o']]
     );
     assert_eq!(
         transport

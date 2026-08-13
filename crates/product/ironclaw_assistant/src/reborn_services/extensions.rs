@@ -50,6 +50,9 @@ pub(super) async fn list_extensions(
     service: Arc<dyn LifecycleProductService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     channel_connection_service: Arc<dyn ChannelConnectionService>,
+    session_channels: Option<
+        Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
+    >,
     caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionListResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller.clone());
@@ -59,13 +62,17 @@ pub(super) async fn list_extensions(
         LifecycleProductAction::ExtensionList,
     )
     .await?;
-    // The web UI's browser-push channel is host infrastructure, not a
-    // browse-and-install integration, so keep it out of the install UI while it
-    // stays a working notification channel. Classified by id (see
-    // `is_builtin_host_surface`), not by channel direction.
+    // The deployment's own session channel (the surface this UI itself
+    // fronts) is host infrastructure, not a browse-and-install integration,
+    // so keep it out of the install UI while it stays a working notification
+    // channel. Classified through the session-channel directory — the same
+    // manifest-derived fact the session-inbound route keys on — never by a
+    // hardcoded id.
     let installed = lifecycle_installed_extensions(&lifecycle)
         .into_iter()
-        .filter(|extension| !is_builtin_host_surface(&extension.summary))
+        .filter(|extension| {
+            !is_builtin_host_surface(session_channels.as_deref(), &extension.summary)
+        })
         .collect::<Vec<_>>();
     let connections = channel_connection_service
         .caller_channel_connections(caller.clone())
@@ -94,6 +101,9 @@ pub(super) async fn list_extensions(
 
 pub(super) async fn list_extension_registry(
     service: &dyn LifecycleProductService,
+    session_channels: Option<
+        &dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory,
+    >,
     caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionRegistryResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller);
@@ -126,7 +136,7 @@ pub(super) async fn list_extension_registry(
     Ok(RebornExtensionRegistryResponse {
         entries: registry_entries
             .iter()
-            .filter(|extension| !is_builtin_host_surface(&extension.summary))
+            .filter(|extension| !is_builtin_host_surface(session_channels, &extension.summary))
             .cloned()
             .map(|extension| registry_entry(extension.summary, &installed_ids))
             .collect(),
@@ -227,13 +237,23 @@ async fn lifecycle_extension_infos(
 
 /// The host's own built-in surface — always present, not a browse-and-install
 /// integration — is hidden from the install catalog even though it backs a
-/// channel (the web UI's browser-push channel). This is an explicit id
-/// classification rather than one inferred from channel direction, so it stays
-/// correct as the web-app channel later gains inbound/outbound capabilities.
-/// Naming the package dir here is allowed by `NON_VENDOR_PROVIDER_PACKAGE_DIRS`
-/// (reborn_extension_specificity).
-fn is_builtin_host_surface(summary: &LifecycleExtensionSummary) -> bool {
-    matches!(summary.package_ref.id.as_str(), "web-push")
+/// channel. Classified through the [`SessionChannelDirectory`]: the
+/// deployment's authenticated-session channel IS the surface this product
+/// serves, a manifest-derived fact (`[channel.ingress.verification] kind =
+/// "authenticated_session"`) rather than a hardcoded extension id — generic
+/// code never names a channel. An absent directory hides nothing: catalog
+/// visibility fails OPEN because hiding an installable integration is the
+/// costlier mistake.
+///
+/// [`SessionChannelDirectory`]: ironclaw_product_contracts::session_ingress::SessionChannelDirectory
+fn is_builtin_host_surface(
+    session_channels: Option<
+        &dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory,
+    >,
+    summary: &LifecycleExtensionSummary,
+) -> bool {
+    session_channels
+        .is_some_and(|directory| directory.is_session_channel(summary.package_ref.id.as_str()))
 }
 
 fn registry_entry(
@@ -753,6 +773,7 @@ mod tests {
             Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
+            None,
             caller.clone(),
         )
         .await
@@ -805,6 +826,7 @@ mod tests {
                 Arc::new(service),
                 Some(credentials),
                 no_channel_connections(),
+                None,
                 caller(),
             )
             .await
@@ -834,6 +856,7 @@ mod tests {
             Arc::new(service),
             Some(Arc::new(credentials)),
             no_channel_connections(),
+            None,
             caller(),
         )
         .await
@@ -863,6 +886,7 @@ mod tests {
             Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
+            None,
             caller(),
         )
         .await
@@ -895,6 +919,7 @@ mod tests {
             Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
+            None,
             caller(),
         )
         .await
@@ -981,9 +1006,15 @@ mod tests {
             },
         };
 
-        let response = list_extensions(Arc::new(service), None, no_channel_connections(), caller())
-            .await
-            .expect("list extensions");
+        let response = list_extensions(
+            Arc::new(service),
+            None,
+            no_channel_connections(),
+            None,
+            caller(),
+        )
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(
@@ -1020,6 +1051,7 @@ mod tests {
                 }),
                 None,
                 channel_connections(&[("fixture", false)]),
+                None,
                 caller(),
             )
             .await
@@ -1067,6 +1099,7 @@ mod tests {
                 }),
                 None,
                 no_channel_connections(),
+                None,
                 caller(),
             )
             .await
@@ -1093,6 +1126,7 @@ mod tests {
                 }),
                 None,
                 channel_connections(&[("fixture", true)]),
+                None,
                 caller(),
             )
             .await
@@ -1153,7 +1187,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
 
-        let response = list_extension_registry(&service, caller.clone())
+        let response = list_extension_registry(&service, None, caller.clone())
             .await
             .expect("registry response");
 

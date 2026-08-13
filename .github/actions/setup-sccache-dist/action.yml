@@ -52,13 +52,22 @@ runs:
       run: echo "::notice title=OVH sccache skipped::SCCACHE_DIST_AUTH_TOKEN or OVH Redis cache credentials are unavailable; using local compilation."
 
     - name: Install sccache
+      id: install_sccache
       if: ${{ inputs.auth-token != '' || (inputs.redis-password != '' && inputs.cache-ssh-private-key != '' && inputs.cache-ssh-host != '' && inputs.cache-ssh-known-hosts != '') }}
+      # Compilation caching is optional; a release-asset outage must not keep
+      # the caller's tests from running without a cache.
+      continue-on-error: true
       uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
       with:
         version: v0.16.0
 
+    - name: Fall back to local compilation
+      if: ${{ steps.install_sccache.outcome == 'failure' }}
+      shell: bash
+      run: echo "::warning title=sccache installation failed::The optional sccache binary could not be installed; using local compilation."
+
     - name: Configure OVH sccache
-      if: ${{ inputs.auth-token != '' || (inputs.redis-password != '' && inputs.cache-ssh-private-key != '' && inputs.cache-ssh-host != '' && inputs.cache-ssh-known-hosts != '') }}
+      if: ${{ (inputs.auth-token != '' || (inputs.redis-password != '' && inputs.cache-ssh-private-key != '' && inputs.cache-ssh-host != '' && inputs.cache-ssh-known-hosts != '')) && steps.install_sccache.outcome == 'success' }}
       shell: bash
       env:
         SCCACHE_CACHE_SSH_HOST: ${{ inputs.cache-ssh-host }}

@@ -296,6 +296,14 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   preserves host approval, authentication, authorization, and policy gates.
   The trusted turn origin is the switch; an interactive run must not receive
   this protocol merely because it shares a run profile or process.
+- A graceful scheduled-trigger exit is valid only when its final assistant
+  reply is non-empty and its trimmed final line does not end in `?`. Empty
+  replies and question-ending replies use the existing bounded, tools-capable
+  completion-nudge path. If no further nudge is available, the loop exits with
+  `invalid_model_output` instead of `Completed`. Every rejected assistant reply
+  remains in the transcript and failed-exit evidence. This validation is keyed
+  on `TurnOriginKind::ScheduledTrigger`; interactive question-ending replies
+  retain their conversational completion behavior.
 
 Host-trusted trigger ingress request fields are:
 
@@ -543,7 +551,7 @@ unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
 persists the result without external egress. Trigger execution itself still
 does not choose, parse, or infer a destination. (✎ 2026-08-08: the retired
 in-app "WebApp selection" sentence above describes the pre-#7157 stored-target
-model; under the shipped two-lane model the `web-push` catalog target is a
+model; under the shipped two-lane model the `web-app` catalog target is a
 real external destination — a routine that should notify the browser pins it
 in the prompt's delivery step like any channel target, and the
 notification-channel set fans gate/auth/failure notices to it when selected.)

@@ -1019,6 +1019,7 @@ async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
             content_type="application/json",
             body=json.dumps(
                 {
+                    "session_channel_extension_id": "web-app",
                     "tenant_id": "reborn-v2-e2e",
                     "user_id": USER_ID,
                     "capabilities": {},
@@ -1342,7 +1343,7 @@ async def test_reborn_v2_chat_request_failure_uses_selected_language(
         "**/api/webchat/v2/threads", handle_create_thread
     )
     await reborn_v2_page.route(
-        f"**/api/webchat/v2/threads/{thread_id}/messages", fail_send
+        "**/api/webchat/v2/channels/*/messages", fail_send
     )
 
     await reborn_v2_page.goto(
@@ -2237,6 +2238,7 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2534,6 +2536,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2580,7 +2583,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -2658,6 +2661,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2712,7 +2716,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -2786,6 +2790,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2847,7 +2852,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -3251,6 +3256,7 @@ async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -3601,6 +3607,7 @@ async def test_reborn_v2_loading_older_messages_preserves_viewport(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

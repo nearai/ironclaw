@@ -80,7 +80,7 @@ ironclaw_network = { path = "../../substrates/ironclaw_network" }
 ironclaw_observability = { path = "../../substrates/ironclaw_observability" }
 ironclaw_operator = { path = "../../product/ironclaw_operator" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound" }
-ironclaw_web_push = { path = "../../domains/ironclaw_web_push" }
+ironclaw_web_app = { path = "../../domains/ironclaw_web_app" }
 ironclaw_processes = { path = "../../kernel/ironclaw_processes" }
 ironclaw_assistant = { path = "../../product/ironclaw_assistant" }
 ironclaw_turn_runner = { path = "../../loop/ironclaw_turn_runner" }

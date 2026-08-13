@@ -953,6 +953,67 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
     );
 }
 
+/// Secret labels in structured file output must redact their paired values
+/// before the preview vocabulary hides the label itself. Otherwise the next
+/// model request sees `"[redacted]": "opaque-value"` and no later scanner can
+/// recover that the surviving value was credential material.
+#[tokio::test]
+async fn durable_read_file_result_redacts_structured_credential_value() {
+    let canary = "never-before-uploaded-canary-integration";
+    let marker = "structured-credential-redaction-marker";
+    let content = serde_json::json!({
+        "marker": marker,
+        "password": canary,
+        "secretary": "Treasury contact",
+    })
+    .to_string();
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.read_file",
+                json!({"path": "/workspace/structured-secret.json"}),
+            ),
+            RebornScriptedReply::text("read it"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let workspace_path = h
+        .capability_recorder
+        .workspace_file_path("structured-secret.json")
+        .expect("durable file-tools harness exposes its workspace");
+    std::fs::write(&workspace_path, content)
+        .expect("structured fixture is seeded outside the model");
+
+    h.submit_turn("read the structured file")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("builtin.read_file")
+        .await
+        .expect("read_file ran");
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, marker)
+        .await
+        .expect("benign structured content survives in the model-visible result");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "Treasury contact",
+    )
+    .await
+    .expect("credential substrings in benign keys do not cause false-positive redaction");
+    assert!(
+        h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, canary)
+            .await
+            .is_err(),
+        "the credential value must not survive in the model-visible tool result"
+    );
+    assert!(
+        h.assert_model_request_contains(canary).await.is_err(),
+        "the credential value must never reach a model request"
+    );
+}
+
 /// `result_read` continuation (issue #5838): two subsequent scripted turns on
 /// the SAME thread page the durable `read_file` result. Page two is invoked
 /// exclusively with the `result_ref` and `next_offset` surfaced by page one,

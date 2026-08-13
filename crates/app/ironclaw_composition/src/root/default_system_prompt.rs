@@ -40,21 +40,47 @@ pub(crate) enum DefaultSystemPromptError {
     },
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct DefaultSystemPromptIdentitySource {
-    storage_root: PathBuf,
-    prompt_path: PathBuf,
+/// Which conditional protocol sections this runtime appends to the resolved
+/// system prompt.
+///
+/// Named fields rather than positional `bool`s: every one of these describes a
+/// capability the prompt is allowed to claim, and a swapped pair would silently
+/// tell the model about a surface it does not have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SystemPromptProtocols {
     /// When true, the progressive tool-disclosure protocol is appended to the
     /// system prompt so the model is told to discover deferred tools via
     /// `tool_search`. Set from the resolved tool-disclosure mode at build time;
     /// off ⇒ the prompt carries the file plus the unconditional self-knowledge
     /// section, and nothing that references the bridge tools.
-    disclosure_protocol_active: bool,
+    pub(crate) disclosure: bool,
     /// When true, the benchmarking-mode protocol is appended, telling the
     /// model no human is available to answer clarifying questions. Set from
     /// the `BENCHMARKING_MODE` env var at build time (see `runtime.rs`); off
     /// by default, so normal product usage is unaffected.
-    benchmarking_mode_active: bool,
+    pub(crate) benchmarking_mode: bool,
+    /// The bound memory provider's own guidance text, appended verbatim, or
+    /// `None` when no provider is bound or the bound one ships none. Resolved
+    /// at build time from the provider's `[memory].guidance_doc` (see
+    /// `runtime.rs`).
+    ///
+    /// Content rather than a flag, because the text is not the host's to write.
+    /// It names concrete `ironclaw.memory.*` tools and describes one provider's
+    /// recall behavior, so the provider that implements them owns what it says
+    /// — a search-first backend needs to tell the model something different
+    /// from one that serves a standing document. A `Disabled` binding registers
+    /// no package and the model's surface carries no memory tools at all, so
+    /// `None` there is what keeps the prompt from claiming a surface the
+    /// deployment does not have. Same reasoning as `disclosure`: guidance that
+    /// names concrete tools must not outlive those tools.
+    pub(crate) memory_guidance: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DefaultSystemPromptIdentitySource {
+    storage_root: PathBuf,
+    prompt_path: PathBuf,
+    protocols: SystemPromptProtocols,
     loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
 }
 
@@ -62,15 +88,13 @@ impl DefaultSystemPromptIdentitySource {
     pub(crate) fn try_new(
         storage_root: PathBuf,
         prompt_path: PathBuf,
-        disclosure_protocol_active: bool,
-        benchmarking_mode_active: bool,
+        protocols: SystemPromptProtocols,
     ) -> Result<Self, DefaultSystemPromptError> {
         read_default_system_prompt(&storage_root, &prompt_path)?;
         Ok(Self {
             storage_root,
             prompt_path,
-            disclosure_protocol_active,
-            benchmarking_mode_active,
+            protocols,
             loaded_identity_content: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -84,10 +108,13 @@ impl DefaultSystemPromptIdentitySource {
         // — and so existing installs get them, not just freshly seeded ones.
         let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
         append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
-        if self.disclosure_protocol_active {
+        if let Some(guidance) = self.protocols.memory_guidance.as_deref() {
+            append_section(&mut content, guidance);
+        }
+        if self.protocols.disclosure {
             append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
         }
-        if self.benchmarking_mode_active {
+        if self.protocols.benchmarking_mode {
             append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_PROMPT);
         }
         if matches!(
@@ -330,359 +357,4 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
 }
 
 #[cfg(test)]
-mod tests {
-    use ironclaw_host_api::{
-        ids::{TenantId, ThreadId, UserId},
-        turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
-    };
-    use ironclaw_loop_contracts::{
-        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
-    };
-    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
-
-    use super::*;
-
-    async fn test_run_context() -> LoopRunContext {
-        let profile = InMemoryRunProfileResolver::default()
-            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-            .await
-            .expect("profile resolves");
-        let scope = TurnScope::new(
-            TenantId::new("tenant-default-system-prompt").expect("valid"),
-            None,
-            None,
-            ThreadId::new("thread-default-system-prompt").expect("valid"),
-        );
-        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile)
-    }
-
-    async fn run_context_with_origin(origin: TurnOriginKind) -> LoopRunContext {
-        test_run_context()
-            .await
-            .with_product_context(ProductTurnContext::new(
-                origin,
-                None,
-                None,
-                TurnOwner::Personal {
-                    user: UserId::new("prompt-test-owner").expect("valid user id"),
-                },
-            ))
-    }
-
-    #[tokio::test]
-    async fn default_system_prompt_loads_and_resolves_as_identity_message() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-        let source = DefaultSystemPromptIdentitySource::try_new(
-            storage_root,
-            prompt_path.clone(),
-            false,
-            false,
-        )
-        .expect("prompt loads");
-        let context = test_run_context().await;
-
-        let candidates = source
-            .load_identity_candidates(&context, PromptMode::TextOnly)
-            .await
-            .expect("load candidates");
-
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].name.as_str(), DEFAULT_SYSTEM_PROMPT_NAME);
-        assert!(
-            prompt_path.exists(),
-            "source should seed the editable standalone prompt file"
-        );
-
-        let content = source
-            .resolve_identity_message_content(
-                &context,
-                candidates[0]
-                    .message_ref
-                    .as_ref()
-                    .expect("trusted identity has ref"),
-            )
-            .await
-            .expect("resolve content")
-            .expect("content exists");
-
-        assert!(
-            content
-                .content
-                .contains("When a tool result is partial, truncated, failed")
-        );
-        // Self-knowledge must be grounded in the published docs site rather than
-        // recalled from training data (#6734): the prompt has to name the
-        // llms.txt index and the `.md` raw-markdown suffix, or the model has no
-        // way to look its own capabilities up. The guidance is ground knowledge
-        // about the runtime, so it is appended in memory rather than seeded into
-        // the user-editable file — otherwise only fresh installs would get it.
-        assert!(
-            !std::fs::read_to_string(&prompt_path)
-                .expect("seeded prompt reads")
-                .contains("docs.ironclaw.com"),
-            "docs grounding must not be seeded into the user-editable prompt file"
-        );
-        assert!(
-            content
-                .content
-                .contains("https://docs.ironclaw.com/llms.txt"),
-            "prompt must point capability questions at the docs index"
-        );
-        assert!(
-            content.content.contains(".md"),
-            "prompt must teach the raw-markdown `.md` suffix for docs pages"
-        );
-        assert!(
-            !content.content.contains("tool_search"),
-            "disclosure-off prompt must not mention the bridge tools"
-        );
-    }
-
-    #[tokio::test]
-    async fn disclosure_active_appends_tool_search_protocol_to_system_prompt() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-
-        let off = DefaultSystemPromptIdentitySource::try_new(
-            storage_root.clone(),
-            prompt_path.clone(),
-            false,
-            false,
-        )
-        .expect("off source loads");
-        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true, false)
-            .expect("on source loads");
-        let context = test_run_context().await;
-
-        async fn resolve_content(
-            source: &DefaultSystemPromptIdentitySource,
-            context: &LoopRunContext,
-        ) -> String {
-            let candidates = source
-                .load_identity_candidates(context, PromptMode::TextOnly)
-                .await
-                .expect("candidates load");
-            source
-                .resolve_identity_message_content(
-                    context,
-                    candidates[0]
-                        .message_ref
-                        .as_ref()
-                        .expect("trusted identity has ref"),
-                )
-                .await
-                .expect("resolve content")
-                .expect("content exists")
-                .content
-        }
-
-        let off_content = resolve_content(&off, &context).await;
-        let on_content = resolve_content(&on, &context).await;
-
-        // The base prompt is preserved verbatim, and only the active source teaches
-        // the search/describe/call protocol — so the model is actually told the
-        // deferred long tail exists and how to reach it.
-        assert!(on_content.starts_with(off_content.trim_end()));
-        assert!(!off_content.contains("tool_search"));
-        assert!(on_content.contains("tool_search"));
-        assert!(on_content.contains("tool_describe"));
-        assert!(on_content.contains("tool_call"));
-        assert!(on_content.contains("Tool Discovery"));
-        assert!(
-            on_content.contains("When `tool_search` is present"),
-            "bridged-mode guidance must be conditional on the outgoing surface actually advertising tool_search"
-        );
-        assert!(
-            on_content.contains("When `tool_search` is absent"),
-            "below-threshold guidance must direct the model to use the complete direct surface"
-        );
-    }
-
-    #[tokio::test]
-    async fn benchmarking_mode_active_appends_no_human_protocol_to_system_prompt() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-
-        let off = DefaultSystemPromptIdentitySource::try_new(
-            storage_root.clone(),
-            prompt_path.clone(),
-            false,
-            false,
-        )
-        .expect("off source loads");
-        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, true)
-            .expect("on source loads");
-        let context = test_run_context().await;
-
-        async fn resolve_content(
-            source: &DefaultSystemPromptIdentitySource,
-            context: &LoopRunContext,
-        ) -> String {
-            let candidates = source
-                .load_identity_candidates(context, PromptMode::TextOnly)
-                .await
-                .expect("candidates load");
-            source
-                .resolve_identity_message_content(
-                    context,
-                    candidates[0]
-                        .message_ref
-                        .as_ref()
-                        .expect("trusted identity has ref"),
-                )
-                .await
-                .expect("resolve content")
-                .expect("content exists")
-                .content
-        }
-
-        let off_content = resolve_content(&off, &context).await;
-        let on_content = resolve_content(&on, &context).await;
-
-        // The base prompt is preserved verbatim, and only the active source
-        // adds the no-human protocol — real product usage (mode off) is
-        // byte-identical to today's prompt.
-        assert!(on_content.starts_with(off_content.trim_end()));
-        assert!(!off_content.contains("Automated Evaluation Mode"));
-        assert!(on_content.contains("Automated Evaluation Mode"));
-        assert!(on_content.contains("no one to answer a clarifying question"));
-    }
-
-    #[tokio::test]
-    async fn scheduled_trigger_origin_appends_unattended_protocol_only_to_triggered_runs() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-        let source =
-            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, false)
-                .expect("prompt loads");
-        let interactive_context = run_context_with_origin(TurnOriginKind::Inbound).await;
-        let scheduled_context = run_context_with_origin(TurnOriginKind::ScheduledTrigger).await;
-
-        async fn resolve_content(
-            source: &DefaultSystemPromptIdentitySource,
-            context: &LoopRunContext,
-        ) -> String {
-            let candidates = source
-                .load_identity_candidates(context, PromptMode::TextOnly)
-                .await
-                .expect("candidates load");
-            source
-                .resolve_identity_message_content(
-                    context,
-                    candidates[0]
-                        .message_ref
-                        .as_ref()
-                        .expect("trusted identity has ref"),
-                )
-                .await
-                .expect("resolve content")
-                .expect("content exists")
-                .content
-        }
-
-        let interactive_content = resolve_content(&source, &interactive_context).await;
-        let scheduled_content = resolve_content(&source, &scheduled_context).await;
-
-        assert!(
-            !interactive_content.contains("Unattended Scheduled Run"),
-            "interactive runs must retain the ordinary ask-the-user escape valve"
-        );
-        assert!(scheduled_content.contains("Unattended Scheduled Run"));
-        assert!(scheduled_content.contains("There is no human present"));
-        assert!(scheduled_content.contains("Never end the run with a question"));
-        assert!(scheduled_content.contains("final reply is the run's recorded output"));
-    }
-
-    #[tokio::test]
-    async fn default_system_prompt_reloads_edited_prompt_for_new_candidates() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-        let source = DefaultSystemPromptIdentitySource::try_new(
-            storage_root.clone(),
-            prompt_path.clone(),
-            false,
-            false,
-        )
-        .expect("prompt loads");
-        let context = test_run_context().await;
-        let first_candidates = source
-            .load_identity_candidates(&context, PromptMode::TextOnly)
-            .await
-            .expect("first candidates load");
-
-        std::fs::write(&prompt_path, "edited standalone prompt").expect("prompt edits");
-        let edited_candidates = source
-            .load_identity_candidates(&context, PromptMode::TextOnly)
-            .await
-            .expect("edited candidates load");
-
-        assert_ne!(
-            first_candidates[0].message_ref,
-            edited_candidates[0].message_ref
-        );
-        let content = source
-            .resolve_identity_message_content(
-                &context,
-                edited_candidates[0]
-                    .message_ref
-                    .as_ref()
-                    .expect("trusted identity has ref"),
-            )
-            .await
-            .expect("resolve edited content")
-            .expect("edited content exists");
-
-        // The user's edited base is preserved verbatim and stays first, but the
-        // docs-grounding self-knowledge section is ground knowledge about the
-        // runtime (#6734): it is appended unconditionally, so an install whose
-        // SYSTEM.md predates the guidance (or was edited to drop it) still tells
-        // the model to look its own capabilities up instead of guessing.
-        assert!(content.content.starts_with("edited standalone prompt"));
-        assert!(
-            content.content.contains("## Self-Knowledge"),
-            "self-knowledge guidance must be appended even when SYSTEM.md omits it"
-        );
-        assert!(
-            content
-                .content
-                .contains("https://docs.ironclaw.com/llms.txt"),
-            "appended guidance must point capability questions at the docs index"
-        );
-        assert!(
-            content.content.contains(".md"),
-            "appended guidance must teach the raw-markdown `.md` suffix for docs pages"
-        );
-        assert!(
-            !content.content.contains("tool_search"),
-            "disclosure-off prompt must not mention the bridge tools"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn default_system_prompt_rejects_symlink() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        std::fs::create_dir_all(prompt_path.parent().expect("parent")).expect("prompt parent");
-        let target = storage_root.join("target.md");
-        std::fs::write(&target, "linked prompt").expect("target prompt");
-        std::os::unix::fs::symlink(&target, &prompt_path).expect("prompt symlink");
-
-        let error = seed_default_system_prompt(&storage_root, &prompt_path)
-            .expect_err("symlink should be rejected");
-
-        assert!(error.to_string().contains("must not be a symlink"));
-    }
-}
+mod tests;

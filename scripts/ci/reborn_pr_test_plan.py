@@ -389,6 +389,15 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
+    #   * `preflight-gates.sh` is the local pre-push gate gauntlet proposed by
+    #     the 2026-08 gate audit (docs/internal/gate-audit-2026-08.md §4.3);
+    #     referenced by no workflow, so no lane can be selected for it.
+    "scripts/preflight-gates.sh",
+    #   * `check-boundaries.sh` was DELETED by the same audit (measured broken
+    #     on a clean tree, run by nothing). The entry stays so the deletion
+    #     diff — and any revert — classifies instead of tripping the
+    #     fail-closed arm; the audit's own PR was the first to hit it.
+    "scripts/check-boundaries.sh",
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,
     #     driven by its own lane rather than by a crate/integration selection.
     "scripts/test-mutation-audit.sh",
@@ -477,6 +486,7 @@ DOCKER_RUNTIME_CONFIG_OWNERS = {
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
+SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -760,6 +770,7 @@ def build_plan(
     run_sandbox_docker = False
     qa_evidence_changed = False
     nextest_config_changed = False
+    shared_reborn_action_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
@@ -798,6 +809,14 @@ def build_plan(
             # dead `live_tests::zizmor_scan*` overrides failed the whole
             # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
             nextest_config_changed = True
+            continue
+        if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
+            # Every `Tests (Reborn)` job installs the compiler cache through
+            # this local action. No narrow lane can exercise a change to it
+            # safely, so use the exhaustive plan just as we do for shared
+            # nextest configuration. Keep other `.github/actions/**` paths
+            # fail-closed until their consumers are mapped deliberately.
+            shared_reborn_action_changed = True
             continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
@@ -1053,6 +1072,11 @@ def build_plan(
     if nextest_config_changed:
         return _full_plan(
             "nextest runner config changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
+    if shared_reborn_action_changed:
+        return _full_plan(
+            "shared sccache action changed; this PR runs the exhaustive plan",
             canonical_packages,
         )
 

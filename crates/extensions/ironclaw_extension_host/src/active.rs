@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::extension::{
     Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
 };
@@ -26,14 +26,14 @@ pub struct ActiveExtension {
     pub resolved: Arc<ResolvedExtensionManifest>,
     pub extension: Arc<dyn Extension>,
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    pub channel: Option<Arc<dyn ChannelAdapter>>,
+    pub channel: ChannelSurfaces,
 }
 
 /// Default live-extension wrapper published by the active snapshot.
 pub struct BoundExtension {
     contract: ExtensionContract,
     tools: Option<Arc<dyn ToolAdapter>>,
-    channel: Option<Arc<dyn ChannelAdapter>>,
+    channel: ChannelSurfaces,
 }
 
 impl BoundExtension {
@@ -41,7 +41,7 @@ impl BoundExtension {
         resolved: &ResolvedExtensionManifest,
         installation_id: &str,
         tools: Option<Arc<dyn ToolAdapter>>,
-        channel: Option<Arc<dyn ChannelAdapter>>,
+        channel: ChannelSurfaces,
     ) -> Result<Self, ironclaw_host_api::error::HostApiError> {
         Ok(Self {
             contract: ExtensionContract {
@@ -104,7 +104,7 @@ impl Extension for BoundExtension {
         self.tools.clone()
     }
 
-    fn channel_adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
+    fn channel_surfaces(&self) -> ChannelSurfaces {
         self.channel.clone()
     }
 }
@@ -169,8 +169,9 @@ impl ActiveSnapshot {
             }
             if let Some(channel) = &extension.resolved.channel
                 && let Some(ingress) = &channel.ingress
+                && let Some(route_suffix) = &ingress.route_suffix
             {
-                let suffix = ingress.route_suffix.as_str().to_string();
+                let suffix = route_suffix.as_str().to_string();
                 if let Some(existing) =
                     route_owner.insert(suffix.clone(), extension.extension_id.clone())
                 {
@@ -220,7 +221,10 @@ impl ActiveSnapshot {
         let extension = self.extensions.get(extension_id)?;
         let channel = extension.resolved.channel.as_ref()?;
         let ingress = channel.ingress.as_ref()?;
-        if !channel.inbound || ingress.route_suffix.as_str() != route_suffix {
+        // authenticated_session ingress carries no route_suffix, so it never
+        // matches a mounted webhook route — the `?` fails closed here.
+        let declared_suffix = ingress.route_suffix.as_ref()?;
+        if !channel.supports_inbound() || declared_suffix.as_str() != route_suffix {
             return None;
         }
         Some(Arc::clone(extension))
@@ -252,8 +256,9 @@ impl ActiveSnapshot {
         }
         if let Some(channel) = &candidate.resolved.channel
             && let Some(ingress) = &channel.ingress
+            && let Some(route_suffix) = &ingress.route_suffix
         {
-            let suffix = ingress.route_suffix.as_str();
+            let suffix = route_suffix.as_str();
             if let Some(existing) = self.route_owner.get(suffix)
                 && existing != &candidate.extension_id
             {

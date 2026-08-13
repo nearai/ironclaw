@@ -47,6 +47,7 @@ use ironclaw_product_contracts::outbound::{
 use ironclaw_product_contracts::projection::{
     ProjectionStreamSubscription, ProjectionSubscriptionRequest,
 };
+use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
@@ -107,6 +108,8 @@ pub struct RebornProjectionServices {
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     product_reply_target_binding_ref: ReplyTargetBindingRef,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    // arch-exempt: optional_arc, minimal projection-only test graphs have no transcript store
+    thread_service: Option<Arc<dyn SessionThreadService>>,
 }
 
 impl RebornProjectionServices {
@@ -162,6 +165,12 @@ impl RebornProjectionServices {
         self
     }
 
+    /// Attach the durable transcript source used to project finalized replies.
+    pub fn with_thread_service(mut self, service: Arc<dyn SessionThreadService>) -> Self {
+        self.thread_service = Some(service);
+        self
+    }
+
     pub fn with_display_previews(
         mut self,
         display_previews: Arc<CapabilityDisplayPreviewStore>,
@@ -179,6 +188,7 @@ impl RebornProjectionServices {
             display_previews: Arc::clone(&self.display_previews),
             reply_target_binding_ref: self.product_reply_target_binding_ref.clone(),
             live_epoch: Arc::clone(&self.live_epoch),
+            thread_service: self.thread_service.clone(),
         })
     }
 
@@ -254,6 +264,7 @@ pub fn build_reborn_projection_services(
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         product_reply_target_binding_ref,
         auth_challenges: None,
+        thread_service: None,
     }
 }
 
@@ -350,6 +361,8 @@ struct ProductRuntimeProjectionStream {
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
     live_epoch: Arc<str>,
+    // arch-exempt: optional_arc, minimal projection-only test graphs have no transcript store
+    thread_service: Option<Arc<dyn SessionThreadService>>,
 }
 
 #[async_trait]
@@ -637,6 +650,7 @@ impl ProductRuntimeProjectionStream {
                 &request.scope,
                 turn_after,
                 self.auth_challenges.as_deref(),
+                self.thread_service.as_deref(),
             )
             .await?;
         if turn_drain_has_terminal_run_status(&turn_drain)

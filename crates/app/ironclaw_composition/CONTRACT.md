@@ -436,6 +436,10 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
 ### Tests
 
+- `src/runtime/tests/core.rs::standalone_cli_send_uses_saved_user_model_preference`
+  — caller-level regression guard that the CLI runtime resolves the actor's
+  saved model preference before durable message acceptance and carries that
+  choice through replay-aware acceptance into the model gateway request.
 - `src/runtime/tests/core.rs::standalone_runtime_webui_bundle_reuses_thread_and_turn_services`
   — regression guard that the product surface reuses the runtime turn/thread
   services.

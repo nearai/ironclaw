@@ -56,7 +56,7 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // to the eager chat transport path, where it must be available before the first
 // stream opens. Two more changes then landed on the merged tree, each adding a
 // little to /chat:
-//  - Web Push notifications added ~13 `automations.notificationChannels.webPush.*`
+//  - Web Push notifications added ~13 `automations.notificationChannels.devicePush.*`
 //    keys + a reworded `noSelectionHelper` to the eager `en.ts` fallback pack.
 //    Eager code was kept OUT of /chat: `registerServiceWorker` is in the
 //    dependency-free `lib/register-sw.ts`, and the enrollment UI rides the

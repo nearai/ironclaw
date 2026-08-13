@@ -55,7 +55,9 @@ pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
     }
 }
 
-pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, u32, u32) {
+pub(super) fn capability_batch_counts<'a>(
+    resolutions: impl IntoIterator<Item = &'a Resolution>,
+) -> (u32, u32, u32, u32) {
     let mut result_count = 0;
     let mut denied_count = 0;
     let mut gated_count = 0;

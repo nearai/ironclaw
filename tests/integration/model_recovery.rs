@@ -141,14 +141,18 @@ async fn content_filtered_completion_recovers_with_model_visible_observation() {
 #[tokio::test]
 async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_limit() {
     const ORIGINAL_TASK: &str = "retain this exact original task through the long tool run";
-    let mut script = (0..130)
-        .map(|index| {
-            RebornScriptedReply::tool_call(
-                "test_echo",
-                json!({"message": format!("iteration {index}")}),
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut script = Vec::new();
+    for index in 0..130 {
+        if index == 128 {
+            script.push(RebornScriptedReply::text(format!(
+                "durable window compaction summary before iteration {index}"
+            )));
+        }
+        script.push(RebornScriptedReply::tool_call(
+            "test_echo",
+            json!({"message": format!("iteration {index}")}),
+        ));
+    }
     script.push(RebornScriptedReply::text("long tool run complete"));
     let harness = RebornIntegrationHarness::test_default()
         .with_iteration_limit_for_test(NonZeroU32::new(140).expect("non-zero test limit"))
@@ -165,6 +169,10 @@ async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_
         .assert_conversation_history_message_count_at_least(132)
         .await
         .expect("durable tool results exceed the 128-message window");
+    harness
+        .assert_summary_artifact_count_at_least(1)
+        .await
+        .expect("window eviction produces a durable compaction summary");
     harness
         .assert_last_model_message_content_contains(ORIGINAL_TASK)
         .await

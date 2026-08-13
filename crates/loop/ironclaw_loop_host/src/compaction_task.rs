@@ -283,7 +283,10 @@ where
         if request.drop_through_seq == 0 {
             return Err(CompactionError::InvalidCutPoint);
         }
-        if request.mode != LoopCompactionMode::Fresh {
+        if !matches!(
+            request.mode,
+            LoopCompactionMode::Fresh | LoopCompactionMode::WindowEviction
+        ) {
             return Err(CompactionError::UnsupportedMode);
         }
         let start_exclusive = request.last_compacted_through_seq.unwrap_or(0);
@@ -331,6 +334,10 @@ where
                 deferred_reason = Some(reason);
             }
             CompactionMessageDisposition::Include if terminal.kind == MessageKind::User => {}
+            CompactionMessageDisposition::Include
+                if request.mode == LoopCompactionMode::WindowEviction
+                    && terminal.kind == MessageKind::ToolResultReference
+                    && terminal.status == MessageStatus::Finalized => {}
             // A stable-non-model-visible terminal (e.g. RejectedBusy) is a legal
             // cut point: it is excluded from the compacted output (same as the
             // in-range SkipEphemeral branch below) and compaction proceeds normally.

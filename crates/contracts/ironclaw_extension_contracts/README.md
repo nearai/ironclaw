@@ -11,7 +11,7 @@ packages depend on product.
 
 - **Family / layer:** `crates/contracts/` / `contracts` · **Package:** `ironclaw_extension_contracts` · **Manifest:** `crates/contracts/ironclaw_extension_contracts/Cargo.toml`
 - **Use this when:** you implement or consume an extension surface — a channel
-  adapter, a tool adapter, a manifest descriptor, an auth recipe, an
+  capability, a tool adapter, a manifest descriptor, an auth recipe, an
   installation state — generically.
 - **Don't use this when:** you need the registry or installation *stores* (→
   `ironclaw_extension_registry`), lifecycle execution/binding/ingress routing
@@ -24,10 +24,17 @@ packages depend on product.
 18 shipped modules (`src/lib.rs` is the source of truth; the module-by-module
 charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
 
-- `channel_adapter` — `ChannelAdapter` (implemented once per channel package)
-  + its DTO family (`NormalizedInboundMessage`, `OutboundEnvelope`/`Part`,
-  `DeliveryReport`, `TargetQuery`/`Candidate`, `ChannelError`,
-  `ChannelAttachmentRef`, `ProductTriggerReason`).
+- `channel_adapter` — `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`
+  (a package implements only the capabilities its manifest selects) plus
+  `ChannelSurfaces` and their DTO family (`NormalizedInboundMessage`/
+  `InboundAttachment`, `OutboundEnvelope`/`Part`, `DeliveryReport`,
+  `DirectTargetProvisionRequest`, `ChannelError`, `ProductTriggerReason`). Vendor
+  webhook ingress pairs with `ChannelIngress`; message replies pair with
+  `ChannelReply`; delivery pairs with `ChannelDelivery`. Authenticated-session
+  ingress and stream replies are host-owned, so those sections deliberately
+  bind no adapter half. `ChannelDelivery` also has one optional, typed
+  direct-target provisioning operation; it is deliberately not target search.
+  `ChannelAttachmentRef` is only package-internal parse→fetch state.
 - `tool_adapter` — `ToolAdapter` + `RestrictedEgress`; `egress` — channel
   egress transport vocabulary (`ProtocolHttpEgress`, `OutboundDeliverySink`).
 - `extension` — `Extension`, `ExtensionEntrypoint` and bindings; `runtime` —

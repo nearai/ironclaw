@@ -60,10 +60,14 @@ use ironclaw_turns::{ModelInvalidOutputDetailReason as InvalidOutputReason, Turn
 use tracing::debug;
 
 mod prompt_cache_activity;
+mod redaction;
 
 use prompt_cache_activity::{
     ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
     system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+use redaction::{
+    redact_completion_request, redact_tool_completion_request, redact_tool_definitions,
 };
 
 use crate::{
@@ -1361,7 +1365,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 )]
 async fn complete_model_request<P>(
     provider: &P,
-    completion: CompletionRequest,
+    mut completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
@@ -1375,6 +1379,23 @@ where
         replay_identity,
         next_fallback_index,
     } = request_context;
+    let redaction_started_at = Instant::now();
+    let redaction_count = redact_completion_request(&mut completion);
+    if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+        debug!(
+            target: CONTEXT_SHADOW_TARGET,
+            message_count = completion.messages.len(),
+            redaction_count,
+            elapsed_micros = redaction_started_at.elapsed().as_micros(),
+            "reborn provider-bound message redaction shadow measurement"
+        );
+    }
+    if redaction_count > 0 {
+        debug!(
+            redaction_count,
+            "reborn model gateway redacted provider-bound message content"
+        );
+    }
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
@@ -1405,13 +1426,30 @@ where
             let unavailable_capability_guard =
                 unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
-            let llm_tool_definitions = tool_definitions
+            let mut llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
                     recovery_tool_names.push(definition.name.as_str().to_string());
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_redaction_started_at = Instant::now();
+            let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions);
+            if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+                debug!(
+                    target: CONTEXT_SHADOW_TARGET,
+                    tool_definition_count = llm_tool_definitions.len(),
+                    redaction_count = tool_redaction_count,
+                    elapsed_micros = tool_redaction_started_at.elapsed().as_micros(),
+                    "reborn provider-bound tool redaction shadow measurement"
+                );
+            }
+            if tool_redaction_count > 0 {
+                debug!(
+                    redaction_count = tool_redaction_count,
+                    "reborn model gateway redacted provider-bound tool metadata"
+                );
+            }
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
@@ -1496,6 +1534,14 @@ where
                             &response,
                             error.safe_summary.as_str(),
                         ));
+                    let repair_redaction_count =
+                        redact_tool_completion_request(&mut repair_request);
+                    if repair_redaction_count > 0 {
+                        debug!(
+                            redaction_count = repair_redaction_count,
+                            "reborn model gateway redacted provider-bound repair content"
+                        );
+                    }
                     let rejected_response = response;
                     let retry_started_at = live_latency_started_at();
                     let response = match provider.complete_with_tools(repair_request).await {
@@ -2899,6 +2945,80 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct StopSequenceRecordingProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StopSequenceRecordingProvider {
+        fn model_name(&self) -> &str {
+            "stop-sequence-recording-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the stop-sequence test has no tool surface")
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_model_request_redacts_stop_sequences_before_provider_dispatch() {
+        let provider = StopSequenceRecordingProvider::default();
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.stop_sequences = Some(vec!["password: swordfish".to_string()]);
+        let replay_identity =
+            ProviderReplayIdentity::new("stop-sequence-recording-provider", provider.model_name())
+                .unwrap();
+
+        complete_model_request(
+            &provider,
+            request,
+            None,
+            None,
+            None,
+            ProviderRequestContext::new(replay_identity, None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = provider
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stop_sequences,
+            Some(vec!["password: [REDACTED_SECRET]".to_string()])
+        );
+    }
 
     #[derive(Default)]
     struct RecordingSafeTextSink {

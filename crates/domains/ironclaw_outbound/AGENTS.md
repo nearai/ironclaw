@@ -20,7 +20,9 @@ outbound egress/subscription policy.
   inputs/outputs, secrets, host paths, or backend error details (the store
   tests pin that backend error detail never leaks).
 - External push targets are candidates only; the outbound policy service must
-  call the reply-target validator before every delivery attempt.
+  call the reply-target validator before every new delivery attempt. A replay
+  of an already-recorded stable delivery identity returns the authoritative
+  row without starting a new attempt or revalidating a target.
 - `OutboundResolutionEngine` is the read-only candidate selector above
   `OutboundPolicyService`; it resolves typed delivery requests into
   `CommunicationDeliveryCandidate` or `NoDelivery`, but never validates
