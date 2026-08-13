@@ -576,6 +576,9 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
                 "mpim:read",
                 "users:read",
                 "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
             ],
         },
     ]
