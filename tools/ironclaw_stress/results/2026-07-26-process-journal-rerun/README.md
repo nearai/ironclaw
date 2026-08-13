@@ -128,7 +128,7 @@ the storage layout with independently CAS-able process records plus an
 append-only journal/index mechanism.
 
 The follow-up consolidation slices are defined in
-`docs/reborn/2026-07-26-process-kernel-next-collapses.md`.
+`docs/internal/reborn/2026-07-26-process-kernel-next-collapses.md`.
 
 Artifacts:
 

@@ -18,7 +18,7 @@ PROPOSAL §11.2.6 sets the persistence idiom for the `domains/` family:
 `ScopedFilesystem` is the floor, every domain crate is backend-neutral, and
 *"a crate that instead needs a hand-written SQL backend is a deliberate, narrow
 design choice that must be justified by an ADR"*
-(`docs/reborn/target-architecture/families/domains.md:49`). Two crates are
+(`docs/internal/reborn/target-architecture/families/domains.md:49`). Two crates are
 outside that floor today: `ironclaw_triggers` and `ironclaw_hooks` (ADR 0004).
 The restructure row gave each the same binary choice — converge onto the
 `RootFilesystem` mount catalog, or write the ADR.
@@ -38,7 +38,7 @@ whether the crate's *claim/queue semantics* survive the move to the fabric.
 
 The load-bearing statements are not CRUD. They are the concurrency control for
 a distributed work queue, and the contract they implement is explicit:
-`docs/reborn/contracts/triggers.md:202-204` requires the worker to enforce
+`docs/internal/reborn/contracts/triggers.md:202-204` requires the worker to enforce
 `max_concurrent_fires_per_trigger = 1` *"through an atomic repository
 claim/lease operation that covers read, eligibility check, active-fire check,
 and claim write."*
@@ -244,7 +244,7 @@ Reopen this decision when **any** of the following becomes true:
    exception is for the two shapes that ship today. A third means either
    converging first, or exporting the conformance suite as described above.
 
-Note the open follow-up in `docs/reborn/contracts/triggers.md:472-474` — trigger
+Note the open follow-up in `docs/internal/reborn/contracts/triggers.md:472-474` — trigger
 count quotas *"must be enforced through an atomic repository/database policy
 when they are added"* — which would add SQL under this decision rather than
 challenge it.

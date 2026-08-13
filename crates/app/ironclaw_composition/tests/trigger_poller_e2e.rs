@@ -71,6 +71,16 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+
+fn trigger_execution_contract(goal: impl Into<String>) -> Value {
+    json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
 const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
@@ -1531,7 +1541,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         &runtime,
         json!({
             "name": "trigger-e2e-created-by-tool",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -1561,7 +1571,14 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         .await
         .expect("get created trigger")
         .expect("created trigger persisted");
-    assert_eq!(record.prompt, TRIGGER_PROMPT);
+    assert!(
+        record.prompt.contains(TRIGGER_PROMPT),
+        "rendered trigger prompt must preserve the frozen goal"
+    );
+    assert!(
+        record.execution_spec.is_some(),
+        "builtin trigger creation must persist the structured execution contract"
+    );
     assert_eq!(record.creator_user_id, user_id);
     assert_eq!(record.name, "trigger-e2e-created-by-tool");
 
@@ -1649,7 +1666,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         &runtime,
         json!({
             "name": "trigger-e2e-created-by-tool-fires-twice",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -2317,7 +2334,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         &runtime,
         json!({
             "name": "trigger-e2e-self-create-guard",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )

@@ -19,7 +19,7 @@ BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
 # scripts/build-wasm-extensions.sh uses — instead of a literal
 # `crates/extensions/packages` path, so the target-architecture family move
 # (PROPOSAL §5) cannot leave this pointed at a directory that no longer exists
-# (docs/reborn/target-architecture/CHECKLIST.md WS10). The env override still
+# (docs/internal/reborn/target-architecture/CHECKLIST.md WS10). The env override still
 # bypasses discovery entirely, unchanged.
 resolve_default_first_party_extensions_root() {
   local support_dir

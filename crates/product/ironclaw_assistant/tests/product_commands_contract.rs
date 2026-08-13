@@ -26,6 +26,42 @@ fn command_payload_maps_to_typed_model_command_without_v1_parser() {
 }
 
 #[test]
+fn model_command_maps_user_preference_actions() {
+    let use_model =
+        InboundCommandPayload::new("model", "use gpt-5-mini", ProductTriggerReason::BotCommand)
+            .expect("valid command");
+    let follow_default =
+        InboundCommandPayload::new("model", "default", ProductTriggerReason::BotCommand)
+            .expect("valid command");
+
+    assert_eq!(
+        ProductCommand::from_payload(&use_model).expect("parse preference command"),
+        ProductCommand::Model {
+            action: ProductModelCommand::Use {
+                model: "gpt-5-mini".to_string(),
+            }
+        }
+    );
+    assert_eq!(
+        ProductCommand::from_payload(&follow_default).expect("parse default command"),
+        ProductCommand::Model {
+            action: ProductModelCommand::Default,
+        }
+    );
+}
+
+#[test]
+fn model_preference_commands_reject_missing_or_extra_arguments() {
+    for arguments in ["use", "use model-a extra", "default extra"] {
+        let payload =
+            InboundCommandPayload::new("model", arguments, ProductTriggerReason::BotCommand)
+                .expect("valid command");
+        let rejection = ProductCommand::from_payload(&payload).expect_err("invalid command");
+        assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    }
+}
+
+#[test]
 fn model_command_maps_provider_selection_without_cli_shelling_contract() {
     let payload = InboundCommandPayload::new(
         "model",
@@ -501,6 +537,12 @@ fn execution_audience_is_per_action() {
         ProductCommand::Status,
         ProductCommand::Model {
             action: ProductModelCommand::Status,
+        },
+        ProductCommand::Model {
+            action: ProductModelCommand::Use { model: "m".into() },
+        },
+        ProductCommand::Model {
+            action: ProductModelCommand::Default,
         },
         ProductCommand::Unknown {
             name: "nope".into(),

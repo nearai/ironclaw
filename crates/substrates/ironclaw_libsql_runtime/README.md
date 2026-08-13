@@ -85,6 +85,6 @@ cargo test -p ironclaw_architecture_tests   # driver allowlists + boundary rules
 ## See also
 
 Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md) · design record:
-`docs/reborn/target-architecture/PROPOSAL.md` §6.2.6 and §11.2.6 · relationship
+`docs/internal/reborn/target-architecture/PROPOSAL.md` §6.2.6 and §11.2.6 · relationship
 to the fabric: `ironclaw_filesystem` answers "where do these bytes go"; this
 crate answers "which connection, on which lane, may run this statement now".

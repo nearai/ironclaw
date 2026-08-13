@@ -82,4 +82,4 @@ cargo test -p ironclaw_architecture_tests   # after dependency/API changes
 - [`../AGENTS.md`](../AGENTS.md) — the kernel family; the lease mint's charter
   seal (the issuing port is public — the restriction is boundary rules, not a
   type seal).
-- `docs/reborn/contracts/approvals.md`, `docs/reborn/contracts/run-state.md`.
+- `docs/internal/reborn/contracts/approvals.md`, `docs/internal/reborn/contracts/run-state.md`.

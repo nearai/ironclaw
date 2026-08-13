@@ -1,5 +1,5 @@
 //! Anti-slippage ratchet for the capability-path DTO collapse (§3/§9/§10 of
-//! `docs/reborn/contracts/capability-access.md`).
+//! `docs/internal/reborn/contracts/capability-access.md`).
 //!
 //! §1.1 showed a single capability call re-wrapped through ~5 near-identical
 //! request shapes plus an overloaded ten-variant result enum. §3 collapses those

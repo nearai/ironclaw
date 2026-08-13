@@ -111,11 +111,11 @@ an at-most-once reservation it does not own (`ironclaw_outbound`).
 
 ## Sources
 
-`docs/reborn/target-architecture/families/product.md` · PROPOSAL §6.9.1–6.9.5,
+`docs/internal/reborn/target-architecture/families/product.md` · PROPOSAL §6.9.1–6.9.5,
 §8, §12.11 D-B/D-H · gates: `crates/app/ironclaw_architecture_tests/tests/`
 (`reborn_dependency_boundaries.rs`, `reborn_transport_product_boundary.rs`,
 `reborn_service_method_freeze_ratchet.rs`, `reborn_operator_port_inversion.rs`,
 `reborn_product_contract_location_scan.rs`,
 `reborn_same_layer_edge_inventory.rs`) · module specs:
 `ironclaw_webui/CONTRACT.md` (root `AGENTS.md` Module Specs table) · conventions:
-`docs/reborn/guidance-conventions.md`.
+`docs/internal/reborn/guidance-conventions.md`.

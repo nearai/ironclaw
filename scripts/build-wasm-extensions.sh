@@ -19,7 +19,7 @@
 # (scripts/ci/lib/crate_tree.py) by crate NAME, not from a literal path, so the
 # target-architecture family move (crates/<family>/ironclaw_*, PROPOSAL §5)
 # does not leave this script unable to find the manifests it is supposed to
-# build (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+# build (docs/internal/reborn/target-architecture/CHECKLIST.md WS10, #6963).
 #
 # WS2 moved the packages out of the support crate: they were
 # `<support-crate>/assets/<ext>/`, they are now `packages/<ext>/` SIBLING to

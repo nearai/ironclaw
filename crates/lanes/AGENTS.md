@@ -140,7 +140,7 @@ why the next one should not be undertaken casually.
 
 ## Sources
 
-[`docs/reborn/target-architecture/families/lanes.md`](../../docs/reborn/target-architecture/families/lanes.md)
+[`docs/internal/reborn/target-architecture/families/lanes.md`](../../docs/internal/reborn/target-architecture/families/lanes.md)
 (full charter, boundaries, security posture) · PROPOSAL §6.6 (per-crate
 contracts, incl. the WS3/WS7 amendments), §8 (dependency model), §11.2.6/§12
 (driver and decision logs) · the gates named above.

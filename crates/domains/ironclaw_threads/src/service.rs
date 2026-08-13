@@ -9,9 +9,10 @@ use crate::{
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
     BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
     ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
@@ -27,10 +28,36 @@ pub trait SessionThreadService: Send + Sync {
         request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError>;
 
+    /// Accept an inbound transcript row without product-routing metadata.
+    ///
+    /// An implementation that delegates this method to
+    /// [`Self::accept_inbound_message_with_replay_metadata`] must override that
+    /// method too. The default metadata method delegates default metadata back
+    /// here for legacy compatibility, so delegating only this method creates a
+    /// mutual-recursion trap.
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError>;
+
+    /// Accept an inbound transcript row together with product-routing metadata
+    /// that must be committed atomically and returned on idempotent replay.
+    /// Backends supporting non-default metadata must override this method. A
+    /// backend that implements [`Self::accept_inbound_message`] by delegating
+    /// here must also override this method; otherwise default metadata recurses
+    /// back through the legacy method indefinitely.
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        if replay_metadata == InboundMessageReplayMetadata::default() {
+            return self.accept_inbound_message(request).await;
+        }
+        Err(SessionThreadError::Backend(
+            "thread service does not support durable inbound replay metadata".to_string(),
+        ))
+    }
 
     async fn replay_accepted_inbound_message(
         &self,
@@ -389,6 +416,16 @@ where
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         self.as_ref().accept_inbound_message(request).await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.as_ref()
+            .accept_inbound_message_with_replay_metadata(request, replay_metadata)
+            .await
     }
 
     async fn replay_accepted_inbound_message(
