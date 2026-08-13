@@ -91,6 +91,10 @@ pub enum DeliveryIntent {
     /// creator's notification-channel set, so unlike [`Self::FailureNotice`]
     /// (source-routed to an interactive conversation) it is policy-class.
     BackgroundRunNotice,
+    /// A web-app run-completion notification (2026-08-13 design §7.9): the
+    /// push fallback when no browser surface answered arbitration. Fixed
+    /// copy only; policy-class like [`Self::BackgroundRunNotice`].
+    RunCompletionNotice,
     /// A model-initiated explicit delivery via builtin.outbound_deliver.
     ModelDelivery,
 }
@@ -175,6 +179,7 @@ impl DeliveryIntent {
                 | Self::GatePrompt
                 | Self::AuthPrompt
                 | Self::BackgroundRunNotice
+                | Self::RunCompletionNotice
                 | Self::ModelDelivery
         )
     }
@@ -199,6 +204,7 @@ impl DeliveryIntent {
             Self::Cleanup => "cleanup",
             Self::Reaction => "reaction",
             Self::BackgroundRunNotice => "background-run-notice",
+            Self::RunCompletionNotice => "run-completion-notice",
             Self::ModelDelivery => "model-delivery",
         }
     }
@@ -1605,7 +1611,8 @@ fn validate_final_workspace_files(parts: &[OutboundPart]) -> Result<(), Coordina
         OutboundPart::Text(_)
         | OutboundPart::AuthPrompt { .. }
         | OutboundPart::Retract { .. }
-        | OutboundPart::React { .. } => None,
+        | OutboundPart::React { .. }
+        | OutboundPart::RunCompletion(_) => None,
     }) {
         count = count
             .checked_add(1)

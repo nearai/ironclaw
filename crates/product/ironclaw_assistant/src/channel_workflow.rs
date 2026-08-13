@@ -41,6 +41,10 @@ use ironclaw_loop_host::HostInputEnqueuePort;
 /// services. Never a channel selector — the notifier picks the delivering
 /// extension per notification target from that target's catalog entry.
 const BACKGROUND_RUN_NOTIFIER_ID: &str = "background-run-notifier";
+/// Attribution bucket for the run-completions push facade's delivery
+/// services (2026-08-13 design §7.9). Same shape and rules as
+/// [`BACKGROUND_RUN_NOTIFIER_ID`].
+const RUN_COMPLETION_NOTIFIER_ID: &str = "run-completion-notifier";
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
     OutboundStateStorePort, TriggeredRunDelivery, TriggeredRunDeliveryStore,
@@ -230,6 +234,42 @@ impl RebornChannelWorkflowFactory {
             target_codecs,
             identity.agent_id.clone(),
         )) as Arc<dyn TriggeredRunDelivery>)
+    }
+
+    /// The run-completions push facade's delivery bundle (2026-08-13 design
+    /// §7.9): the same background-notifier-shaped [`RunDeliveryServices`]
+    /// under its own notifier identity, or `None` when the composed runtime
+    /// has no delivery coordinator (nothing can push).
+    pub fn run_completion_delivery_services(&self) -> Option<RunDeliveryServices> {
+        let delivery = self.services.delivery.as_ref()?;
+        let notice_thread_id =
+            match ThreadId::new(format!("{RUN_COMPLETION_NOTIFIER_ID}-channel-notices")) {
+                Ok(thread_id) => thread_id,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "ironclaw::reborn::channel_workflow",
+                        %error,
+                        "invalid run-completion notice thread id; completion push unavailable"
+                    );
+                    return None;
+                }
+            };
+        Some(RunDeliveryServices {
+            project_filesystem: Arc::clone(&delivery.project_filesystem),
+            binding_service: Arc::new(TriggeredNoopConversationBindingService),
+            thread_service: Arc::clone(&self.services.thread_service),
+            turn_coordinator: Arc::clone(&self.services.turn_coordinator),
+            outbound_store: Arc::clone(&delivery.outbound_store),
+            route_store: Arc::clone(&delivery.route_store),
+            communication_preferences: Arc::clone(&delivery.communication_preferences),
+            delivery_targets: Arc::clone(&delivery.delivery_targets),
+            coordinator: Arc::clone(&delivery.coordinator),
+            extension_id: RUN_COMPLETION_NOTIFIER_ID.to_string(),
+            fallback_notice_scope: self.notice_scope(notice_thread_id),
+            approval_context: delivery.approval_context.clone(),
+            blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
+            auth_flow_cancel: delivery.auth_flow_cancel.clone(),
+        })
     }
 
     fn notice_scope(&self, notice_thread_id: ThreadId) -> TurnScope {

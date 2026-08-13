@@ -125,6 +125,7 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
         RunNotificationEventKind::ModelDelivery => "model-delivery",
+        RunNotificationEventKind::RunCompleted => "run-completion",
     };
     match discriminator {
         Some(discriminator) => {
