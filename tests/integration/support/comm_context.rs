@@ -8,7 +8,7 @@
 //! DISTINCT from the outbound delivery **sink** (E-OUTBOUND): this is prompt
 //! **context**, not a delivery recorder. The production service→context
 //! mapping is already unit-tested in
-//! `crates/ironclaw_reborn_composition/src/root/communication_context.rs`; this
+//! `crates/product/ironclaw_assistant/src/communication_context.rs`; this
 //! double covers only the int-tier wiring gap.
 
 // Shared integration-test support: not every binary that mounts the
@@ -21,41 +21,39 @@ use std::sync::Arc;
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+    ConnectedChannelSummary, ConnectedChannelsState, NotificationChannelsState,
+    PendingExtensionAuthState,
 };
 
 /// A [`CommunicationContextProvider`] that returns a pre-resolved
 /// [`CommunicationRuntimeContext`] regardless of scope/actor. Mirrors the
 /// loop-driver-host `StubCommunicationContextProvider` shape but with a
-/// *configured* delivery target + connected channel so the rendered slice
-/// carries distinctive sentinels a test can assert on.
+/// *configured* notification-channel count + connected channel so the
+/// rendered slice carries distinctive sentinels a test can assert on.
 pub struct RecordingCommunicationContextProvider {
     context: CommunicationRuntimeContext,
 }
 
 impl RecordingCommunicationContextProvider {
-    /// Provider that reports a single connected channel `channel_name` and a
-    /// configured outbound delivery target (`display_name` on `channel`). The
-    /// rendered model-context slice reads
+    /// Provider that reports a single connected channel `channel_name` and
+    /// `notification_channel_count` configured notification-channel targets.
+    /// The rendered model-context slice reads
     /// `Connected channels: <channel_name> (authenticated, active).` and
-    /// `Outbound delivery target: <display_name> (<channel>) — applies to ...`.
-    pub fn with_target_and_channel(
-        display_name: impl Into<String>,
-        channel: impl Into<String>,
+    /// `Background-run notifications: <notification_channel_count> channel(s) configured.`
+    pub fn with_notification_count_and_channel(
+        notification_channel_count: usize,
         channel_name: impl Into<String>,
     ) -> Arc<dyn CommunicationContextProvider> {
         Arc::new(Self {
             context: CommunicationRuntimeContext {
+                pending_extension_auth: PendingExtensionAuthState::Unknown,
                 connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
                     name: channel_name.into(),
                     authenticated: true,
                     active: true,
                     presentation: None,
                 }]),
-                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
-                    display_name: display_name.into(),
-                    channel: channel.into(),
-                }),
+                notification_channels: NotificationChannelsState::Known(notification_channel_count),
                 // Placeholder; the host stamps the surface-derived value in
                 // `CommunicationContextFetch::resolve`, mirroring production.
                 delivery_tools_visible: false,

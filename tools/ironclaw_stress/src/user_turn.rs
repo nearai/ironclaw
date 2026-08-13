@@ -967,19 +967,44 @@ where
             .user_turn_context_for_user_index(owner_index)
             .map_err(|error| OperationFailure::invalid_request("thread_list_context", error))?;
         let thread_id = thread_list_thread_id(thread_index)?;
+        let title = if args.thread_list_untitled {
+            None
+        } else {
+            Some(format!("Thread list seed {thread_index:06}"))
+        };
         time_stage(
             &mut stages.ensure_thread,
             self.thread_service.ensure_thread(EnsureThreadRequest {
-                scope: context.thread_scope,
-                thread_id: Some(thread_id),
+                scope: context.thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
                 created_by_actor_id: context.user_id.as_str().to_string(),
-                title: Some(format!("Thread list seed {thread_index:06}")),
+                title,
                 metadata_json: None,
             }),
         )
         .await
         .map(|_| ())
-        .map_err(|error| thread_failure("thread_list_prefill_ensure_thread", error))
+        .map_err(|error| thread_failure("thread_list_prefill_ensure_thread", error))?;
+        if args.thread_list_untitled {
+            // One accepted user message gives the sidebar something to derive
+            // a label from — the untitled-thread listing shape.
+            self.thread_service
+                .accept_inbound_message(ironclaw_threads::AcceptInboundMessageRequest {
+                    scope: context.thread_scope,
+                    thread_id,
+                    actor_id: context.user_id.as_str().to_string(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: ironclaw_threads::MessageContent::text(format!(
+                        "thread list seed message {thread_index:06}"
+                    )),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| thread_failure("thread_list_prefill_seed_message", error))?;
+        }
+        Ok(())
     }
 
     async fn run_operation(

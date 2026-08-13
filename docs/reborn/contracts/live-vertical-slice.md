@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Runnable V1 demo
-**Crates:** `ironclaw_filesystem`, `ironclaw_extensions`, `ironclaw_resources`, `ironclaw_events`, `ironclaw_capabilities`, `ironclaw_host_runtime`, `ironclaw_scripts`
+**Crates:** `ironclaw_filesystem`, `ironclaw_extension_registry`, `ironclaw_resources`, `ironclaw_event_log`, `ironclaw_capabilities`, `ironclaw_host_runtime`, `ironclaw_sandbox`
 
 ---
 
@@ -51,10 +51,10 @@ by default.
 
 ## 3. What this validates
 
-Implementation evidence: `crates/ironclaw_capabilities/src/dispatch.rs` implements the
+Implementation evidence: `crates/kernel/ironclaw_capabilities/src/dispatch.rs` implements the
 sealed `RuntimeDispatcher::dispatch_json(Authorized)` path, and
-`crates/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` plus
-`crates/ironclaw_capabilities/tests/runtime_dispatch_event_contract.rs` validate the
+`crates/kernel/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` plus
+`crates/kernel/ironclaw_capabilities/tests/runtime_dispatch_event_contract.rs` validate the
 dispatcher contracts that replaced the retired vertical-slice test.
 
 The dispatcher contract tests validate:

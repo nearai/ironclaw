@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import tomllib
 from provider_capability_inventory import (
+    shipped_provider_manifests,
     ALL_CLASSIFIED_CAPABILITY_IDS,
     COVERAGE_BACKLOG,
     EMULATE_SUPPORTED_TOOLS,
@@ -26,13 +27,13 @@ from provider_capability_inventory import (
 from provider_operation_cases import PROVIDER_OPERATION_CASES
 
 ROOT = Path(__file__).resolve().parents[3]
-ASSET_ROOT = ROOT / "crates/ironclaw_first_party_extensions/assets"
+ASSET_ROOT = ROOT / "crates/extensions/packages"
 TRACE_ROOT = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 
 
 def _production_capability_ids() -> set[str]:
     capability_ids = set()
-    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+    for manifest_path in shipped_provider_manifests():
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         capability_ids.update(tool["id"] for tool in manifest.get("tools", []))

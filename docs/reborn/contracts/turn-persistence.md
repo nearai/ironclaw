@@ -49,8 +49,8 @@ not persist a parallel turn snapshot.
 - Active-lock key is the canonical `TurnScope`: tenant, agent, optional project, and thread.
 - The key excludes `TurnActor.user_id`, channel IDs, source binding refs, and reply binding refs.
 - A lock stores the current owning `TurnRunId`, explicit `TurnStatus`, monotonically increasing `TurnLockVersion`, `acquired_at`, and `updated_at`.
-- Queued, running, cancel-requested, blocked, and recovery-required runs keep the lock.
-- Terminal runs release the lock exactly once.
+- Queued, running, cancel-requested, and blocked runs keep the lock.
+- Terminal runs, including legacy `RecoveryRequired` records, release the lock exactly once.
 - Runner claim/resume/block/cancel-request transitions update the lock status/version while keeping ownership with the same run.
 
 ---
@@ -88,7 +88,7 @@ A duplicate idempotency key must replay prior accepted submit and admission-reje
 - Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, records `last_heartbeat_at`, records `lease_expires_at`, and updates active-lock metadata.
 - Heartbeats only renew metadata for matching, unexpired runner ID/lease token; successful heartbeats refresh `last_heartbeat_at` and extend `lease_expires_at`.
 - Physical adapters may split high-churn runner lease metadata from lower-churn turn snapshots/tables, as long as all read, recovery, and terminal transition APIs expose one logical run state. Liveness decisions must use durable lease metadata, not require one lifecycle event per heartbeat.
-- Expired `Running` and `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted recovery event, and keep the active lock so uncertain side-effecting work is not auto-retried.
+- Expired `Running` and `CancelRequested` leases clear current runner ownership and emit a redacted recovery event only when recovery resolves them to `Cancelled`, `Queued`, or `Failed`. A safe checkpoint still inside its full lease-TTL grace window remains unchanged, including its expired ownership metadata, until a later sweep resolves it. Recovery otherwise converges directly to a settled state rather than parking work in a distinct recovery status: cancellation to terminal `Cancelled`; a run with no checkpoint or one parked at a checkpoint that replays no side effect (`BeforeModel`, `BeforeBlock`) back to `Queued`; and a run parked at a side-effecting or unrecognized checkpoint, or one that has exhausted the bounded reclaim budget, to terminal `Failed`. Uncertain side-effecting work is still never auto-retried, and the active lock is released exactly when the resulting status is terminal. The full transition table is in `turn-runner.md` §3.
 - Blocking a running run requires a matching, unexpired lease, writes a checkpoint record, stores the latest checkpoint/gate refs on the run, clears current lease ownership, and keeps the active lock.
 - Loop-driver resume payloads are staged only in host memory. The subsequent
   process checkpoint command atomically persists the opaque ref, schema

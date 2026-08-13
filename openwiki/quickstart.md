@@ -19,7 +19,7 @@ Welcome to the IronClaw repository documentation. This is your entry point to un
 ironclaw/
 ├── src/                   # v1 legacy monolith (maintenance only)
 ├── crates/                # Reborn runtime — active development target (68+ crates)
-├── crates/ironclaw_reborn_cli/        # Primary CLI/WebUI entrypoint
+├── crates/ironclaw_cli/        # Primary CLI/WebUI entrypoint
 ├── crates/ironclaw_agent_loop/        # Core agent execution engine
 ├── crates/ironclaw_product_workflow/  # Product layer (flows, approvals, skills)
 ├── docs/                  # User-facing and draft architecture docs
@@ -119,7 +119,7 @@ Substrate Layer (Events, Filesystem, Memory, Threads)
 - **Fix a bug:** Jump to [Workflows: Fix a Bug](development/workflows.md#fixing-a-bug) (test-first discipline required)
 - **Add a new feature:** See [Architecture Overview](architecture/overview.md#where-to-build-new-features) and [Crate Reference](architecture/crates.md)
 - **Review a pull request:** Read [Workflows: Code Review](development/workflows.md#code-review) and the [Testing Guide](development/testing.md)
-- **Deploy to production:** See [Configuration](reference/configuration.md) and Dockerfile patterns in `crates/ironclaw_reborn_cli`
+- **Deploy to production:** See [Configuration](reference/configuration.md) and Dockerfile patterns in `crates/ironclaw_cli`
 - **Understand a capability:** Visit [Capabilities & Tools](domains/capabilities.md)
 - **Query the codebase:** Use the knowledge graph (see [AGENTS.md: Code Discovery](AGENTS.md#code-discovery)) before grep
 - **Report a security issue:** See [Security & Safety](architecture/security.md) and SECURITY.md (if present)

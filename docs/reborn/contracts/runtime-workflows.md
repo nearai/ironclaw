@@ -21,7 +21,7 @@ For every core runtime workflow, the architecture must identify:
 - interface contract invoked
 - what the service must not own
 
-This prevents a new hidden agent runtime from forming inside `ironclaw_kernel`, `ironclaw_extensions`, or a future conversation crate.
+This prevents a new hidden agent runtime from forming inside `ironclaw_kernel`, `ironclaw_extension_registry`, or a future conversation crate.
 
 ---
 

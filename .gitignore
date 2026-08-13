@@ -47,7 +47,7 @@ artifacts/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
-!crates/ironclaw_first_party_extensions/assets/*/wasm/*.wasm
+!crates/extensions/packages/*/wasm/*.wasm
 
 # Traces
 trace_*.json
@@ -66,6 +66,14 @@ trace_*.json
 # root they land in ./attachments/. These are user uploads, never source.
 /attachments/
 
+# The per-caller agent workspace. Local-dev sets `workspace_root` to the server's
+# cwd, so `serve` from the repo root gives every caller
+# ./tenants/<tenant>/users/<user>/, and anything the agent writes there -- a script
+# it authored, a file it was asked to produce -- lands in the repo. Runtime output,
+# never source: without this, a `git add -A` after a demo session commits an
+# agent-written script into the tree (caught in review on #7171).
+/tenants/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -83,10 +91,12 @@ tests/fixtures/llm_traces/live/*.log
 .anvil/
 .codegraph/
 
-# codebase-memory knowledge graph — build artifact, not source.
-# Rebuilt from code via the codebase-memory MCP; per-environment, never committed.
+# codebase-memory knowledge graph. Share only the compressed bootstrap snapshot;
+# local metadata and runtime state remain per-environment.
 # See CLAUDE.md -> "Code Discovery".
-.codebase-memory/
+.codebase-memory/*
+!.codebase-memory/.gitattributes
+!.codebase-memory/graph.db.zst
 
 # test-tools fixture-bundle build artifacts — regenerate with
 # scripts/build-test-tools.sh; only sources/manifests/schemas/prompts are tracked.
@@ -109,3 +119,11 @@ crates/*/frontend/dist/
 # It is a regenerable build artifact of a local audit, never source.
 mutants.out/
 mutants.out.old/
+
+# Local TypeScript app directory — anchored to repo root so it does not
+# silently exclude nested `app/` directories (e.g. crates/*/frontend/src/app/).
+# Prefer .git/info/exclude for personal working directories.
+/app/
+
+# Skill bundles staged into a workspace at activation. Build output, never source.
+.skills/

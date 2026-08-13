@@ -1,0 +1,319 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "slack"
+name = "Slack"
+version = "0.1.0"
+description = "Slack: DM the assistant via the Slack Events API channel (workspace bot), and act as you via your own user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack_user_tool.wasm"
+
+[admin_configuration]
+group_id = "extension.slack"
+display_name = "Slack deployment configuration"
+description = "Deployment credentials and routing configuration for the Slack channel."
+fields = [
+  { handle = "slack_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "slack_signing_secret", label = "Signing secret", secret = true, required = true },
+  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false, required = true },
+  { handle = "slack_api_app_id", label = "App ID", secret = false, required = true },
+  { handle = "slack_installation_id", label = "Installation ID", secret = false, required = true },
+  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false, required = true },
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true },
+]
+# Retired handles (run-acts-as-invoker): `slack_shared_subject_user_id`,
+# `slack_subject_routes`, and the interim `slack_allowed_channels` allowlist
+# are gone — a shared channel runs as whoever invoked the bot, and adding the
+# bot to a channel is what admits it (presence-based; the message arriving
+# through this channel's verified ingress is the membership evidence). Saved
+# values for retired handles are inert; new saves fail closed as unknown
+# fields.
+
+# Least-privilege scopes: the read-only tools request only read scopes; only
+# send_message requests chat:write. The slack OAuth grant is the union of
+# these (the [auth.slack] recipe ceiling — a single account shared by all
+# tools), so a read-only user still grants chat:write while send_message is a
+# default tool. Reducing the grant for read-only users needs a write-opt-in /
+# scope-upgrade re-consent flow — tracked separately.
+
+# ---- tool surfaces ---------------------------------------------------------
+
+[[tools]]
+standard_op = "search_messages"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.search_messages"
+description = "Slack notes: indexed search — for the newest message in a known conversation use get_conversation_history instead. Requires the search:read user scope. Raw Slack ids are for tool calls only — never include one in a reply."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/search_messages.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "list_conversations"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.list_conversations"
+description = "Slack notes: lists channels, private channels, DMs, and group DMs visible to you; is_member is the authoritative membership signal. DM entries carry the counterpart user."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/list_conversations.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_conversation_info"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.get_conversation_info"
+description = "Slack notes: for a DM, counterpart.user_ref is the authoritative mention target."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/get_conversation_info.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_conversation_history"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.get_conversation_history"
+description = "Slack notes: newest-first; thread replies are NOT included — a reply_count > 0 means fetch get_thread_replies. Limit above 999 is clamped."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/get_conversation_history.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_thread_replies"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.get_thread_replies"
+description = "Slack notes: thread is the parent message's ts."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/get_thread_replies.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_user_info"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.get_user_info"
+description = "Slack notes: includes status text/emoji, timezone, and title for presence-style questions."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/get_user_info.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "whoami"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.whoami"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/whoami.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "send_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.send_message"
+description = "Slack notes: text is Slack mrkdwn. To notify someone, mention them as <@U…> with their real user id — a plain @name notifies nobody; never guess a user id or derive one from a channel or DM conversation id (for a DM conversation id, get_conversation_info returns the authoritative user). Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply. Requires the chat:write user scope."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/send_message.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+# ---- channel surface (at most one per extension) ---------------------------
+
+[channel]
+id = "messages"
+display_name = "Slack messages"
+conversation_model = "continuous"
+commands = ["model", "status", "new", "stop", "interrupt"]
+
+# For a conversational vendor the two axes happen to share one mechanism — a
+# message in the conversation — which is exactly why the reply/delivery
+# distinction stayed invisible until a streaming channel existed. They are
+# still declared separately: `message` twice is a coincidence of transport,
+# not one concept.
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
+
+[channel.connection]
+provider = "slack"
+strategy = "oauth"
+instructions = "Connect your Slack account with OAuth from the Slack extension configuration. The workspace bot is configured once by an administrator; this connection authorizes only your personal Slack tools and identity."
+input_placeholder = ""
+submit_label = "Connect Slack"
+error_message = "Slack OAuth connection failed. Try connecting Slack again."
+connection_success_message = "Slack is installed and connected for this user. Slack tools use the user's OAuth account, while inbound and outbound channel messages use the administrator-configured workspace bot."
+
+[channel.connection.notices]
+connect_required = "👋 Connect your Slack account in the IronClaw web app, then message me here again."
+paired = "✅ Slack is connected. You can talk to IronClaw here."
+already_paired_same_user = "✅ This Slack account is already connected to you."
+already_bound_to_other_user = "This Slack account is already connected to another IronClaw user."
+expired_or_unknown = "That Slack connection is invalid or expired. Start a fresh OAuth connection from IronClaw."
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "slack_signing_secret"
+signature_header = "X-Slack-Signature"
+signature_prefix = "v0="
+signature_encoding = "hex"
+timestamp_header = "X-Slack-Request-Timestamp"
+max_age_seconds = 300
+signed_payload = [
+  { literal = "v0:" },
+  { header = "X-Slack-Request-Timestamp" },
+  { literal = ":" },
+  { body = true },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "slack.com"
+methods = ["post"]
+credential_handle = "slack_bot_token"
+paths = [
+  "/api/chat.postMessage",
+  "/api/chat.delete",
+  "/api/conversations.open",
+  "/api/files.completeUploadExternal",
+  # 👀→✅ run-lifecycle reaction on the triggering message (needs the
+  # reactions:write scope operator-side; a missing scope fails the reaction
+  # best-effort and never fails the run).
+  "/api/reactions.add",
+  "/api/reactions.remove",
+]
+request_body_limit_bytes = 262144
+response_body_limit_bytes = 262144
+
+# conversations.history / conversations.replies hydrate shared-channel pings
+# with recent conversation context at ingress. The bot needs the
+# channels:history-family scopes granted operator-side; when absent, Slack
+# returns missing_scope and the ping proceeds with no context.
+[[channel.egress]]
+scheme = "https"
+host = "slack.com"
+methods = ["get"]
+credential_handle = "slack_bot_token"
+paths = [
+  "/api/files.info",
+  "/api/files.getUploadURLExternal",
+  "/api/conversations.history",
+  "/api/conversations.replies",
+]
+request_body_limit_bytes = 0
+response_body_limit_bytes = 262144
+
+# Private downloads remain under Slack's exact file host and prefix. The bot
+# credential is injected by the host and the response cap matches the shared
+# per-file attachment budget.
+[[channel.egress]]
+scheme = "https"
+host = "files.slack.com"
+methods = ["get"]
+credential_handle = "slack_bot_token"
+path_prefixes = ["/files-pri/"]
+request_body_limit_bytes = 0
+response_body_limit_bytes = 5242880
+
+# External upload tickets are pre-authorized by Slack. File bytes carry no bot
+# credential and are limited to the same per-file attachment budget.
+[[channel.egress]]
+scheme = "https"
+host = "files.slack.com"
+methods = ["post"]
+path_prefixes = ["/upload/"]
+request_body_limit_bytes = 5242880
+response_body_limit_bytes = 262144
+
+[channel.presentation]
+supports_markdown = true
+supports_threads = true
+can_reply_in_threads = true
+command_prefix = "/ironclaw "
+
+# ---- auth surface: recipe data, zero extension code ------------------------
+
+[auth.slack]
+method = "oauth2_code"
+display_name = "Slack account"
+authorization_endpoint = "https://slack.com/oauth/v2/authorize"
+token_endpoint = "https://slack.com/api/oauth.v2.access"
+scope_param = "user_scope"
+pkce = "s256"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+client_credentials = { client_id_handle = "slack_oauth_client_id", client_secret_handle = "slack_oauth_client_secret" }
+
+[auth.slack.token_response]
+access_token = "/authed_user/access_token"
+scope = { path = "/authed_user/scope", missing = "fallback_to_requested" }
+
+[auth.slack.identity]
+account_id = "/authed_user/id"
+team_id = "/team/id"
+enterprise_id = "/enterprise/id"
+app_id = "/app_id"

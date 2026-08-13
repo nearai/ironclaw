@@ -303,7 +303,7 @@ def build_report(
         "axes": list(COVERAGE_AXES),
         "denominators": {
             "capabilities": (
-                "crates/ironclaw_first_party_extensions/assets/*/manifest.toml"
+                "crates/extensions/packages/*/manifest.toml"
             ),
             "journeys": "tests/e2e/journey_cases.py::ALL_JOURNEY_CASES",
             "faults": "tests/e2e/provider_fault_cases.py::PROVIDER_FAULT_CASES",

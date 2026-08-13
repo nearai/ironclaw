@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_approvals`
+**Crate:** `crates/kernel/ironclaw_approvals`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/communication-delivery-resolution.md`
 
 ---

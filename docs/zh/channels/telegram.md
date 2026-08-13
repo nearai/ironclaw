@@ -73,17 +73,16 @@ https://your-host/webhooks/extensions/telegram/updates
 
 ## 配置
 
-```toml
-telegram.enabled = true
-```
-
-查看当前状态：
-
-```bash
-ironclaw config get telegram.enabled
-```
+Telegram 在 `config.toml` 中没有任何设置，也没有用于启用的 CLI 配置键。
+入口路由已编译进程序并始终挂载；只有在按上述步骤安装 Telegram 扩展并完成
+机器人设置之后，它才会开始正常服务，在此之前返回 `503`。
 
 机器人令牌保存在加密的密钥存储中，而不是 `config.toml` 里。参见[配置](/capabilities/configuration)（暂仅提供英文版）。
+
+<Note>
+  旧版本遗留的 `[telegram]` 配置段仍可被解析，但不会被读取——`ironclaw serve`
+  启动时会记录一条弃用提示。删除该配置段即可消除该提示。
+</Note>
 
 ---
 

@@ -33,7 +33,7 @@ fn file_tools_with_runtime_policy(
 
 pub(crate) fn file_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
+        ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true))
 }
@@ -78,7 +78,7 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 /// through it. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
+        ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
@@ -87,7 +87,7 @@ pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<T
     // port (mirrors `project_create`'s `PROJECT_CREATE_CAPABILITY_ID`
     // opt-in pattern -- see `profiles/project.rs`).
     profile.capability_ids.push(CapabilityId::new(
-        ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
+        ironclaw_composition::test_support::RESULT_READ_CAPABILITY_ID,
     )?);
     // `builtin.json` (`parse`) is the minimal granted capability whose output
     // is a top-level JSON array, needed to drive the truncated-array

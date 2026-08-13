@@ -6,7 +6,7 @@ at `/`, authenticates a bearer caller, and runs one text turn through the
 `/api/webchat/v2/*` endpoints against the deterministic mock LLM.
 
 This is intentionally small and complements the Rust composition tests
-(`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`), which drive the
+(`crates/app/ironclaw_composition/tests/webui_v2_serve.rs`), which drive the
 same router in-process via `tower::ServiceExt::oneshot` with no real TCP
 listener or browser. It also differs from `test_reborn_gateway_smoke.py`, which
 exercises the legacy `ironclaw` web channel (`/api/chat/*`) under ENGINE_V2 —
@@ -27,7 +27,9 @@ Wiring confirmed manually before this test existed:
 import asyncio
 import json
 import re
+import sys
 import uuid
+from collections.abc import Callable
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -38,7 +40,11 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    install_fake_v2_event_stream,
+    open_reborn_v2_page,
+    reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_first_run_server,  # noqa: F401 - imported fixture
     reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
     send_and_settle as _send_and_settle,
@@ -177,158 +183,54 @@ def _assert_control_typography(
         )
 
 
-async def _wait_for_automation_named(
+async def _wait_for_automation(
     client: httpx.AsyncClient,
     base_url: str,
-    name: str,
+    predicate: Callable[[dict], bool],
+    expectation: str,
     *,
+    absent: bool = False,
     timeout: float = 30.0,
-) -> dict:
+) -> dict | None:
     last_body: dict = {}
     try:
         async with asyncio.timeout(timeout):
             while True:
                 response = await client.get(
                     f"{base_url}/api/webchat/v2/automations",
+                    params={
+                        "include_completed": "true",
+                        "limit": 100,
+                        "run_limit": 0,
+                    },
                     timeout=5,
                 )
                 response.raise_for_status()
                 last_body = response.json()
-                for automation in last_body.get("automations", []):
-                    if automation.get("name") == name:
-                        return automation
+                automation = next(
+                    (
+                        item
+                        for item in last_body.get("automations", [])
+                        if predicate(item)
+                    ),
+                    None,
+                )
+                if absent and automation is None:
+                    return None
+                if not absent and automation is not None:
+                    return automation
                 await asyncio.sleep(0.5)
     except TimeoutError:
         raise AssertionError(
-            f"Timed out waiting for automation {name!r}. Last body: {last_body}"
+            f"Timed out waiting for automation {expectation}. Last body: {last_body}"
         ) from None
 
 
 async def _install_fake_v2_event_stream(page) -> None:
-    script = """
-        (() => {
-          const nativeFetch = window.fetch.bind(window);
-          const encoder = new TextEncoder();
-          const expectedAuthorization = __EXPECTED_AUTHORIZATION__;
-          let activeStream = null;
-          let holdNextConnection = false;
-
-          const currentStream = () => {
-            if (!activeStream || activeStream.closed) {
-              throw new Error("no event stream is open");
-            }
-            return activeStream;
-          };
-
-          const closeStream = (stream, error = null) => {
-            if (!stream || stream.closed) return;
-            stream.closed = true;
-            if (stream.controller) {
-              if (error) {
-                stream.controller.error(error);
-              } else {
-                stream.controller.close();
-              }
-            }
-            if (activeStream === stream) activeStream = null;
-          };
-
-          const openStreamResponse = (signal) => {
-            const stream = { closed: false, controller: null };
-            const body = new ReadableStream({
-              start(controller) {
-                stream.controller = controller;
-              },
-              cancel() {
-                stream.closed = true;
-                if (activeStream === stream) activeStream = null;
-              },
-            });
-            if (activeStream && !activeStream.closed) {
-              closeStream(activeStream);
-            }
-            activeStream = stream;
-            signal?.addEventListener(
-              "abort",
-              () => closeStream(stream),
-              { once: true },
-            );
-            return new Response(body, {
-              status: 200,
-              headers: { "content-type": "text/event-stream" },
-            });
-          };
-
-          window.fetch = async (input, init = {}) => {
-            const request = new Request(input, init);
-            const url = new URL(request.url, window.location.href);
-            if (!url.pathname.endsWith("/events")) {
-              return nativeFetch(input, init);
-            }
-            if (url.searchParams.has("token")) {
-              return new Response("", { status: 400 });
-            }
-            if (request.headers.get("Authorization") !== expectedAuthorization) {
-              return new Response("", { status: 401 });
-            }
-            if (!holdNextConnection) {
-              return openStreamResponse(request.signal);
-            }
-            return new Promise((resolve, reject) => {
-              const stream = {
-                closed: false,
-                controller: null,
-                resolve,
-                reject,
-              };
-              activeStream = stream;
-              request.signal?.addEventListener(
-                "abort",
-                () => {
-                  if (stream.closed) return;
-                  stream.closed = true;
-                  if (activeStream === stream) activeStream = null;
-                  reject(new DOMException("Aborted", "AbortError"));
-                },
-                { once: true },
-              );
-            });
-          };
-
-          window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
-            const stream = currentStream();
-            if (!stream.controller) throw new Error("event stream is reconnecting");
-            stream.controller.enqueue(encoder.encode(
-              `id: ${id}\\nevent: ${type}\\ndata: ${
-                JSON.stringify({ type, ...frame })
-              }\\n\\n`
-            ));
-          };
-
-          window.__failLatestV2Sse = (readyState = 2) => {
-            const stream = currentStream();
-            if (readyState === 0) {
-              holdNextConnection = true;
-              closeStream(stream, new TypeError("event stream interrupted"));
-              return;
-            }
-            holdNextConnection = false;
-            if (stream.resolve) {
-              stream.closed = true;
-              if (activeStream === stream) activeStream = null;
-              stream.resolve(new Response("", { status: 401 }));
-              return;
-            }
-            closeStream(stream, new TypeError("event stream interrupted"));
-          };
-        })();
-        """
-    await page.add_init_script(
-        script.replace(
-            "__EXPECTED_AUTHORIZATION__",
-            json.dumps(f"Bearer {REBORN_V2_AUTH_TOKEN}"),
-        )
-    )
+    # Shared with the legacy WebChat v2 suites: the fetch-based fake matching
+    # the `event-source-plus` transport the SPA actually uses (see
+    # reborn_webui_harness.install_fake_v2_event_stream for the contract).
+    await install_fake_v2_event_stream(page)
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
@@ -354,6 +256,350 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         assert urlparse(anon_page.url).path == "/login"
     finally:
         await anon_ctx.close()
+
+
+async def test_inspector_debug_activation_and_responsive_shell(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """The opt-in inspector adapts without changing the ordinary chat shell."""
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    panel = page.locator(SEL_V2["inspector_panel"])
+    try:
+        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await expect(panel).to_have_count(0)
+
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(panel).to_have_attribute("data-layout", "sidebar")
+        inspector_toggle = page.locator(SEL_V2["inspector_open"])
+        await expect(inspector_toggle).to_be_visible()
+        await expect(inspector_toggle).to_have_attribute("aria-pressed", "true")
+
+        stats_tab = page.locator(SEL_V2["inspector_tab_stats"])
+        await stats_tab.click()
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+        await page.locator(SEL_V2["inspector_close"]).click()
+        await expect(panel).to_have_count(0)
+        await expect(inspector_toggle).to_have_attribute("aria-pressed", "false")
+        await inspector_toggle.click()
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+
+        await page.set_viewport_size({"width": 900, "height": 900})
+        await expect(panel).to_have_attribute("data-layout", "overlay")
+        await page.set_viewport_size({"width": 500, "height": 900})
+        await expect(panel).to_have_count(0)
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await expect(panel).to_have_attribute("data-layout", "sidebar")
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+
+        await page.reload()
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(stats_tab).to_have_attribute("aria-selected", "true")
+        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(panel).to_be_visible(timeout=15000)
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=false&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(panel).to_have_count(0)
+    finally:
+        await context.close()
+
+
+async def test_inspector_prompt_and_stats_render_host_diagnostics(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
+    marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        submitted = await _send_message(client, reborn_v2_server, thread_id, marker)
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+        )
+    run_id = assistant.get("turn_run_id") or submitted.get("run_id")
+    assert run_id, f"completed turn did not expose its run id: {assistant!r}"
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1440, "height": 900}
+    )
+    page = await context.new_page()
+    try:
+        await open_reborn_v2_page(
+            page,
+            reborn_v2_server,
+            path=f"/chat/{thread_id}?debug=true",
+            ready_selector=SEL_V2["inspector_prompt_content"],
+        )
+        prompt = page.locator(SEL_V2["inspector_prompt_content"])
+        await expect(prompt).to_be_visible(timeout=30000)
+        await expect(prompt.get_by_text("Estimated prompt tokens", exact=True)).to_be_visible()
+        await expect(prompt.get_by_text("mock-model", exact=True).first).to_be_visible()
+
+        conversation = prompt.locator("details").filter(has_text=marker).first
+        await expect(conversation).to_have_count(1)
+        await conversation.locator("summary").click()
+        await expect(conversation.locator("pre")).to_contain_text(marker)
+        await expect(
+            prompt.get_by_text(
+                "Reconstructed content reflects the latest host prompt boundary",
+            )
+        ).to_have_count(1)
+
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        await expect(activity).to_be_visible(timeout=30000)
+        await expect(
+            activity.locator("[data-activity-kind='turn_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='prompt_prepared']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
+        activity_kinds = await activity.locator("[data-activity-kind]").evaluate_all(
+            "entries => entries.map(entry => entry.dataset.activityKind)"
+        )
+        assert activity_kinds.index("turn_started") < activity_kinds.index(
+            "prompt_prepared"
+        )
+        assert activity_kinds.index("model_call_started") < activity_kinds.index(
+            "model_call_completed"
+        )
+        await expect(activity.get_by_text("Turn 1 of 1", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        stats = page.locator(SEL_V2["inspector_stats_content"])
+        await expect(stats).to_be_visible()
+        model_calls = (
+            stats.get_by_text("Model calls", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
+        )
+        await expect(model_calls).to_have_text("1")
+        input_tokens = (
+            stats.get_by_text("Input tokens", exact=True)
+            .locator("..")
+            .locator("p")
+            .nth(1)
+        )
+        await expect(input_tokens).to_have_text("10")
+        await expect(stats.get_by_text("Output tokens", exact=True).locator("..")).not_to_contain_text(
+            "Unavailable"
+        )
+        await expect(stats.get_by_text("Tool calls", exact=True).locator("..")).to_contain_text(
+            "0"
+        )
+        await expect(
+            stats.get_by_text("Successful tool calls", exact=True).locator("..")
+        ).to_contain_text("0")
+        await expect(
+            stats.get_by_text("Failed tool calls", exact=True).locator("..")
+        ).to_contain_text("0")
+        await expect(stats.get_by_text("Browser-observed stream health", exact=True)).to_be_visible()
+        # A settled run's last diagnostic update schedules a background
+        # snapshot refresh. That refresh must not downgrade the open stream,
+        # so the browser-observed state settles on "Live" and stays there.
+        await expect(page.locator(SEL_V2["inspector_stream_state"])).to_have_text("Live")
+        await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
+        await expect(stats.get_by_text("Statistics are partial:")).to_have_count(0)
+
+        second_marker = f"turn-navigation-e2e-{uuid.uuid4()}"
+        await page.locator(SEL_V2["inspector_close"]).click()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_have_count(0)
+        inspector_run_prefix = (
+            f"/operator/inspector/threads/{thread_id}/runs/"
+        )
+        async with page.expect_request(
+            lambda request: inspector_run_prefix in request.url
+            and run_id not in request.url,
+            timeout=30000,
+        ) as background_observation:
+            async with httpx.AsyncClient(headers=headers) as client:
+                await _send_and_settle(
+                    client,
+                    reborn_v2_server,
+                    thread_id,
+                    second_marker,
+                    expected=2,
+                )
+        observed_request = await background_observation.value
+        assert inspector_run_prefix in observed_request.url
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            second_assistant = await _wait_for_assistant_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+            )
+        second_run_id = second_assistant.get("turn_run_id")
+        assert second_run_id and second_run_id != run_id, second_assistant
+        assert second_run_id in observed_request.url
+
+        await page.locator(SEL_V2["inspector_open"]).click()
+        await page.locator(SEL_V2["inspector_tab_activity"]).click()
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible(
+            timeout=30000
+        )
+        await expect(activity.get_by_label("Previous turn")).to_be_enabled()
+        await expect(activity.get_by_label("Next turn")).to_be_disabled()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 1 of 2", exact=True)).to_be_visible()
+        await expect(activity.get_by_label("Previous turn")).to_be_disabled()
+        await expect(activity.get_by_label("Next turn")).to_be_enabled()
+        await expect(activity.get_by_label("Latest turn")).to_be_enabled()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(run_id)
+
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 2 of 2", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+
+        # A third turn takes navigation past the old two-run retention depth.
+        # Stopping at two made the browser's wider navigation window look sound
+        # while every turn beyond the second rendered blank, so this walks back
+        # two turns and asserts the FIRST run still renders real activity rather
+        # than the empty state.
+        async with httpx.AsyncClient(headers=headers) as client:
+            await _send_and_settle(
+                client,
+                reborn_v2_server,
+                thread_id,
+                f"retention-depth-e2e-{uuid.uuid4()}",
+                expected=3,
+            )
+        # An operator who navigated to a turn keeps it: the arriving turn widens
+        # the window without yanking the selection to the newest run. Following
+        # it is an explicit "Latest" click.
+        await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible(
+            timeout=30000
+        )
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 2 of 3", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(
+            second_run_id
+        )
+        await activity.get_by_label("Previous turn").click()
+        await expect(activity.get_by_text("Turn 1 of 3", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_panel"])).to_contain_text(run_id)
+        # The timeline container only renders when the run has retained
+        # activity; the empty state omits it. Its presence two turns back is the
+        # evidence that host retention actually covers the navigable window.
+        await expect(page.locator(SEL_V2["inspector_activity_content"])).to_be_visible()
+        await expect(
+            activity.get_by_text("No activity yet", exact=True)
+        ).to_have_count(0)
+
+        await activity.get_by_label("Latest turn").click()
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+
+        await page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true,
+                value: "hidden",
+              });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await expect(page.locator(SEL_V2["inspector_health"])).to_have_text("Idle")
+        async with page.expect_response(
+            lambda response: "/operator/inspector/" in response.url
+            and "/events" in response.url
+            and "connection_generation=" in response.url,
+            timeout=30000,
+        ) as reconnect_info:
+            await page.evaluate(
+                """() => {
+                  Object.defineProperty(document, "visibilityState", {
+                    configurable: true,
+                    value: "visible",
+                  });
+                  document.dispatchEvent(new Event("visibilitychange"));
+                }"""
+            )
+        reconnect_response = await reconnect_info.value
+        assert reconnect_response.status == 200, reconnect_response.url
+        activity = page.locator(SEL_V2["inspector_activity_content"])
+        # The thread now holds three turns and navigation was left on the
+        # latest, so the reconnect resumes observing that run.
+        await expect(activity.get_by_text("Turn 3 of 3", exact=True)).to_be_visible()
+        await expect(
+            activity.locator("[data-activity-kind='model_call_started']")
+        ).to_have_count(1)
+        await expect(
+            activity.locator("[data-activity-kind='model_call_completed']")
+        ).to_have_count(1)
+
+        await page.locator(SEL_V2["inspector_tab_stats"]).click()
+        reconnects = page.locator(SEL_V2["inspector_stream_reconnects"])
+        await expect(reconnects).to_have_text(re.compile(r"^[1-9][0-9,]*$"))
+        updates = page.locator(SEL_V2["inspector_stream_updates"])
+        updates_before_reload = int((await updates.inner_text()).replace(",", ""))
+        await page.reload()
+        await expect(page.locator(SEL_V2["inspector_stats_content"])).to_be_visible(
+            timeout=30000
+        )
+        await expect(updates).to_have_text(f"{updates_before_reload:,}")
+    finally:
+        await context.close()
+
+
+async def test_inspector_uses_the_selected_locale(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """Inspector chrome, status, tabs, and accessibility labels follow the locale."""
+    context = await reborn_v2_browser.new_context(
+        locale="zh-CN",
+        viewport={"width": 1440, "height": 900},
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/chat?debug=true&token={REBORN_V2_AUTH_TOKEN}"
+        )
+        panel = page.locator(SEL_V2["inspector_panel"])
+        await expect(panel).to_be_visible(timeout=15000)
+        await expect(panel.get_by_text("Web 调试检查器", exact=True)).to_be_visible()
+        await expect(page.locator(SEL_V2["inspector_health"])).to_have_text("空闲")
+        await expect(page.locator(SEL_V2["inspector_close"])).to_have_attribute(
+            "aria-label", "关闭检查器"
+        )
+        await expect(page.locator(SEL_V2["inspector_tab_prompt"])).to_have_text(
+            "提示词"
+        )
+    finally:
+        await context.close()
 
 
 @pytest.mark.parametrize(
@@ -506,6 +752,166 @@ async def test_reborn_v2_shared_control_typography_is_stable(
         await context.close()
 
 
+async def test_reborn_v2_first_run_onboarding_configures_llm_and_survives_restart(
+    reborn_v2_first_run_server,
+    reborn_v2_browser,
+    mock_llm_server,
+):
+    """A fresh install can configure its first provider without leaking the key."""
+    state, start, stop = reborn_v2_first_run_server
+    base_url = state["base_url"]
+    api_key = "first-run-e2e-secret-7054"
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+
+    try:
+        await page.goto(
+            f"{base_url}/chat?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await page.wait_for_url(re.compile(r".*/welcome(?:[?#].*)?$"), timeout=15000)
+        await expect(
+            page.get_by_role("heading", name="Welcome to IronClaw")
+        ).to_be_visible(timeout=15000)
+
+        openai_row = page.locator(
+            SEL_V2["onboarding_provider_card_for"].format(provider_id="openai")
+        )
+        await openai_row.locator(SEL_V2["onboarding_provider_setup"]).click()
+
+        dialog = page.get_by_role("dialog")
+        await expect(
+            dialog.get_by_role("heading", name="Configure OpenAI")
+        ).to_be_visible(timeout=5000)
+        await dialog.get_by_label("Base URL").fill(f"{mock_llm_server}/v1")
+        await dialog.get_by_label("API key").fill(api_key)
+        await dialog.get_by_label("Default model").fill("mock-model")
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/webchat/v2/llm/test-connection")
+        ) as probe_info:
+            await dialog.get_by_role("button", name="Test connection").click()
+        probe = await probe_info.value
+        probe_body = await probe.text()
+        assert probe.status == 200, probe_body
+        assert (await probe.json())["ok"] is True
+        assert api_key not in probe_body
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/webchat/v2/llm/providers")
+        ) as upsert_info:
+            async with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and response.url.endswith("/api/webchat/v2/llm/active")
+            ) as active_info:
+                await dialog.get_by_role("button", name="Save").click()
+
+        upsert = await upsert_info.value
+        active = await active_info.value
+        upsert_body = await upsert.text()
+        active_body = await active.text()
+        assert upsert.status == 200, upsert_body
+        assert active.status == 200, active_body
+        assert api_key not in upsert_body
+        assert api_key not in active_body
+
+        await page.wait_for_url(re.compile(r".*/chat(?:[?#].*)?$"), timeout=15000)
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+
+        async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+            providers = await client.get(
+                f"{base_url}/api/webchat/v2/llm/providers",
+                timeout=15,
+            )
+            providers.raise_for_status()
+            providers_body = providers.json()
+            openai = next(
+                provider
+                for provider in providers_body["providers"]
+                if provider["id"] == "openai"
+            )
+            assert providers_body["active"] == {
+                "provider_id": "openai",
+                "model": "mock-model",
+            }
+            assert openai["api_key_set"] is True
+            assert api_key not in providers.text
+
+        browser_state = await page.evaluate(
+            """() => JSON.stringify({
+              html: document.documentElement.outerHTML,
+              inputValues: Array.from(
+                document.querySelectorAll("input, textarea"),
+                (element) => element.value,
+              ),
+              localStorage: Array.from(
+                { length: localStorage.length },
+                (_, index) => localStorage.getItem(localStorage.key(index)),
+              ),
+              sessionStorage: Array.from(
+                { length: sessionStorage.length },
+                (_, index) => sessionStorage.getItem(sessionStorage.key(index)),
+              ),
+            })"""
+        )
+        assert REBORN_V2_AUTH_TOKEN in browser_state
+        assert api_key not in browser_state
+        persisted_config = (
+            state["home_dir"] / "reborn-home" / "config.toml"
+        ).read_text(encoding="utf-8")
+        assert api_key not in persisted_config
+
+        await page.reload()
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        assert urlparse(page.url).path == "/chat"
+
+        await composer.fill("hello from first-run onboarding")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
+            "Hello!", timeout=30000
+        )
+
+        await stop()
+        restarted_url = await start()
+        await page.goto(
+            f"{restarted_url}/chat?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        assert urlparse(page.url).path == "/chat"
+
+        async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+            providers = await client.get(
+                f"{restarted_url}/api/webchat/v2/llm/providers",
+                timeout=15,
+            )
+            providers.raise_for_status()
+            assert providers.json()["active"] == {
+                "provider_id": "openai",
+                "model": "mock-model",
+            }
+            assert api_key not in providers.text
+
+        await stop()
+        captured_logs = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in state["log_paths"]
+            if path.exists()
+        )
+        assert captured_logs, "first-run server logs were not captured"
+        assert "Using OpenAI-compatible provider" in captured_logs
+        assert api_key not in captured_logs
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_lazy_routes_preserve_direct_navigation(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -613,6 +1019,7 @@ async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
             content_type="application/json",
             body=json.dumps(
                 {
+                    "session_channel_extension_id": "web-app",
                     "tenant_id": "reborn-v2-e2e",
                     "user_id": USER_ID,
                     "capabilities": {},
@@ -936,7 +1343,7 @@ async def test_reborn_v2_chat_request_failure_uses_selected_language(
         "**/api/webchat/v2/threads", handle_create_thread
     )
     await reborn_v2_page.route(
-        f"**/api/webchat/v2/threads/{thread_id}/messages", fail_send
+        "**/api/webchat/v2/channels/*/messages", fail_send
     )
 
     await reborn_v2_page.goto(
@@ -1079,68 +1486,190 @@ async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
     await expect(assistant_messages.last).to_contain_text("I understand your request.")
 
 
-async def test_reborn_v2_automation_rename_persists_from_ui(
+async def test_reborn_v2_automation_lifecycle_persists_from_ui(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Creating an automation through chat can be renamed from /automations."""
+    """Automation UI mutations persist through the real served API."""
     label = f"ui-{uuid.uuid4().hex[:8]}"
     original_name = f"E2E rename original {label}"
     renamed_name = f"E2E rename updated {label}"
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    automation_id = None
+    automation_deleted = False
+    context = None
 
     async with httpx.AsyncClient(headers=headers) as client:
-        thread_id = await _create_thread(client, reborn_v2_server)
-        await _send_message(
-            client,
-            reborn_v2_server,
-            thread_id,
-            f"reborn create automation rename target {label}",
-        )
-        await _wait_for_assistant_message(client, reborn_v2_server, thread_id)
-        automation = await _wait_for_automation_named(
-            client, reborn_v2_server, original_name
-        )
-        automation_id = automation["automation_id"]
+        try:
+            thread_id = await _create_thread(client, reborn_v2_server)
+            await _send_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+                f"reborn create automation rename target {label}",
+            )
+            await _wait_for_assistant_message(client, reborn_v2_server, thread_id)
+            automation = await _wait_for_automation(
+                client,
+                reborn_v2_server,
+                lambda item: item.get("name") == original_name,
+                f"named {original_name!r}",
+            )
+            assert automation is not None
+            automation_id = automation["automation_id"]
 
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
-    try:
-        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
-        row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
-        row = page.locator(row_selector)
-        await expect(row).to_be_visible(timeout=15000)
-        await row.locator(
-            SEL_V2["automation_name_button_for"].format(id=automation_id)
-        ).click()
+            async def wait_for_automation_id(
+                *,
+                expected_name: str | None = None,
+                expected_state: str | None = None,
+                absent: bool = False,
+            ) -> dict | None:
+                def matches(item: dict) -> bool:
+                    return (
+                        item.get("automation_id") == automation_id
+                        and (
+                            expected_name is None
+                            or item.get("name") == expected_name
+                        )
+                        and (
+                            expected_state is None
+                            or item.get("state") == expected_state
+                        )
+                    )
 
-        await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
-            timeout=15000
-        )
-        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
-            original_name
-        )
+                details = []
+                if expected_name is not None:
+                    details.append(f"name {expected_name!r}")
+                if expected_state is not None:
+                    details.append(f"state {expected_state!r}")
+                if absent:
+                    expectation = f"{automation_id!r} to be absent"
+                elif details:
+                    expectation = f"{automation_id!r} with {' and '.join(details)}"
+                else:
+                    expectation = f"{automation_id!r} in any state"
+                return await _wait_for_automation(
+                    client,
+                    reborn_v2_server,
+                    matches,
+                    expectation,
+                    absent=absent,
+                )
 
-        await page.locator(SEL_V2["automation_rename_button"]).click()
-        rename_input = page.locator(SEL_V2["automation_rename_input"])
-        await expect(rename_input).to_have_value(original_name)
-        await rename_input.fill(f"  {renamed_name}  ")
-        await page.locator(SEL_V2["automation_rename_save"]).click()
+            assert automation["state"] == "scheduled"
 
-        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
-            renamed_name,
-            timeout=15000,
-        )
-        await expect(row).to_contain_text(renamed_name)
+            context = await reborn_v2_browser.new_context(
+                viewport={"width": 1280, "height": 720}
+            )
+            page = await context.new_page()
+            await page.goto(
+                f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}"
+            )
+            row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
+            name_button_selector = SEL_V2["automation_name_button_for"].format(
+                id=automation_id
+            )
+            action_button_selector = SEL_V2["automation_action_for"].format(
+                id=automation_id
+            )
+            delete_button_selector = SEL_V2["automation_delete_for"].format(
+                id=automation_id
+            )
+            delete_dialog_selector = SEL_V2[
+                "automation_delete_dialog_for"
+            ].format(id=automation_id)
+            row = page.locator(row_selector)
+            await expect(row).to_be_visible(timeout=15000)
+            await row.locator(name_button_selector).click()
 
-        await page.reload()
-        row = page.locator(row_selector)
-        await expect(row).to_contain_text(renamed_name, timeout=15000)
-    finally:
-        await context.close()
+            await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
+                timeout=15000
+            )
+            await expect(
+                page.locator(SEL_V2["automation_detail_title"])
+            ).to_contain_text(original_name)
 
-    async with httpx.AsyncClient(headers=headers) as client:
-        renamed = await _wait_for_automation_named(client, reborn_v2_server, renamed_name)
-        assert renamed["automation_id"] == automation_id
+            await page.locator(SEL_V2["automation_rename_button"]).click()
+            rename_input = page.locator(SEL_V2["automation_rename_input"])
+            await expect(rename_input).to_have_value(original_name)
+            await rename_input.fill(f"  {renamed_name}  ")
+            await page.locator(SEL_V2["automation_rename_save"]).click()
+
+            await expect(
+                page.locator(SEL_V2["automation_detail_title"])
+            ).to_contain_text(renamed_name, timeout=15000)
+            renamed = await wait_for_automation_id(expected_name=renamed_name)
+            assert renamed is not None
+            assert renamed["automation_id"] == automation_id
+
+            await page.reload()
+            row = page.locator(row_selector)
+            await expect(row).to_contain_text(renamed_name, timeout=15000)
+            await row.locator(name_button_selector).click()
+
+            await page.locator(action_button_selector).click()
+            paused = await wait_for_automation_id(expected_state="paused")
+            assert paused is not None
+            assert paused["name"] == renamed_name
+
+            await page.reload()
+            row = page.locator(row_selector)
+            await expect(row).to_contain_text("Paused", timeout=15000)
+            await row.locator(name_button_selector).click()
+            await expect(page.locator(action_button_selector)).to_have_attribute(
+                "data-automation-action",
+                "resume",
+                timeout=15000,
+            )
+            paused_after_reload = await wait_for_automation_id(
+                expected_state="paused"
+            )
+            assert paused_after_reload is not None
+
+            await page.locator(action_button_selector).click()
+            resumed = await wait_for_automation_id(expected_state="scheduled")
+            assert resumed is not None
+            assert resumed["name"] == renamed_name
+
+            await page.reload()
+            row = page.locator(row_selector)
+            await expect(row).to_contain_text("Scheduled", timeout=15000)
+            await row.locator(name_button_selector).click()
+            await expect(page.locator(action_button_selector)).to_have_attribute(
+                "data-automation-action",
+                "pause",
+                timeout=15000,
+            )
+            resumed_after_reload = await wait_for_automation_id(
+                expected_state="scheduled"
+            )
+            assert resumed_after_reload is not None
+
+            await page.locator(delete_button_selector).click()
+            confirmation = page.locator(delete_dialog_selector)
+            await expect(confirmation).to_be_visible(timeout=15000)
+            await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+
+            await expect(page.locator(row_selector)).to_have_count(0, timeout=15000)
+            await wait_for_automation_id(absent=True)
+            automation_deleted = True
+        finally:
+            # Keep the module-scoped server isolated if an earlier assertion fails.
+            test_failed = sys.exc_info()[0] is not None
+            cleanup_error = None
+            if automation_id is not None and not automation_deleted:
+                try:
+                    cleanup_response = await client.delete(
+                        f"{reborn_v2_server}/api/webchat/v2/automations/{automation_id}",
+                        timeout=5,
+                    )
+                    cleanup_response.raise_for_status()
+                    await wait_for_automation_id(absent=True)
+                except (AssertionError, httpx.HTTPError) as error:
+                    cleanup_error = error
+            if context is not None:
+                await context.close()
+            if cleanup_error is not None and not test_failed:
+                raise cleanup_error
 
 
 async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
@@ -1381,6 +1910,7 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -1527,11 +2057,89 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     ).to_be_visible(timeout=15000)
 
     await expect(composer).to_be_enabled()
+    # A busy run no longer gates the composer: sends are queued behind the
+    # active run rather than blocked, so the send affordance stays enabled.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     await composer.fill("draft while the reply is still running")
     await expect(composer).to_have_value("draft while the reply is still running")
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
 
     await composer.press("Enter")
-    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(2, timeout=5000)
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).nth(1)).to_contain_text(
+        "draft while the reply is still running"
+    )
+
+
+async def test_reborn_v2_composer_takes_focus_from_sidebar_navigation(reborn_v2_page):
+    """"+ New" and opening a thread both land keyboard focus in the composer.
+
+    This is the tier that matters for #7204: Chromium focuses a <button> on
+    click, so after either sidebar action the clicked button owns
+    document.activeElement when the composer's rAF runs. A component test that
+    stubs activeElement to None cannot see that, and the first fix shipped a
+    focus guard that refused to steal from the button — leaving the composer
+    unfocused on exactly the two paths the issue is about.
+    """
+    page = reborn_v2_page
+    composer = page.locator(SEL_V2["chat_composer"])
+
+    async def composer_is_focused() -> bool:
+        return await composer.evaluate("node => node === document.activeElement")
+
+    # Give the sidebar a thread to open later. The serve fixture is shared
+    # across this module, so the sidebar already holds other tests' threads —
+    # tag this one so the row lookup below cannot match theirs.
+    marker = f"focus-nav-{uuid.uuid4().hex[:8]}"
+    await composer.fill(marker)
+    await composer.press("Enter")
+    await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        marker, timeout=15000
+    )
+    await expect(composer).to_have_attribute(
+        "data-send-disabled", "false", timeout=15000
+    )
+
+    sidebar = page.locator(SEL_V2["sidebar"])
+    # Pin the row by its own thread id, read off the DOM. "New" prepends a row
+    # and a `.first` locator resolves lazily, so it would silently retarget the
+    # new empty thread; the URL is not usable either (it stays on /chat).
+    marked_row = sidebar.locator(SEL_V2["thread_item"]).filter(has_text=marker)
+    await expect(marked_row).to_be_visible(timeout=15000)
+    first_thread_id = await marked_row.get_attribute("data-thread-id")
+    assert first_thread_id, "sidebar thread row must expose data-thread-id"
+    existing_thread = sidebar.locator(
+        f"{SEL_V2['thread_item']}[data-thread-id='{first_thread_id}']"
+    )
+
+    # "New": a real click, so the button holds focus until we take it back.
+    new_button = sidebar.locator(SEL_V2["thread_new"])
+    await expect(new_button).to_be_enabled(timeout=15000)
+    await new_button.click()
+    await expect(composer).to_have_value("", timeout=15000)
+    await page.wait_for_function(
+        "selector => document.activeElement === document.querySelector(selector)",
+        arg=SEL_V2["chat_composer"],
+        timeout=5000,
+    )
+    assert await composer_is_focused() is True
+
+    # Typing goes straight into the composer with no intermediate click.
+    await page.keyboard.type("typed without clicking")
+    await expect(composer).to_have_value("typed without clicking")
+
+    # Opening an existing thread does the same.
+    await existing_thread.click()
+    await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        marker, timeout=15000
+    )
+    await page.wait_for_function(
+        "selector => document.activeElement === document.querySelector(selector)",
+        arg=SEL_V2["chat_composer"],
+        timeout=5000,
+    )
+    assert await composer_is_focused() is True
 
 
 async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
@@ -1566,7 +2174,9 @@ async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
 
     await expect(cancel_button).to_be_visible(timeout=10000)
     await expect(cancel_button).to_be_enabled(timeout=10000)
-    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    # The run is still active after the failed cancel, and a busy run no
+    # longer gates the composer: sends are queued behind the active run.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
         has_text="Couldn't stop this run"
     )
@@ -1598,6 +2208,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -1644,7 +2255,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -1653,44 +2264,42 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         connection_status = page.locator(SEL_V2["connection_status"])
 
         await context.set_offline(True)
-        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
-        await expect(connection_status).to_have_css("position", "static")
-        assert await connection_status.evaluate("node => Boolean(node.closest('header'))")
-        await expect(connection_status).to_be_in_viewport()
-
+        # RECONNECTING is no longer rendered (internal state only): a proxy
+        # that closes the SSE body between streamed frames would otherwise
+        # blink the badge on every chunk. The badge stays absent during a
+        # transient/retryable reconnect and only reappears on a terminal
+        # DISCONNECTED state.
+        await expect(connection_status).to_have_count(0, timeout=5000)
         await page.set_viewport_size({"width": 390, "height": 844})
         connection_status_toggle = page.locator(SEL_V2["connection_status_toggle"])
         connection_status_label = page.locator(SEL_V2["connection_status_label"])
-        disclosure_id = await connection_status_label.get_attribute("id")
-        assert disclosure_id
-        await expect(connection_status_label).to_be_hidden()
-        await expect(connection_status_label).to_have_attribute("aria-hidden", "true")
-        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "false")
-        await expect(connection_status_toggle).to_have_attribute("aria-controls", disclosure_id)
-        await expect(connection_status_toggle).to_be_in_viewport()
-
-        await connection_status_toggle.click()
-        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "true")
-        await expect(connection_status_label).to_have_attribute("aria-hidden", "false")
-        await expect(connection_status_label).to_be_visible()
-        await expect(connection_status_label).to_have_text("Reconnecting...")
-        await expect(connection_status_label).to_have_css("position", "absolute")
-        await expect(connection_status_toggle).to_be_in_viewport()
-        await expect(connection_status_label).to_be_in_viewport()
+        # No visible status affordance while RECONNECTING is hidden.
+        await expect(connection_status_toggle).to_have_count(0, timeout=5000)
+        await expect(connection_status_label).to_have_count(0, timeout=5000)
         await expect(page.locator(SEL_V2["header_logs_link"])).to_be_visible()
         await expect(page.locator(SEL_V2["header_docs_link"])).to_be_visible()
 
         await page.set_viewport_size({"width": 1280, "height": 720})
         await context.set_offline(False)
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
         await expect(connection_status).to_have_count(0, timeout=5000)
 
         await composer.fill("summarize 3 X/Twitter posts")
         await composer.press("Enter")
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
 
+        # A retryable stream interruption (readyState 0) stays RECONNECTING
+        # internally and is not rendered; the badge remains absent. Wait for
+        # an open stream first so the forced failure does not race the fake
+        # stream lifecycle, then wait for the held pending connection so the
+        # terminal failure below targets the held promise.
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
         await page.evaluate("() => window.__failLatestV2Sse(0)")
-        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+        await page.wait_for_function("() => window.__v2SseHasHeldConnection?.() === true")
+        await expect(connection_status).to_have_count(0, timeout=5000)
 
+        # A terminal (non-retryable) failure escalates to DISCONNECTED, which
+        # is still rendered.
         await page.evaluate("() => window.__failLatestV2Sse(2)")
         await expect(connection_status).to_have_text("Disconnected", timeout=5000)
 
@@ -1724,6 +2333,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -1778,7 +2388,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -1852,6 +2462,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -1913,7 +2524,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -2076,10 +2687,11 @@ async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
 async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     reborn_v2_page, reborn_v2_server
 ):
-    """The browser logs route scopes, paginates, retries, and preserves older entries."""
+    """The logs UI filters with SelectMenu while preserving scope and pagination."""
     requested_queries: list[dict[str, list[str]]] = []
     pagination_cursors: list[str] = []
     logs_requested = asyncio.Event()
+    filtered_logs_requested = asyncio.Event()
     polled_after_pagination = asyncio.Event()
     pagination_attempts = 0
     pagination_loaded = False
@@ -2090,6 +2702,10 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
         query = parse_qs(parsed.query)
         requested_queries.append(query)
         logs_requested.set()
+        if query.get("level") == ["warn"] and query.get("target") == [
+            "ironclaw::ui"
+        ]:
+            filtered_logs_requested.set()
         cursor = query.get("cursor", [None])[0]
         if cursor == "older-page-1":
             pagination_cursors.append(cursor)
@@ -2210,6 +2826,27 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
         reborn_v2_page.locator(SEL_V2["logs_scope_chip"].format(key="run_id"))
     ).to_contain_text("run-ui")
 
+    level_filter = reborn_v2_page.locator(SEL_V2["logs_level_filter"])
+    level_trigger = level_filter.get_by_role("button")
+    await expect(level_trigger).to_have_attribute("aria-haspopup", "listbox")
+    await expect(level_filter.locator("select")).to_have_count(0)
+    await reborn_v2_page.locator(SEL_V2["logs_target_filter"]).fill("ironclaw::ui")
+    await level_trigger.click()
+    await expect(reborn_v2_page.get_by_role("listbox")).to_be_visible()
+    await reborn_v2_page.get_by_role("option", name="WARN", exact=True).click()
+    await asyncio.wait_for(filtered_logs_requested.wait(), timeout=10)
+    await expect(level_trigger).to_contain_text("WARN")
+    filtered_query = next(
+        query
+        for query in reversed(requested_queries)
+        if query.get("level") == ["warn"]
+        and query.get("target") == ["ironclaw::ui"]
+    )
+    assert filtered_query.get("thread_id") == ["thread-ui"], filtered_query
+    assert filtered_query.get("run_id") == ["run-ui"], filtered_query
+    assert filtered_query.get("tool_call_id") == ["tool-call-ui"], filtered_query
+    assert filtered_query.get("source") == ["slack"], filtered_query
+
     entry = reborn_v2_page.locator(SEL_V2["logs_entry"]).first
     await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
         "scoped log from browser fixture"
@@ -2291,6 +2928,7 @@ async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2641,6 +3279,7 @@ async def test_reborn_v2_loading_older_messages_preserves_viewport(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

@@ -42,6 +42,7 @@ pub fn new_flow_request(
     expires_at: DateTime<Utc>,
 ) -> NewAuthFlow {
     NewAuthFlow {
+        requested_scopes: Vec::new(),
         id: None,
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
