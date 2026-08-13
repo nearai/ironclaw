@@ -1832,7 +1832,7 @@ where
 
         Ok(AcceptedInboundMessage {
             thread_id,
-            message_id,
+            message_id: message.message_id,
             sequence,
             idempotent_replay: resuming_pending_idempotency,
             replay_metadata,

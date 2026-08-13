@@ -987,9 +987,7 @@ impl StubServices {
                         caller.user_id.as_str().to_string(),
                     ))
                     .cloned()
-                    .unwrap_or(UserModelPreference {
-                        model: Some("model-b".to_string()),
-                    });
+                    .unwrap_or(UserModelPreference { model: None });
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(preference)
                         .expect("user model preference payload"),
@@ -6676,10 +6674,7 @@ async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin
         .await
         .expect("oneshot");
     assert_eq!(get_response.status(), StatusCode::OK);
-    assert_eq!(
-        read_json(get_response).await,
-        serde_json::json!({ "model": "model-b" })
-    );
+    assert_eq!(read_json(get_response).await, serde_json::json!({}));
 
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let put_response = router
@@ -6726,10 +6721,7 @@ async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin
         )
         .await
         .expect("oneshot");
-    assert_eq!(
-        read_json(other_caller_get).await,
-        serde_json::json!({ "model": "model-b" })
-    );
+    assert_eq!(read_json(other_caller_get).await, serde_json::json!({}));
 
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let reset_response = router
