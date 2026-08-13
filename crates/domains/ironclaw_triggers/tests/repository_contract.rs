@@ -3759,9 +3759,11 @@ mod fire_claim_contract {
         repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), base_fire_slot))
             .await
             .expect("insert retention record");
+        let mut fire_slot = base_fire_slot;
+        let mut claimed_slots = Vec::with_capacity(501);
 
         for offset in 0..=500 {
-            let fire_slot = base_fire_slot + chrono::Duration::minutes(offset);
+            claimed_slots.push(fire_slot);
             let run_id = TurnRunId::new();
             let claimed = repo
                 .claim_due_fire(ClaimDueFireRequest {
@@ -3785,16 +3787,18 @@ mod fire_claim_contract {
             .await
             .expect("accept retention fire")
             .expect("accepted retention fire should persist");
-            repo.clear_active_fire(ClearActiveFireRequest {
-                tenant_id: tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                run_id,
-                status: TriggerRunHistoryStatus::Ok,
-            })
-            .await
-            .expect("clear retention fire")
-            .expect("active fire should clear");
+            let cleared = repo
+                .clear_active_fire(ClearActiveFireRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    run_id,
+                    status: TriggerRunHistoryStatus::Ok,
+                })
+                .await
+                .expect("clear retention fire")
+                .expect("active fire should clear");
+            fire_slot = cleared.next_run_at;
         }
 
         let retained = repo
@@ -3804,11 +3808,11 @@ mod fire_claim_contract {
         assert_eq!(retained.len(), 500);
         assert_eq!(
             retained.first().expect("newest retained").fire_slot,
-            base_fire_slot + chrono::Duration::minutes(500)
+            claimed_slots.last().cloned().expect("newest claimed slot")
         );
         assert_eq!(
             retained.last().expect("oldest retained").fire_slot,
-            base_fire_slot + chrono::Duration::minutes(1)
+            claimed_slots.get(1).cloned().expect("oldest retained slot")
         );
     }
 
