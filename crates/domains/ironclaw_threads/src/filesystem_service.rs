@@ -121,6 +121,11 @@ enum TransactionalMessageWrite {
     IdempotencyAlreadyAccepted,
 }
 
+enum InboundIdempotencyState {
+    Accepted(AcceptedInboundMessage),
+    Pending(InboundIdempotencyRecord),
+}
+
 /// On-disk thread state record. The transcript boundary's
 /// [`SessionThreadRecord`] is the user-visible shape; this struct adds
 /// `next_sequence` so the per-thread monotonic counter is durable.
@@ -1181,6 +1186,50 @@ where
         })
     }
 
+    async fn classify_inbound_idempotency_record(
+        &self,
+        scope: &ThreadScope,
+        requested_thread_id: &ThreadId,
+        requested_actor_id: &str,
+        request_fingerprint: &str,
+        record: InboundIdempotencyRecord,
+    ) -> Result<InboundIdempotencyState, SessionThreadError> {
+        match self
+            .accepted_message_from_idempotency_record(
+                scope,
+                requested_thread_id,
+                requested_actor_id,
+                &record,
+            )
+            .await
+        {
+            Ok(accepted) => Ok(InboundIdempotencyState::Accepted(accepted)),
+            Err(SessionThreadError::UnknownMessage { message_id })
+                if message_id == record.message_id =>
+            {
+                let Some(stored_actor_id) = record.actor_id.as_deref() else {
+                    return Err(SessionThreadError::Backend(
+                        "inbound idempotency record references a missing message".to_string(),
+                    ));
+                };
+                if stored_actor_id != requested_actor_id {
+                    return Err(SessionThreadError::IdempotentReplayActorMismatch {
+                        stored_actor_id: stored_actor_id.to_string(),
+                        requested_actor_id: requested_actor_id.to_string(),
+                    });
+                }
+                if record.request_fingerprint.as_deref() != Some(request_fingerprint) {
+                    return Err(SessionThreadError::Backend(
+                        "inbound idempotency retry payload does not match its recovery intent"
+                            .to_string(),
+                    ));
+                }
+                Ok(InboundIdempotencyState::Pending(record))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn idempotency_record_from_path(
         &self,
         scope: &ThreadScope,
@@ -1569,42 +1618,26 @@ where
             && let Some(record) = self.idempotency_record_from_path(&scope, path).await?
         {
             match self
-                .accepted_message_from_idempotency_record(&scope, &thread_id, &actor_id, &record)
-                .await
+                .classify_inbound_idempotency_record(
+                    &scope,
+                    &thread_id,
+                    &actor_id,
+                    &request_fingerprint,
+                    record,
+                )
+                .await?
             {
-                Ok(accepted) => return Ok(accepted),
-                Err(SessionThreadError::UnknownMessage { message_id })
-                    if message_id == record.message_id =>
-                {
-                    let Some(stored_actor_id) = record.actor_id.as_deref() else {
-                        return Err(SessionThreadError::Backend(
-                            "inbound idempotency record references a missing message".to_string(),
-                        ));
-                    };
-                    if stored_actor_id != actor_id {
-                        return Err(SessionThreadError::IdempotentReplayActorMismatch {
-                            stored_actor_id: stored_actor_id.to_string(),
-                            requested_actor_id: actor_id.clone(),
-                        });
-                    }
-                    if record.request_fingerprint.as_deref() != Some(request_fingerprint.as_str()) {
-                        return Err(SessionThreadError::Backend(
-                            "inbound idempotency retry payload does not match its recovery intent"
-                                .to_string(),
-                        ));
-                    }
-                    pending_idempotency = Some(record);
-                }
-                Err(error) => return Err(error),
+                InboundIdempotencyState::Accepted(accepted) => return Ok(accepted),
+                InboundIdempotencyState::Pending(record) => pending_idempotency = Some(record),
             }
         }
 
-        let resuming_pending_idempotency = pending_idempotency.is_some();
+        let mut resuming_pending_idempotency = pending_idempotency.is_some();
         let message_id = pending_idempotency
             .as_ref()
             .map(|record| record.message_id)
             .unwrap_or_else(ThreadMessageId::new);
-        let replay_metadata = pending_idempotency
+        let mut replay_metadata = pending_idempotency
             .as_ref()
             .map(|record| record.replay_metadata.clone())
             .unwrap_or(replay_metadata);
@@ -1696,19 +1729,68 @@ where
                 // with the same message id and model rather than duplicating
                 // the message or resolving current policy again.
                 if !resuming_pending_idempotency && let Some((path, entry)) = &idempotency_write {
-                    self.filesystem
+                    match self
+                        .filesystem
                         .put(
                             &scope.to_resource_scope(),
                             path,
                             entry.clone(),
                             CasExpectation::Absent,
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(FilesystemError::VersionMismatch { .. }) => {
+                            let record = self
+                                .idempotency_record_from_path(&scope, path)
+                                .await?
+                                .ok_or_else(|| {
+                                    SessionThreadError::Backend(
+                                        "concurrent inbound idempotency claim disappeared"
+                                            .to_string(),
+                                    )
+                                })?;
+                            match self
+                                .classify_inbound_idempotency_record(
+                                    &scope,
+                                    &thread_id,
+                                    &actor_id,
+                                    &request_fingerprint,
+                                    record,
+                                )
+                                .await?
+                            {
+                                InboundIdempotencyState::Accepted(accepted) => {
+                                    return Ok(accepted);
+                                }
+                                InboundIdempotencyState::Pending(record) => {
+                                    message.message_id = record.message_id;
+                                    replay_metadata = record.replay_metadata;
+                                    resuming_pending_idempotency = true;
+                                }
+                            }
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 let sequence = self.reserve_sequence(&scope, &thread_id).await?;
                 message.sequence = sequence;
-                self.write_new_message(&scope, &thread_id, &message, "message")
-                    .await?;
+                if let Err(error) = self
+                    .write_new_message(&scope, &thread_id, &message, "message")
+                    .await
+                {
+                    if resuming_pending_idempotency
+                        && let Some(path) = &idempotency_path
+                        && let Ok(Some(accepted)) = self
+                            .accepted_message_from_idempotency_path(
+                                &scope, &thread_id, &actor_id, path,
+                            )
+                            .await
+                    {
+                        return Ok(accepted);
+                    }
+                    return Err(error);
+                }
                 sequence
             }
         };

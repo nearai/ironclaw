@@ -386,14 +386,10 @@ impl RebornLlmConfigService {
             return Ok(None);
         };
         let snapshot = self.build_provider_snapshot().await?;
-        Ok(policy
-            .provider_id
-            .eq(snapshot
-                .active
-                .as_ref()
-                .map(|active| active.provider_id.as_str())
-                .unwrap_or_default())
-            .then_some(policy))
+        Ok(matching_active_model_policy(
+            policy,
+            snapshot.active.as_ref(),
+        ))
     }
 
     async fn build_snapshot(
@@ -402,12 +398,8 @@ impl RebornLlmConfigService {
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let mut snapshot = self.build_provider_snapshot().await?;
         let stored = self.read_model_policy(caller).await?;
-        snapshot.user_model_policy = stored.filter(|policy| {
-            snapshot
-                .active
-                .as_ref()
-                .is_some_and(|active| active.provider_id == policy.provider_id)
-        });
+        snapshot.user_model_policy = stored
+            .and_then(|policy| matching_active_model_policy(policy, snapshot.active.as_ref()));
         Ok(snapshot)
     }
 
@@ -920,14 +912,14 @@ impl LlmConfigService for RebornLlmConfigService {
         let Some(active) = snapshot.active else {
             return Err(LlmConfigServiceError::Unavailable);
         };
-        if active.provider_id != policy.provider_id {
+        let Some(policy) = matching_active_model_policy(policy, Some(&active)) else {
             return match requested_model {
                 Some(_) => Err(invalid_model(
                     "the active provider's model policy is not configured",
                 )),
                 None => Ok(None),
             };
-        }
+        };
 
         let preference = if requested_model.is_none() {
             self.read_user_model_preference(&caller).await?.model
@@ -1557,6 +1549,15 @@ fn validated_model_policy(
         workspace_default,
         allowed_models,
     })
+}
+
+fn matching_active_model_policy(
+    policy: ModelSelectionPolicy,
+    active: Option<&LlmActiveSelection>,
+) -> Option<ModelSelectionPolicy> {
+    active
+        .is_some_and(|active| active.provider_id == policy.provider_id)
+        .then_some(policy)
 }
 
 fn validated_model_id(field: &'static str, model: &str) -> Result<String, LlmConfigServiceError> {

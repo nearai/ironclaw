@@ -2056,6 +2056,67 @@ async fn filesystem_transactional_accept_concurrent_duplicate_replays_existing_m
     );
 }
 
+#[tokio::test]
+async fn filesystem_fallback_accept_concurrent_duplicate_replays_existing_message() {
+    let backend = Arc::new(FallbackRaceBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-fallback-accept-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let request_scope = scope("fallback-accept-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fallback-accept-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("binding-fallback-accept-race".into()),
+        reply_target_binding_id: None,
+        external_event_id: Some("event-fallback-accept-race".into()),
+        content: MessageContent::text("same payload"),
+    };
+
+    let left = service.accept_inbound_message_with_replay_metadata(
+        request.clone(),
+        InboundMessageReplayMetadata {
+            resolved_model: Some("model-a".into()),
+        },
+    );
+    let right = service.accept_inbound_message_with_replay_metadata(
+        request,
+        InboundMessageReplayMetadata {
+            resolved_model: Some("model-a".into()),
+        },
+    );
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("first concurrent fallback accept converges");
+    let right = right.expect("second concurrent fallback accept converges");
+
+    assert_eq!(left.message_id, right.message_id);
+    assert_eq!(left.sequence, right.sequence);
+    assert!(left.idempotent_replay || right.idempotent_replay);
+    assert_eq!(
+        left.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+    assert_eq!(left.replay_metadata, right.replay_metadata);
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, left.message_id);
+}
+
 /// Regression for the ScopedFilesystem migration: two stores share one
 /// underlying [`RootFilesystem`] but each is constructed with a
 /// [`MountView`] whose `/threads` alias resolves to a different
@@ -4646,6 +4707,22 @@ struct TransactionalRaceBackend {
     idempotency_get_count: AtomicUsize,
 }
 
+struct FallbackRaceBackend {
+    inner: InMemoryBackend,
+    begin_barrier: Barrier,
+    begin_count: AtomicUsize,
+}
+
+impl FallbackRaceBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            begin_barrier: Barrier::new(2),
+            begin_count: AtomicUsize::new(0),
+        }
+    }
+}
+
 struct ConcurrentToolResultWriteBackend {
     inner: InMemoryBackend,
     tool_result_get_barrier: Barrier,
@@ -4970,6 +5047,79 @@ impl RootFilesystem for TransactionalRaceBackend {
             _guard: guard,
             staged_puts: HashMap::new(),
         }))
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for FallbackRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        if self.begin_count.fetch_add(1, Ordering::SeqCst) < 2 {
+            self.begin_barrier.wait().await;
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::BeginTxn,
+            });
+        }
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
     }
 }
 

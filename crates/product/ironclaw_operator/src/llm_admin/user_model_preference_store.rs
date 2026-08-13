@@ -119,7 +119,9 @@ impl<F: RootFilesystem + ?Sized> UserModelPreferenceStore
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+    use ironclaw_filesystem::{
+        DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend,
+    };
     use ironclaw_host_api::{
         ids::{TenantId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
@@ -172,6 +174,28 @@ mod tests {
             )])
         });
         FilesystemUserModelPreferenceStore::new(Arc::new(filesystem))
+    }
+
+    fn fault_injecting_store() -> (
+        FilesystemUserModelPreferenceStore<FaultInjecting<InMemoryBackend>>,
+        Arc<FaultInjecting<InMemoryBackend>>,
+    ) {
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let filesystem = ScopedFilesystem::new(Arc::clone(&backend), |scope| {
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/llm-preferences")?,
+                VirtualPath::new(format!(
+                    "/tenants/{}/users/{}/llm-preferences",
+                    scope.tenant_id.as_str(),
+                    scope.user_id.as_str()
+                ))?,
+                MountPermissions::read_write(),
+            )])
+        });
+        (
+            FilesystemUserModelPreferenceStore::new(Arc::new(filesystem)),
+            backend,
+        )
     }
 
     #[tokio::test]
@@ -265,6 +289,38 @@ mod tests {
         assert_eq!(
             store.read(&test_caller).await,
             Err(UserModelPreferenceStoreError::InvalidData),
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_failures_are_classified_as_unavailable() {
+        let (store, backend) = fault_injecting_store();
+        let test_caller = caller("tenant-a", "alice");
+        let preference = UserModelPreference {
+            model: Some("model-b".to_string()),
+        };
+        store
+            .write(&test_caller, &preference)
+            .await
+            .expect("seed preference before injecting failures");
+        backend.add_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("/llm-preferences/")
+                .backend("preference read unavailable"),
+        );
+        backend.add_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/llm-preferences/")
+                .backend("preference write unavailable"),
+        );
+
+        assert_eq!(
+            store.read(&test_caller).await,
+            Err(UserModelPreferenceStoreError::Unavailable),
+        );
+        assert_eq!(
+            store.write(&test_caller, &preference).await,
+            Err(UserModelPreferenceStoreError::Unavailable),
         );
     }
 }
