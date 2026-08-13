@@ -85,12 +85,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.write("CLAUDE.md", "Read `docs/guide.md` and `crates/core/ironclaw_alpha/README.md`.\n")
         self.symlink("crates/core/CLAUDE.md", "AGENTS.md")
         self.write("docs/guide.md", "scanned like every docs/ page\n")
-        # The Mintlify navigation defines the published surface the docs
-        # branch of discovery must cover (check_docs_nav_coverage).
-        self.write(
-            "docs/docs.json",
-            '{"navigation": {"pages": ["guide"]}}\n',
-        )
+        # Navigation defines the published surface the scan must cover.
+        self.write("docs/docs.json", '{"navigation": {"pages": ["guide"]}}\n')
         self.write(
             ".claude/rules/alpha.md",
             '---\npaths:\n  - "crates/**/*.rs"\n---\n# Alpha rule\n',
@@ -157,9 +153,8 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
-            # Fixtures opt in to living internal spec pages per test: the
-            # production tuple names real-repo pages, and the liveness refusal
-            # would otherwise fire on every fixture that lacks them.
+            # Fixtures opt in per test; the production tuple names real-repo
+            # pages the fixture tree lacks.
             mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", internal_guidance),
             mock.patch.object(
                 GATE,
@@ -641,9 +636,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("docs/zh/index.md", output)
 
     def test_docs_historical_archives_are_excluded_but_contracts_are_not(self) -> None:
-        """The dated archives under docs/internal/ describe the tree as it
-        stood when written — they are excluded as a class. The living
-        contract corpus under docs/internal/reborn/contracts/ is scanned."""
+        """docs/internal/ archives are excluded; the living contract corpus
+        inside is scanned."""
         self.build_fixture()
         self.write(
             "docs/internal/plans/2026-01-01-old-plan.md",
@@ -703,10 +697,8 @@ class GuidanceGateTests(unittest.TestCase):
                 self.assertIn(name, output)
 
     def test_internal_spec_links_are_repo_claims(self) -> None:
-        """The living internal spec pages are never published, so their
-        relative markdown links are repo-path claims, not Mintlify site
-        routes — renaming a contract file must not leave cross-references
-        dangling with the gate green."""
+        """Internal spec pages are never published, so their relative links
+        are repo-path claims, not site routes."""
         self.build_fixture()
         self.write("docs/internal/reborn/contracts/kernel.md", "A real sibling.\n")
         self.write(
@@ -721,8 +713,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("renamed-away.md", output)
 
     def test_internal_guidance_prefix_matching_no_pages_refuses(self) -> None:
-        """A stale living-spec prefix (the corpus moved) must refuse instead
-        of silently dropping the gate's best-signal files from the scan."""
+        """A stale spec prefix (the corpus moved) must refuse, not silently
+        drop the pages from the scan."""
         self.build_fixture()
         code, output = self.run_gate(
             internal_guidance=("docs/internal/reborn/contracts/",)
@@ -732,11 +724,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("docs/internal/reborn/contracts/", output)
 
     def test_nav_coverage_refuses_when_docs_discovery_breaks(self) -> None:
-        """The published surface is defined by docs.json navigation, so the
-        docs branch of discovery silently breaking (here: a wrong prefix
-        drops every docs page from the scan) refuses on the first
-        navigation page the scan no longer covers — no count floor
-        involved."""
+        """A broken docs discovery filter refuses on the first nav page the
+        scan no longer covers."""
         self.build_fixture()
         with mock.patch.object(GATE, "DOCS_PREFIX", "docz/"):
             code, output = self.run_gate()
@@ -745,9 +734,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("guide", output)
 
     def test_nav_page_without_scanned_source_refuses(self) -> None:
-        """A navigation entry whose source file is not in the scan set —
-        whether the file is missing or filtered out — is published prose
-        the gate is not checking, and must refuse."""
+        """A nav entry with no scanned source file is published prose the
+        gate is not checking."""
         self.build_fixture()
         self.write(
             "docs/docs.json",
@@ -758,9 +746,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("ghost-page", output)
 
     def test_openapi_nav_pseudo_pages_are_not_coverage_claims(self) -> None:
-        """Auto-generated endpoint entries ("GET /users") name no source
-        file; they are skipped exactly as docs_publication_boundary.py
-        skips them."""
+        """Generated endpoint entries ("GET /users") have no source file
+        and are skipped."""
         self.build_fixture()
         self.write(
             "docs/docs.json",
@@ -770,9 +757,8 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
 
     def test_unreadable_docs_json_refuses(self) -> None:
-        """Without docs.json the published-page set cannot be derived, so
-        docs discovery cannot be validated — refuse, never pass vacuously.
-        Same for a navigation that names no source-backed page."""
+        """Missing, unparseable, or page-less docs.json refuses — never a
+        vacuous pass."""
         self.build_fixture()
         self.write("docs/docs.json", "{not json\n")
         code, output = self.run_gate()

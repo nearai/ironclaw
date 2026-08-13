@@ -19,20 +19,12 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      `AGENTS.md`/`CLAUDE.md`, every `AGENTS.md`/`CLAUDE.md`/`CONTRACT.md`/
      `README.md` under `crates/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
-     directory. Every `.md`/`.mdx` under `docs/` outside `docs/internal/` —
-     the public Mintlify tree and the `zh/` locale mirror — is scanned the
-     same way, but for **backticked inline paths only**: markdown link
-     targets on published pages are Mintlify site paths (extensionless page
-     routes, site-absolute `/using/cli` forms), a different namespace than
-     the tracked tree, so the link extractor is off by design rather than
-     suppressed case-by-case. `docs/internal/` — the fenced archive of dated
-     plans, ADRs, and research notes — is excluded as a class
-     (`DOCS_EXCLUDED_PREFIX` below), and the living spec pages inside it
-     named in `INTERNAL_GUIDANCE_PREFIXES` (the contract corpus, the
-     extension-runtime spec pages, guidance-conventions.md) are instead
-     scanned as full guidance files: they are never published, so their
-     relative markdown links are repo-path claims and are checked like any
-     guidance file's.
+     directory. Published `docs/` pages (everything outside `docs/internal/`,
+     `zh/` mirror included) are scanned for backticked paths only — their
+     markdown links are Mintlify site routes, not repo paths. The
+     `docs/internal/` archive is excluded as a class, except the living spec
+     pages in `INTERNAL_GUIDANCE_PREFIXES`, which are scanned as full
+     guidance files (never published, so their links are repo-path claims).
   2. **Rule triggers are live.** Every `paths:` glob in a rule's (or skill's)
      frontmatter must match at least one tracked file. A rule whose glob
      matches nothing is a rule that never loads — the exact
@@ -121,10 +113,8 @@ content owner adds the `✎` / `path-ok` marker those lines should carry.
 The gate fails closed on its own errors — unreadable file, unterminated or
 unparseable frontmatter, broken crate discovery, an extraction pass that finds
 almost nothing (floor constants below), a docs.json navigation page missing
-from the docs scan (`check_docs_nav_coverage`: the published surface defines
-what docs discovery must cover, so there is no docs count floor to tune) —
-because "the checker crashed" must never be reported as "the guidance is
-fine".
+from the docs scan — because "the checker crashed" must never be reported as
+"the guidance is fine".
 
     python3 scripts/ci/check-guidance.py           # verify
     python3 scripts/ci/check-guidance.py --json    # machine-readable report
@@ -151,39 +141,24 @@ sys.path.insert(0, str(_CI))
 
 import crate_tree  # noqa: E402  (scripts/ci/lib — the one discovery rule)
 
-# The publication-boundary gate owns the Mintlify navigation model
-# (collect_nav_pages, the OpenAPI pseudo-page filter, page suffixes); the
-# docs-coverage check below reuses it rather than re-deriving what counts
-# as a published page.
+# Owns the Mintlify navigation model; the docs-coverage check reuses it.
 import docs_publication_boundary  # noqa: E402  (scripts/ci)
 
 ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
-# The docs tree — published Mintlify pages and the zh/ locale mirror. The
-# scan is against the git tree, not the publication set, so `.mintignore`
-# plays no part here. The fenced historical archive `docs/internal/` is
-# excluded as a *class*, not per-file: dated plans, ADRs, research notes,
-# superpowers specs, and design-era checklists describe the tree as it stood
-# when they were written (measured 2026-08-07: 705 of 709 dangling docs
-# references sat in what is now docs/internal/) — forcing them to track
-# today's tree would either rewrite history or drown KNOWN_MISSING, and both
-# destroy the signal this gate exists for.
+# The docs scan reads the git tree, not the publication set (`.mintignore`
+# plays no part). docs/internal/ is excluded as a class: its dated plans and
+# ADRs describe the tree as it stood when written (measured 2026-08-07: 705
+# of 709 dangling docs references sat there).
 DOCS_PREFIX = "docs/"
 DOCS_EXCLUDED_PREFIX = "docs/internal/"
-# The *living* spec pages inside that archive class — pages the tree still
-# cites as currently authoritative, so they are scanned as full guidance
-# files rather than excluded with their archival neighbors: the contract
-# corpus, the extension-runtime spec pages (overview.md is named canonical
-# by contracts/extensions.md; standard-operations.md is the live vocabulary
-# the extension-surfaces skill routes to — their design-era siblings
-# checklist.md and implementation.md stay archival), and the
-# guidance-conventions page that canonically describes this gate. They are
-# never published, so their relative markdown links are repo-path claims and
-# get the guidance treatment, links included. Each prefix must match at
-# least one tracked page or discovery refuses: a silent zero-match (the
-# corpus moved) is the gate going dark on its best-signal files.
+# Living spec pages inside the archive, still cited as authoritative, so
+# they get the full guidance treatment — links included, since they are
+# never published. The extension-runtime siblings checklist.md and
+# implementation.md stay archival. Each prefix must match a tracked page or
+# discovery refuses (a zero-match means the corpus moved).
 INTERNAL_GUIDANCE_PREFIXES = (
     "docs/internal/reborn/contracts/",
     "docs/internal/reborn/extension-runtime/overview.md",
@@ -246,14 +221,10 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # its measured value: low enough that legitimate consolidation never trips
 # it, high enough that a parser or discovery pass silently degrading to a
 # handful of hits refuses instead of passing — a floor of 1 catches only
-# total loss, not the degraded-but-nonzero shape. The published docs/
-# surface deliberately has *no* count floor: its health is checked against
-# an independent definition of the published set instead — every page
-# docs.json navigation publishes must be in the scan
-# (`check_docs_nav_coverage` below), so the docs branch of discovery
-# breaking refuses on the first missing page rather than at an arbitrary
-# magnitude. The living internal spec pages are likewise guarded by their
-# own per-prefix zero-match refusal, not a count.
+# total loss, not the degraded-but-nonzero shape. The docs surface has no
+# count floor: `check_docs_nav_coverage` validates it against docs.json
+# navigation instead, and the internal spec prefixes have their own
+# zero-match refusal.
 MIN_GUIDANCE_FILES = 180
 MIN_PATH_REFERENCES = 1100
 MIN_RULE_GLOBS = 20
@@ -493,19 +464,11 @@ def discover_guidance(tree: Tree) -> list[str]:
 def check_docs_nav_coverage(repo_root: pathlib.Path, docs: list[str]) -> int:
     """Every page docs.json navigation publishes must be in the scan.
 
-    The docs branch of discovery is validated against an independent
-    definition of the published surface — the Mintlify navigation — rather
-    than a count floor: if the discovery filter breaks (a renamed prefix, an
-    over-broad exclusion), the first navigation page missing from the scan
-    set refuses, with no arbitrary threshold to tune. Routes are
-    extensionless and docs/-relative; OpenAPI pseudo-pages ("GET /users")
-    name generated endpoint docs, not source files, and are skipped exactly
-    as `docs_publication_boundary.py` skips them. That gate separately fails
-    a navigation entry with no source file as a broken public page; here the
-    same entry refuses too, because either way it is published prose this
-    scan is not checking. Returns the number of covered pages — zero is a
-    refusal, since a navigation that names no source-backed page means the
-    coverage check has nothing to validate discovery against.
+    Validates docs discovery against the published surface itself instead of
+    a count floor: a broken filter refuses on the first missing nav page.
+    OpenAPI pseudo-pages ("GET /users") have no source file and are skipped,
+    matching docs_publication_boundary.py. Zero covered pages also refuses —
+    an empty navigation would validate nothing.
     """
     docs_json = repo_root / "docs" / "docs.json"
     try:
@@ -1202,9 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
-        # Every scanned file under docs/ — the published surface plus the
-        # living internal spec pages. Published-surface health has its own
-        # signal (`nav_pages_covered` below); this metric reports scan scope.
+        # All scanned docs/ files; published-surface health is nav_pages_covered.
         docs_files = sum(1 for doc in docs if doc.startswith(DOCS_PREFIX))
         nav_covered = check_docs_nav_coverage(repo_root, docs)
         crates = load_crates(repo_root)
