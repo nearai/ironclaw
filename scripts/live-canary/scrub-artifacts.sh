@@ -151,6 +151,74 @@ except (OSError, UnicodeError, ValueError):
 PY
 }
 
+is_source_identical_bundled_skill() {
+  local skill_dir="$1"
+  local skill_name
+  skill_name="$(basename "${skill_dir}")"
+
+  python3 - "${BUNDLED_SKILLS_ROOT}/${skill_name}" "${skill_dir}" \
+    "${BUNDLED_SKILL_MARKER}" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+trusted_dir = Path(sys.argv[1])
+staged_dir = Path(sys.argv[2])
+marker_name = sys.argv[3]
+
+
+def regular_files(root: Path) -> list[tuple[str, Path]]:
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("bundle root is not a real directory")
+    files: list[tuple[str, Path]] = []
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for directory in directories:
+            if (current_path / directory).is_symlink():
+                raise ValueError("bundle contains a symlinked directory")
+        for filename in filenames:
+            path = current_path / filename
+            relative = path.relative_to(root).as_posix()
+            if relative == marker_name:
+                raise ValueError("unexpected runtime marker in bundle")
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("bundle contains a non-regular file")
+            files.append((relative, path))
+    return sorted(files)
+
+
+def files_equal(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        while True:
+            left_chunk = left_file.read(1024 * 1024)
+            right_chunk = right_file.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+try:
+    trusted_files = regular_files(trusted_dir)
+    staged_files = regular_files(staged_dir)
+    if not trusted_files:
+        raise ValueError("trusted source is empty")
+    if [relative for relative, _ in trusted_files] != [relative for relative, _ in staged_files]:
+        raise ValueError("staged bundle file set differs from trusted source")
+    if not all(
+        files_equal(trusted_path, staged_path)
+        for (_, trusted_path), (_, staged_path) in zip(trusted_files, staged_files)
+    ):
+        raise ValueError("staged bundle content differs from trusted source")
+except (OSError, UnicodeError, ValueError):
+    sys.exit(1)
+PY
+}
+
 is_verified_first_party_extension_manifest() {
   local manifest="$1"
   local extension_dir
@@ -172,9 +240,12 @@ is_verified_first_party_extension_manifest() {
 }
 
 # Reborn live QA copies each case's full home into the artifact staging tree.
-# In strict mode, remove only managed system-skill installations whose marker,
-# stable content hash, file set, and bytes all match the source-controlled
-# bundle. Unverified and operator-owned skills remain in scope for scanning.
+# In strict mode, remove managed system-skill installations that are provably
+# the source-controlled bundle: either the runtime ownership marker verifies
+# (marker + stable content hash + file set + bytes), or — for the
+# marker-less trees the backend-generic skill mount exports — the file set
+# and bytes are identical to the source bundle. Unverified, divergent, and
+# operator-owned skills remain in scope for scanning.
 if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" ]]; then
   while IFS= read -r -d '' marker; do
     skill_dir="$(dirname "${marker}")"
@@ -190,6 +261,36 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     find "${ARTIFACT_DIR}" -type f \
       -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
       -print0
+  )
+
+  # Skill mounts moved onto one backend-generic tree (#7171), and the case
+  # homes exported into artifacts no longer carry the runtime ownership
+  # marker — the marker-keyed pruning above stopped engaging, and the
+  # long-committed placeholder text in `skills/local-test/SKILL.md`
+  # (`-e NEARAI_API_KEY=<your-key>` docker examples) started failing every
+  # strict lane. A marker-less skill snapshot whose file set and bytes are
+  # identical to the source-controlled bundle is repository content whether
+  # or not the runtime stamped it; prune those too. Anything divergent —
+  # operator-authored, truncated, or modified — stays in scope for scanning.
+  while IFS= read -r -d '' skill_dir; do
+    skill_dir="${skill_dir%/}"
+    case "${skill_dir}" in
+      "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
+      "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
+        if [[ -f "${skill_dir}/${BUNDLED_SKILL_MARKER}" ]]; then
+          # The marker-keyed verification above owns marker-carrying dirs;
+          # a marker that failed verification must stay in scanning scope.
+          continue
+        fi
+        if is_source_identical_bundled_skill "${skill_dir}"; then
+          rm -rf -- "${skill_dir}"
+        fi
+        ;;
+    esac
+  done < <(
+    find "${ARTIFACT_DIR}" -type d \
+      -path '*/reborn-home/*/local-dev/system/skills/*' \
+      -prune -print0
   )
 
   # Installed first-party extension manifests are also source-controlled
