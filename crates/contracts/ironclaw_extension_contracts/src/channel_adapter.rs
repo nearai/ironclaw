@@ -584,6 +584,15 @@ pub struct DirectTargetProvisionRequest {
 
 /// Typed channel-adapter failures.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Channel capability failures, split by what vendor redelivery can do about
+/// them. Ingress answers **5xx** only for the transient variants
+/// (`Configuration`, `VendorWiring`, `AttachmentTransfer { retryable: true }`)
+/// — redelivering the same update later may genuinely succeed. Every other
+/// variant is deterministic for a given payload: redelivery replays the same
+/// bytes into the same failure, and vendors with strictly ordered webhook
+/// redelivery re-send any non-2xx update and hold every later update in
+/// the conversation behind it. Ingress therefore acknowledges (2xx),
+/// discards, and warn-logs deterministic failures instead of rejecting them.
 pub enum ChannelError {
     #[error("inbound request could not be parsed: {reason}")]
     Parse { reason: String },
@@ -596,6 +605,10 @@ pub enum ChannelError {
     Render { reason: String },
     #[error("vendor wiring failed: {reason}")]
     VendorWiring { reason: String },
+    /// `retryable` decides the ingress disposition: `true` means a transient
+    /// transfer fault (5xx, vendor may redeliver with success), `false` means
+    /// the transfer can never succeed for this payload (adapters degrade or
+    /// ingress acknowledges-and-discards).
     #[error("attachment transfer failed: {reason}")]
     AttachmentTransfer { reason: String, retryable: bool },
     #[error("channel operation is not supported by this adapter")]

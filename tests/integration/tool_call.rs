@@ -786,10 +786,10 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
 /// at the gateway (`CapabilitySurfacePolicyFilter`, before
-/// `register_provider_tool_call` ever stages an invocation). The loop must
-/// surface the precise `outside_capability_surface` observation to the model,
-/// let it repair the response on the next call, and complete without ever
-/// dispatching or reporting the rejected call as successful.
+/// `register_provider_tool_call` ever stages an invocation). The gateway must
+/// return precise batch-rejection feedback to the model, let it repair the
+/// response on the next call, and complete without ever dispatching or
+/// reporting the rejected call as successful.
 #[tokio::test]
 async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     let h = RebornIntegrationHarness::test_default()
@@ -810,12 +810,14 @@ async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     h.assert_reply_contains("continue without it")
         .await
         .expect("repaired reply is finalized");
-    h.assert_model_request_contains(
-        "model error observation: invalid_output reason=outside_capability_surface; \
-         repair the response and continue",
-    )
+    h.assert_model_message_content_in_order(&[
+        "Tool call batch rejected by host:",
+        "model returned a tool call outside the advertised capability surface",
+        "None of this response's tool calls were executed.",
+        "Retry with an available capability",
+    ])
     .await
-    .expect("the retry tells the model precisely why its tool call was rejected");
+    .expect("the gateway tells the model precisely why its tool-call batch was rejected");
 
     h.assert_tool_not_invoked("builtin.spawn_subagent")
         .await

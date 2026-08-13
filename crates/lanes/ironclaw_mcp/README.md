@@ -74,5 +74,5 @@ cargo test -p ironclaw_architecture_tests   # egress scan + layer matrix
 Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guardrails —
 gate-pinned by `tests/module_charter.rs`). Family boundary:
 [`crates/lanes/AGENTS.md`](../AGENTS.md). Contracts:
-`docs/reborn/contracts/mcp.md`, `docs/reborn/contracts/runtime-workflows.md`,
-`docs/reborn/contracts/processes.md`. Design record: PROPOSAL §6.6.3.
+`docs/internal/reborn/contracts/mcp.md`, `docs/internal/reborn/contracts/runtime-workflows.md`,
+`docs/internal/reborn/contracts/processes.md`. Design record: PROPOSAL §6.6.3.

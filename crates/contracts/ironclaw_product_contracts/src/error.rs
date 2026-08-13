@@ -22,7 +22,7 @@
 //! The split is where the two vocabularies actually diverge, measured rather
 //! than chosen: `ironclaw_extension_host` constructs exactly the six variants
 //! below across its 19 production files, and none of the kernel-typed ones.
-//! See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
+//! See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
 //! decision and the alternatives it beat.
 
 use ironclaw_host_api::error::HostApiError;

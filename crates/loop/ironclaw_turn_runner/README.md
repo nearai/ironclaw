@@ -77,5 +77,5 @@ cargo test -p ironclaw_architecture_tests    # after dependency/API changes
 ## See also
 
 Family rules: `crates/loop/AGENTS.md` · working rules: `AGENTS.md` beside this
-file · design record: `docs/reborn/target-architecture/families/loop.md`
+file · design record: `docs/internal/reborn/target-architecture/families/loop.md`
 (§6.7.3) + PROPOSAL §12.13 D-S.

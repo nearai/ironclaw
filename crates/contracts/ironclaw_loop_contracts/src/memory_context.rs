@@ -62,12 +62,95 @@ pub struct MemoryPromptContextRequest {
 /// [`AgentLoopHostErrorKind::Unavailable`](super::host::AgentLoopHostErrorKind::Unavailable).
 /// Raw backend error messages, filesystem paths, and internal identifiers must
 /// never appear in the error's `safe_summary`.
+/// Which retrieval lane a degradation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRetrievalLane {
+    ShortTerm,
+    LongTerm,
+}
+
+impl MemoryRetrievalLane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ShortTerm => "short_term",
+            Self::LongTerm => "long_term",
+        }
+    }
+}
+
+/// Why a retrieval lane produced nothing. A closed vocabulary, never free text
+/// and never a backend message — the label is safe to record and to render in
+/// operator surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRetrievalFailureKind {
+    /// The request itself was rejected (bad query or profile).
+    Input,
+    /// The provider or its storage backend was unreachable or errored.
+    Unavailable,
+}
+
+impl MemoryRetrievalFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// One lane that failed rather than returning nothing.
+///
+/// This is the distinction the previous contract could not express: a lane
+/// error and a lane with no matching memory both arrived as an empty snippet
+/// list, so "the memory backend is down" was indistinguishable from "the user
+/// has no memory about this" in tests and in operator diagnostics alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRetrievalDegradation {
+    pub lane: MemoryRetrievalLane,
+    pub kind: MemoryRetrievalFailureKind,
+}
+
+impl MemoryRetrievalDegradation {
+    pub fn new(lane: MemoryRetrievalLane, kind: MemoryRetrievalFailureKind) -> Self {
+        Self { lane, kind }
+    }
+}
+
+/// The result of one memory prompt-context load: the snippets that were
+/// admitted, plus a typed record of every lane that failed on the way.
+///
+/// Mirrors [`LoopContextBundle`](super::host::LoopContextBundle), which carries
+/// its successful payload alongside an explicit description of what was lost
+/// (`recent_window_truncation`). Memory retrieval is best-effort — a failing
+/// lane must never fail the turn — but "best-effort" is not "invisible":
+/// `degradations` is empty exactly when every queried lane answered.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryPromptContextLoad {
+    pub snippets: Vec<LoopContextSnippet>,
+    pub degradations: Vec<MemoryRetrievalDegradation>,
+}
+
+impl MemoryPromptContextLoad {
+    /// A load where every queried lane answered.
+    pub fn healthy(snippets: Vec<LoopContextSnippet>) -> Self {
+        Self {
+            snippets,
+            degradations: Vec::new(),
+        }
+    }
+
+    /// Whether any queried lane failed rather than simply matching nothing.
+    pub fn is_degraded(&self) -> bool {
+        !self.degradations.is_empty()
+    }
+}
+
 #[async_trait]
 pub trait MemoryPromptContextService: Send + Sync {
     async fn load_memory_snippets(
         &self,
         request: MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError>;
+    ) -> Result<MemoryPromptContextLoad, AgentLoopHostError>;
 }
 
 /// No-op implementation that always returns an empty snippet list.
@@ -82,7 +165,7 @@ impl MemoryPromptContextService for EmptyMemoryPromptContextService {
     async fn load_memory_snippets(
         &self,
         _request: MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
-        Ok(Vec::new())
+    ) -> Result<MemoryPromptContextLoad, AgentLoopHostError> {
+        Ok(MemoryPromptContextLoad::default())
     }
 }

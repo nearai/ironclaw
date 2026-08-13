@@ -7,9 +7,9 @@
   `CLAUDE.md` is a pointer here.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/host-runtime.md`
-- `docs/reborn/contracts/runtime-workflows.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- `docs/internal/reborn/contracts/host-runtime.md`
+- `docs/internal/reborn/contracts/runtime-workflows.md`
+- `docs/internal/reborn/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 

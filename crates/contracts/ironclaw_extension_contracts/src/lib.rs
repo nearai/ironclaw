@@ -9,7 +9,7 @@
 //! constructors. It parses no manifests, stores no installations, routes no
 //! ingress, and executes no lifecycle. Those live above it, in
 //! `ironclaw_extension_registry` (records) and `ironclaw_extension_host`
-//! (execution). See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.2 and
+//! (execution). See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.2 and
 //! `families/contracts.md`.
 //!
 //! **Security role (§6.1.2, §12.1a):** this crate is the host↔extension

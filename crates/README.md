@@ -10,7 +10,7 @@ matrix use [`AGENTS.md`](./AGENTS.md); for the runtime narrative (how a turn
 actually executes) read [`Architecture.md`](./Architecture.md); for the
 design record — per-family specs, the frozen proposal, the live checklist —
 read
-[`docs/reborn/target-architecture/`](../docs/reborn/target-architecture/README.md).
+[`docs/internal/reborn/target-architecture/`](../docs/internal/reborn/target-architecture/README.md).
 
 ## Mental model
 
@@ -45,7 +45,7 @@ that owns that boundary — never thread it through a UI or runtime crate.
 Counts measured 2026-08-05 (`cargo metadata --no-deps`; the enforcing gate is
 `python3 scripts/ci/check-target-tree.py`). Every family has an `AGENTS.md`
 (its boundary and crate table) and an in-depth spec in
-[`docs/reborn/target-architecture/families/`](../docs/reborn/target-architecture/families/);
+[`docs/internal/reborn/target-architecture/families/`](../docs/internal/reborn/target-architecture/families/);
 every crate has a `README.md`.
 
 | Directory | Crates | What lives there |
@@ -93,7 +93,7 @@ enforced dependency ladder is the seven-layer matrix in
 
 Pick the family with the table above, then follow the read order in
 [`AGENTS.md`](./AGENTS.md): family `AGENTS.md` → crate `README.md` → crate
-working rules / module spec → `docs/reborn/contracts/`. Two program-wide
+working rules / module spec → `docs/internal/reborn/contracts/`. Two program-wide
 rules to know before starting:
 
 - Product handlers, channels, scheduled triggers, and agent callers go

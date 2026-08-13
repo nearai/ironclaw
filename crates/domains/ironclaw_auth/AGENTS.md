@@ -6,7 +6,7 @@ the map is enforced, not prose — edit it with that suite in hand and do not
 reflow the table. Orientation, measured surface/deps, and test commands
 are in [`README.md`](./README.md); the family boundary is
 [`../AGENTS.md`](../AGENTS.md). Sources of truth beyond the crate:
-`docs/reborn/contracts/auth-product.md` and PROPOSAL §6.4.8.
+`docs/internal/reborn/contracts/auth-product.md` and PROPOSAL §6.4.8.
 
 ## Sub-owner map
 

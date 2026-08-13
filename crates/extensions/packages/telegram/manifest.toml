@@ -22,12 +22,12 @@ service = "telegram.extension/v1"
 [admin_configuration]
 group_id = "extension.telegram"
 display_name = "Telegram deployment configuration"
-description = "Deployment credentials and public account metadata for the Telegram channel."
+description = "Deployment credentials for the Telegram channel. Telegram delivers updates by webhook, so the instance must be reachable over public HTTPS with a valid certificate — a local installation needs a tunnel (such as ngrok or Cloudflare Tunnel) in front of it."
 fields = [
-  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true },
-  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
-  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
-  { handle = "bot_username", label = "Bot username", secret = false, required = true },
+  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by BotFather when you create the bot (/newbot)." },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true, description = "A random string you invent (1–256 letters, digits, '_' or '-'). IronClaw registers it with Telegram and uses it to verify every incoming update." },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true, description = "The full public address Telegram delivers to: https://<your-host>/webhooks/extensions/telegram/updates. For a local installation, use your tunnel's hostname." },
+  { handle = "bot_username", label = "Bot username", secret = false, required = true, description = "Your bot's username without the leading @ (5–32 characters, ending in 'bot'). Used for the pairing link and group mentions." },
   # MTProto application identity for the linked-device surface, operator-supplied
   # (PROPOSAL §11 decision 2): bundling one id across every deployment would pool
   # Telegram's flood limits and invite `API_ID_PUBLISHED_FLOOD`, which permanently
@@ -36,8 +36,8 @@ fields = [
   # bot channel must keep booting with its existing configuration, and the
   # device-link flow fails closed with an explicit "not configured" error rather
   # than making every existing install invalid.
-  { handle = "telegram_api_id", label = "MTProto api_id (linked accounts)", secret = false, required = false },
-  { handle = "telegram_api_hash", label = "MTProto api_hash (linked accounts)", secret = true, required = false },
+  { handle = "telegram_api_id", label = "MTProto api_id (linked accounts)", secret = false, required = false, description = "From my.telegram.org → API development tools. Only needed to link a personal account; the bot channel works without it." },
+  { handle = "telegram_api_hash", label = "MTProto api_hash (linked accounts)", secret = true, required = false, description = "The api_hash issued beside your api_id at my.telegram.org. Treated as a secret." },
 ]
 # Shared-conversation admission is presence-based (run-acts-as-invoker):
 # any group/supergroup the bot has been added to is served — the update

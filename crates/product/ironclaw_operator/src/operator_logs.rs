@@ -24,6 +24,9 @@ const MAX_LOG_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_LOG_RESPONSE_BYTES: usize = 256 * 1024;
 const LOG_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const SOURCE: &str = "in_memory_tracing";
+/// Raw causes emitted to this target are server-side diagnostics and must never
+/// enter the product-visible operator log buffer.
+pub(crate) const SERVER_DIAGNOSTIC_TARGET: &str = "ironclaw_server_diagnostics";
 
 static OPERATOR_LOGS: LazyLock<Arc<OperatorLogBuffer>> =
     LazyLock::new(|| Arc::new(OperatorLogBuffer::new(HISTORY_CAP)));
@@ -594,6 +597,12 @@ pub fn capture_tracing_log(
     message: String,
     fields: Vec<(String, String)>,
 ) {
+    if target
+        .strip_prefix(SERVER_DIAGNOSTIC_TARGET)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with("::"))
+    {
+        return;
+    }
     operator_log_buffer().record_with_fields(
         reborn_level_from_tracing(level),
         target,
@@ -1155,6 +1164,34 @@ mod tests {
         );
         assert_eq!(response.entries[0].tool_name.as_deref(), Some(tool_name));
         assert_eq!(response.entries[0].source.as_deref(), Some(source));
+    }
+
+    #[test]
+    fn server_only_diagnostics_never_enter_product_visible_operator_logs() {
+        let token = uuid::Uuid::new_v4().to_string();
+        let direct_message = format!("direct raw backend cause {token}");
+        let nested_message = format!("nested raw backend cause {token}");
+        let subscriber = tracing_subscriber::registry().with(OperatorLogLayer);
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::error!(
+                target: SERVER_DIAGNOSTIC_TARGET,
+                message = direct_message.as_str()
+            );
+            tracing::error!(
+                target: "ironclaw_server_diagnostics::filesystem",
+                message = nested_message.as_str()
+            );
+        });
+
+        let response = operator_log_buffer().query(RebornLogQueryRequest::default().set_limit(500));
+        assert!(
+            response.entries.iter().all(|entry| {
+                !entry.message.contains(&direct_message) && !entry.message.contains(&nested_message)
+            }),
+            "server-only causes must not cross into the product-visible log buffer"
+        );
     }
 
     #[test]

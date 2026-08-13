@@ -105,7 +105,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
 - Read the crate's guidance in order: `crates/<crate>/AGENTS.md`, then `CLAUDE.md`, `CONTRACT.md`,
   `README.md` (note the absence of an expected one as a finding), then `Cargo.toml` (deps, features,
   `pub` surface) and `src/lib.rs`/`src/main.rs` to map the module tree. Pull the matching
-  `docs/reborn/contracts/*.md` if the crate has a cross-crate contract.
+  `docs/internal/reborn/contracts/*.md` if the crate has a cross-crate contract.
 - **Small crate (`src` < ~2k lines): read every source file in full** so the review is complete, not
   sampled. **Large crate: read the guidance, the public API (`lib.rs` re-exports), the `CONTRACT.md`,
   and the largest / hottest modules**, and scope the PR to the slice you fully understand (§2).

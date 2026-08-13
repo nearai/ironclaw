@@ -129,6 +129,7 @@ fn render_group(
             .map(|field| RebornAdminConfigurationField {
                 handle: field.handle.as_str().to_string(),
                 label: field.label,
+                description: field.description,
                 required: field.required,
                 provided: field.provided,
                 // Defense in depth, same as the capability handler's
@@ -476,6 +477,7 @@ mod tests {
                 AdminConfigurationFieldState {
                     handle: SecretHandle::new("api_token").expect("handle"),
                     label: "API token".to_string(),
+                    description: "Issued in the provider console under API tokens.".to_string(),
                     secret: true,
                     required: true,
                     provided: true,
@@ -484,6 +486,7 @@ mod tests {
                 AdminConfigurationFieldState {
                     handle: SecretHandle::new("region").expect("handle"),
                     label: "Region".to_string(),
+                    description: String::new(),
                     secret: false,
                     required: false,
                     provided: true,
@@ -501,6 +504,10 @@ mod tests {
             group.fields[1].value.as_deref(),
             Some("eu-west-1"),
             "a non-secret value must survive — redaction may not blank the whole form"
+        );
+        assert_eq!(
+            group.fields[0].description, "Issued in the provider console under API tokens.",
+            "field help text must survive into the view payload"
         );
     }
 
@@ -536,6 +543,7 @@ mod tests {
                 label: "API token".to_string(),
                 secret: true,
                 required: true,
+                description: String::new(),
                 host_managed: false,
             }],
         };

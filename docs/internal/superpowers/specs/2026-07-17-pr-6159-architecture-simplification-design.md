@@ -7,7 +7,7 @@
 **Baseline:** `nearai/ironclaw#6159` at `0575d3815d03fce0d43e6247f0bb3956af9e9ada`
 
 **Governing direction:** current host/product contracts and
-`docs/reborn/contracts/kernel-boundary.md`
+`docs/internal/reborn/contracts/kernel-boundary.md`
 
 ## Goal
 

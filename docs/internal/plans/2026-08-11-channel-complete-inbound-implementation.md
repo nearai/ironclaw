@@ -71,7 +71,7 @@
 **Files:**
 - Update extension-contract, extension-family, assistant, auth, domain, and package guidance named in the mission
 - Update `crates/product/ironclaw_webui/CONTRACT.md`
-- Update `docs/reborn/extension-runtime/overview.md`
+- Update `docs/internal/reborn/extension-runtime/overview.md`
 - Amend `docs/internal/design/2026-08-11-channel-adapter-contract.md` with dated corrections
 - Fold the requested `serve.rs` no-session-channel warning and review-thread fixes still valid on the live tree
 

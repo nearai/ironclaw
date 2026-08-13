@@ -9,7 +9,7 @@ commands are in [`README.md`](./README.md); the family boundary is
 [`../AGENTS.md`](../AGENTS.md).
 
 This file was reduced to a pointer on 2026-08-05
-(`docs/reborn/guidance-conventions.md`, rule 1): its buckets and notes
+(`docs/internal/reborn/guidance-conventions.md`, rule 1): its buckets and notes
 duplicated the spec, and where the two disagreed the map had already been
 declared the winner. Two facts worth keeping visible at the door:
 

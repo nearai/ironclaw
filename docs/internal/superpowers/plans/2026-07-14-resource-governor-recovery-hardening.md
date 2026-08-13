@@ -21,7 +21,7 @@ and remove the post-ack availability check.
 **Files:**
 
 - `crates/ironclaw_resources/src/filesystem_governor/journal.rs`
-- `docs/reborn/contracts/resources.md`
+- `docs/internal/reborn/contracts/resources.md`
 
 Add a deadline-exhaustion regression around the atomic batch retry helper. Keep
 retry eligibility limited to `BackendBusy`, stop starting retries after the
@@ -57,7 +57,7 @@ accountant tests proving actual usage is not replaced by release.
 **Files:**
 
 - `crates/ironclaw_filesystem/src/db.rs`
-- `docs/reborn/contracts/resources.md`
+- `docs/internal/reborn/contracts/resources.md`
 
 Map Postgres SQLSTATE `40001`, `40P01`, and `55P03` to `BackendBusy`, retain
 generic mapping for all other errors, and keep focused classification coverage.

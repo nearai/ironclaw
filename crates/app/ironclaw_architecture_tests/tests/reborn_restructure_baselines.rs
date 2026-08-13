@@ -1,5 +1,5 @@
 //! WS0 baseline record for the target-architecture restructure (epic #3773,
-//! workstream #6920 — `docs/reborn/target-architecture/CHECKLIST.md` WS0).
+//! workstream #6920 — `docs/internal/reborn/target-architecture/CHECKLIST.md` WS0).
 //!
 //! CHECKLIST WS0 names five ratchets that must not regress while the
 //! restructure runs. Three of them are recorded beside the test that owns the

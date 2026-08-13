@@ -4,7 +4,7 @@ Orientation (what this crate is, surface, deps, tests) lives in
 [`README.md`](./README.md); the family boundary in
 [`../AGENTS.md`](../AGENTS.md). This file is the canonical crate-local rules —
 consolidated 2026-08-05 from the former `CLAUDE.md` guardrails (now a pointer)
-per `docs/reborn/guidance-conventions.md` rule 1. One correction was made in
+per `docs/internal/reborn/guidance-conventions.md` rule 1. One correction was made in
 the consolidation: the transcript-boundary rule below used to name
 `InboundConversationService` as the transcript storage boundary, which
 inverted the WS5 rename — the transcript service is `ironclaw_threads`'
@@ -145,4 +145,4 @@ binding/acceptance service.
   — the production implementation of the submission port.
 - `crates/kernel/ironclaw_turns/AGENTS.md` — background only; no normal
   dependency exists.
-- `docs/reborn/contracts/events-projections.md`
+- `docs/internal/reborn/contracts/events-projections.md`

@@ -9,7 +9,7 @@
 //! nothing, delivers nothing, and speaks no HTTP. `ironclaw_assistant` owns the
 //! `ProductSurface` implementation and the frozen inventory of concrete
 //! commands, views, and capabilities; this crate owns only their shapes. See
-//! `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 and
+//! `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.3 and
 //! `families/contracts.md`.
 //!
 //! Admission test for a type here (the contracts-family four-part test):

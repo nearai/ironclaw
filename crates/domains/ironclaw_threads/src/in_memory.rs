@@ -24,14 +24,15 @@ use crate::{
     BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
-    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +66,7 @@ struct InboundIdempotencyKey {
 struct InboundIdempotencyRecord {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
+    replay_metadata: InboundMessageReplayMetadata,
 }
 
 impl InboundIdempotencyKey {
@@ -123,6 +125,18 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata::default(),
+        )
+        .await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         let mut state = self.state.lock().await;
         if let Some(key) = InboundIdempotencyKey::from_request(&request)
             && let Some(record) = state.inbound_idempotency.get(&key)
@@ -152,6 +166,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 message_id: record.message_id,
                 sequence: existing.sequence,
                 idempotent_replay: true,
+                replay_metadata: record.replay_metadata.clone(),
             });
         }
 
@@ -198,6 +213,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 InboundIdempotencyRecord {
                     thread_id: request.thread_id.clone(),
                     message_id,
+                    replay_metadata: replay_metadata.clone(),
                 },
             );
         }
@@ -207,6 +223,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             message_id,
             sequence,
             idempotent_replay: false,
+            replay_metadata,
         })
     }
 
@@ -243,6 +260,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             source_binding_id: message.source_binding_id.clone(),
             reply_target_binding_id: message.reply_target_binding_id.clone(),
             turn_run_id: message.turn_run_id.clone(),
+            replay_metadata: record.replay_metadata.clone(),
         }))
     }
 

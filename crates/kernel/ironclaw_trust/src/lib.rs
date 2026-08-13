@@ -26,7 +26,7 @@
 //! See `crates/kernel/ironclaw_trust/CONTRACT.md` for the full cross-crate
 //! contract (evaluation matrix, `PackageIdentity` scope, mutation
 //! orchestration, built-in tool migration intent), `CLAUDE.md` for the
-//! per-file guardrails, and `docs/reborn/contracts/host-api.md` (in the
+//! per-file guardrails, and `docs/internal/reborn/contracts/host-api.md` (in the
 //! staging-track docs) for the broader Reborn vocabulary.
 #![warn(unreachable_pub)]
 

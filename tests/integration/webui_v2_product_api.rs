@@ -1177,6 +1177,40 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
             "secret fields must never expose a value: {secret_field}"
         );
     }
+    let telegram_fields = groups
+        .iter()
+        .find(|group| group["group_id"] == "extension.telegram")
+        .and_then(|group| group["fields"].as_array())
+        .expect("telegram group lists fields");
+    // Each handle must carry ITS OWN manifest help text — a distinctive
+    // fragment per field, so a description copied to every field or attached
+    // to the wrong handle fails here even though all four are non-empty.
+    let expected_fragments = [
+        ("telegram_bot_token", "BotFather"),
+        ("telegram_webhook_secret", "random string you invent"),
+        (
+            "telegram_webhook_url",
+            "/webhooks/extensions/telegram/updates",
+        ),
+        ("bot_username", "without the leading @"),
+    ];
+    for (handle, fragment) in expected_fragments {
+        let description = telegram_fields
+            .iter()
+            .find(|field| field["handle"] == handle)
+            .and_then(|field| field["description"].as_str())
+            .unwrap_or_else(|| panic!("field {handle} carries help text on the wire"));
+        assert!(
+            description.contains(fragment),
+            "field {handle} must carry its own manifest help text \
+             (expected fragment {fragment:?}): {description}"
+        );
+    }
+    assert_eq!(
+        telegram_fields.len(),
+        expected_fragments.len(),
+        "every telegram field is covered by a help-text expectation"
+    );
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");

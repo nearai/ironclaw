@@ -13,7 +13,7 @@
 #[path = "support/product_surface.rs"]
 mod programmable_surface;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -121,10 +121,11 @@ use ironclaw_product_contracts::ironhub::{
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_llm::{
-    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, USER_MODEL_CATALOG_VIEW,
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
+    USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView, ProductOutboundEnvelope,
@@ -310,8 +311,12 @@ fn caller() -> ProductSurfaceCaller {
 }
 
 fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
+    caller_for_tenant_and_user("tenant-alpha", user_id)
+}
+
+fn caller_for_tenant_and_user(tenant_id: &str, user_id: &str) -> ProductSurfaceCaller {
     ProductSurfaceCaller::new(
-        TenantId::new("tenant-alpha").expect("tenant"),
+        TenantId::new(tenant_id).expect("tenant"),
         UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
@@ -581,6 +586,7 @@ struct StubServices {
     stall_global_auto_approve: Mutex<bool>,
     next_global_auto_approve_error: Mutex<Option<ProductSurfaceError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
+    user_model_preferences: Mutex<HashMap<(String, String), UserModelPreference>>,
     next_extensions_view: Mutex<Option<RebornExtensionListResponse>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     surface_calls: Mutex<Vec<RecordedProductSurfaceCallRequest>>,
@@ -838,7 +844,7 @@ impl StubServices {
 
     async fn invoke(
         &self,
-        _caller: ProductSurfaceCaller,
+        caller: ProductSurfaceCaller,
         capability: CapabilityId,
         input: serde_json::Value,
         activity_id: ActivityId,
@@ -876,6 +882,17 @@ impl StubServices {
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
             ));
+        }
+        if capability.as_str() == LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID {
+            let preference: UserModelPreference =
+                serde_json::from_value(input.clone()).expect("user model preference input");
+            self.user_model_preferences.lock().expect("lock").insert(
+                (
+                    caller.tenant_id.as_str().to_string(),
+                    caller.user_id.as_str().to_string(),
+                ),
+                preference,
+            );
         }
         self.invoke_calls
             .lock()
@@ -964,6 +981,23 @@ impl StubServices {
                 .expect("user model catalog payload"),
                 next_cursor: None,
             }),
+            id if id == USER_MODEL_PREFERENCE_VIEW.id => {
+                let preference = self
+                    .user_model_preferences
+                    .lock()
+                    .expect("lock")
+                    .get(&(
+                        caller.tenant_id.as_str().to_string(),
+                        caller.user_id.as_str().to_string(),
+                    ))
+                    .cloned()
+                    .unwrap_or(UserModelPreference { model: None });
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(preference)
+                        .expect("user model preference payload"),
+                    next_cursor: None,
+                })
+            }
             id if id == THREADS_VIEW.id => {
                 let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params).expect("thread list params");
@@ -6620,6 +6654,151 @@ async fn user_model_catalog_does_not_require_operator_capability() {
         services.view_queries.lock().expect("lock").as_slice()[0].view_id,
         USER_MODEL_CATALOG_VIEW.id
     );
+}
+
+#[tokio::test]
+async fn user_model_preference_routes_are_caller_scoped_and_do_not_require_admin() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+    let other_router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        caller_for_user("user-beta"),
+    );
+    let other_tenant_router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        caller_for_tenant_and_user("tenant-beta", "user-alpha"),
+    );
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    assert_eq!(read_json(get_response).await, serde_json::json!({}));
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let put_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"model-a"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(put_response.status(), StatusCode::OK);
+    assert_eq!(
+        read_json(put_response).await,
+        serde_json::json!({ "model": "model-a" })
+    );
+
+    let same_caller_get = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(same_caller_get).await,
+        serde_json::json!({ "model": "model-a" })
+    );
+
+    let other_caller_get = other_router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(read_json(other_caller_get).await, serde_json::json!({}));
+
+    let other_tenant_get = other_tenant_router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(read_json(other_tenant_get).await, serde_json::json!({}));
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let reset_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":null}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(reset_response.status(), StatusCode::OK);
+    assert_eq!(read_json(reset_response).await, serde_json::json!({}));
+
+    let reset_get = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/model-preference")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(read_json(reset_get).await, serde_json::json!({}));
+
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert_eq!(
+        view_ids,
+        vec![
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+        ]
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "model": "model-a" }));
+    assert_eq!(invoke_calls[1].1, serde_json::json!({ "model": null }));
 }
 
 #[tokio::test]
