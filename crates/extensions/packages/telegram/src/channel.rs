@@ -168,7 +168,7 @@ async fn complete_message(
             Ok(fetched) => match pending.complete(fetched) {
                 Ok(attachment) => message.attachments.push(attachment),
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         %external_file_id,
                         %error,
                         "dropping telegram attachment whose fetched bytes failed completion"
@@ -181,7 +181,7 @@ async fn complete_message(
                 },
             ) => return Err(error),
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     %external_file_id,
                     %error,
                     "dropping telegram attachment after a non-retryable transfer failure"
