@@ -204,9 +204,11 @@ the `CLAUDE.md` alias rule above holds (index mode `120000`, target exactly
 `ALIAS_REAL_FILE_EXCEPTIONS` table). The same reference check covers the
 public docs tree (`docs/**/*.md|.mdx`, including the `zh/` mirror):
 backticked repo paths are verified there, while markdown links are treated
-as Mintlify site routes and skipped — except in the re-included living
-corpora (`docs/reborn/contracts/` and the other
-`DOCS_REINCLUDED_PREFIXES` entries, this page among them), which are never
+as Mintlify site routes and skipped. The `docs/internal/` archive is
+excluded as a class, except for the living spec pages named in the gate's
+`INTERNAL_GUIDANCE_PREFIXES` (the contract corpus under
+`docs/internal/reborn/contracts/`, the extension-runtime spec pages, and
+this page), which are scanned as full guidance files — they are never
 published, so their relative links are checked as repo paths too. Mark a
 deliberately historical reference with the dated-correction glyph `✎` —
 which exempts its whole line — or with

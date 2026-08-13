@@ -19,20 +19,20 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      `AGENTS.md`/`CLAUDE.md`, every `AGENTS.md`/`CLAUDE.md`/`CONTRACT.md`/
      `README.md` under `crates/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
-     directory. Every `.md`/`.mdx` under `docs/` — the public Mintlify tree,
-     the `zh/` locale mirror, and the living corpora named in
-     `DOCS_REINCLUDED_PREFIXES` (the contract corpus, the extension-runtime
-     spec pages, guidance-conventions.md) — is scanned the same way, but on
-     published pages for **backticked inline paths only**: markdown link
-     targets there are Mintlify site paths (extensionless page routes,
-     site-absolute `/using/cli` forms), a different namespace than the
-     tracked tree, so the link extractor is off by design rather than
-     suppressed case-by-case. The re-included corpora are the exception:
-     they are fenced out of publication, so their relative markdown links
-     are repo-path claims and are checked like any guidance file's. The
-     dated archives (`docs/internal/`, the non-reincluded parts of
-     `docs/reborn/`) are excluded as classes — see `DOCS_EXCLUDED_PREFIXES`
-     below.
+     directory. Every `.md`/`.mdx` under `docs/` outside `docs/internal/` —
+     the public Mintlify tree and the `zh/` locale mirror — is scanned the
+     same way, but for **backticked inline paths only**: markdown link
+     targets on published pages are Mintlify site paths (extensionless page
+     routes, site-absolute `/using/cli` forms), a different namespace than
+     the tracked tree, so the link extractor is off by design rather than
+     suppressed case-by-case. `docs/internal/` — the fenced archive of dated
+     plans, ADRs, and research notes — is excluded as a class
+     (`DOCS_EXCLUDED_PREFIX` below), and the living spec pages inside it
+     named in `INTERNAL_GUIDANCE_PREFIXES` (the contract corpus, the
+     extension-runtime spec pages, guidance-conventions.md) are instead
+     scanned as full guidance files: they are never published, so their
+     relative markdown links are repo-path claims and are checked like any
+     guidance file's.
   2. **Rule triggers are live.** Every `paths:` glob in a rule's (or skill's)
      frontmatter must match at least one tracked file. A rule whose glob
      matches nothing is a rule that never loads — the exact
@@ -151,32 +151,34 @@ ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
-# The docs tree — published Mintlify pages and the zh/ locale mirror — plus
-# the living corpora re-included from the fenced trees below. The scan is
-# against the git tree, not the publication set, so `.mintignore` plays no
-# part here. The fenced historical archives are excluded as *classes*, not
-# per-file: dated plans, ADRs, research notes, superpowers specs, and
-# design-era checklists describe the tree as it stood when they were written
-# (measured 2026-08-07: 705 of 709 dangling docs references sat in
-# docs/internal/ and the non-contract parts of docs/reborn/) — forcing them
-# to track today's tree would either rewrite history or drown KNOWN_MISSING,
-# and both destroy the signal this gate exists for. Re-included prefixes are
-# the *living* exceptions inside those classes — pages the tree still cites
-# as currently authoritative: the contract corpus, the extension-runtime
-# spec pages (overview.md is named canonical by contracts/extensions.md;
-# standard-operations.md is the live vocabulary the extension-surfaces skill
-# routes to — their design-era siblings checklist.md and implementation.md
-# stay archival), and the guidance-conventions page that canonically
-# describes this gate. Each prefix must match at least one tracked page or
-# discovery refuses: a silent zero-match (the corpus moved) is the gate
-# going dark on its best-signal files.
+# The docs tree — published Mintlify pages and the zh/ locale mirror. The
+# scan is against the git tree, not the publication set, so `.mintignore`
+# plays no part here. The fenced historical archive `docs/internal/` is
+# excluded as a *class*, not per-file: dated plans, ADRs, research notes,
+# superpowers specs, and design-era checklists describe the tree as it stood
+# when they were written (measured 2026-08-07: 705 of 709 dangling docs
+# references sat in what is now docs/internal/) — forcing them to track
+# today's tree would either rewrite history or drown KNOWN_MISSING, and both
+# destroy the signal this gate exists for.
 DOCS_PREFIX = "docs/"
-DOCS_EXCLUDED_PREFIXES = ("docs/internal/", "docs/reborn/")
-DOCS_REINCLUDED_PREFIXES = (
-    "docs/reborn/contracts/",
-    "docs/reborn/extension-runtime/overview.md",
-    "docs/reborn/extension-runtime/standard-operations.md",
-    "docs/reborn/guidance-conventions.md",
+DOCS_EXCLUDED_PREFIX = "docs/internal/"
+# The *living* spec pages inside that archive class — pages the tree still
+# cites as currently authoritative, so they are scanned as full guidance
+# files rather than excluded with their archival neighbors: the contract
+# corpus, the extension-runtime spec pages (overview.md is named canonical
+# by contracts/extensions.md; standard-operations.md is the live vocabulary
+# the extension-surfaces skill routes to — their design-era siblings
+# checklist.md and implementation.md stay archival), and the
+# guidance-conventions page that canonically describes this gate. They are
+# never published, so their relative markdown links are repo-path claims and
+# get the guidance treatment, links included. Each prefix must match at
+# least one tracked page or discovery refuses: a silent zero-match (the
+# corpus moved) is the gate going dark on its best-signal files.
+INTERNAL_GUIDANCE_PREFIXES = (
+    "docs/internal/reborn/contracts/",
+    "docs/internal/reborn/extension-runtime/overview.md",
+    "docs/internal/reborn/extension-runtime/standard-operations.md",
+    "docs/internal/reborn/guidance-conventions.md",
 )
 
 CORRECTION_GLYPH = "✎"
@@ -234,16 +236,18 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # its measured value: low enough that legitimate consolidation never trips
 # it, high enough that a parser or discovery pass silently degrading to a
 # handful of hits refuses instead of passing — a floor of 1 catches only
-# total loss, not the degraded-but-nonzero shape. The docs/ surface gets its
-# own floor (measured 2026-08-07: ~127 docs files in scope) because the
-# aggregate floors sit below the guidance-only remainder — without it, the
-# docs branch of discovery silently breaking would pass on guidance alone,
-# which is exactly the silent-degradation shape floors exist to refuse.
+# total loss, not the degraded-but-nonzero shape. The published docs/
+# surface gets its own floor (measured 2026-08-13: 82 published pages in
+# scope; the living internal spec pages are guarded separately by their
+# per-prefix zero-match refusal) because the aggregate floors sit below the
+# guidance-only remainder — without it, the docs branch of discovery
+# silently breaking would pass on guidance alone, which is exactly the
+# silent-degradation shape floors exist to refuse.
 MIN_GUIDANCE_FILES = 180
 MIN_PATH_REFERENCES = 1100
 MIN_RULE_GLOBS = 20
 MIN_ALIAS_PAIRS = 40
-MIN_DOCS_FILES = 60
+MIN_DOCS_FILES = 40
 
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -460,19 +464,18 @@ def discover_guidance(tree: Tree) -> list[str]:
             path.startswith(DOCS_PREFIX)
             and path.endswith((".md", ".mdx"))
             and (
-                not path.startswith(DOCS_EXCLUDED_PREFIXES)
-                or path.startswith(DOCS_REINCLUDED_PREFIXES)
+                not path.startswith(DOCS_EXCLUDED_PREFIX)
+                or path.startswith(INTERNAL_GUIDANCE_PREFIXES)
             )
         ):
             docs.append(path)
-    for prefix in DOCS_REINCLUDED_PREFIXES:
+    for prefix in INTERNAL_GUIDANCE_PREFIXES:
         if not any(path.startswith(prefix) for path in docs):
             raise GuidanceError(
-                f"re-included docs prefix {prefix!r} matched no tracked "
+                f"living internal spec prefix {prefix!r} matched no tracked "
                 "pages — the corpus moved or was renamed, and leaving the "
                 "prefix stale would silently drop it from the scan. Update "
-                "DOCS_REINCLUDED_PREFIXES (and DOCS_EXCLUDED_PREFIXES) to "
-                "the new location."
+                "INTERNAL_GUIDANCE_PREFIXES to the new location."
             )
     return docs
 
@@ -628,13 +631,14 @@ def extract_references(
     # Under docs/, markdown link targets are Mintlify site routes
     # (extensionless page paths, `/using/cli` site-absolute forms) — a
     # different namespace than the tracked tree, so the link extractor is off
-    # there by design. Backticked repo paths remain checked. The re-included
-    # contract corpus is the exception: it is fenced out of publication
-    # (never a site route), and its relative links (`](kernel-boundary.md)`)
-    # are genuine repo-path claims — renaming one contract file would leave
-    # every cross-reference dangling with the gate green.
+    # there by design. Backticked repo paths remain checked. The living
+    # internal spec pages are the exception: they are fenced out of
+    # publication (never a site route), and their relative links
+    # (`](kernel-boundary.md)`) are genuine repo-path claims — renaming one
+    # contract file would leave every cross-reference dangling with the gate
+    # green.
     include_links = not doc.startswith(DOCS_PREFIX) or doc.startswith(
-        DOCS_REINCLUDED_PREFIXES
+        INTERNAL_GUIDANCE_PREFIXES
     )
     previous_spans: list[str] = []
     for number, line, markers in _reference_lines(text, doc):
@@ -1128,7 +1132,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
-        docs_files = sum(1 for doc in docs if doc.startswith(DOCS_PREFIX))
+        # The published-docs floor counts only the Mintlify surface: the
+        # living internal spec pages have their own per-prefix zero-match
+        # refusal in discovery, so they must not pad this count.
+        docs_files = sum(
+            1
+            for doc in docs
+            if doc.startswith(DOCS_PREFIX)
+            and not doc.startswith(DOCS_EXCLUDED_PREFIX)
+        )
         if docs_files < MIN_DOCS_FILES:
             raise GuidanceError(
                 f"discovered only {docs_files} docs/ files in scope (floor is "

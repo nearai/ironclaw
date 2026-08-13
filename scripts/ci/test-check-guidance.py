@@ -137,7 +137,7 @@ class GuidanceGateTests(unittest.TestCase):
         tracked: list[str] | None = None,
         known_missing: tuple | None = (),
         alias_exceptions: dict[str, str] | None = None,
-        reincluded: tuple[str, ...] = (),
+        internal_guidance: tuple[str, ...] = (),
     ) -> tuple[int, str]:
         listing = self.root / "tracked-files.txt"
         listing.write_text(
@@ -152,10 +152,10 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
             mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
-            # Fixtures opt in to re-included corpora per test: the production
-            # tuple names real-repo pages, and the liveness refusal would
-            # otherwise fire on every fixture that lacks them.
-            mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", reincluded),
+            # Fixtures opt in to living internal spec pages per test: the
+            # production tuple names real-repo pages, and the liveness refusal
+            # would otherwise fire on every fixture that lacks them.
+            mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", internal_guidance),
             mock.patch.object(
                 GATE,
                 "ALIAS_REAL_FILE_EXCEPTIONS",
@@ -546,7 +546,7 @@ class GuidanceGateTests(unittest.TestCase):
             with (
                 mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
                 mock.patch.object(GATE, "MIN_DOCS_FILES", 0),
-                mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", ()),
+                mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", ()),
                 mock.patch.object(GATE, "KNOWN_MISSING", ()),
                 mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
                 contextlib.redirect_stderr(stderr),
@@ -637,27 +637,29 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("docs/zh/index.md", output)
 
     def test_docs_historical_archives_are_excluded_but_contracts_are_not(self) -> None:
-        """Dated archives describe the tree as it stood when written — they
-        are excluded as classes. The living contract corpus under
-        docs/reborn/contracts/ is scanned."""
+        """The dated archives under docs/internal/ describe the tree as it
+        stood when written — they are excluded as a class. The living
+        contract corpus under docs/internal/reborn/contracts/ is scanned."""
         self.build_fixture()
         self.write(
             "docs/internal/plans/2026-01-01-old-plan.md",
             "We will edit `crates/core/ironclaw_gone/src/lib.rs`.\n",
         )
         self.write(
-            "docs/reborn/target-architecture/CHECKLIST.md",
+            "docs/internal/reborn/target-architecture/CHECKLIST.md",
             "Milestone: `crates/core/ironclaw_gone/src/lib.rs`.\n",
         )
         self.write(
-            "docs/reborn/contracts/example.md",
+            "docs/internal/reborn/contracts/example.md",
             "Pinned by `crates/core/ironclaw_gone/tests/contract.rs`.\n",
         )
-        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
         self.assertEqual(code, 1)
         self.assertNotIn("2026-01-01-old-plan.md", output)
         self.assertNotIn("CHECKLIST.md", output)
-        self.assertIn("docs/reborn/contracts/example.md", output)
+        self.assertIn("docs/internal/reborn/contracts/example.md", output)
         self.assertIn("crates/core/ironclaw_gone/tests/contract.rs", output)
 
     def test_docs_unterminated_fence_refuses(self) -> None:
@@ -696,30 +698,34 @@ class GuidanceGateTests(unittest.TestCase):
                 self.assertIn("unterminated", output)
                 self.assertIn(name, output)
 
-    def test_reincluded_corpus_links_are_repo_claims(self) -> None:
-        """The re-included corpora are never published, so their relative
-        markdown links are repo-path claims, not Mintlify site routes —
-        renaming a contract file must not leave cross-references dangling
-        with the gate green."""
+    def test_internal_spec_links_are_repo_claims(self) -> None:
+        """The living internal spec pages are never published, so their
+        relative markdown links are repo-path claims, not Mintlify site
+        routes — renaming a contract file must not leave cross-references
+        dangling with the gate green."""
         self.build_fixture()
-        self.write("docs/reborn/contracts/kernel.md", "A real sibling.\n")
+        self.write("docs/internal/reborn/contracts/kernel.md", "A real sibling.\n")
         self.write(
-            "docs/reborn/contracts/index.md",
+            "docs/internal/reborn/contracts/index.md",
             "See [kernel](kernel.md) and [renamed](renamed-away.md).\n",
         )
-        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
         self.assertEqual(code, 1)
         self.assertNotIn("kernel.md`", output)
         self.assertIn("renamed-away.md", output)
 
-    def test_reincluded_prefix_matching_no_pages_refuses(self) -> None:
-        """A stale re-included prefix (the corpus moved) must refuse instead
+    def test_internal_guidance_prefix_matching_no_pages_refuses(self) -> None:
+        """A stale living-spec prefix (the corpus moved) must refuse instead
         of silently dropping the gate's best-signal files from the scan."""
         self.build_fixture()
-        code, output = self.run_gate(reincluded=("docs/reborn/contracts/",))
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
         self.assertEqual(code, 1)
         self.assertIn("matched no tracked", output)
-        self.assertIn("docs/reborn/contracts/", output)
+        self.assertIn("docs/internal/reborn/contracts/", output)
 
     def test_docs_floor_refuses_when_docs_branch_breaks(self) -> None:
         """The aggregate floors sit below the guidance-only remainder, so the
@@ -737,7 +743,7 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
             mock.patch.object(GATE, "MIN_DOCS_FILES", 5),
-            mock.patch.object(GATE, "DOCS_REINCLUDED_PREFIXES", ()),
+            mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", ()),
             mock.patch.object(
                 GATE, "ALIAS_REAL_FILE_EXCEPTIONS", dict(self.ROOT_ALIAS_EXCEPTION)
             ),
