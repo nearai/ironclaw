@@ -410,7 +410,7 @@ impl SecretStore<InMemoryBackend> {
     /// `/tenants/<tenant>/users/<user>/secrets`), matching production
     /// composition's `invocation_mount_view` shape so cross-tenant isolation
     /// stays structural. Replaces the deleted `InMemorySecretStore` (§4.3 of
-    /// `docs/reborn/contracts/secrets.md`).
+    /// `docs/internal/reborn/contracts/secrets.md`).
     pub fn ephemeral() -> Self {
         Self::ephemeral_over(Arc::new(InMemoryBackend::new()))
     }

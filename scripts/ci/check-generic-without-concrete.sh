@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The automated deletion test (docs/reborn/extension-runtime/overview.md §8,
+# The automated deletion test (docs/internal/reborn/extension-runtime/overview.md §8,
 # checklist DEL-9): every generic Reborn crate's dependency graph must be free
 # of concrete extension crates, and its tests must pass without them.
 #

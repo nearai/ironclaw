@@ -79,8 +79,8 @@ cargo test -p ironclaw_architecture_tests   # boundary rules
 ## See also
 
 Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
-`docs/reborn/contracts/secrets.md`,
-`docs/reborn/contracts/storage-placement.md`,
-`docs/reborn/contracts/kernel-boundary.md`. (The crate's working rules were
+`docs/internal/reborn/contracts/secrets.md`,
+`docs/internal/reborn/contracts/storage-placement.md`,
+`docs/internal/reborn/contracts/kernel-boundary.md`. (The crate's working rules were
 folded into the Invariants above on 2026-08-06; this README is the crate-local
 home.)

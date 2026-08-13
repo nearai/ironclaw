@@ -17,7 +17,7 @@ group_id = "vendor.acme"
 display_name = "Acme deployment configuration"
 description = "Deployment credentials for the Acme channel."
 fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
 ]
 

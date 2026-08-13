@@ -194,15 +194,29 @@ fn admin_configuration_is_manifest_declared_and_resolved_without_installation_st
     assert_eq!(descriptor.fields.len(), 2);
     assert!(descriptor.fields[0].secret);
     assert!(descriptor.fields[1].secret);
+    assert_eq!(
+        descriptor.fields[0].description,
+        "Issued by the Acme developer console under Bot Settings.",
+        "a manifest-declared field description must survive resolution"
+    );
+    assert!(
+        descriptor.fields[1].description.is_empty(),
+        "a field without a declared description resolves to empty, not an error"
+    );
 }
 
 #[test]
 fn duplicate_admin_configuration_handles_fail_closed() {
-    let toml = ACME_MANIFEST.replace(
-        r#"fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+    let original_fields = r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]"#,
+]"#;
+    assert!(
+        ACME_MANIFEST.contains(original_fields),
+        "fixture fields block drifted; update this replacement source"
+    );
+    let toml = ACME_MANIFEST.replace(
+        original_fields,
         r#"fields = [
   { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
   { handle = "acme_client_id", label = "Duplicate", secret = true, required = true },
@@ -237,11 +251,16 @@ fn channel_runtime_configuration_comes_from_admin_configuration_alone() {
 
 #[test]
 fn channel_runtime_secret_references_must_be_declared_by_admin_configuration() {
-    let toml = ACME_MANIFEST.replace(
-        r#"fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+    let original_fields = r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]"#,
+]"#;
+    assert!(
+        ACME_MANIFEST.contains(original_fields),
+        "fixture fields block drifted; update this replacement source"
+    );
+    let toml = ACME_MANIFEST.replace(
+        original_fields,
         r#"fields = [
   { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
 ]"#,

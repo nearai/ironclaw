@@ -42,18 +42,12 @@ ironclaw serve
 
 </Step>
 
-<Step title="Connect the channel">
+<Step title="Enter the deployment configuration (operator, once per instance)">
 
-In the [web interface](/using/webui), open **Extensions**, switch to the **Channels** tab,
-and scroll to the **bottom of the Built-in section**. Use **Configure** on the Slack card
-and provide the app id, bot token, and signing secret. They are written to the encrypted
-secret store.
-
-<Warning>
-Extensions opens on the **Registry** tab, which is not where channels are connected, and
-the Slack card sits below the web and terminal rows on the Channels tab. If you can't find
-it, you're probably on the wrong tab or haven't scrolled.
-</Warning>
+In the [web interface](/using/webui), open **Admin → Configuration** and fill in the
+**Slack deployment configuration** card — the bot token, signing secret, workspace
+(team) ID, app ID, and the other fields the card lists. They are written to the
+encrypted secret store.
 
 <Note>
 The agent can't do this operator step for you — registering the app credentials stays in
@@ -275,8 +269,9 @@ it through the setup flow, then restart the server.
 </Accordion>
 
 <Accordion title="I can't find where to configure Slack">
-Open **Extensions**, switch from **Registry** to the **Channels** tab, and scroll to the
-bottom of the Built-in section. The Slack card is below the web and terminal channel rows.
+The instance-wide credentials live under **Admin → Configuration**, on the **Slack
+deployment configuration** card. The **Extensions** page handles the personal half —
+installing the extension and connecting your own Slack account.
 </Accordion>
 
 </AccordionGroup>

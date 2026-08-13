@@ -2,7 +2,7 @@
 
 Working rules for the boot-configuration leaf. Orientation lives in
 `README.md`; family rules in `crates/app/AGENTS.md`. (The `CLAUDE.md` beside
-this file is a symlink alias of it, per `docs/reborn/guidance-conventions.md`;
+this file is a symlink alias of it, per `docs/internal/reborn/guidance-conventions.md`;
 this file is the canonical home for its working rules.)
 
 ## Start Here

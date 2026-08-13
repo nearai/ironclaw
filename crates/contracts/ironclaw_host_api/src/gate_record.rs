@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the "render from record" result contract.
 //!
 //! Part of the capability-path result collapse
-//! (`docs/reborn/contracts/capability-access.md`
+//! (`docs/internal/reborn/contracts/capability-access.md`
 //! §5.2.9). [`Resolution`](crate::resolution::Resolution)'s control-plane arms carry only
 //! *opaque* refs — [`GateRef`](crate::ids::GateRef), [`DenyRef`](crate::ids::DenyRef),
 //! [`ResultRef`](crate::ids::ResultRef) — never inline content. The records in this

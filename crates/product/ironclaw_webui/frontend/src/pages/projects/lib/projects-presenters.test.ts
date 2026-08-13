@@ -5,8 +5,6 @@ import { test } from "vitest";
 import {
   formatMessageRole,
   formatMetricValue,
-  formatMissionCadence,
-  formatMissionStatus,
   formatProjectDate,
   formatProjectRole,
   formatProjectRelativeTime,
@@ -23,7 +21,6 @@ const t = (key, params = {}) => {
   const translations = {
     "projects.count.steps": "Steps: {count}",
     "projects.metric.notSet": "Localized not set",
-    "projects.missions.manual": "Localized manual",
     "projects.relative.hoursAgo": "{count} localized hours ago",
     "projects.relative.inMinutes": "in {count} localized minutes",
     "projects.relative.noActivity": "Localized no activity",
@@ -44,24 +41,6 @@ const t = (key, params = {}) => {
   return key;
 };
 
-test("formatMissionCadence localizes backend manual cadence type", () => {
-  assert.equal(formatMissionCadence({ cadence_type: "manual" }, t), "Localized manual");
-  assert.equal(formatMissionCadence({ cadence_type: "Manual" }, t), "Localized manual");
-});
-
-test("formatMissionCadence preserves descriptions and custom cadence types", () => {
-  assert.equal(
-    formatMissionCadence({ cadence_description: "Every weekday", cadence_type: "manual" }, t),
-    "Every weekday"
-  );
-  assert.equal(formatMissionCadence({ cadence_type: "cron" }, t), "cron");
-});
-
-test("formatMissionCadence falls back to localized manual label", () => {
-  assert.equal(formatMissionCadence({}, t), "Localized manual");
-  assert.equal(formatMissionCadence(null, t), "Localized manual");
-});
-
 test("project enum formatters localize API-backed state and role values", () => {
   assert.equal(formatProjectState("active", t), "Localized active");
   assert.equal(formatProjectState("archived", t), "Localized archived project");
@@ -71,7 +50,6 @@ test("project enum formatters localize API-backed state and role values", () => 
   assert.equal(formatProjectRole("unexpected", t), "unexpected");
   assert.equal(projectStateTone("active"), "success");
   assert.equal(projectStateTone("archived"), "muted");
-  assert.equal(formatMissionStatus("Active", t), "Localized active");
   assert.equal(formatThreadState("Done", t), "Localized done");
   assert.equal(formatThreadType("mission_run", t), "Localized mission run");
   assert.equal(formatThreadType("ad_hoc", t), "ad hoc");

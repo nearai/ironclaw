@@ -23,7 +23,7 @@ Pick the tier first; everything else follows. The repo's tier knowledge lives in
 - **The backend-integration tier is NOT a PR gate unless the workflow says so** (re-verify: `grep -n integration .github/workflows/platform-and-compat.yml`): full Postgres coverage may run post-merge or nightly. A green PR does not prove the tier ran; run it locally when your change is DB/runtime-shaped — crate-level, e.g. `cargo test -p ironclaw_hooks --features integration,test-support` (the workspace-root `integration` feature is empty; a bare root `cargo test --features integration` runs nothing extra).
 - **Never add a silent self-skip to PR-gated tests.** `if docker_missing { return }` hides the suite from CI. Existing Docker sandbox canaries still need migration; new tests should skip loudly via feature gates or explicit env opt-outs.
 - **Capability results and terminal errors have their own test shape** — recoverable failures must remain model-visible outcomes, while host failures are terminal; test the caller against the capability-access contract and its real redaction/evidence validation.
-- **A contract doc change needs its test named.** The house pattern: `docs/reborn/contracts/conversation-binding.md` names its test file + run command; `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior, wire both.
+- **A contract doc change needs its test named.** The house pattern: `docs/internal/reborn/contracts/conversation-binding.md` names its test file + run command; `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior, wire both.
 
 ## Verify
 

@@ -71,7 +71,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
         checked >= 30,
         "expected every active boundary rule's crate to resolve to a real manifest; only \
          {checked} did. A rule set that resolves to nothing checks nothing while passing \
-         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+         (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
     );
 }
 
@@ -360,10 +360,10 @@ fn reborn_virtual_roots_match_storage_placement_contract() {
         std::fs::read_to_string(crate_path(&root, "crates/ironclaw_host_api/src/path.rs"))
             .expect("host API path source must be readable");
     let storage_contract =
-        std::fs::read_to_string(root.join("docs/reborn/contracts/storage-placement.md"))
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/storage-placement.md"))
             .expect("storage placement contract must be readable");
     let filesystem_contract =
-        std::fs::read_to_string(root.join("docs/reborn/contracts/filesystem.md"))
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/filesystem.md"))
             .expect("filesystem contract must be readable");
 
     let implemented = extract_virtual_roots_const(&path_source);
@@ -1813,7 +1813,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         obligations_dir.display()
     );
     let host_runtime_contract =
-        std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
     // WS3 re-point: the script lane merged into `ironclaw_sandbox` and no longer
     // lives in a `lib.rs`. Scanning the whole crate source tree keeps the rule
@@ -3059,7 +3059,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     assert!(
         config_file_src.contains("reject_inline_secret"),
         "RebornConfigFile::validate must call `reject_inline_secret` on operator-pasteable \
-         fields. See `docs/reborn/contracts/secrets.md` and epic #3036's `Pitfalls & \
+         fields. See `docs/internal/reborn/contracts/secrets.md` and epic #3036's `Pitfalls & \
          Landmines` section: \"Do not bake secret material into blueprints/config.\""
     );
 

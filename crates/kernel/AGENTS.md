@@ -196,16 +196,16 @@ change: `cargo test -p ironclaw_architecture_tests`.
 
 ## Sources
 
-- `docs/reborn/target-architecture/families/kernel.md` — the family spec (the
+- `docs/internal/reborn/target-architecture/families/kernel.md` — the family spec (the
   design record; where it and the tree disagree, the code and its gates win
   and both get a dated correction).
 - PROPOSAL §6.5.1–§6.5.10 (per-crate contracts), §7 (trust transitions
   T1–T8), §8 (dependency model), §11.2 (mechanical enforcement), §12.13 D-R
   (loopback carve-out) and D-S (lifecycle-authority re-verification).
-- `docs/reborn/target-architecture/ws12-security-audit.md` — the 2026-08-05
+- `docs/internal/reborn/target-architecture/ws12-security-audit.md` — the 2026-08-05
   adversarial re-verification of the evidence-mint, secrets, verifier, and
   D-R seams (verdicts: HOLDS / HOLDS-WITH-RESIDUAL; residuals recorded
   there).
 - `.claude/rules/safety-and-sandbox.md` — the house security frame this
   family implements.
-- `docs/reborn/guidance-conventions.md` — what this file is and is not.
+- `docs/internal/reborn/guidance-conventions.md` — what this file is and is not.

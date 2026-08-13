@@ -91,7 +91,7 @@ layers, name that scope or split the PR. Move-only changes state that behavior
 is unchanged, keep behavioral fixes separate, and record follow-up issues for
 problems discovered during the move. After moving or renaming code, search
 `.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`,
-`docs/reborn/contracts/`, and other Markdown references for stale paths.
+`docs/internal/reborn/contracts/`, and other Markdown references for stale paths.
 
 ## Removing a "redundant" layer un-masks behavior
 

@@ -80,7 +80,7 @@ first-party extension manifests, Cargo test/clippy.
 - `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml` and
   `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`
   opt into exactly `status`.
-- `docs/reborn/contracts/extensions.md`
+- `docs/internal/reborn/contracts/extensions.md`
   documents the schema, fail-closed compatibility behavior, and authorization
   boundary.
 
@@ -589,7 +589,7 @@ Only stage `native_extensions.rs` if its test actually changes.
 ### Task 6: Document the Contract and Verify the Security Boundary
 
 **Files:**
-- Modify: `docs/reborn/contracts/extensions.md`
+- Modify: `docs/internal/reborn/contracts/extensions.md`
 - Verify: all files changed by Tasks 1-5
 - Update on GitHub after verification: PR #6816 body
 
@@ -683,7 +683,7 @@ action-level admin/owner authorization for commands not exposed here.
 - [ ] **Step 6: Commit documentation**
 
 ```bash
-git add docs/reborn/contracts/extensions.md
+git add docs/internal/reborn/contracts/extensions.md
 git commit -m "docs(extensions): define channel command exposure"
 ```
 

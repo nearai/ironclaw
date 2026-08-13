@@ -79,7 +79,7 @@
 > `rg -n "fn webui_v2_app" crates/`.
 
 It is the native host-owned surface that enters `ProductSurface` directly
-(`docs/reborn/how-to-port-channel-to-reborn.md`, "Native host surface").
+(`docs/internal/reborn/how-to-port-channel-to-reborn.md`, "Native host surface").
 
 ### Surface
 
@@ -379,7 +379,7 @@ rows are inventoried here, not implemented in the current PR.
 
 ### What this composition deliberately does NOT do
 
-Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
+Per Path A in `docs/internal/reborn/how-to-port-channel-to-reborn.md`:
 
 - No `ProductAdapter` wrapper around browser sessions.
 - No fake `ExternalActorRef` / `ProtocolAuthEvidence` /
@@ -436,6 +436,10 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
 ### Tests
 
+- `src/runtime/tests/core.rs::standalone_cli_send_uses_saved_user_model_preference`
+  — caller-level regression guard that the CLI runtime resolves the actor's
+  saved model preference before durable message acceptance and carries that
+  choice through replay-aware acceptance into the model gateway request.
 - `src/runtime/tests/core.rs::standalone_runtime_webui_bundle_reuses_thread_and_turn_services`
   — regression guard that the product surface reuses the runtime turn/thread
   services.

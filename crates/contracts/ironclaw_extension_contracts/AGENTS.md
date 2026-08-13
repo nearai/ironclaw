@@ -4,7 +4,7 @@ Canonical crate guidance (the crate's `CLAUDE.md` is a pointer here).
 Orientation and public surface: [`README.md`](./README.md). Family boundary
 and admission test: [`../AGENTS.md`](../AGENTS.md). Carved out of
 `ironclaw_host_api` by WS1.3 of the target architecture (PROPOSAL §6.1.2,
-`docs/reborn/target-architecture/families/contracts.md`).
+`docs/internal/reborn/target-architecture/families/contracts.md`).
 
 ## What belongs here
 

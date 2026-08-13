@@ -2,6 +2,7 @@
 //! Contract tests for the InboundTurnService.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +45,13 @@ use ironclaw_product_contracts::inbound::{
     ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
     UserMessagePayload,
 };
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
@@ -140,6 +148,114 @@ impl TurnCoordinator for CapturingTurnCoordinator {
 struct ScriptedTurnCoordinator {
     results: Arc<Mutex<VecDeque<Result<SubmitTurnResponse, TurnError>>>>,
     submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
+}
+
+struct MutableModelResolver {
+    model: Mutex<Option<String>>,
+    resolve_count: AtomicUsize,
+}
+
+impl MutableModelResolver {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Mutex::new(Some(model.to_string())),
+            resolve_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn set_model(&self, model: &str) {
+        *self.model.lock().expect("model resolver lock poisoned") = Some(model.to_string());
+    }
+
+    fn resolve_count(&self) -> usize {
+        self.resolve_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for MutableModelResolver {
+    async fn snapshot(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn set_active(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn list_models(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn resolve_user_model(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        self.resolve_count.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .model
+            .lock()
+            .expect("model resolver lock poisoned")
+            .clone())
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
 }
 
 impl ScriptedTurnCoordinator {
@@ -1762,6 +1878,52 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
         submissions[0].idempotency_key.as_str(),
         submissions[1].idempotency_key.as_str(),
         "retry after post-submit failure must reuse stable turn idempotency key"
+    );
+}
+
+#[tokio::test]
+async fn accepted_message_replay_reuses_the_persisted_resolved_model() {
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    coordinator.push_result(Err(TurnError::Unavailable {
+        reason: "transient submit failure".into(),
+    }));
+    let coordinator_handle = coordinator.clone();
+    let model_resolver = Arc::new(MutableModelResolver::new("model-a"));
+    let service = DefaultInboundTurnService::new(
+        FakeConversationBindingService::new(),
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    )
+    .with_llm_config_service(model_resolver.clone());
+
+    let envelope = sample_user_message_envelope("model-replay");
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect_err("first submit fails after the resolved model is accepted");
+
+    model_resolver.set_model("model-b");
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect("accepted message replay succeeds");
+
+    let submitted_models = coordinator_handle
+        .submissions()
+        .into_iter()
+        .map(|request| request.requested_model)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        submitted_models,
+        vec![Some("model-a".to_string()), Some("model-a".to_string())],
+        "retry/replay must preserve the model resolved before message acceptance"
+    );
+    assert_eq!(
+        model_resolver.resolve_count(),
+        1,
+        "accepted-message replay must not consult live model preferences again"
     );
 }
 
