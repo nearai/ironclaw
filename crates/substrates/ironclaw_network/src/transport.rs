@@ -107,6 +107,7 @@ impl ReqwestNetworkTransport {
 fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .timeout(key.timeout);
     if !key.resolved_addrs.is_empty() {
         builder = builder.resolve_to_addrs(&key.host, &key.resolved_addrs);
