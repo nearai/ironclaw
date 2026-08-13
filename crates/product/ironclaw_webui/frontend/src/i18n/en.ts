@@ -122,7 +122,7 @@ registerPack("en", {
   "chat.workedFor": "Worked for {duration}",
   "chat.reloadHistory": "Reload history",
   "chat.busyRejectedResend":
-    "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
+    "This message wasn't sent because IronClaw was busy. Resend it to try again.",
   "chat.identityUser": "You",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
