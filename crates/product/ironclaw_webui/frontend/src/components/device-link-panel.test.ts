@@ -6,12 +6,14 @@ import vm from "node:vm";
 import { componentProps, findComponent } from "../lib/vm-component-harness";
 import { sourceForVmTest } from "../test-support/vm-module-harness";
 import {
+  DEVICE_LINK_DISPLAY_KINDS,
   DEVICE_LINK_ERROR_CODES,
   DEVICE_LINK_INPUT_KINDS,
   DEVICE_LINK_MODES,
   DEVICE_LINK_STEPS,
   deviceLinkAlternateMode,
   deviceLinkFrameFromWire,
+  deviceLinkModeLabel,
   deviceLinkPollDelayMs,
 } from "../lib/device-link-frame";
 
@@ -30,6 +32,13 @@ function wireFrame(overrides = {}) {
     poll_interval_ms: 3000,
     ...overrides,
   };
+}
+
+// A frame from an extension that declares a SECOND linking path. Always
+// explicit: the wire default is "no alternate", and the card must not invent
+// one — a vendor with a single path answers `UnsupportedMode` to a switch.
+function alternateOffered(overrides = {}) {
+  return wireFrame({ alternate_available: true, ...overrides });
 }
 
 function response(frame, { flowId = "flow-1" } = {}) {
@@ -109,12 +118,14 @@ function createHarness({ startResponses = [], pollResponses = [], submitResponse
     useT: () => tForTest,
     // The real normalizer and the real vocabulary: a test that stubbed these
     // would not prove the card and the wire agree.
+    DEVICE_LINK_DISPLAY_KINDS,
     DEVICE_LINK_ERROR_CODES,
     DEVICE_LINK_INPUT_KINDS,
     DEVICE_LINK_MODES,
     DEVICE_LINK_STEPS,
     deviceLinkAlternateMode,
     deviceLinkFrameFromWire,
+    deviceLinkModeLabel,
     deviceLinkPollDelayMs,
     startDeviceLink: async (request) => {
       calls.push(["start", request.mode]);
@@ -263,7 +274,7 @@ test("DeviceLinkPanel renders each input step with the affordance its kind requi
     [DEVICE_LINK_INPUT_KINDS.code, { type: "text", autoComplete: "one-time-code" }],
     [DEVICE_LINK_INPUT_KINDS.password, { type: "password", autoComplete: "current-password" }],
   ]) {
-    const frame = wireFrame({
+    const frame = alternateOffered({
       step: DEVICE_LINK_STEPS.inputRequired,
       input_kind: kind,
       secret_label: `label for ${kind}`,
@@ -335,9 +346,9 @@ test("DeviceLinkPanel submits an input with the revision it was rendered from an
 test("DeviceLinkPanel restarts in the alternate mode from the QR step", async () => {
   const harness = createHarness({
     startResponses: [
-      response(wireFrame({ qr_payload: "scheme://login?token=AAAA" })),
+      response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" })),
       response(
-        wireFrame({
+        alternateOffered({
           step: DEVICE_LINK_STEPS.inputRequired,
           input_kind: DEVICE_LINK_INPUT_KINDS.identifier,
           secret_label: "Phone number",
@@ -346,7 +357,7 @@ test("DeviceLinkPanel restarts in the alternate mode from the QR step", async ()
         { flowId: "flow-2" },
       ),
     ],
-    pollResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
+    pollResponses: [response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" }))],
   });
 
   const rendered = await harness.mount();
@@ -377,6 +388,241 @@ test("DeviceLinkPanel restarts in the alternate mode from the QR step", async ()
   assert.deepEqual(attribute(phoneView, "data-device-link-target-mode"), [
     DEVICE_LINK_MODES.default,
   ]);
+});
+
+// The card is shared by every device-link vendor, so the ceremony it paints
+// has to come off the wire. A vendor that declares one path answers
+// `UnsupportedMode` to a switch — an error the user cannot retry out of — so
+// an unstated `alternate_available` must render no switch at all.
+test("DeviceLinkPanel offers no mode switch to a vendor that declares no second path", async () => {
+  const harness = createHarness({
+    startResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
+    pollResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
+  });
+
+  const rendered = await harness.mount();
+
+  assert.deepEqual(attribute(rendered, "data-device-link-step"), [DEVICE_LINK_STEPS.display]);
+  assert.deepEqual(
+    attribute(rendered, "data-device-link-target-mode"),
+    [],
+    "a QR-only vendor gets no switch",
+  );
+  assert.ok(!stringify(rendered).includes("device-link-mode-switch"));
+});
+
+test("DeviceLinkPanel labels the mode switch from the recipe, for the path it moves to", async () => {
+  const labelled = {
+    alternate_available: true,
+    default_mode_label: "Scan a code",
+    alternate_mode_label: "Use my phone number",
+  };
+  const harness = createHarness({
+    startResponses: [
+      response(wireFrame({ qr_payload: "scheme://login?token=AAAA", ...labelled })),
+      response(
+        wireFrame({
+          step: DEVICE_LINK_STEPS.inputRequired,
+          input_kind: DEVICE_LINK_INPUT_KINDS.identifier,
+          secret_label: "Phone number",
+          mode: DEVICE_LINK_MODES.alternate,
+          ...labelled,
+        }),
+        { flowId: "flow-2" },
+      ),
+    ],
+    pollResponses: [
+      response(wireFrame({ qr_payload: "scheme://login?token=AAAA", ...labelled })),
+    ],
+  });
+
+  const onDefault = await harness.mount();
+  assert.ok(
+    stringify(onDefault).includes("Use my phone number"),
+    "on the primary path the switch is named for the fallback it moves to",
+  );
+  assert.ok(
+    !stringify(onDefault).includes("deviceLink.useAlternate"),
+    "a recipe label wins over the generic fallback copy",
+  );
+
+  attribute(onDefault, "onClick")[0]();
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  const onAlternate = harness.render();
+
+  assert.ok(
+    stringify(onAlternate).includes("Scan a code"),
+    "and on the fallback path it is named for the primary one",
+  );
+
+  // Without labels the card falls back to generic host copy — never to one
+  // vendor's ceremony.
+  const unlabelled = createHarness({
+    startResponses: [response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" }))],
+    pollResponses: [response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" }))],
+  });
+  const generic = stringify(await unlabelled.mount());
+  assert.ok(generic.includes("deviceLink.useAlternate"));
+  assert.ok(!generic.includes("phone"), "the shared fallback copy names no vendor's ceremony");
+});
+
+// Bumping the attempt alone left `mode` on whatever had just failed, so a
+// vendor that rejects the alternate path re-failed on every "start again"
+// with no way back to the path that works.
+test("DeviceLinkPanel returns to the vendor's primary path when the user starts again", async () => {
+  const harness = createHarness({
+    startResponses: [
+      response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" })),
+      response(
+        alternateOffered({
+          step: DEVICE_LINK_STEPS.failed,
+          instructions: "That path did not work for this account.",
+          error_code: "invalid_input",
+          restartable: true,
+          mode: DEVICE_LINK_MODES.alternate,
+        }),
+        { flowId: "flow-2" },
+      ),
+      response(alternateOffered({ qr_payload: "scheme://login?token=RETRY" }), {
+        flowId: "flow-3",
+      }),
+    ],
+    pollResponses: [response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" }))],
+  });
+
+  // Switch to the alternate path, which fails.
+  const rendered = await harness.mount();
+  attribute(rendered, "onClick")[0]();
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  const failedView = harness.render();
+  assert.deepEqual(attribute(failedView, "data-device-link-mode"), [DEVICE_LINK_MODES.alternate]);
+  assert.ok(stringify(failedView).includes("deviceLink.startAgain"));
+
+  // "Start again" — the only affordance on a failed frame.
+  attribute(failedView, "onClick")[0]();
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  const retried = harness.render();
+
+  assert.deepEqual(
+    harness.calls.filter((call) => call[0] === "start"),
+    [
+      ["start", DEVICE_LINK_MODES.default],
+      ["start", DEVICE_LINK_MODES.alternate],
+      ["start", DEVICE_LINK_MODES.default],
+    ],
+    "start again re-runs the primary path, not the one that just failed",
+  );
+  assert.deepEqual(attribute(retried, "data-device-link-mode"), [DEVICE_LINK_MODES.default]);
+  assert.deepEqual(attribute(retried, "data-device-link-step"), [DEVICE_LINK_STEPS.display]);
+});
+
+// `display_kind` says what the payload IS. A link rendered as a QR is a
+// picture of a URL nobody can scan from the device they are linking, and a
+// scannable token rendered as a clickable link invites the browser to open
+// the vendor's login token.
+test("DeviceLinkPanel renders the affordance the frame's display kind asks for", async () => {
+  const cases = [
+    {
+      displayKind: DEVICE_LINK_DISPLAY_KINDS.link,
+      expectQr: false,
+      expectOpen: true,
+      why: "a link payload is opened, not scanned",
+    },
+    {
+      displayKind: DEVICE_LINK_DISPLAY_KINDS.qrCode,
+      expectQr: true,
+      expectOpen: false,
+      why: "a scannable payload is not offered to this browser as a link",
+    },
+    {
+      displayKind: undefined,
+      expectQr: true,
+      expectOpen: true,
+      // An older host states no kind; the card must paint what it always did.
+      why: "an unstated display kind keeps both affordances",
+    },
+  ];
+
+  for (const { displayKind, expectQr, expectOpen, why } of cases) {
+    const frame = wireFrame({
+      qr_payload: "scheme://login?token=AAAA",
+      ...(displayKind ? { display_kind: displayKind } : {}),
+    });
+    const harness = createHarness({
+      startResponses: [response(frame)],
+      pollResponses: [response(frame)],
+    });
+
+    const payload = harness.payloadPanelProps(await harness.mount());
+
+    assert.equal(payload.payload, "scheme://login?token=AAAA", why);
+    assert.equal(payload.showQr, expectQr, why);
+    assert.equal(Boolean(payload.labels.open), expectOpen, why);
+  }
+});
+
+// A re-render — a refresh, a second tab, a re-opened settings pane — must
+// REJOIN the live link. Beginning another one invalidates the payload the
+// user is mid-scan on and debits the begin budget for a restart nobody asked
+// for.
+test("DeviceLinkPanel resumes the flow it was handed, and drops the hint once that flow is abandoned", async () => {
+  const live = deviceLinkFrameFromWire(
+    alternateOffered({ flow_id: "flow-live", qr_payload: "scheme://login?token=AAAA" }),
+  );
+  const harness = createHarness({
+    startResponses: [
+      response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" }), {
+        flowId: "flow-live",
+      }),
+      response(
+        alternateOffered({
+          step: DEVICE_LINK_STEPS.inputRequired,
+          input_kind: DEVICE_LINK_INPUT_KINDS.identifier,
+          secret_label: "Phone number",
+        }),
+        { flowId: "flow-2" },
+      ),
+    ],
+    pollResponses: [
+      response(alternateOffered({ qr_payload: "scheme://login?token=AAAA" }), {
+        flowId: "flow-live",
+      }),
+    ],
+  });
+
+  const rendered = await harness.mount({ initialFrame: live });
+
+  assert.equal(
+    harness.requests.find(([kind]) => kind === "start")[1].resumeFlowId,
+    "flow-live",
+    "the card rejoins the link it arrived holding",
+  );
+
+  // Switching paths deliberately abandons that flow; resuming the link the
+  // card just cancelled would undo the switch.
+  attribute(rendered, "onClick")[0]();
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  harness.render({ initialFrame: live });
+
+  assert.deepEqual(
+    harness.requests
+      .filter(([kind]) => kind === "start")
+      .map(([, request]) => request.resumeFlowId),
+    ["flow-live", ""],
+    "an abandoned flow is not resumed",
+  );
 });
 
 test("DeviceLinkPanel ignores a poll response carrying a stale step revision", async () => {
@@ -445,11 +691,10 @@ test("DeviceLinkPanel renders the ADR's device-confirmation control on completio
         wireFrame({
           step: DEVICE_LINK_STEPS.completed,
           revision: 9,
-          // The projector carries the resolved `vendor_user_ref` here: it is
-          // the frame's one already-validated short-string slot, so the card
-          // can render the identity the user checks rather than parsing it
-          // back out of prose.
-          code: "+15550000000",
+          // The resolved account identity rides its own slot. It used to
+          // borrow `code`, which left the card unable to tell "read this code
+          // to your phone" from "this is who you linked as".
+          vendor_user_ref: "+15550000000",
         }),
       ),
     ],
@@ -477,10 +722,13 @@ test("DeviceLinkPanel renders the ADR's device-confirmation control on completio
 
   // …and the account line is genuinely driven by the resolved identity: a
   // completion that carried none must not render an empty "Linked as" claim.
+  // A leftover `code` is NOT that identity — it is a short code the vendor
+  // issued for the user to read, and showing it as the linked account is the
+  // claim this control exists to make checkable.
   const withoutAccount = createHarness({
     startResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
     pollResponses: [
-      response(wireFrame({ step: DEVICE_LINK_STEPS.completed, revision: 9 })),
+      response(wireFrame({ step: DEVICE_LINK_STEPS.completed, revision: 9, code: "AB-CD-12" })),
     ],
   });
   await withoutAccount.mount();
@@ -493,6 +741,10 @@ test("DeviceLinkPanel renders the ADR's device-confirmation control on completio
   assert.ok(
     !bare.includes("device-link-account"),
     "no resolved account means no account line",
+  );
+  assert.ok(
+    !bare.includes("AB-CD-12"),
+    "a vendor-issued code is not an account identity and must not be shown as one",
   );
 });
 

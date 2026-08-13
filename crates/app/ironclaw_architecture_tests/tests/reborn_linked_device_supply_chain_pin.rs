@@ -1142,6 +1142,86 @@ updates:
 
 /// The pin table itself has to be well-formed, or every assertion above
 /// compares against nonsense.
+/// The consumer half of the pin: exactly one workspace crate may name the
+/// MTProto stack, and this table says which.
+///
+/// Every other assertion in this file bounds *what* the stack is — version,
+/// checksum, features. None of them bounds *who links it*, so a second crate
+/// taking a `grammers-*` edge would inherit an in-process dependency with full
+/// process authority while every gate here still reported success. Written as
+/// a table rather than a single literal so a second linked-device package adds
+/// a reviewed row instead of loosening the rule.
+#[test]
+fn reborn_linked_device_stack_has_exactly_the_declared_consumers() {
+    /// Manifest paths permitted to declare a `grammers-*` dependency.
+    const PERMITTED_CONSUMERS: &[&str] = &[PACKAGE_MANIFEST];
+
+    let root = workspace_root();
+    let metadata = cargo_metadata(&root, false);
+    let members: BTreeSet<String> = metadata["workspace_members"]
+        .as_array()
+        .expect("cargo metadata must include workspace_members")
+        .iter()
+        .map(|id| id.as_str().expect("member id is a string").to_string())
+        .collect();
+
+    let mut actual: Vec<String> = Vec::new();
+    for package in metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages")
+    {
+        let id = package["id"].as_str().expect("package id is a string");
+        if !members.contains(id) {
+            continue;
+        }
+        let manifest = Path::new(
+            package["manifest_path"]
+                .as_str()
+                .expect("manifest_path is a string"),
+        );
+        let text = std::fs::read_to_string(manifest)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest.display()));
+        let declares = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .any(|line| line.contains(STACK_PREFIX));
+        if declares {
+            actual.push(
+                manifest
+                    .strip_prefix(&root)
+                    .unwrap_or(manifest)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    actual.sort();
+    assert!(
+        !members.is_empty(),
+        "no workspace members resolved; this gate would pass having scanned nothing"
+    );
+
+    let mut expected: Vec<String> = PERMITTED_CONSUMERS
+        .iter()
+        .map(|path| {
+            let resolved = crate_path(&root, path);
+            resolved
+                .strip_prefix(&root)
+                .unwrap_or(&resolved)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    expected.sort();
+
+    assert_eq!(
+        actual, expected,
+        "the MTProto stack must be linked by exactly the declared consumers. A crate that \
+         appears here has taken an in-process dependency with full process authority; a crate \
+         that disappeared has dropped the edge and its row should go with it."
+    );
+}
+
 #[test]
 fn reborn_linked_device_pin_table_is_internally_consistent() {
     assert!(

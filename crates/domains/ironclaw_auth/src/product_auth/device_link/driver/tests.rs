@@ -443,6 +443,8 @@ fn expired_display_challenge(flow: &AuthFlowRecord) -> AuthChallenge {
     let AuthChallenge::DeviceLinkStep {
         extension_id,
         display_name,
+        default_mode_label,
+        alternate_mode_label,
         mode,
         step,
         revision,
@@ -454,6 +456,8 @@ fn expired_display_challenge(flow: &AuthFlowRecord) -> AuthChallenge {
     AuthChallenge::DeviceLinkStep {
         extension_id,
         display_name,
+        default_mode_label,
+        alternate_mode_label,
         mode,
         step,
         revision: revision + 1,

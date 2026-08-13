@@ -42,7 +42,13 @@ export function AuthDeviceLinkCard({ gate, onCancel }) {
     >
       <DeviceLinkPanel
         provider={gate?.provider || ""}
-        extensionName={gate?.provider || ""}
+        // The installed extension, not the credential-authority namespace.
+        // These are two identities the repo keeps apart on purpose; passing
+        // `provider` for both was the conflation that reads as correct right
+        // up until one vendor backs more than one extension. The frame now
+        // carries the installed id, so fall back to `provider` only for a
+        // frame minted before it existed.
+        extensionName={frame?.extensionId || gate?.provider || ""}
         displayName={displayName}
         initialFrame={frame}
         threadId={gate?.threadId || ""}

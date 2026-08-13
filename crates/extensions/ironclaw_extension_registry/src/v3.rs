@@ -84,6 +84,11 @@ pub enum ManifestV3Error {
     #[error("[auth.{vendor}] recipe is not referenced by any credential")]
     UnreferencedAuthRecipe { vendor: String },
     #[error(
+        "manifest declares more than one `method = \"device_link\"` auth surface \
+         ([auth.{first}] and [auth.{second}]); an extension links at most one account"
+    )]
+    MultipleDeviceLinkRecipes { first: String, second: String },
+    #[error(
         "credential audience host `{host}` must be a literal host (wildcards are not allowed \
          in v3 manifests)"
     )]
@@ -359,6 +364,14 @@ pub(crate) fn parse_v3(
 
     // Validate recipes.
     let mut recipes: BTreeMap<VendorId, VendorAuthRecipe> = BTreeMap::new();
+    // At most one device-link surface per extension, structurally, the way
+    // `[channel]` is at most one. Nothing downstream can express two: the
+    // binding slot holds a single adapter, and the host resolves the flow's
+    // vendor by scanning the surfaces and taking the first device-link match —
+    // so a second one would not be rejected, it would be silently ignored, and
+    // flows, minted accounts, and custody grants would all attribute to
+    // whichever vendor happened to sort first.
+    let mut device_link_vendor: Option<String> = None;
     for (vendor, recipe) in raw.auth {
         recipe
             .validate()
@@ -366,6 +379,15 @@ pub(crate) fn parse_v3(
                 vendor: vendor.clone(),
                 error,
             })?;
+        if matches!(recipe, VendorAuthRecipe::DeviceLink(_)) {
+            if let Some(first) = &device_link_vendor {
+                return Err(ManifestV3Error::MultipleDeviceLinkRecipes {
+                    first: first.clone(),
+                    second: vendor.clone(),
+                });
+            }
+            device_link_vendor = Some(vendor.clone());
+        }
         recipes.insert(VendorId::new(vendor)?, recipe);
     }
 

@@ -284,8 +284,17 @@ async fn an_undeclared_alternate_mode_never_reaches_the_adapter() {
     assert_eq!(h.adapter.call_count(), 0);
 }
 
+/// Superseded assertion, deliberately rewritten rather than deleted.
+///
+/// This test used to pin an outright refusal of a second `begin`, on the
+/// reasoning that it would start a parallel vendor conversation. The refusal
+/// was wrong — the auth tier re-mints a lapsed frame through exactly that call,
+/// so refusing it terminalized every link whose first frame lapsed — but the
+/// invariant underneath it was right and still holds: an adapter must never be
+/// running two conversations for one flow. That is now enforced by ordering
+/// (cancel, then begin) instead of by refusal, and this test pins the ordering.
 #[tokio::test]
-async fn a_second_begin_does_not_re_invoke_a_transition_that_already_ran() {
+async fn a_second_begin_never_leaves_two_vendor_conversations_running() {
     let h = harness(DeviceLinkLimits::default()).await;
     let request = request(FLOW);
     h.driver
@@ -293,14 +302,24 @@ async fn a_second_begin_does_not_re_invoke_a_transition_that_already_ran() {
         .await
         .expect("first begin");
 
-    let error = h
-        .driver
+    h.driver
         .begin(&request, DeviceLinkMode::Default)
         .await
-        .expect_err("a live flow must not start a parallel vendor conversation");
+        .expect("the re-mint is admitted");
 
-    assert!(matches!(error, DeviceLinkError::Internal { .. }));
-    assert_eq!(h.adapter.call_count(), 1);
+    // Every `Begin` after the first is preceded by a `Cancel`, so at no point
+    // are two conversations live for one flow.
+    let kinds: Vec<_> = h.adapter.recorded().into_iter().map(|c| c.kind).collect();
+    for (index, kind) in kinds.iter().enumerate() {
+        if index > 0 && matches!(kind, FakeDeviceLinkCallKind::Begin(_)) {
+            assert_eq!(
+                kinds[index - 1],
+                FakeDeviceLinkCallKind::Cancel,
+                "a begin that is not the first must be preceded by a cancel: {kinds:?}"
+            );
+        }
+    }
+    assert_eq!(kinds.len(), 3, "begin, cancel, begin: {kinds:?}");
 }
 
 // -------------------------------------------------------------------------
@@ -597,11 +616,132 @@ async fn begins_are_bounded_per_user() {
     assert_eq!(
         error,
         DeviceLinkError::Vendor {
-            code: DeviceLinkErrorCode::RateLimited,
+            code: DeviceLinkErrorCode::HostThrottled,
             restartable: true
         }
     );
     assert_eq!(h.adapter.call_count(), 1);
+}
+
+/// The defect this pins: the auth tier re-mints a lapsed frame by calling
+/// `begin` again on the SAME flow id (its `mint_step` says so in its own doc),
+/// and this driver used to refuse that with a non-restartable `Internal` — so
+/// every link whose first frame lapsed terminalized with "cannot be completed
+/// for this account". The host flow TTL outlives the step TTL by an order of
+/// magnitude, so at a lapse the flow is ALWAYS still live and the refusal
+/// ALWAYS fired.
+#[tokio::test]
+async fn a_second_begin_on_a_live_flow_re_mints_instead_of_failing() {
+    let h = harness(DeviceLinkLimits::default()).await;
+    h.driver
+        .begin(&request("flow-a"), DeviceLinkMode::Default)
+        .await
+        .expect("first begin");
+
+    h.driver
+        .begin(&request("flow-a"), DeviceLinkMode::Default)
+        .await
+        .expect("a re-mint of a live flow must succeed, not terminalize the link");
+
+    // The hazard the old refusal guarded is closed a better way: the stale
+    // vendor conversation is cancelled before the fresh one starts, so the
+    // adapter never runs two at once for one flow.
+    let kinds: Vec<_> = h
+        .adapter
+        .recorded()
+        .into_iter()
+        .map(|call| call.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            FakeDeviceLinkCallKind::Begin(DeviceLinkMode::Default),
+            FakeDeviceLinkCallKind::Cancel,
+            FakeDeviceLinkCallKind::Begin(DeviceLinkMode::Default),
+        ],
+        "a re-mint cancels the stale conversation before starting a fresh one"
+    );
+}
+
+/// A re-mint is the same attempt asking for a fresh frame, so it must not
+/// spend the budget that bounds how many attempts a user may start. With a 60s
+/// step clock inside a 600s flow clock, charging re-mints would let one
+/// attended link burn an entire hourly budget.
+#[tokio::test]
+async fn a_re_mint_does_not_spend_the_begin_budget() {
+    let limits = DeviceLinkLimits {
+        max_begins_per_user: 1,
+        ..DeviceLinkLimits::default()
+    };
+    let h = harness(limits).await;
+    h.driver
+        .begin(&request("flow-a"), DeviceLinkMode::Default)
+        .await
+        .expect("first begin");
+
+    h.driver
+        .begin(&request("flow-a"), DeviceLinkMode::Default)
+        .await
+        .expect("the re-mint rides the attempt that is already paid for");
+
+    // The budget is still spent for a genuinely NEW attempt, which is what it
+    // exists to bound.
+    let error = h
+        .driver
+        .begin(&request("flow-b"), DeviceLinkMode::Default)
+        .await
+        .expect_err("a second distinct attempt is still refused");
+    assert_eq!(
+        error,
+        DeviceLinkError::Vendor {
+            code: DeviceLinkErrorCode::HostThrottled,
+            restartable: true
+        }
+    );
+}
+
+/// What a re-mint may never buy: forgiveness. The secret-attempt counter is
+/// per-flow, so resetting it on re-mint would turn a bounded password-guessing
+/// budget into an unbounded one.
+#[tokio::test]
+async fn a_re_mint_carries_the_secret_attempt_count_forward() {
+    let limits = DeviceLinkLimits {
+        max_secret_attempts_per_flow: 1,
+        ..DeviceLinkLimits::default()
+    };
+    let h = harness(limits).await;
+    h.driver
+        .begin(&request("flow-a"), DeviceLinkMode::Default)
+        .await
+        .expect("begin");
+    h.driver
+        .submit_input(
+            &request("flow-a"),
+            DeviceLinkInput::Password(SecretString::from("first")),
+        )
+        .await
+        .expect("the one permitted attempt");
+
+    h.driver
+        .begin(&request("flow-a"), DeviceLinkMode::Default)
+        .await
+        .expect("re-mint");
+
+    let error = h
+        .driver
+        .submit_input(
+            &request("flow-a"),
+            DeviceLinkInput::Password(SecretString::from("second")),
+        )
+        .await
+        .expect_err("a re-mint must not hand back a fresh guessing budget");
+    assert_eq!(
+        error,
+        DeviceLinkError::Vendor {
+            code: DeviceLinkErrorCode::HostThrottled,
+            restartable: true
+        }
+    );
 }
 
 #[tokio::test]
@@ -627,7 +767,7 @@ async fn begins_are_bounded_per_deployment() {
     assert_eq!(
         error,
         DeviceLinkError::Vendor {
-            code: DeviceLinkErrorCode::RateLimited,
+            code: DeviceLinkErrorCode::HostThrottled,
             restartable: true
         }
     );
@@ -676,7 +816,7 @@ async fn distinct_identifiers_are_bounded_per_user() {
     assert_eq!(
         error,
         DeviceLinkError::Vendor {
-            code: DeviceLinkErrorCode::RateLimited,
+            code: DeviceLinkErrorCode::HostThrottled,
             restartable: true
         }
     );
@@ -710,7 +850,7 @@ async fn secret_attempts_are_bounded_per_flow() {
     assert_eq!(
         error,
         DeviceLinkError::Vendor {
-            code: DeviceLinkErrorCode::RateLimited,
+            code: DeviceLinkErrorCode::HostThrottled,
             restartable: true
         }
     );
@@ -761,7 +901,7 @@ async fn active_flows_are_bounded() {
     assert_eq!(
         error,
         DeviceLinkError::Vendor {
-            code: DeviceLinkErrorCode::RateLimited,
+            code: DeviceLinkErrorCode::LimitReached,
             restartable: true
         }
     );
@@ -822,6 +962,25 @@ mod auth_port {
             extension_id: ExtensionId::new(extension).expect("extension id"),
             scope: product_scope(USER),
         }
+    }
+
+    /// The cross-half suite the port owns, run against the production
+    /// implementation.
+    ///
+    /// This is the check whose absence let `begin` mean two different things
+    /// on either side of the seam: both halves were tested, neither test
+    /// crossed. Every case lives in `ironclaw_auth` beside the port it
+    /// constrains, so a future implementation of `DeviceLinkDriver` inherits
+    /// it instead of re-deriving it.
+    #[tokio::test]
+    async fn the_production_driver_satisfies_the_port_conformance_suite() {
+        let h = harness(DeviceLinkLimits::default()).await;
+        ironclaw_auth::test_support::conformance::assert_device_link_driver_conformance(
+            &h.driver,
+            &binding(EXTENSION),
+            AuthFlowId::new(),
+        )
+        .await;
     }
 
     #[tokio::test]

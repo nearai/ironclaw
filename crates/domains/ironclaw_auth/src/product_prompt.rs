@@ -25,6 +25,7 @@ use ironclaw_extension_contracts::auth_prompt::{
     PairingPromptView,
 };
 use ironclaw_extension_contracts::device_link::{DeviceLinkMode, DeviceLinkStep};
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter_error::{ProductAdapterError, RedactedString};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
@@ -437,12 +438,14 @@ fn auth_challenge_to_view(
             device_link: None,
         },
         AuthChallenge::DeviceLinkStep {
+            extension_id,
             display_name,
+            default_mode_label,
+            alternate_mode_label,
             mode,
             step,
             revision,
             expires_at,
-            ..
         } => AuthChallengeView {
             kind: AuthPromptChallengeKind::DeviceLink,
             provider: provider.clone(),
@@ -452,7 +455,12 @@ fn auth_challenge_to_view(
             pairing: None,
             device_link: Some(device_link_prompt_view(
                 provider,
+                Some(extension_id),
                 display_name,
+                (
+                    default_mode_label.as_deref(),
+                    alternate_mode_label.as_deref(),
+                ),
                 *mode,
                 step,
                 *revision,
@@ -490,15 +498,24 @@ fn completed_account_label(step: &DeviceLinkStep) -> Option<CredentialAccountLab
 /// Every string here is host-authored or already-validated step text; the
 /// vendor cannot push copy through this function, and the payload is read
 /// through the single `expose` accessor so the render site stays greppable.
+#[allow(clippy::too_many_arguments)]
+// arch-exempt: too_many_args, one durable challenge projects to one view and
+// every argument is a field of that challenge; the aggregation this wants is
+// passing `&AuthChallenge` itself, which the two callers cannot both supply,
+// plan: this feature's design record under docs/internal/design/ (find it
+// with `rg -l ADR-device-link-auth-hook`)
 fn device_link_prompt_view(
     provider: &AuthProviderId,
+    extension_id: Option<&ExtensionId>,
     display_name: &str,
+    labels: (Option<&str>, Option<&str>),
     mode: DeviceLinkMode,
     step: &DeviceLinkStep,
     revision: u64,
     expires_at: chrono::DateTime<chrono::Utc>,
     flow_id: Option<&crate::AuthFlowId>,
 ) -> DeviceLinkPromptView {
+    let (default_mode_label, alternate_mode_label) = labels;
     let mut view = DeviceLinkPromptView {
         provider: provider.as_str().to_string(),
         display_name: display_name.to_string(),
@@ -526,6 +543,19 @@ fn device_link_prompt_view(
             DeviceLinkStep::Failed { restartable, .. } => Some(*restartable),
             _ => None,
         },
+        // The recipe's promise that the extension supplies the labels a user
+        // reads is kept here or nowhere: a card with no labels falls back to
+        // generic host copy, and one told there is no alternate offers no
+        // switch instead of wedging on `UnsupportedMode`.
+        alternate_available: Some(alternate_mode_label.is_some()),
+        default_mode_label: default_mode_label.map(str::to_string),
+        alternate_mode_label: alternate_mode_label.map(str::to_string),
+        display_kind: match step {
+            DeviceLinkStep::Display { kind, .. } => Some(*kind),
+            _ => None,
+        },
+        extension_id: extension_id.map(|id| id.as_str().to_string()),
+        vendor_user_ref: None,
     };
     match step {
         DeviceLinkStep::Display { payload, .. } => {
@@ -548,11 +578,11 @@ fn device_link_prompt_view(
         } => {
             // Showing the resolved identity is the ONLY control that makes a
             // substituted login visible (PROPOSAL §3.2) — never drop it. It
-            // also rides `code`, the frame's one already-validated
-            // short-string slot, so a card can render it as the thing the
-            // user checks rather than having to parse it back out of prose.
+            // carries its own slot: it used to ride `code`, which left a card
+            // unable to tell "read this code to your phone" from "this is who
+            // you linked as".
             view.instructions = format!("Linked to {display_name} as {vendor_user_ref}.");
-            view.code = Some(vendor_user_ref.clone());
+            view.vendor_user_ref = Some(vendor_user_ref.clone());
         }
         DeviceLinkStep::Failed { code, restartable } => {
             view.instructions = if *restartable {
@@ -576,15 +606,22 @@ fn device_link_prompt_view(
 pub fn device_link_view_for_flow(flow: &crate::AuthFlowRecord) -> Option<DeviceLinkPromptView> {
     match flow.challenge.as_ref()? {
         AuthChallenge::DeviceLinkStep {
+            extension_id,
             display_name,
+            default_mode_label,
+            alternate_mode_label,
             mode,
             step,
             revision,
             expires_at,
-            ..
         } => Some(device_link_prompt_view(
             &flow.provider,
+            Some(extension_id),
             display_name,
+            (
+                default_mode_label.as_deref(),
+                alternate_mode_label.as_deref(),
+            ),
             *mode,
             step,
             *revision,

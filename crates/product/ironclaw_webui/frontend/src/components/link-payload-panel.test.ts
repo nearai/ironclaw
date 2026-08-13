@@ -240,6 +240,29 @@ test("LinkPayloadPanel flips to the renewal view at expiry, stops ticking, and n
   assert.deepEqual(renewals, ["renew"]);
 });
 
+test("LinkPayloadPanel renders a payload that is not meant to be scanned without a QR", async () => {
+  // A payload the owner knows is a link to OPEN has nothing to scan: no QR
+  // image, and the encoder is never asked for one.
+  const harness = createHarness({ qrResults: ["data:image/png;base64,QR1"] });
+  const props = {
+    payload: "https://vendor.example/link/AAAA",
+    showQr: false,
+    expiresAtMs: LIVE_EXPIRES_AT_MS,
+  };
+
+  harness.render(props);
+  await tick();
+  const rendered = harness.render(props);
+
+  assert.deepEqual(harness.qrCalls, [], "a payload that is not scanned is never encoded");
+  assert.deepEqual(valuesAfter(rendered, "src="), []);
+  assert.deepEqual(
+    valuesAfter(rendered, "href="),
+    ["https://vendor.example/link/AAAA"],
+    "the affordance that opens it survives",
+  );
+});
+
 test("LinkPayloadPanel renders a code-only payload without a QR or an open affordance", async () => {
   const harness = createHarness();
   const props = { code: "AB-CD-12", expiresAtMs: LIVE_EXPIRES_AT_MS };

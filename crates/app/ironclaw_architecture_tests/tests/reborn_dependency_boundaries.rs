@@ -779,7 +779,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // #7157 made for `runtime_context`.
         //
         // Count read from this test's own failure message after the merge.
-        ("ironclaw_extension_contracts", 10_344),
+        //
+        // 10_344 -> 10_512 (2026-08-13, device-link review fixes): +168 lines
+        // of declaration and doc, no logic. Three parts, each closing an
+        // audited defect: `DeviceLinkPromptView` gains the facts a card cannot
+        // derive — `alternate_available` and the recipe's two mode labels
+        // (without them the generic panel hardcoded one vendor's ceremony and
+        // wedged a vendor that declares no alternate), `display_kind` (the
+        // contract has always distinguished a scannable code from a link and
+        // it reached no consumer), `extension_id`, and `vendor_user_ref`
+        // (which used to double-book the `code` slot) — plus their four
+        // bounding validators; `DeviceLinkErrorCode` gains `HostThrottled` and
+        // `LimitReached` so a host budget stops impersonating a vendor
+        // pushback; and `DeviceLinkAdapter` gains the four cross-half
+        // obligations that were previously prose in a design doc no
+        // implementor reads. Enforcement of all of it stays where it was.
+        // Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 10_512),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

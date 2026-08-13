@@ -78,8 +78,13 @@ pub struct GenericExtensionHostParams {
     /// The per-extension linked-account resolver factory; the unwired shape
     /// is the explicit `UnavailableLinkedAccountResolution`.
     pub linked_accounts: Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>,
-    /// Admin-configuration reads for load-time factory construction. `None`
-    /// composes the fail-closed source.
+    /// Admin-configuration reads for load-time factory construction.
+    ///
+    /// Required, like its two custody siblings: production always supplies it,
+    /// so an `Option` here described a deployment that does not exist and hid
+    /// the fail-closed choice inside this crate. A deployment without admin
+    /// configuration passes `None` at the composition boundary instead, where
+    /// the choice is visible.
     pub admin_secrets: Option<Arc<crate::ChannelConfigService>>,
 }
 

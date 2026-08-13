@@ -159,11 +159,135 @@ pub async fn assert_auth_flow_step_conformance(
     step_advance_never_moves_a_flow_deadline_earlier(flows, scope, provider).await;
 }
 
+/// Run the **port-level** device-link conformance cases against a real
+/// [`DeviceLinkDriver`] implementation.
+///
+/// Why this exists, stated as the defect it was written for: the auth tier
+/// re-mints a lapsed frame by calling [`DeviceLinkDriver::begin`] again on the
+/// same flow, and an implementation once refused exactly that as an internal
+/// error. Both halves were individually tested and both suites passed — the
+/// auth fake accepted the second `begin`, the implementation's own tests
+/// asserted the refusal — because nothing ran the two halves against one
+/// contract. Every case here is a cross-half obligation, so it belongs with
+/// the port and not with either implementation.
+///
+/// `binding` must name an extension whose manifest declares a device-link auth
+/// surface with a bound adapter, and `flow` must be an id no other case is
+/// using.
+pub async fn assert_device_link_driver_conformance(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+    flow: AuthFlowId,
+) {
+    re_begin_on_a_live_flow_is_admitted(driver, binding, flow).await;
+    cancel_is_idempotent(driver, binding, flow).await;
+    poll_on_an_unknown_flow_is_restartable(driver, binding).await;
+}
+
+/// The obligation the auth step machine depends on: a `begin` naming a flow the
+/// implementation already knows is a RE-MINT of that attempt, not a second
+/// attempt, and it must be admitted. An implementation that refuses it
+/// terminalizes every link whose step clock lapses before the user finishes.
+async fn re_begin_on_a_live_flow_is_admitted(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+    flow: AuthFlowId,
+) {
+    let case = "re_begin_on_a_live_flow_is_admitted";
+    driver
+        .begin(crate::DeviceLinkBeginRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            mode: DeviceLinkMode::Default,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("[{case}] the first begin must succeed: {error:?}"));
+
+    driver
+        .begin(crate::DeviceLinkBeginRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            mode: DeviceLinkMode::Default,
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "[{case}] a second begin on a live flow is the auth tier's re-mint and must be \
+                 admitted, not refused: {error:?}"
+            )
+        });
+
+    let _ = driver
+        .cancel(crate::DeviceLinkCancelRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            reason: crate::DeviceLinkCancelReason::UserCanceled,
+        })
+        .await;
+}
+
+/// Cancel is the abort path every TTL reap and every user abandonment takes, so
+/// it must tolerate being called on a flow that is already gone.
+async fn cancel_is_idempotent(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+    flow: AuthFlowId,
+) {
+    let case = "cancel_is_idempotent";
+    driver
+        .begin(crate::DeviceLinkBeginRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            mode: DeviceLinkMode::Default,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("[{case}] begin must succeed: {error:?}"));
+
+    for attempt in 1..=2 {
+        driver
+            .cancel(crate::DeviceLinkCancelRequest {
+                flow_id: flow,
+                binding: binding.clone(),
+                reason: crate::DeviceLinkCancelReason::UserCanceled,
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("[{case}] cancel attempt {attempt} must not error: {error:?}")
+            });
+    }
+}
+
+/// A poll for a flow the implementation never had — a restarted process, a
+/// reaped flow, a stale card — must be reported as something the user can
+/// restart, never as a dead end.
+async fn poll_on_an_unknown_flow_is_restartable(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+) {
+    let case = "poll_on_an_unknown_flow_is_restartable";
+    let unknown = AuthFlowId::new();
+    match driver
+        .poll(crate::DeviceLinkPollRequest {
+            flow_id: unknown,
+            binding: binding.clone(),
+        })
+        .await
+    {
+        Ok(_) => panic!("[{case}] an unknown flow must not report progress"),
+        Err(error) => assert!(
+            error.restartable(),
+            "[{case}] an unknown flow must be restartable so the card can re-mint: {error:?}"
+        ),
+    }
+}
+
 fn device_link_challenge(revision: u64, expires_at: chrono::DateTime<Utc>) -> AuthChallenge {
     AuthChallenge::DeviceLinkStep {
         extension_id: ironclaw_host_api::ids::ExtensionId::new("conformance-device-link")
             .expect("conformance extension id is valid"),
         display_name: "Conformance account".to_string(),
+        default_mode_label: None,
+        alternate_mode_label: None,
         mode: DeviceLinkMode::Default,
         step: DeviceLinkStep::AwaitingVendor {
             retry_in: std::time::Duration::from_secs(3),

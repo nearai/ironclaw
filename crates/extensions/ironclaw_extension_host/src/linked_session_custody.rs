@@ -68,7 +68,8 @@ pub const PENDING_LINK_REVISION: u64 = 0;
 /// Provisional blobs one process will park at once. Mirrors the device-link
 /// driver's active-flow bound: a provisional blob exists only while a flow is
 /// mid-handshake.
-pub const MAX_PROVISIONAL_SESSIONS: usize = 64;
+pub const MAX_PROVISIONAL_SESSIONS: usize =
+    crate::device_link_driver::DeviceLinkLimits::DEFAULT_MAX_ACTIVE_FLOWS;
 
 /// The durable identity of one linked-account session record.
 ///

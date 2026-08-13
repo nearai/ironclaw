@@ -145,7 +145,7 @@ impl DeviceLinkFlowDriver {
             return self.resume_reusable(&request.scope, existing).await;
         }
 
-        let display_name = self.display_name(&request).await?;
+        let copy = self.recipe_copy(&request).await?;
         let now = Utc::now();
         let flow_id = AuthFlowId::new();
         let record = self
@@ -163,7 +163,9 @@ impl DeviceLinkFlowDriver {
                 // not the unsupported-challenge fallback.
                 challenge: AuthChallenge::DeviceLinkStep {
                     extension_id: request.extension_id.clone(),
-                    display_name,
+                    display_name: copy.display_name,
+                    default_mode_label: copy.default_mode_label,
+                    alternate_mode_label: copy.alternate_mode_label,
                     mode: request.mode,
                     step: DeviceLinkStep::AwaitingVendor {
                         retry_in: std::time::Duration::from_millis(
@@ -407,10 +409,16 @@ impl DeviceLinkFlowDriver {
         self.mint_step(scope, &flow, frame.mode, None).await
     }
 
-    async fn display_name(
+    /// Resolve the recipe copy a card renders: the account name and the two
+    /// path labels.
+    ///
+    /// All three are read once, when the flow starts, and held on the durable
+    /// challenge — a card rendered later must not have to re-resolve a
+    /// manifest that may no longer be installed.
+    async fn recipe_copy(
         &self,
         request: &DeviceLinkStartRequest,
-    ) -> Result<String, AuthProductError> {
+    ) -> Result<RecipeCopy, AuthProductError> {
         let resolved = self
             .recipes
             .resolve(
@@ -421,7 +429,11 @@ impl DeviceLinkFlowDriver {
             .await
             .ok_or(AuthProductError::MalformedConfig)?;
         match resolved.recipe {
-            VendorAuthRecipe::DeviceLink(recipe) => Ok(recipe.display_name),
+            VendorAuthRecipe::DeviceLink(recipe) => Ok(RecipeCopy {
+                display_name: recipe.display_name,
+                default_mode_label: recipe.default_mode_label,
+                alternate_mode_label: recipe.alternate_mode_label,
+            }),
             // Refusing here is the point: starting a device link against a
             // vendor whose manifest declares some other method would drive an
             // adapter that is not bound for it.
@@ -697,6 +709,13 @@ fn binding_for(flow: &AuthFlowRecord) -> Result<DeviceLinkBinding, AuthProductEr
     })
 }
 
+/// The recipe-authored copy a device-link card renders.
+struct RecipeCopy {
+    display_name: String,
+    default_mode_label: Option<String>,
+    alternate_mode_label: Option<String>,
+}
+
 fn challenge_for(
     flow: &AuthFlowRecord,
     mode: DeviceLinkMode,
@@ -704,17 +723,27 @@ fn challenge_for(
     revision: u64,
     now: Timestamp,
 ) -> Result<AuthChallenge, AuthProductError> {
-    let (extension_id, display_name) = match flow.challenge.as_ref() {
-        Some(AuthChallenge::DeviceLinkStep {
-            extension_id,
-            display_name,
-            ..
-        }) => (extension_id.clone(), display_name.clone()),
-        _ => return Err(AuthProductError::UnknownOrExpiredFlow),
-    };
+    let (extension_id, display_name, default_mode_label, alternate_mode_label) =
+        match flow.challenge.as_ref() {
+            Some(AuthChallenge::DeviceLinkStep {
+                extension_id,
+                display_name,
+                default_mode_label,
+                alternate_mode_label,
+                ..
+            }) => (
+                extension_id.clone(),
+                display_name.clone(),
+                default_mode_label.clone(),
+                alternate_mode_label.clone(),
+            ),
+            _ => return Err(AuthProductError::UnknownOrExpiredFlow),
+        };
     Ok(AuthChallenge::DeviceLinkStep {
         extension_id,
         display_name,
+        default_mode_label,
+        alternate_mode_label,
         mode,
         step: step.clone(),
         revision,
@@ -779,6 +808,8 @@ fn auth_error_for(code: DeviceLinkErrorCode) -> AuthErrorCode {
         // behavior, so this reads as "no credential", not "try again".
         DeviceLinkErrorCode::AccountUnavailable => AuthErrorCode::CredentialMissing,
         DeviceLinkErrorCode::RateLimited
+        | DeviceLinkErrorCode::HostThrottled
+        | DeviceLinkErrorCode::LimitReached
         | DeviceLinkErrorCode::VendorUnavailable
         | DeviceLinkErrorCode::CustodyFailed
         | DeviceLinkErrorCode::Internal => AuthErrorCode::BackendUnavailable,

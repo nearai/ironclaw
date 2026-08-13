@@ -93,6 +93,20 @@ pub enum AuthChallenge {
         /// from a durable flow must not have to re-resolve a manifest that may
         /// no longer be installed.
         display_name: String,
+        /// The recipe's own names for the two declared paths, resolved with
+        /// `display_name` when the flow starts and held for the same reason:
+        /// a card rendered from a durable flow must not re-resolve a manifest,
+        /// and the card is not the authority on which paths exist.
+        ///
+        /// `alternate_mode_label` absent means the extension declares no
+        /// alternate path at all — the recipe's own documented contract — so a
+        /// card offers no switch. Additive with `serde(default)`: a flow
+        /// persisted before these existed rehydrates with both absent, which
+        /// reads as "one path, host-labeled".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_mode_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alternate_mode_label: Option<String>,
         mode: DeviceLinkMode,
         step: DeviceLinkStep,
         revision: u64,
@@ -664,6 +678,8 @@ mod tests {
         original.challenge = Some(AuthChallenge::DeviceLinkStep {
             extension_id: ExtensionId::new("acme").unwrap(),
             display_name: "Acme personal account".to_string(),
+            default_mode_label: None,
+            alternate_mode_label: None,
             mode: DeviceLinkMode::Default,
             step: DeviceLinkStep::Display {
                 kind: DeviceLinkDisplayKind::QrCode,

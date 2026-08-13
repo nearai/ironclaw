@@ -257,7 +257,15 @@ pub struct DeviceLinkBeginRequest {
     pub mode: DeviceLinkMode,
 }
 
-/// Ask the vendor whether an in-flight link has moved. Must be a pure read.
+/// Ask the vendor whether an in-flight link has moved.
+///
+/// "Pure read" in the sense that matters: safe to call at the host's cadence
+/// without consuming a one-shot or advancing anything the user has not done.
+/// It may still talk to the vendor — a handshake whose acceptance is only
+/// observable by re-asking has no other way to notice, and the shipped
+/// implementation works exactly that way — so this is not a no-side-effects
+/// claim, and an implementor reading it as one would ship a poll that can
+/// never complete.
 #[derive(Debug)]
 pub struct DeviceLinkPollRequest {
     pub flow_id: AuthFlowId,
@@ -355,7 +363,11 @@ impl DeviceLinkDriverError {
     /// The stable code a card and the audit trail render.
     pub fn code(&self) -> DeviceLinkErrorCode {
         match self {
-            Self::NoBinding { .. } => DeviceLinkErrorCode::AccountUnavailable,
+            // Not `AccountUnavailable`: nothing is wrong with the user's
+            // account. The extension is not bound on this deployment, which is
+            // an operator condition, and telling the user their account cannot
+            // be linked sends them to fix something they do not control.
+            Self::NoBinding { .. } => DeviceLinkErrorCode::VendorUnavailable,
             Self::UnknownFlow => DeviceLinkErrorCode::UnknownFlow,
             Self::Vendor { code, .. } => *code,
             Self::Custody => DeviceLinkErrorCode::CustodyFailed,

@@ -31,6 +31,10 @@ export function formatLinkCountdown(remainingMs) {
  * Props
  *   payload      openable/scannable content; drives the QR image and the
  *                "open" affordance. Empty renders neither.
+ *   showQr       whether this payload is meant to be SCANNED. False renders the
+ *                payload's other affordances without a QR image and never asks
+ *                the encoder for one — a payload the owner knows is a link to
+ *                open has nothing to scan.
  *   code         short code shown as text and offered to the clipboard.
  *   expiresAtMs  epoch ms the payload dies at; 0 disables the countdown and
  *                the expired view entirely.
@@ -44,6 +48,7 @@ export function formatLinkCountdown(remainingMs) {
  */
 export function LinkPayloadPanel({
   payload = "",
+  showQr = true,
   code = "",
   expiresAtMs = 0,
   idPrefix = "link",
@@ -63,7 +68,7 @@ export function LinkPayloadPanel({
 
   // Render the payload as a QR data URL; a rotated payload re-renders it.
   React.useEffect(() => {
-    if (!payload) {
+    if (!payload || !showQr) {
       setQrDataUrl("");
       return undefined;
     }
@@ -79,7 +84,7 @@ export function LinkPayloadPanel({
     return () => {
       cancelled = true;
     };
-  }, [payload]);
+  }, [payload, showQr]);
 
   // A new deadline re-arms the clock: the countdown restarts and the expiry
   // notification is allowed to fire again.

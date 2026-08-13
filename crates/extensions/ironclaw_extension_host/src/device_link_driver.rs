@@ -75,6 +75,7 @@ use tracing::debug;
 use crate::entrypoint::declared_device_link_recipe;
 use crate::lifecycle::SnapshotWatch;
 use crate::linked_session_custody::LinkedSessionStore;
+use crate::linked_session_custody::PENDING_LINK_REVISION;
 
 /// Account-ref prefix for a link that has no credential account yet.
 ///
@@ -86,10 +87,6 @@ use crate::linked_session_custody::LinkedSessionStore;
 /// stores it durably under the minted account before the flow — and with it
 /// the provisional blob — is forgotten.
 const PENDING_ACCOUNT_PREFIX: &str = "pending-link.";
-
-/// The revision a provisional (pre-mint) grant carries. A real account starts
-/// at 1 on its first link, so 0 can never collide with one.
-const PENDING_LINK_REVISION: u64 = 0;
 
 /// Host-side bounds for device-link flows. Every field is a declared constant
 /// with a test, not a magic number at a call site.
@@ -116,6 +113,16 @@ pub struct DeviceLinkLimits {
     pub max_active_flows: usize,
 }
 
+impl DeviceLinkLimits {
+    /// The default ceiling on concurrent non-terminal flows.
+    ///
+    /// Public because custody's provisional-blob cap must equal it: a
+    /// provisional blob exists only while a flow is mid-handshake, so a cap
+    /// below this one would reject a blob for a flow the driver still admits.
+    /// The two used to agree by comment only.
+    pub const DEFAULT_MAX_ACTIVE_FLOWS: usize = 64;
+}
+
 impl Default for DeviceLinkLimits {
     fn default() -> Self {
         Self {
@@ -127,7 +134,7 @@ impl Default for DeviceLinkLimits {
             max_begins_per_deployment: 100,
             max_identifiers_per_user: 3,
             max_secret_attempts_per_flow: 5,
-            max_active_flows: 64,
+            max_active_flows: Self::DEFAULT_MAX_ACTIVE_FLOWS,
         }
     }
 }
@@ -337,7 +344,26 @@ impl SnapshotDeviceLinkDriver {
         }
 
         self.reap_expired(now).await;
-        self.admit_begin(request, now)?;
+
+        // A `begin` naming a flow the host already knows is a RE-MINT, not a
+        // second attempt: the auth tier's step clock lapsed and it wants a
+        // fresh frame for the same link (its `mint_step` is documented as
+        // "used both to start a link and to re-mint one"). Refusing it outright
+        // — which this driver used to do — terminalized every link whose first
+        // frame lapsed, because the host flow TTL outlives the step TTL by an
+        // order of magnitude, so the flow is always still live at a lapse.
+        //
+        // Drop the stale vendor conversation FIRST, which is the hazard the
+        // refusal was really guarding: an adapter must never run two
+        // conversations for one flow. Then re-admit under the same flow, and
+        // carry the previous attempt's clock and secret-attempt count forward
+        // so a re-mint can neither extend the attempt nor reset an abuse
+        // counter.
+        let resumed = self.resumable_flow(&request.flow_id);
+        if resumed.is_some() {
+            self.cancel_flow(request, &resolved).await;
+        }
+        self.admit_begin(request, now, resumed)?;
 
         let grant = self.custody_grant(request)?;
         let session = self.sessions.open(&request.extension_id, &grant);
@@ -648,6 +674,11 @@ impl SnapshotDeviceLinkDriver {
     /// Cancel one flow's vendor-side state, best effort, and forget it.
     async fn cancel_flow(&self, request: &DeviceLinkRequest, resolved: &ResolvedDeviceLink) {
         self.forget(&request.extension_id, &request.flow_id);
+        self.cancel_vendor_side(request, resolved).await;
+    }
+
+    /// The vendor half of [`Self::cancel_flow`], without forgetting the flow.
+    async fn cancel_vendor_side(&self, request: &DeviceLinkRequest, resolved: &ResolvedDeviceLink) {
         let Ok(grant) = self.custody_grant(request) else {
             return;
         };
@@ -666,6 +697,7 @@ impl SnapshotDeviceLinkDriver {
     async fn reap_expired(&self, now: Instant) {
         let expired = {
             let mut state = self.lock();
+            state.evict_spent_budgets(now, self.limits.rate_window);
             let ttl = self.limits.flow_ttl;
             let expired: Vec<(DeviceLinkFlowId, ExpiredFlow)> = state
                 .flows
@@ -700,41 +732,61 @@ impl SnapshotDeviceLinkDriver {
         }
     }
 
+    /// The per-user budget key for a request: user AND extension.
+    fn budget_key(request: &DeviceLinkRequest) -> BudgetKey {
+        (request.user_id().clone(), request.extension_id.clone())
+    }
+
+    /// The clock and abuse counters a re-mint must carry forward, snapshotted
+    /// before the stale conversation is cancelled.
+    fn resumable_flow(&self, flow_id: &DeviceLinkFlowId) -> Option<ResumedFlow> {
+        self.lock().flows.get(flow_id).map(|flow| ResumedFlow {
+            started_at: flow.started_at,
+            secret_attempts: flow.secret_attempts,
+        })
+    }
+
+    /// Admit a `begin`. `resumed` carries the previous attempt when this is a
+    /// re-mint of a flow that is already live (see [`Self::begin_at`]).
+    ///
+    /// A re-mint deliberately skips the begin budgets and the active-flow cap:
+    /// both exist to bound how many *attempts* a user or a deployment may
+    /// start, and a re-mint is the same attempt asking for a fresh frame. With
+    /// a 60s step clock inside a 600s flow clock, charging each re-mint would
+    /// let one attended link spend an entire hourly budget. What a re-mint may
+    /// never do is buy time or forgiveness, so the flow clock and the
+    /// secret-attempt count come across unchanged.
     fn admit_begin(
         &self,
         request: &DeviceLinkRequest,
         now: Instant,
+        resumed: Option<ResumedFlow>,
     ) -> Result<(), DeviceLinkError> {
         let mut state = self.lock();
-        if state.flows.contains_key(&request.flow_id) {
-            // Never re-invoke a transition that already ran: a second `begin`
-            // on a live flow would start a parallel vendor conversation.
-            return Err(DeviceLinkError::Internal {
-                reason: "device-link flow has already begun",
-            });
-        }
-        if state.flows.len() >= self.limits.max_active_flows {
-            return Err(rate_limited());
-        }
-        let window = self.limits.rate_window;
-        if !state
-            .deployment_begins
-            .admit(now, window, self.limits.max_begins_per_deployment)
-        {
-            return Err(rate_limited());
-        }
-        let per_user = state.begins.entry(request.user_id().clone()).or_default();
-        if !per_user.admit(now, window, self.limits.max_begins_per_user) {
-            return Err(rate_limited());
+        if resumed.is_none() {
+            if state.flows.len() >= self.limits.max_active_flows {
+                return Err(limit_reached());
+            }
+            let window = self.limits.rate_window;
+            if !state
+                .deployment_begins
+                .admit(now, window, self.limits.max_begins_per_deployment)
+            {
+                return Err(host_throttled());
+            }
+            let per_user = state.begins.entry(Self::budget_key(request)).or_default();
+            if !per_user.admit(now, window, self.limits.max_begins_per_user) {
+                return Err(host_throttled());
+            }
         }
         state.flows.insert(
             request.flow_id.clone(),
             FlowState {
                 extension: request.extension_id.clone(),
                 scope: request.scope.clone(),
-                started_at: now,
+                started_at: resumed.map(|r| r.started_at).unwrap_or(now),
                 last_poll_at: None,
-                secret_attempts: 0,
+                secret_attempts: resumed.map(|r| r.secret_attempts).unwrap_or(0),
             },
         );
         Ok(())
@@ -778,7 +830,7 @@ impl SnapshotDeviceLinkDriver {
                 let digest = identifier_digest(value);
                 let budget = state
                     .identifiers
-                    .entry(request.user_id().clone())
+                    .entry(Self::budget_key(request))
                     .or_default();
                 if !budget.admit(
                     now,
@@ -786,12 +838,12 @@ impl SnapshotDeviceLinkDriver {
                     self.limits.max_identifiers_per_user,
                     digest,
                 ) {
-                    return Err(rate_limited());
+                    return Err(host_throttled());
                 }
             }
             DeviceLinkInput::Code(_) | DeviceLinkInput::Password(_) => {
                 if flow.secret_attempts >= self.limits.max_secret_attempts_per_flow {
-                    return Err(rate_limited());
+                    return Err(host_throttled());
                 }
                 flow.secret_attempts += 1;
             }
@@ -889,12 +941,43 @@ enum InputAdmission {
     Admitted,
 }
 
+/// Per-user budgets are keyed by extension as well as user.
+///
+/// Pooling them across extensions would make one vendor's link attempts
+/// consume another's budget — a user who exhausted their attempts linking one
+/// account could not start linking a different service at all. The
+/// deployment-wide counter is deliberately NOT keyed: it is the total-abuse
+/// ceiling, and total means total.
+type BudgetKey = (UserId, ExtensionId);
+
 #[derive(Default)]
 struct DriverState {
     flows: HashMap<DeviceLinkFlowId, FlowState>,
-    begins: HashMap<UserId, RateCounter>,
+    begins: HashMap<BudgetKey, RateCounter>,
     deployment_begins: RateCounter,
-    identifiers: HashMap<UserId, IdentifierBudget>,
+    identifiers: HashMap<BudgetKey, IdentifierBudget>,
+}
+
+impl DriverState {
+    /// Drop counters whose window has fully elapsed.
+    ///
+    /// Without this the two maps are append-only for the process lifetime:
+    /// every user who ever started a link keeps a live entry, keyed by a value
+    /// the reaper never revisits. Called from the same reap pass that expires
+    /// flows.
+    fn evict_spent_budgets(&mut self, now: Instant, window: Duration) {
+        self.begins
+            .retain(|_, counter| counter.is_live(now, window));
+        self.identifiers
+            .retain(|_, budget| budget.is_live(now, window));
+    }
+}
+
+/// What a re-mint carries forward from the attempt it replaces.
+#[derive(Debug, Clone, Copy)]
+struct ResumedFlow {
+    started_at: Instant,
+    secret_attempts: u32,
 }
 
 struct FlowState {
@@ -915,6 +998,13 @@ struct RateCounter {
 }
 
 impl RateCounter {
+    /// Whether this counter still constrains anything: a counter whose window
+    /// has elapsed would reset on its next use, so holding it is pure memory.
+    fn is_live(&self, now: Instant, window: Duration) -> bool {
+        self.window_started_at
+            .is_some_and(|started| now.saturating_duration_since(started) < window)
+    }
+
     fn admit(&mut self, now: Instant, window: Duration, max: u32) -> bool {
         match self.window_started_at {
             Some(started) if now.saturating_duration_since(started) < window => {}
@@ -939,6 +1029,12 @@ struct IdentifierBudget {
 }
 
 impl IdentifierBudget {
+    /// See [`RateCounter::is_live`].
+    fn is_live(&self, now: Instant, window: Duration) -> bool {
+        self.window_started_at
+            .is_some_and(|started| now.saturating_duration_since(started) < window)
+    }
+
     fn admit(&mut self, now: Instant, window: Duration, max: u32, digest: [u8; 32]) -> bool {
         match self.window_started_at {
             Some(started) if now.saturating_duration_since(started) < window => {}
@@ -999,12 +1095,23 @@ fn linked_account_label(
         })
 }
 
-/// The host has no error variant of its own on the closed contract enum, so a
-/// host-side budget rejection rides the code a card and the audit trail can
-/// both read: `RateLimited`, restartable once the window rolls.
-fn rate_limited() -> DeviceLinkError {
+/// A host-side budget rejection, said in the host's own voice.
+///
+/// Deliberately NOT `RateLimited`: that code means the vendor pushed back, and
+/// emitting it for a host budget told a user and the audit trail that a vendor
+/// was called when none was. Restartable once the window rolls.
+fn host_throttled() -> DeviceLinkError {
     DeviceLinkError::Vendor {
-        code: DeviceLinkErrorCode::RateLimited,
+        code: DeviceLinkErrorCode::HostThrottled,
+        restartable: true,
+    }
+}
+
+/// A ceiling waiting will not clear — the host is already tracking as many
+/// concurrent links as it will hold. Restartable only once one of them ends.
+fn limit_reached() -> DeviceLinkError {
+    DeviceLinkError::Vendor {
+        code: DeviceLinkErrorCode::LimitReached,
         restartable: true,
     }
 }

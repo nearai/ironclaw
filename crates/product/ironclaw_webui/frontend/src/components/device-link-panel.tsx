@@ -11,12 +11,14 @@ import {
   submitDeviceLinkInput,
 } from "../lib/device-link-api";
 import {
+  DEVICE_LINK_DISPLAY_KINDS,
   DEVICE_LINK_ERROR_CODES,
   DEVICE_LINK_INPUT_KINDS,
   DEVICE_LINK_MODES,
   DEVICE_LINK_STEPS,
   deviceLinkAlternateMode,
   deviceLinkFrameFromWire,
+  deviceLinkModeLabel,
   deviceLinkPollDelayMs,
 } from "../lib/device-link-frame";
 
@@ -71,6 +73,10 @@ const INPUT_CLASS =
  * - **Secrets are not retained.** The typed value is cleared the moment it is
  *   handed to the host; the session it produces is host custody and never
  *   reaches the browser.
+ * - **Nothing about the ceremony is hardcoded.** Whether a second path exists,
+ *   what the two paths are called, and whether the payload is scanned or
+ *   opened all come off the frame. This card is shared by every device-link
+ *   vendor; a rule it invents here is a rule every other vendor inherits.
  *
  * Props
  *   provider       vendor id the link belongs to (the auth provider).
@@ -115,6 +121,14 @@ export function DeviceLinkPanel({
   // in, and `start` mints one server-side — so the authoritative value is
   // whatever the response reports, and the prop is only the starting guess.
   const invocationIdRef = React.useRef(invocationId || "");
+  // The live flow this card arrived holding — a chat gate carries one. `start`
+  // is handed it as `resume_flow_id` so a re-render (a refresh, a second tab, a
+  // re-opened settings pane) REJOINS that link instead of beginning another
+  // one: a fresh begin invalidates the payload the user is mid-scan on and
+  // debits the begin budget for a link nobody asked to restart. Cleared the
+  // moment the user abandons the flow — a mode switch or a "start again" must
+  // not resume the link it just cancelled.
+  const resumeFlowIdRef = React.useRef(initialFrame?.flowId || "");
   const completedRef = React.useRef(false);
 
   const name = displayName || provider || extensionName;
@@ -169,6 +183,7 @@ export function DeviceLinkPanel({
         runId,
         gateRef,
         invocationId,
+        resumeFlowId: resumeFlowIdRef.current,
       }),
     )
       .then((response) => {
@@ -221,12 +236,18 @@ export function DeviceLinkPanel({
   const switchMode = () => {
     abandonCurrentFlow();
     setFrame(null);
+    resumeFlowIdRef.current = "";
     setMode(deviceLinkAlternateMode(mode));
   };
 
   const restart = () => {
     abandonCurrentFlow();
     setFrame(null);
+    resumeFlowIdRef.current = "";
+    // Back to the vendor's primary path. Bumping the attempt alone left the
+    // card on whatever mode had just failed, so a vendor that rejects the
+    // alternate path re-failed on every retry with no way back.
+    setMode(DEVICE_LINK_MODES.default);
     setAttempt((value) => value + 1);
   };
 
@@ -270,19 +291,35 @@ export function DeviceLinkPanel({
     }
   };
 
-  const modeSwitch = (
-    <button
-      type="button"
-      onClick={switchMode}
-      data-testid="device-link-mode-switch"
-      data-device-link-target-mode={deviceLinkAlternateMode(mode)}
-      className="text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200"
-    >
-      {mode === DEVICE_LINK_MODES.alternate
-        ? t("deviceLink.useQr")
-        : t("deviceLink.usePhone")}
-    </button>
-  );
+  // The path the switch moves the user TO, and what the extension calls it.
+  const targetMode = deviceLinkAlternateMode(mode);
+  const targetModeLabel = deviceLinkModeLabel(frame, targetMode);
+  // Rendered ONLY when the extension declares a second path. A vendor with one
+  // path answers `UnsupportedMode` to a switch, which is a wedge the user
+  // cannot retry out of — so an absent `alternate_available` means no switch,
+  // not an optimistic one.
+  const modeSwitch = frame?.alternateAvailable
+    ? (
+        <button
+          type="button"
+          onClick={switchMode}
+          data-testid="device-link-mode-switch"
+          data-device-link-target-mode={targetMode}
+          className="text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200"
+        >
+          {targetModeLabel ||
+            (targetMode === DEVICE_LINK_MODES.alternate
+              ? t("deviceLink.useAlternate")
+              : t("deviceLink.useDefault"))}
+        </button>
+      )
+    : null;
+
+  // `display_kind` says what the payload IS, and so which affordance renders
+  // it. A frame that declares none renders both, exactly as every frame did
+  // before the field existed.
+  const showQr = frame?.displayKind !== DEVICE_LINK_DISPLAY_KINDS.link;
+  const showOpenLink = frame?.displayKind !== DEVICE_LINK_DISPLAY_KINDS.qrCode;
 
   const errorNotice = error
     ? (<p role="alert" data-testid="device-link-error" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)
@@ -323,8 +360,9 @@ export function DeviceLinkPanel({
             idPrefix="device-link"
             payload={frame.qrPayload || ""}
             code={frame.code || ""}
+            showQr={showQr}
             expiresAtMs={frame.expiresAtMs}
-            labels={payloadLabels(t, name)}
+            labels={payloadLabels(t, name, showOpenLink)}
             onRenew={renewPayload}
             isRenewing={isRenewing}
           />
@@ -388,13 +426,13 @@ export function DeviceLinkPanel({
             under the name "IronClaw". The copy therefore asks the user to
             check a specific, checkable fact and claims nothing beyond it.
           */}
-          {frame.code
+          {frame.vendorUserRef
             ? (
                 <p
                   data-testid="device-link-account"
                   className="text-xs leading-5 text-iron-300"
                 >
-                  {t("deviceLink.confirmDeviceAccount", { account: frame.code })}
+                  {t("deviceLink.confirmDeviceAccount", { account: frame.vendorUserRef })}
                 </p>
               )
             : null}
@@ -440,12 +478,14 @@ function inputAttributes(inputKind) {
   return INPUT_ATTRIBUTES[inputKind] || INPUT_ATTRIBUTES[DEVICE_LINK_INPUT_KINDS.code];
 }
 
-function payloadLabels(t, name) {
+// The payload panel renders its "open" affordance only when it is handed a
+// label for one, so a payload the frame declares scannable carries none.
+function payloadLabels(t, name, withOpenLink) {
   return {
     qrAlt: t("deviceLink.qrAlt", { name }),
     copy: t("deviceLink.copyCode"),
     copied: t("common.copiedToClipboard"),
-    open: t("deviceLink.openIn", { name }),
+    ...(withOpenLink ? { open: t("deviceLink.openIn", { name }) } : {}),
     expiresIn: (time) => t("deviceLink.expiresIn", { time }),
     expired: t("deviceLink.expired"),
     renew: t("deviceLink.refresh"),

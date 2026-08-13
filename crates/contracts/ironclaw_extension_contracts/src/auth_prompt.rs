@@ -31,7 +31,8 @@ use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::turn::TurnRunId;
 
 use crate::device_link::{
-    DeviceLinkErrorCode, DeviceLinkInputKind, DeviceLinkMode, DeviceLinkStepKind,
+    DeviceLinkDisplayKind, DeviceLinkErrorCode, DeviceLinkInputKind, DeviceLinkMode,
+    DeviceLinkStepKind,
 };
 
 /// Maximum byte length for a bounded identifier-shaped prompt field.
@@ -157,8 +158,20 @@ pub struct DeviceLinkPromptView {
     pub qr_payload: Option<String>,
     /// A short code to show the user, when the vendor issues one directly
     /// rather than as a scannable payload.
+    ///
+    /// Means only that. It used to double as the completed frame's resolved
+    /// account identity, which left a card unable to tell "read this code to
+    /// your phone" from "this is who you linked as" — see
+    /// [`DeviceLinkPromptView::vendor_user_ref`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// The resolved account identity on a completed frame.
+    ///
+    /// Showing it is the one control that makes a substituted login visible
+    /// (PROPOSAL §3.2), so it carries its own slot rather than borrowing the
+    /// one a mid-flow code uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_user_ref: Option<String>,
     /// Label for the input the current step is asking for ("Login code",
     /// "Account password"). Present only on an input step; its presence is what
     /// tells a card to render a field.
@@ -189,6 +202,37 @@ pub struct DeviceLinkPromptView {
     /// offer "use the other path instead".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<DeviceLinkMode>,
+    /// Whether the extension declares a second path at all.
+    ///
+    /// Load-bearing, not decorative: without it a card renders a switch for
+    /// every vendor, and one that declares no alternate answers
+    /// [`crate::device_link::DeviceLinkError::UnsupportedMode`] — a wedge the
+    /// user cannot retry out of. Absent, a consumer must assume `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_available: Option<bool>,
+    /// The recipe's own name for the primary path ("Scan a code").
+    ///
+    /// The recipe promises the labels a user reads come from the extension.
+    /// Carrying them here is what keeps that promise: a card with no label
+    /// falls back to generic host copy, never to one vendor's ceremony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode_label: Option<String>,
+    /// The recipe's own name for the fallback path ("Use my phone number").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_mode_label: Option<String>,
+    /// How the payload is meant to be rendered.
+    ///
+    /// The contract has always distinguished a scannable code from a link;
+    /// this is where that reaches a card. Absent, a consumer renders both
+    /// affordances as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_kind: Option<DeviceLinkDisplayKind>,
+    /// The installed extension this link belongs to.
+    ///
+    /// Distinct from `provider`, which is the credential-authority namespace:
+    /// a card needs the installed identity to name what it is linking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
     /// Whether a fresh `begin` could succeed after a failed frame. Mirrors
     /// `DeviceLinkStep::Failed`'s own bit; absent, a consumer derives it from
     /// `error_code`.
@@ -455,6 +499,28 @@ impl DeviceLinkPromptView {
             "device_link_prompt_flow_id",
             self.flow_id.as_deref(),
             PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        // The recipe-authored strings are extension-supplied, so they are
+        // bounded on the same terms as every other text a card renders.
+        validate_optional_display_text(
+            "device_link_prompt_default_mode_label",
+            self.default_mode_label.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_alternate_mode_label",
+            self.alternate_mode_label.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_extension_id",
+            self.extension_id.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_vendor_user_ref",
+            self.vendor_user_ref.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
         )
     }
 }
@@ -694,6 +760,12 @@ mod tests {
             input_kind: None,
             mode: Some(DeviceLinkMode::Default),
             restartable: None,
+            alternate_available: Some(false),
+            default_mode_label: None,
+            alternate_mode_label: None,
+            display_kind: Some(DeviceLinkDisplayKind::QrCode),
+            extension_id: Some("example".to_string()),
+            vendor_user_ref: None,
         }
     }
 
@@ -1119,6 +1191,12 @@ mod tests {
             input_kind: Some(DeviceLinkInputKind::Code),
             mode: Some(DeviceLinkMode::Alternate),
             restartable: Some(true),
+            alternate_available: Some(true),
+            default_mode_label: Some("Scan a code".to_string()),
+            alternate_mode_label: Some("Use your account name".to_string()),
+            display_kind: Some(DeviceLinkDisplayKind::Link),
+            extension_id: Some("example".to_string()),
+            vendor_user_ref: Some("@example-user".to_string()),
         };
 
         let context = AuthPromptContextView::new(

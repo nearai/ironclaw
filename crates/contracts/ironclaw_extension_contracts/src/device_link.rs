@@ -113,6 +113,17 @@ pub enum DeviceLinkErrorCode {
     InvalidInput,
     /// The vendor is rate-limiting; back off and retry.
     RateLimited,
+    /// The **host** is rate-limiting, not the vendor.
+    ///
+    /// A distinct code because the two are different facts with different
+    /// remedies, and folding host budgets into `RateLimited` told a user (and
+    /// the audit trail) that a vendor pushed back when no vendor was called.
+    /// Restartable once the window rolls.
+    HostThrottled,
+    /// A ceiling the user can act on has been reached — a vendor's cap on
+    /// linked devices, or a host cap on concurrent links. Distinct from
+    /// throttling: waiting does not help, removing something does.
+    LimitReached,
     /// The account cannot be linked at all — deactivated, banned, ineligible.
     /// Terminal: re-prompting forever is the wrong behavior.
     AccountUnavailable,
@@ -547,6 +558,30 @@ impl DeviceLinkError {
 }
 
 /// The vendor half of a device-link flow.
+///
+/// # Obligations an implementor must satisfy
+///
+/// These are contract, not advice, and the host cannot check them for you:
+///
+/// * **Custody before completion.** Anything a later tool call needs — the
+///   session credential above all — must be written through the supplied
+///   [`crate::linked_session::LinkedSessionPort`] *before* a
+///   [`DeviceLinkStep::Completed`] is returned. The host mints the credential
+///   account from that step, so a blob written afterwards races a call that
+///   can already be dispatched.
+/// * **`poll` is a read while awaiting the user.** While the flow waits on
+///   something the *user* must do, `poll` must not advance vendor state. It
+///   may still talk to the vendor — a protocol whose acceptance arrives only
+///   by re-asking has no other way to notice — but it must be safe to call at
+///   the host's cadence, on every card that happens to be open, without
+///   consuming a one-shot.
+/// * **`cancel` is idempotent** and safe on a flow that is already gone.
+/// * **A `begin` naming a flow that is already live is a re-mint**, not a
+///   second attempt: the host asks for it when a displayed frame's clock
+///   lapses, and it must be answered with a fresh frame for the same link.
+///
+/// [`ironclaw_auth::test_support::conformance::assert_device_link_driver_conformance`]
+/// exercises the host-side half of these against a real implementation.
 ///
 /// The host owns the state machine, the revision compare-and-swap, the TTLs,
 /// the rate limits, and the credential lifecycle. The adapter owns exactly the

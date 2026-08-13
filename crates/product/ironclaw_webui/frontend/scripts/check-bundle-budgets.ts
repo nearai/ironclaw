@@ -67,7 +67,7 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // Re-measured on the MERGED tree with `vite build` + this check. `main`
 // concurrently re-measured 217.7 KB gzip after its own changes (#7480, #7284
 // et al.); both deltas are in the measurement below.
-// The Telegram device-link card then added a multi-step link flow to /chat.
+// The device-link card then added a multi-step link flow to /chat.
 // Everything deferrable was deferred FIRST, and measured at each step:
 //  - `auth-device-link-card.tsx` and the `device-link-panel` /
 //    `device-link-api` modules behind it load through `React.lazy` from

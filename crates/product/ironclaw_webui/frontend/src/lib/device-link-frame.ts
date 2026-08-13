@@ -37,6 +37,15 @@ export const DEVICE_LINK_MODES = Object.freeze({
   alternate: "alternate",
 });
 
+// `DeviceLinkDisplayKind` — what the payload on a display step IS, and so which
+// affordance renders it: a scannable code, or a link the user opens on the
+// device being linked. A frame that declares none renders both, exactly as
+// every frame did before the field existed.
+export const DEVICE_LINK_DISPLAY_KINDS = Object.freeze({
+  qrCode: "qr_code",
+  link: "link",
+});
+
 // The pace a card polls at when the frame declares none.
 export const DEVICE_LINK_DEFAULT_POLL_MS = 3000;
 
@@ -78,6 +87,15 @@ function boundedNumber(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+// A display kind outside the closed set is a newer host talking to an older
+// browser. It normalizes to "unstated" — both affordances — because a card
+// matching on an unknown string would render NEITHER, which is a display step
+// with nothing on it.
+function knownDisplayKind(value) {
+  const kind = optionalText(value);
+  return Object.values(DEVICE_LINK_DISPLAY_KINDS).includes(kind) ? kind : null;
+}
+
 // `input_kind`, `mode`, `restartable`, and `flow_id` are PROPOSAL §8.12's
 // additive frame fields. The backend now emits all four (`DeviceLinkPromptView`
 // carries them, projected from the durable flow record), so the fallbacks below
@@ -89,6 +107,20 @@ function boundedNumber(value) {
 //   - `restartable` -> derived from `error_code`,
 //   - `flow_id` -> absent, and a card with no flow id cannot poll or submit,
 //     so it starts a flow of its own instead.
+//
+// The recipe-shaped fields are newer still, and each falls back to what a card
+// did before it existed — never to one vendor's ceremony:
+//   - `alternate_available` -> false. FAIL-CLOSED on purpose: a vendor that
+//     declares no second path answers `UnsupportedMode`, so a card that assumed
+//     one offers a switch that wedges the user,
+//   - `default_mode_label` / `alternate_mode_label` -> absent, and the card
+//     labels the switch from generic host copy,
+//   - `display_kind` -> absent, and the card renders both affordances,
+//   - `vendor_user_ref` -> absent, and a completed card shows no account line
+//     rather than borrowing `code`, which means only "a short code the vendor
+//     issued for the user to read",
+//   - `extension_id` -> absent; `provider` is the credential authority, not the
+//     installed extension, so neither substitutes for the other.
 export function deviceLinkFrameFromWire(wire) {
   if (!wire || typeof wire !== "object") return null;
   const step = optionalText(wire.step);
@@ -98,14 +130,20 @@ export function deviceLinkFrameFromWire(wire) {
   return {
     flowId: optionalText(wire.flow_id),
     provider: String(wire.provider || ""),
+    extensionId: optionalText(wire.extension_id),
     displayName: String(wire.display_name || ""),
     step,
     instructions: String(wire.instructions || ""),
     qrPayload: optionalText(wire.qr_payload),
+    displayKind: knownDisplayKind(wire.display_kind),
     code: optionalText(wire.code),
+    vendorUserRef: optionalText(wire.vendor_user_ref),
     secretLabel: optionalText(wire.secret_label),
     inputKind: optionalText(wire.input_kind) || DEVICE_LINK_INPUT_KINDS.code,
     mode: optionalText(wire.mode) || DEVICE_LINK_MODES.default,
+    alternateAvailable: wire.alternate_available === true,
+    defaultModeLabel: optionalText(wire.default_mode_label),
+    alternateModeLabel: optionalText(wire.alternate_mode_label),
     expiresAtMs: Number.isFinite(expiresAt) ? expiresAt : 0,
     revision: boundedNumber(wire.revision),
     pollIntervalMs: boundedNumber(wire.poll_interval_ms) || DEVICE_LINK_DEFAULT_POLL_MS,
@@ -133,4 +171,17 @@ export function deviceLinkAlternateMode(mode) {
   return mode === DEVICE_LINK_MODES.alternate
     ? DEVICE_LINK_MODES.default
     : DEVICE_LINK_MODES.alternate;
+}
+
+// The recipe's own name for one of the two paths, when it supplied one.
+//
+// The recipe promises that the words a user reads about linking come from the
+// extension, so this is what a switch is labelled with; the null return is the
+// signal to fall back to generic host copy. Which label goes with which mode is
+// decided here, once, rather than at each surface that renders a switch.
+export function deviceLinkModeLabel(frame, mode) {
+  if (!frame) return null;
+  return mode === DEVICE_LINK_MODES.alternate
+    ? frame.alternateModeLabel || null
+    : frame.defaultModeLabel || null;
 }

@@ -1611,8 +1611,12 @@ registerPack("en", {
   "deviceLink.expiresIn": "Expires in {time}",
   "deviceLink.expired": "This code expired.",
   "deviceLink.refresh": "Get a new code",
-  "deviceLink.usePhone": "Use my phone number instead",
-  "deviceLink.useQr": "Use a QR code instead",
+  // Fallbacks ONLY. The mode switch is labelled from the recipe's own
+  // `default_mode_label` / `alternate_mode_label`; this copy is what a card
+  // says when the extension supplied none. It is shared by every device-link
+  // extension, so it must never name one vendor's ceremony.
+  "deviceLink.useAlternate": "Use another way to link",
+  "deviceLink.useDefault": "Use the first way to link instead",
   "deviceLink.awaiting": "Waiting for {name} to confirm the link…",
   "deviceLink.identifierLabel": "Phone number",
   "deviceLink.codeLabel": "Login code",
@@ -1620,7 +1624,11 @@ registerPack("en", {
   "deviceLink.submit": "Continue",
   "deviceLink.linked": "{name} account linked",
   "deviceLink.confirmDeviceAccount": "Linked as {account}",
-  "deviceLink.confirmDevice": "Now open {name} → Settings → Devices and check that exactly one new IronClaw device appeared, just now. If you see more than one, or one you did not expect, revoke it there and unlink here.",
+  // Vendor-neutral on purpose: the check is "one new device, just now", and
+  // every service names the screen that shows it differently. Naming one
+  // vendor's menu path here sends every other vendor's users looking for a
+  // menu that does not exist.
+  "deviceLink.confirmDevice": "Now open your linked-device settings in {name} and check that exactly one new IronClaw device appeared, just now. If you see more than one, or one you did not expect, revoke it there and unlink here.",
   "deviceLink.revokeHint": "IronClaw now shows up as a device in {name}. If you ever see a device you do not recognize, revoke it there.",
   "deviceLink.startAgain": "Start again",
   "deviceLink.cannotRetry": "This {name} account cannot be linked.",
