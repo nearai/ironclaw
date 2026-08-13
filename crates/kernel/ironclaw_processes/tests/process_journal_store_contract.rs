@@ -3018,10 +3018,40 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         worker_id: claim.worker_id.clone(),
         lease_token: claim.lease_token.clone(),
     };
-    store
+    let first_heartbeat_cursor = store
         .heartbeat_process(lease.clone())
         .await
-        .expect("heartbeat process");
+        .expect("first heartbeat process");
+    let second_heartbeat_cursor = store
+        .heartbeat_process(lease.clone())
+        .await
+        .expect("second heartbeat process");
+    assert_eq!(
+        first_heartbeat_cursor, claim.state.journal_cursor,
+        "heartbeats must update lease health without advancing the journal cursor"
+    );
+    assert_eq!(
+        second_heartbeat_cursor, claim.state.journal_cursor,
+        "repeated heartbeats must not reserve journal cursors"
+    );
+
+    let heartbeat_snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("heartbeat-updated process snapshot");
+    let claimed_lease = claim.state.lease.as_ref().expect("claimed lease");
+    let heartbeat_lease = heartbeat_snapshot.lease.as_ref().expect("heartbeat lease");
+    assert!(
+        heartbeat_lease.last_heartbeat_at >= claimed_lease.last_heartbeat_at,
+        "heartbeat must refresh last_heartbeat_at"
+    );
+    assert!(
+        heartbeat_lease.lease_expires_at >= claimed_lease.lease_expires_at,
+        "heartbeat must refresh lease_expires_at"
+    );
 
     let gate_ref = TurnGateRef::new("gate:journal-contract").expect("gate ref");
     store
@@ -3142,9 +3172,27 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         .read_process_journal_after(&scope, None, Some(ProcessJournalCursor(0)), 10)
         .await
         .expect("journal page");
-    assert_eq!(page.entries.len(), 4);
+    assert_eq!(page.entries.len(), 3);
     assert_eq!(page.entries[0].status, ProcessLifecycleStatus::Queued);
-    assert_eq!(page.entries[3].status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(page.entries[2].status, ProcessLifecycleStatus::Suspended);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.kind != ProcessJournalKind::Heartbeat),
+        "lease-only heartbeats must not append journal entries"
+    );
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .collect::<Vec<_>>(),
+        vec![
+            ProcessJournalCursor(1),
+            ProcessJournalCursor(2),
+            ProcessJournalCursor(3)
+        ],
+        "heartbeats must not leave cursor-reservation gaps"
+    );
 }
 
 #[tokio::test]

@@ -177,7 +177,7 @@ pub struct DefaultPlannedRuntimeConfig {
 impl Default for DefaultPlannedRuntimeConfig {
     fn default() -> Self {
         Self {
-            heartbeat_interval: std::time::Duration::from_secs(10),
+            heartbeat_interval: std::time::Duration::from_secs(15),
             poll_interval: std::time::Duration::from_secs(5),
             lease_recovery_interval: std::time::Duration::from_secs(10),
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
@@ -1132,6 +1132,14 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn planned_runtime_ships_fifteen_second_heartbeat_default() {
+        assert_eq!(
+            DefaultPlannedRuntimeConfig::default().heartbeat_interval,
+            std::time::Duration::from_secs(15)
+        );
+    }
 
     #[test]
     fn parallel_tool_batch_mode_fails_closed_to_off() {
