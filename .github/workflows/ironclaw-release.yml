@@ -337,14 +337,11 @@ jobs:
     secrets:
       DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
-  # Point the public docs deployment branch at each stable release. The
-  # Mintlify GitHub App deploys the docs site from `docs-live` (dashboard
-  # config, out-of-repo — see docs/internal/weekly-release-strategy.md,
-  # "Docs publication"), so the published site tracks the latest stable
-  # binary instead of main. This is a FORCED pointer update by design:
-  # successive stable tags need not be ancestor-related (release-branch
-  # cherry-picks), and docs-live is a pointer, not a history — its content
-  # is always exactly the tagged tree. Prereleases never move it.
+  # Point `docs-live` (the Mintlify deployment branch) at each stable
+  # release so the public docs site tracks the released binary, not main.
+  # Force-moved by design: stable tags need not be ancestor-related, and
+  # the branch is a pointer, not a history. Prereleases never move it.
+  # See docs/internal/weekly-release-strategy.md, "Docs publication".
   publish-docs-live:
     needs:
       - plan
@@ -358,24 +355,23 @@ jobs:
     steps:
       - name: Point docs-live at the stable release commit
         run: |
-          # Move the pointer only when this workflow's own tag is the newest
-          # stable ironclaw-v* tag: a re-run of an older release's workflow
-          # (routine after a flaky artifact upload) must not silently revert
-          # the live docs site to an older release.
+          set -euo pipefail
+          # A re-run of an older release's workflow must not move the live
+          # docs site backwards: only the newest stable tag may repoint.
           newest="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/ironclaw-v" \
             --jq '.[].ref' \
             | sed 's#^refs/tags/##' \
             | grep -E '^ironclaw-v[0-9]+\.[0-9]+\.[0-9]+$' \
             | sort -V | tail -n 1)"
+          test -n "${newest}"
           if [ "${GITHUB_REF_NAME}" != "${newest}" ]; then
             echo "skipping docs-live repoint: ${GITHUB_REF_NAME} is not the newest stable tag (${newest})"
             exit 0
           fi
-          # PATCH force-moves the existing branch pointer; the POST fallback
-          # bootstraps refs/heads/docs-live on the very first stable release
-          # after this job ships. Ref updates raise ordinary push events, so
-          # the Mintlify App deploys from them like any push.
+          # PATCH force-moves the branch; POST bootstraps it on the first
+          # stable release. Ref updates raise ordinary push events, so the
+          # Mintlify App deploys from them like any push.
           gh api --method PATCH \
             "repos/${GITHUB_REPOSITORY}/git/refs/heads/docs-live" \
             -f "sha=${GITHUB_SHA}" -F "force=true" \

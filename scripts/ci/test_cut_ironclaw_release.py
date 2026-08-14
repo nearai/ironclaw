@@ -449,6 +449,21 @@ class StableChangelogGateTests(unittest.TestCase):
             ):
                 release.ensure_stable_changelog_entry(root, self.STABLE)
 
+    def test_lookalike_attribute_does_not_satisfy_the_stable_gate(self) -> None:
+        """Only a real `<Update>` tag counts — not `data-description=` or the
+        same attribute on another element."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root,
+                '<Update data-description="v1.2.0">…</Update>\n'
+                '<Card description="v1.2.0">…</Card>\n',
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
     def test_prerelease_cut_is_exempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             # No docs/ tree at all: an rc cut must not require one.

@@ -141,20 +141,9 @@ class GitHubTags:
 
 
 def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
-    """A stable cut requires the candidate's `docs/changelog.mdx` to carry
-    the release's entry.
-
-    The public docs site deploys from the `docs-live` branch, which the
-    release workflow repoints at each stable tag — so the changelog page that
-    ships is whatever the candidate commit carries, and it must already
-    contain this release. The probe is the exact `description="vX.Y.Z"`
-    attribute, not a bare-substring `vX.Y.Z`: a prose mention or an
-    rc-labeled entry (`description="vX.Y.Z-rc.1"`) must not satisfy the
-    stable gate. Prerelease (`-rc.N`, hotfix-rc) cuts are exempt so the
-    freeze/blocker flow stays unimpeded; the entry lands on `main` before
-    the Monday cut so the candidate inherits it and later candidates keep it
-    (docs/internal/weekly-release-strategy.md). A malformed version is left
-    for `ensure_release_tag` to reject with the canonical message.
+    """Refuse a stable cut whose candidate `docs/changelog.mdx` has no
+    `<Update description="vX.Y.Z">` entry. Prerelease cuts are exempt;
+    malformed versions are left for `ensure_release_tag` to reject.
     """
     if VERSION_PATTERN.fullmatch(version) is None or "-" in version:
         return
@@ -166,7 +155,11 @@ def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
             f"stable release {version} requires docs/changelog.mdx in the "
             f"candidate checkout, which cannot be read: {error}"
         ) from error
-    if f'description="v{version}"' not in text:
+    # Must be the attribute of a real <Update> tag: prose mentions,
+    # rc-labeled entries, and lookalike attributes on other elements
+    # (data-description=…) must not satisfy the stable gate.
+    entry = re.compile(rf'<Update\b[^>]*\sdescription="v{re.escape(version)}"')
+    if entry.search(text) is None:
         raise ReleaseTagError(
             f"docs/changelog.mdx has no entry for v{version}. Land an "
             f'<Update description="v{version}"> entry on main before the '

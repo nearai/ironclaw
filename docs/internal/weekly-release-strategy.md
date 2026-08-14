@@ -178,8 +178,9 @@ unreleased `main` behavior (issue #7317). The moving parts:
   the wrong page.
 - **Changelog gate.** `scripts/ci/cut_ironclaw_release.py` refuses to create
   a stable tag when the candidate's `docs/changelog.mdx` lacks the
-  release's `description="vX.Y.Z"` entry (exact attribute match — an
-  rc-labeled entry does not satisfy it); rc tags are exempt. Land the entry
+  release's `<Update description="vX.Y.Z">` entry (the tag's exact
+  attribute — an rc-labeled entry, prose mention, or lookalike attribute
+  does not satisfy it); rc tags are exempt. Land the entry
   on `main` before the Monday cut (Candidate and artifact rules, step 3).
 - **Older releases.** Every tag preserves its docs tree
   (`https://github.com/nearai/ironclaw/tree/ironclaw-vX.Y.Z/docs`); the

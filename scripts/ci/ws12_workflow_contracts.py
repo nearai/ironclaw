@@ -96,8 +96,10 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "!fromJson(needs.host.outputs.val).announcement_is_prerelease",
         # The newest-stable-tag guard: without it, re-running an older
         # release's workflow force-moves docs-live backwards and silently
-        # reverts the live docs site.
+        # reverts the live docs site. The comparison itself is pinned, not
+        # just its endpoint and skip message.
         "git/matching-refs/tags/ironclaw-v",
+        'if [ "${GITHUB_REF_NAME}" != "${newest}" ]; then',
         "skipping docs-live repoint:",
     ),
 }
