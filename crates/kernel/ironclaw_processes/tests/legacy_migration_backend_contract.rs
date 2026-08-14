@@ -1,7 +1,7 @@
 //! Durable-backend conformance fixtures for process-journal persistence.
 
-use std::sync::Arc;
 use chrono::Utc;
+use std::sync::Arc;
 
 use ironclaw_filesystem::{
     CasExpectation, Entry, LibSqlRootFilesystem, PostgresRootFilesystem, RootFilesystem,
@@ -30,8 +30,7 @@ async fn heartbeat_persistence_is_durable_on_libsql() {
             .await
             .expect("build libsql database"),
     );
-    let backend =
-        Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
     backend
         .run_migrations()
         .await
@@ -138,7 +137,10 @@ where
         })
         .await
         .expect("reload durable heartbeat process");
-    let first_lease = first_snapshot.lease.as_ref().expect("first heartbeat lease");
+    let first_lease = first_snapshot
+        .lease
+        .as_ref()
+        .expect("first heartbeat lease");
     let reloaded_lease = reloaded_snapshot
         .lease
         .as_ref()
