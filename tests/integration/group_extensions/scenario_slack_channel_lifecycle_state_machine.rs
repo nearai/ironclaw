@@ -66,7 +66,9 @@ const SLACK_OAUTH_CLIENT_SECRET: &str = "slack-oauth-secret";
 
 /// Mirrors the slack manifest's `[[tools.credentials]]` scope union
 /// (`crates/extensions/packages/slack/manifest.toml`):
-/// read scopes shared by every tool plus `chat:write` for `send_message`.
+/// read scopes shared by every tool plus the write additions — `chat:write`
+/// (send/edit/delete), `reactions:read` + `reactions:write` (the reaction
+/// pair), and `im:write` (`open_dm`).
 const SLACK_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
@@ -79,6 +81,9 @@ const SLACK_SCOPES: &[&str] = &[
     "mpim:read",
     "users:read",
     "chat:write",
+    "reactions:read",
+    "reactions:write",
+    "im:write",
 ];
 
 /// The administrator-configuration connection-scoping claims this scenario configures

@@ -71,10 +71,12 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
 1. Declare each capability as a `[[tools]]` entry (id, description, effects,
    default_permission, visibility, `input_schema_ref`, optional
    `prompt_doc_ref`) with a `[[tools.credentials]]` block naming its `vendor`,
-   `audience`, and `injection`. Copy the shape from
-   `crates/extensions/packages/slack/manifest.toml` (8 `[[tools]]` entries — count with
-   `grep -c '^\[\[tools\]\]' <manifest>`) or
-   `crates/extensions/packages/github/manifest.toml`.
+   `audience`, and `injection`. Copy the plain schema-declaring shape from
+   `crates/extensions/packages/github/manifest.toml`; for `standard_op`-bound
+   messaging tools the exemplar is
+   `crates/extensions/packages/slack/manifest.toml`, whose tools are all
+   standard-op-bound (count entries with `grep -c '^\[\[tools\]\]'
+   <manifest>` rather than trusting a written number).
 2. Schemas and prompt docs are **package assets** (`schemas/…`, `prompts/…`)
    embedded by the package module — not composition.
 3. Model-visible tool wording is product surface: if a tool acts *as the user*

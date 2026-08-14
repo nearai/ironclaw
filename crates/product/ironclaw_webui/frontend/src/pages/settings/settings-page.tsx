@@ -60,6 +60,7 @@ export function SettingsPage() {
 
   const tabContent = {
     inference: (<InferenceTab
+      isAdmin={isAdmin}
       settings={settings}
       gatewayStatus={gatewayStatus}
       onSave={save}
@@ -84,13 +85,12 @@ export function SettingsPage() {
     language: (<LanguageTab searchQuery={searchQuery} />),
   };
 
-  const isOperatorTab = (id) => id === "inference";
   const tabContentHas = (id) => Object.prototype.hasOwnProperty.call(tabContent, id);
-  const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
+  const visibleTabIds = Object.keys(tabContent);
   const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
   const redirectTab = defaultTabIsVisible ? defaultTab : visibleTabIds[0] || "language";
 
-  if (!tabContentHas(tab) || (!isAdmin && isOperatorTab(tab))) {
+  if (!tabContentHas(tab)) {
     return (<Navigate to={`/settings/${redirectTab}`} replace />);
   }
 

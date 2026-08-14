@@ -722,6 +722,14 @@ async def test_provider_operation_case_executes_with_provider_readback(
     if operation_case.setup_provider_proxy is not None:
         operation_case.setup_provider_proxy(proxy)
     trace = _provider_operation_trace(operation_case, arguments)
+    if operation_case.expected_failed_tool_result_contains is not None:
+        # Same mechanism the fault cases below use: without the hint the
+        # replayer treats any failed capability result as a replay error.
+        trace["steps"][-1]["request_hint"] = {
+            "expected_failed_tool_result_contains": (
+                operation_case.expected_failed_tool_result_contains
+            )
+        }
     await _install_inline_trace(mock_llm_server, source, trace)
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
@@ -743,7 +751,10 @@ async def test_provider_operation_case_executes_with_provider_readback(
         and preview["capability_id"] == operation_case.capability_id
     ]
     assert len(matches) == 1, matches
-    assert matches[0]["status"] == "completed", matches[0]
+    # Almost every case completes; a single-item read's `empty` class is its
+    # typed model-visible miss, declared via `expected_status="failed"` (see
+    # `ExpectedCapabilityStatus` in provider_operation_types.py).
+    assert matches[0]["status"] == operation_case.expected_status, matches[0]
     await operation_case.assert_outcome(emulate_url, matches[0])
     expected_bearer = {
         # The full-path OAuth exchange deliberately returns this account token;

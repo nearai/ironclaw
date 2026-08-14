@@ -48,7 +48,7 @@ fn default_family_fingerprint(
         }
     };
     format!(
-        "ironclaw_agent_loop.default_family.v2:\
+        "ironclaw_agent_loop.default_family.v3:\
         family_id=default;\
         identity=component_identity_v1;\
         planner=DefaultPlanner;\
@@ -61,7 +61,7 @@ fn default_family_fingerprint(
         gate:DefaultGateHandlingStrategy(block),\
         recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
-        stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
+        stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
         budget:DefaultBudgetStrategy(iteration_limit={iteration_limit},wall_clock_limit=none)"
     )
@@ -73,8 +73,8 @@ fn default_family_fingerprint(
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xca, 0xbb, 0x66, 0x61, 0xe4, 0xfd, 0xb4, 0x81, 0x12, 0x15, 0xc9, 0xde, 0x1d, 0x18, 0x68, 0xc3,
-    0x58, 0xf7, 0x9e, 0x51, 0xa7, 0x91, 0xd5, 0x75, 0xde, 0xe3, 0x7f, 0x96, 0x25, 0xbc, 0xf1, 0xda,
+    0xe6, 0xf2, 0x33, 0x91, 0xb3, 0xa9, 0xe1, 0x10, 0x10, 0xbc, 0x43, 0x24, 0x65, 0x80, 0xd5, 0x74,
+    0x6b, 0xd6, 0xe3, 0xd5, 0xed, 0xd9, 0xe1, 0x70, 0xb1, 0x85, 0xfe, 0x30, 0x05, 0x5c, 0x99, 0xec,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -135,7 +135,7 @@ impl FamilyOverrides {
 /// Overrides are replay-relevant configuration, so an overridden composition
 /// carries a configuration-specific [`ComponentIdentity`] digest derived from
 /// the resolved values; only the pure-default composition keeps the static
-/// [`DEFAULT_FAMILY_DIGEST`], so existing replay identities are unchanged.
+/// [`DEFAULT_FAMILY_DIGEST`].
 pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     if overrides == FamilyOverrides::default() {
         return default();

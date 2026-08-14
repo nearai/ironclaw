@@ -1,8 +1,7 @@
 //! Hosted-MCP registration protocol journeys.
 //!
-//! This is deliberately a new suite: existing integration files cover bundled
-//! MCP discovery, while these scenarios need mutable authentication and OAuth
-//! metadata fixtures for user-registered endpoints.
+//! Hosted-MCP authentication and discovery journeys for user-registered and
+//! bundled endpoints, using mutable OAuth metadata fixtures.
 
 #[allow(dead_code)]
 #[path = "../support/hosted_mcp_registration_server.rs"]
@@ -40,7 +39,10 @@ use ironclaw_extension_manager::lifecycle_test_support::{
     lifecycle_product_context, rebuild_lifecycle_test_services_with_auth_provider,
     webui_gate_resource_scope_for_owner,
 };
-use ironclaw_extension_registry::{ExtensionInstallationStorePort, ExtensionManifestRecord};
+use ironclaw_extension_registry::{
+    ExtensionInstallation, ExtensionInstallationStorePort, ExtensionManifestRecord,
+    ExtensionManifestRef, ManifestHash,
+};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -69,6 +71,14 @@ fn runtime_context(
     scope: ironclaw_host_api::resource::ResourceScope,
     capability: &str,
 ) -> ironclaw_host_api::scope::ExecutionContext {
+    runtime_context_for_host(scope, capability, "mcp.example.test")
+}
+
+fn runtime_context_for_host(
+    scope: ironclaw_host_api::resource::ResourceScope,
+    capability: &str,
+    allowed_host: &str,
+) -> ironclaw_host_api::scope::ExecutionContext {
     let grantee = ExtensionId::new("hosted-mcp-registration-test").expect("test extension id");
     let mut context = ironclaw_host_api::scope::ExecutionContext::local_default(
         scope.user_id.clone(),
@@ -91,7 +101,7 @@ fn runtime_context(
                     network: NetworkPolicy {
                         allowed_targets: vec![NetworkTargetPattern {
                             scheme: Some(NetworkScheme::Https),
-                            host_pattern: "mcp.example.test".to_string(),
+                            host_pattern: allowed_host.to_string(),
                             port: None,
                         }],
                         deny_private_ip_ranges: true,
@@ -395,6 +405,15 @@ async fn complete_fixture_oauth_callback(
     scope: &ironclaw_host_api::resource::ResourceScope,
     provider: ironclaw_auth::AuthProviderId,
 ) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {
+    complete_extension_oauth_callback(services, scope, provider, "mcp-fixture").await
+}
+
+async fn complete_extension_oauth_callback(
+    services: &ironclaw_extension_manager::lifecycle_test_support::ExtensionLifecycleTestServices,
+    scope: &ironclaw_host_api::resource::ResourceScope,
+    provider: ironclaw_auth::AuthProviderId,
+    extension_id: &str,
+) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {
     let auth_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
     let state_hash =
         OpaqueStateHash::new(fixture_digest("hosted-oauth-state")).expect("state digest");
@@ -407,7 +426,7 @@ async fn complete_fixture_oauth_callback(
             flow_id: None,
             scope: auth_scope.clone(),
             provider: provider.clone(),
-            requester_extension: Some(ExtensionId::new("mcp-fixture").expect("extension id")),
+            requester_extension: Some(ExtensionId::new(extension_id).expect("extension id")),
             authorization_url: OAuthAuthorizationUrl::new("https://auth.example.test/authorize")
                 .expect("fixture authorization URL"),
             opaque_state_hash: state_hash.clone(),
@@ -415,7 +434,7 @@ async fn complete_fixture_oauth_callback(
             pkce_verifier: SecretString::from("hosted-oauth-pkce".to_string()),
             update_binding: None,
             continuation: AuthContinuationRef::LifecycleActivation {
-                package_ref: ironclaw_auth::LifecyclePackageRef::new("mcp-fixture")
+                package_ref: ironclaw_auth::LifecyclePackageRef::new(extension_id)
                     .expect("auth package ref"),
             },
             expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -451,6 +470,231 @@ async fn complete_fixture_oauth_callback(
             },
         })
         .await
+}
+
+#[tokio::test]
+async fn bundled_oauth_mcp_projects_active_after_callback_discovers_tools() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::ExactBearer {
+            token: "oauth-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let fixture_secret_store = Arc::new(OnceLock::new());
+    let services = build_lifecycle_test_services_with_auth_provider(
+        "bundled-hosted-mcp-oauth-user",
+        Some(Arc::new(
+            HostedMcpRegistrationNetworkEgress::for_server_with_mcp_host(&server, "mcp.notion.com"),
+        )),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&fixture_secret_store),
+            access_token: "oauth-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(fixture_secret_store.set(services.secret_store()).is_ok());
+    let scope = webui_gate_resource_scope_for_owner("bundled-hosted-mcp-oauth-user");
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+        .expect("bundled package ref");
+
+    let install = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: package_ref.clone(),
+            },
+        )
+        .await
+        .expect("bundled OAuth MCP install reaches setup");
+    let provider = credential_provider_from_response(&install);
+    complete_extension_oauth_callback(&services, &scope, provider, "notion")
+        .await
+        .expect("OAuth callback activates the bundled MCP");
+
+    let capability = services
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capability projection")
+        .into_iter()
+        .find(|capability| {
+            capability.id.as_str().starts_with("notion.")
+                && capability.id.as_str().ends_with(".search")
+        })
+        .expect("OAuth callback publishes the bundled Notion search tool");
+    let listed = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("installation list after bundled OAuth callback");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = listed.payload else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions.iter().any(|extension| {
+            extension.summary.package_ref == package_ref
+                && extension.phase == ironclaw_extension_contracts::state::InstallationState::Active
+                && extension
+                    .summary
+                    .visible_capability_ids
+                    .iter()
+                    .any(|id| id == capability.id.as_str())
+        }),
+        "an active bundled MCP must project as active with discovered tools: {extensions:#?}"
+    );
+    let outcome = invoke_with_standalone_approval(
+        &services,
+        capability.id.as_str(),
+        runtime_context_for_host(scope.clone(), capability.id.as_str(), "mcp.notion.com"),
+        json!({}),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+    ));
+
+    let restored_secret_store = Arc::new(OnceLock::new());
+    let restored = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        "bundled-hosted-mcp-oauth-user",
+        Some(Arc::new(
+            HostedMcpRegistrationNetworkEgress::for_server_with_mcp_host(&server, "mcp.notion.com"),
+        )),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&restored_secret_store),
+            access_token: "oauth-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(restored_secret_store.set(restored.secret_store()).is_ok());
+    let restored_list = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("installation list after restart");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = restored_list.payload
+    else {
+        panic!("restored list returns installed extension summaries")
+    };
+    assert!(
+        extensions.iter().any(|extension| {
+            extension.summary.package_ref == package_ref
+                && extension.phase == ironclaw_extension_contracts::state::InstallationState::Active
+                && extension
+                    .summary
+                    .visible_capability_ids
+                    .iter()
+                    .any(|id| id == capability.id.as_str())
+        }),
+        "a restarted bundled MCP must retain its active discovered projection: {extensions:#?}"
+    );
+    assert!(server.requests().iter().any(|request| {
+        request.rpc_method.as_deref() == Some("tools/call") && request.authorization_matches
+    }));
+
+    // Simulate a bundled-definition upgrade: the installation hash no longer
+    // matches the binary catalog, while the old persisted manifest still
+    // carries discovered schemas. Restore must migrate to the current bundle,
+    // not let the stale discovered record overwrite it and make old-to-old
+    // hash validation pass.
+    let store = restored.extension_management.installation_store_for_test();
+    let installed = store
+        .list_installations()
+        .await
+        .expect("installation readback before upgrade simulation")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "notion")
+        .expect("Notion installation persists");
+    let stale_manifest = store
+        .get_manifest(installed.extension_id())
+        .await
+        .expect("discovered manifest readback before upgrade simulation")
+        .expect("discovered Notion manifest persists");
+    let current_hash = stale_manifest
+        .manifest_hash()
+        .cloned()
+        .expect("current bundled manifest hash");
+    let stale_raw = format!(
+        "{}\n# previous bundled definition\n",
+        stale_manifest.raw_toml()
+    );
+    assert_ne!(stale_raw, stale_manifest.raw_toml());
+    let stale_hash = ManifestHash::new(ironclaw_host_api::approval::sha256_digest_token(
+        stale_raw.as_bytes(),
+    ))
+    .expect("stale manifest hash");
+    let stale_manifest = ExtensionManifestRecord::from_resolved(
+        stale_raw,
+        stale_manifest.manifest().source,
+        stale_manifest.resolved().clone(),
+        Some(stale_hash.clone()),
+    )
+    .expect("stale bundled manifest record");
+    store
+        .upsert_manifest_and_installation(
+            stale_manifest,
+            ExtensionInstallation::new(
+                installed.installation_id().clone(),
+                installed.extension_id().clone(),
+                ExtensionManifestRef::new(installed.extension_id().clone(), Some(stale_hash)),
+                installed.credential_bindings().to_vec(),
+                installed.updated_at(),
+                installed.owner().clone(),
+            )
+            .expect("upgrade simulation installation"),
+        )
+        .await
+        .expect("upgrade simulation persists the stale hash");
+    let upgraded = rebuild_lifecycle_test_services_with_auth_provider(
+        &restored,
+        "bundled-hosted-mcp-oauth-user",
+        Some(Arc::new(
+            HostedMcpRegistrationNetworkEgress::for_server_with_mcp_host(&server, "mcp.notion.com"),
+        )),
+        false,
+        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
+    )
+    .await;
+    let migrated = upgraded
+        .extension_management
+        .installation_store_for_test()
+        .get_manifest(&ExtensionId::new("notion").expect("Notion extension id"))
+        .await
+        .expect("migrated manifest readback")
+        .expect("migrated Notion manifest persists");
+    assert!(
+        migrated
+            .resolved()
+            .mcp
+            .as_ref()
+            .is_some_and(|mcp| mcp.dynamic_input_schemas.is_empty()),
+        "a bundle hash mismatch must retain the current loader contract instead of stale discovery: {migrated:#?}"
+    );
+    assert_eq!(migrated.manifest_hash(), Some(&current_hash));
+    let migrated_installation = upgraded
+        .extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("migrated installation readback")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "notion")
+        .expect("migrated Notion installation persists");
+    assert_eq!(
+        migrated_installation.manifest_ref().manifest_hash(),
+        Some(&current_hash)
+    );
 }
 
 fn mrc_trace_tools() -> Vec<HostedMcpTool> {

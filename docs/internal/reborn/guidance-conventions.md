@@ -171,7 +171,8 @@ toward them, and do not truncate these to hit a number:
 
 - `crates/product/ironclaw_assistant/AGENTS.md` (358) — carries the
   gate-pinned `reborn_services` module-charter map, machine-parsed by
-  `tests/reborn_services_module_charter.rs`, which must not be reflowed;
+  `crates/product/ironclaw_assistant/tests/reborn_services_module_charter.rs`,
+  which must not be reflowed;
   boundary rules and the trigger-thread exception fill the rest.
 - `crates/contracts/ironclaw_product_contracts/AGENTS.md` (267) — the
   four-part admission rule plus the "rulings and known placements" ledger:
@@ -200,10 +201,20 @@ resolves, every rule/skill `paths:` glob matches at least one tracked file,
 every crate appears in its family's table, every crate has a `README.md`, and
 the `CLAUDE.md` alias rule above holds (index mode `120000`, target exactly
 `AGENTS.md`, the two real-file exceptions named in its
-`ALIAS_REAL_FILE_EXCEPTIONS` table). Mark a deliberately historical reference
-with the dated-correction glyph `✎` — which exempts its whole line — or with
+`ALIAS_REAL_FILE_EXCEPTIONS` table). The same reference check covers the
+public docs tree (`docs/**/*.md|.mdx`, including the `zh/` mirror):
+backticked repo paths are verified there, while markdown links are treated
+as Mintlify site routes and skipped. The `docs/internal/` archive is
+excluded as a class, except for the living spec pages named in the gate's
+`INTERNAL_GUIDANCE_PREFIXES` (the contract corpus under
+`docs/internal/reborn/contracts/`, the extension-runtime spec pages, and
+this page), which are scanned as full guidance files — they are never
+published, so their relative links are checked as repo paths too. Mark a
+deliberately historical reference with the dated-correction glyph `✎` —
+which exempts its whole line — or with
 `<!-- check-guidance: path-ok -->` placed immediately after the one reference
-it vouches for; other references on a marked line are still checked. Its
+it vouches for (`{/* check-guidance: path-ok */}` is the equivalent MDX
+comment form); other references on a marked line are still checked. Its
 `KNOWN_MISSING` table is a last resort and shrinks only.
 
 ⚠ **Some guidance is parsed by tests.** Before editing, run

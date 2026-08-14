@@ -96,12 +96,23 @@ start a new run and the operator to inspect checkpoint storage and run-profile
 compatibility.
 
 This contract is pinned by
+`executor_checkpoint_rejection_maps_to_host_authored_terminal_explanation` in
+`crates/loop/ironclaw_turn_runner/src/planned_driver.rs` (a rejected
+checkpoint maps to the bounded host-authored terminal explanation) and by
+`retry_rejects_checkpoint_rejection_without_creating_a_process` in
+`crates/kernel/ironclaw_turns/src/process_projection/tests.rs` (the rejection
+stays terminal after projection into the process journal and cannot create a
+retry process; that selector is also mapped into
+`scripts/reborn-e2e-rust.sh`). The former `loop_driver_host`
+integration-test target and its
 `turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/loop/ironclaw_turn_runner/tests/loop_driver_host.rs`:
+test were deleted in #6696, not moved:
 
 ```bash
-cargo test -p ironclaw_turn_runner --test loop_driver_host \
-  turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work
+cargo test -p ironclaw_turn_runner --lib \
+  executor_checkpoint_rejection_maps_to_host_authored_terminal_explanation
+cargo test -p ironclaw_turns --lib \
+  retry_rejects_checkpoint_rejection_without_creating_a_process
 ```
 
 ---

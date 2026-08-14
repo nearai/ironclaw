@@ -9,7 +9,6 @@ mod support;
 
 use std::num::NonZeroU32;
 
-use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
@@ -45,7 +44,7 @@ async fn iteration_limit_warning_reaches_model_with_tools_and_recovers() {
 }
 
 #[tokio::test]
-async fn no_progress_warning_reaches_model_and_recovers() {
+async fn repeated_call_warning_reaches_model_and_recovers() {
     let repeated = || RebornScriptedReply::tool_call("test_echo", json!({"message": "same"}));
     let harness = RebornIntegrationHarness::test_default()
         .with_no_progress_echo_for_test()
@@ -68,7 +67,7 @@ async fn no_progress_warning_reaches_model_and_recovers() {
         .await
         .expect("recovered reply persisted");
     harness
-        .assert_model_message_content_contains("no progress detected")
+        .assert_model_message_content_contains("repeated capability call detected")
         .await
         .expect("warning reaches the model");
     harness
@@ -78,34 +77,36 @@ async fn no_progress_warning_reaches_model_and_recovers() {
 }
 
 #[tokio::test]
-async fn repeated_no_progress_after_warning_fails_without_extra_capability_turns() {
+async fn repeated_calls_after_warning_remain_advisory() {
     let repeated = || RebornScriptedReply::tool_call("test_echo", json!({"message": "same"}));
     let harness = RebornIntegrationHarness::test_default()
         .with_no_progress_echo_for_test()
-        .script([repeated(), repeated(), repeated(), repeated()])
+        .record_model_calls_for_test()
+        .script([
+            repeated(),
+            repeated(),
+            repeated(),
+            repeated(),
+            RebornScriptedReply::text("finished after another repeated call"),
+        ])
         .build()
         .await
         .expect("harness builds");
 
-    let run_id = harness
-        .submit_turn_async("make progress")
+    harness
+        .submit_turn("make progress")
         .await
-        .expect("turn submitted");
-    let state = harness
-        .wait_for_status(run_id, TurnStatus::Failed)
+        .expect("repeated calls remain non-terminal");
+    harness
+        .assert_reply_contains("finished after another repeated call")
         .await
-        .expect("the repeated warning action reaches the typed failure");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("a failed run carries failure evidence");
-    assert_eq!(
-        failure.category(),
-        "no_progress_detected",
-        "the first repeated no-change action after the warning must terminalize"
-    );
+        .expect("the final reply persists after the repeated calls");
     harness
         .assert_tool_invocation_count("test.echo", 4)
         .await
-        .expect("the warning turn runs once and no fifth capability turn is granted");
+        .expect("the capability still runs after the advisory warning");
+    harness
+        .assert_model_message_content_occurrences("repeated capability call detected", 1)
+        .await
+        .expect("the warning is rendered only once for one uninterrupted streak");
 }

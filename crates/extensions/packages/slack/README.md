@@ -6,8 +6,11 @@ id: `slack`. The family's worked example — the `reborn-extension-surfaces`
 skill walks this manifest section by section.
 
 - **Surfaces:** channel (`messages`: webhook `ChannelIngress`, message
-  `ChannelReply`, message `ChannelDelivery`) + 8 tools
-  (`slack.search_messages`, `slack.send_message`, …) + `[auth.slack]` (oauth2)
+  `ChannelReply`, message `ChannelDelivery`) + 16 tools
+  (`slack.search_messages`, `slack.send_message`, …) + `[auth.slack]`
+  (oauth2). Every tool is a `standard_op` binding: Slack covers all 16 core
+  standard messaging operations, so the host owns their schemas and the
+  manifest `description` is only the Slack addendum
 - **Vendor (credential authority):** `slack`
 - **Runtime:** `wasm` for the tools (`wasm/slack_user_tool.wasm`, source in `wasm-src/`); the channel capabilities are a first-party crate the binary links
 - **Code:** crate `ironclaw_slack_extension` (`src/`: `channel.rs` capabilities, `payload.rs` parsing, `mrkdwn.rs` rendering, delivery/attachments/preference codecs) + `manifest.toml`, `prompts/`, `wasm/`, `wasm-src/`

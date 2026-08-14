@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -149,7 +150,7 @@ class ScrubArtifactsTests(unittest.TestCase):
         )
         if include_marker:
             marker_payload = marker or {
-                "owner": "ironclaw_reborn_composition_bundled_skill",
+                "owner": "ironclaw_composition_bundled_skill",
                 "format": 1,
                 "content_hash": self.bundle_hash("local-test", trusted_skill),
             }
@@ -194,6 +195,47 @@ class ScrubArtifactsTests(unittest.TestCase):
             encoding="utf-8",
         )
         return trusted_root, staged_manifest
+
+    def test_bundled_skill_marker_vocabulary_matches_the_runtime_mint(self) -> None:
+        """The scrubber verifies markers the RUNTIME mints, and the two sides
+        live in different languages: a rename on the Rust side drifts
+        silently. That happened — the WS6/WS7 renames changed
+        BUNDLED_MARKER_OWNER while this script kept the retired "reborn"
+        spelling, every marker failed the owner check, and the bundled-skill
+        pruning never engaged across weeks of canary runs. Pin the owner and
+        the marker filename to the Rust constants so the next rename fails
+        here instead."""
+        rust_source = (
+            ROOT
+            / "crates"
+            / "extensions"
+            / "ironclaw_extension_host"
+            / "src"
+            / "bundled_skills.rs"
+        ).read_text(encoding="utf-8")
+        rust_owner = re.search(
+            r'const BUNDLED_MARKER_OWNER: &str = "([^"]+)";', rust_source
+        )
+        rust_marker_file = re.search(
+            r'const BUNDLED_MARKER_FILE: &str = "([^"]+)";', rust_source
+        )
+        self.assertIsNotNone(
+            rust_owner, "BUNDLED_MARKER_OWNER not found in bundled_skills.rs"
+        )
+        self.assertIsNotNone(
+            rust_marker_file, "BUNDLED_MARKER_FILE not found in bundled_skills.rs"
+        )
+
+        script_source = SCRIPT.read_text(encoding="utf-8")
+        script_owner = re.search(r'\nBUNDLED_SKILL_OWNER="([^"]+)"', script_source)
+        script_marker_file = re.search(
+            r'\nBUNDLED_SKILL_MARKER="([^"]+)"', script_source
+        )
+        self.assertIsNotNone(script_owner)
+        self.assertIsNotNone(script_marker_file)
+
+        self.assertEqual(rust_owner.group(1), script_owner.group(1))
+        self.assertEqual(rust_marker_file.group(1), script_marker_file.group(1))
 
     def test_strict_scrub_redacts_diagnostics_and_preserves_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,11 +446,16 @@ class ScrubArtifactsTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertFalse(bundled.exists())
+            self.assertIn(
+                "scrub: pruned source-identical bundled skill snapshot:",
+                result.stdout,
+            )
 
     def test_strict_scrub_still_scans_marker_less_divergent_skill(self) -> None:
         """A marker-less snapshot that DIVERGES from the source bundle is not
         provably repository content — secret-shaped material in it must still
-        fail the strict lane."""
+        fail the strict lane, and the verdict must name the mismatch so a red
+        lane is diagnosable from the step log alone."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "artifacts"
             root.mkdir()
@@ -427,6 +474,14 @@ class ScrubArtifactsTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertFalse((bundled / "SKILL.md").exists())
+            self.assertIn(
+                "scrub: kept skill snapshot for scanning (not source-identical):",
+                result.stdout,
+            )
+            self.assertIn(
+                "staged bundle content differs from trusted source at SKILL.md",
+                result.stdout + (result.stderr or ""),
+            )
 
     def test_strict_scrub_still_scans_unmanaged_system_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -457,7 +512,7 @@ class ScrubArtifactsTests(unittest.TestCase):
             trusted_root, bundled = self.write_bundled_skill_fixture(
                 root,
                 source_body="api_key: live-secret-value\n",
-                marker='{"owner":"ironclaw_reborn_composition_bundled_skill"',
+                marker='{"owner":"ironclaw_composition_bundled_skill"',
             )
 
             result = self.run_scrub(

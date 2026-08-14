@@ -27,6 +27,9 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "mpim:read",
     "users:read",
     "chat:write",
+    "reactions:read",
+    "reactions:write",
+    "im:write",
 ];
 
 fn github_webhook_normalization_call() -> RebornScriptedReply {

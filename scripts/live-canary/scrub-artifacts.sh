@@ -11,7 +11,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
 NEARAI_MANIFEST_TEMPLATE="${REPO_ROOT}/scripts/live-canary/fixtures/nearai-runtime-manifest.toml"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
-BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
+# Must equal BUNDLED_MARKER_OWNER in
+# crates/extensions/ironclaw_extension_host/src/bundled_skills.rs — the
+# runtime mint this scrubber verifies. The WS6/WS7 crate renames changed
+# the Rust side to "ironclaw_composition_bundled_skill" while this copy
+# kept the retired "reborn" spelling, so EVERY marker failed the owner
+# check and the bundled-skill pruning silently never engaged (the
+# test-side lockstep pin now guards the pair).
+BUNDLED_SKILL_OWNER="ironclaw_composition_bundled_skill"
 
 # The default first-party extensions root hops from the ironclaw_extension_support
 # crate (found by NAME through the shared inventory, scripts/ci/lib/crate_tree.py)
@@ -208,13 +215,20 @@ try:
     if not trusted_files:
         raise ValueError("trusted source is empty")
     if [relative for relative, _ in trusted_files] != [relative for relative, _ in staged_files]:
-        raise ValueError("staged bundle file set differs from trusted source")
-    if not all(
-        files_equal(trusted_path, staged_path)
-        for (_, trusted_path), (_, staged_path) in zip(trusted_files, staged_files)
-    ):
-        raise ValueError("staged bundle content differs from trusted source")
-except (OSError, UnicodeError, ValueError):
+        raise ValueError(
+            "staged bundle file set differs from trusted source: "
+            f"trusted={[relative for relative, _ in trusted_files]} "
+            f"staged={[relative for relative, _ in staged_files]}"
+        )
+    for (relative, trusted_path), (_, staged_path) in zip(trusted_files, staged_files):
+        if not files_equal(trusted_path, staged_path):
+            raise ValueError(
+                f"staged bundle content differs from trusted source at {relative}"
+            )
+except (OSError, UnicodeError, ValueError) as error:
+    # The verdict reason feeds the step log via the caller's narration —
+    # file names and relative paths only, never file content.
+    print(f"scrub: {error}", file=sys.stderr)
     sys.exit(1)
 PY
 }
@@ -253,7 +267,10 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
       "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
       "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
         if is_verified_bundled_skill "${marker}" "${skill_dir}"; then
+          echo "scrub: pruned marker-verified bundled skill snapshot: ${skill_dir}"
           rm -rf -- "${skill_dir}"
+        else
+          echo "scrub: kept skill snapshot for scanning (marker failed verification): ${skill_dir}"
         fi
         ;;
     esac
@@ -283,7 +300,11 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
           continue
         fi
         if is_source_identical_bundled_skill "${skill_dir}"; then
+          echo "scrub: pruned source-identical bundled skill snapshot: ${skill_dir}"
           rm -rf -- "${skill_dir}"
+        else
+          # The python verdict above printed the exact mismatch reason.
+          echo "scrub: kept skill snapshot for scanning (not source-identical): ${skill_dir}"
         fi
         ;;
     esac
