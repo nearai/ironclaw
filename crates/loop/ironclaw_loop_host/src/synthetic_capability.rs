@@ -381,7 +381,10 @@ impl SyntheticCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for SyntheticCapabilityPort {
     fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
-        self.inner.requires_ordered_batch_invocation(invocations)
+        invocations.iter().any(|invocation| {
+            self.capabilities_by_id
+                .contains_key(&invocation.capability_id)
+        }) || self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -794,6 +797,28 @@ mod tests {
             .await
             .expect("visible surface");
         port
+    }
+
+    #[tokio::test]
+    async fn synthetic_batch_requires_host_batch_entry() {
+        let port = synthetic_port().await;
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("synthetic provider call registers");
+        let synthetic_invocation = LoopRequest {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        };
+
+        assert!(
+            port.requires_ordered_batch_invocation(&[synthetic_invocation]),
+            "synthetic handlers must retain the decorator's sequential batch contract"
+        );
     }
 
     fn replay_payload_filesystem()
