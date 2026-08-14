@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import { cn } from "../utils/cn";
 import { Icon } from "./icons";
+import type { DataAttributes } from "./types";
 
 type OpenSelectMenuEntry = {
   close: () => void;
@@ -53,10 +54,6 @@ export type SelectMenuOption = {
   label?: string;
   tone?: SelectMenuTone;
   value: string;
-};
-
-type DataAttributes = {
-  [key: `data-${string}`]: string | number | boolean | undefined;
 };
 
 type SelectMenuRootProps = Pick<

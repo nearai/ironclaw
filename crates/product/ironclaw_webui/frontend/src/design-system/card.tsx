@@ -26,6 +26,7 @@ import type {
 } from "react";
 
 import { cn } from "../utils/cn";
+import type { DataAttributes } from "./types";
 
 /* ─── Variant ─────────────────────────────────────────────────────── */
 // --v2-card-bg     : solid panel surface
@@ -58,10 +59,6 @@ const PADDINGS = {
   sm:   "p-4",
   md:   "p-5",
   lg:   "p-5 md:p-7",
-};
-
-type DataAttributes = {
-  [key: `data-${string}`]: string | number | boolean | undefined;
 };
 
 type CardOwnProps<T extends ElementType> = {

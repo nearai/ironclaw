@@ -7,7 +7,8 @@ import { sourceTextForVmTest } from "../../test-support/vm-module-harness";
 
 function evaluate(source, exportNames) {
   const context = { globalThis: {} };
-  vm.runInNewContext(sourceTextForVmTest(source, exportNames), context);
+  const script = new vm.Script(sourceTextForVmTest(source, exportNames));
+  script.runInNewContext(context);
   return context.globalThis.__testExports;
 }
 

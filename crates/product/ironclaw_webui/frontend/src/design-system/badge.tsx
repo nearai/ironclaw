@@ -14,6 +14,7 @@
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 
 import { cn } from "../utils/cn";
+import type { DataAttributes } from "./types";
 
 /* ── Tone maps ────────────────────────────────────────────────────────── */
 
@@ -41,10 +42,6 @@ const toneClasses = {
 const sizeClasses = {
   sm: "h-6 gap-1.5 rounded-full px-2 text-[0.625rem] tracking-[0.12em]",
   md: "h-7 gap-2 rounded-full px-2.5 text-[0.6875rem] tracking-[0.12em]",
-};
-
-type DataAttributes = {
-  [key: `data-${string}`]: string | number | boolean | undefined;
 };
 
 export type BadgeTone = keyof typeof toneClasses;
