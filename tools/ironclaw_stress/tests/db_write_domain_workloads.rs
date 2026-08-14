@@ -1180,7 +1180,10 @@ where
         ));
     }
     let expected_next_sequence = preview_message.sequence.checked_add(1).ok_or_else(|| {
-        WorkloadFailure::message("read capability preview lookup", "message sequence overflow")
+        WorkloadFailure::message(
+            "read capability preview lookup",
+            "message sequence overflow",
+        )
     })?;
     let after_preview = fixture
         .service
@@ -1204,7 +1207,6 @@ where
             ),
         ));
     }
-
 
     let listed = fixture
         .service
