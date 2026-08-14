@@ -290,6 +290,10 @@ name = "reborn_integration_subagent_await_edge"
 path = "tests/integration/subagent_await_edge.rs"
 
 [[test]]
+name = "reborn_integration_unbound_turns"
+path = "tests/integration/unbound_turns.rs"
+
+[[test]]
 name = "reborn_integration_auth_failure"
 path = "tests/integration/auth/auth_failure.rs"
 

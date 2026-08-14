@@ -1,7 +1,7 @@
 //! Canonical parts-list message vocabulary (`AgentMessage`).
 //!
 //! `AgentMessage` is the canonical cleanup of this crate's provider-facing
-//! `ChatMessage` shape (docs/internal/design/2026-08-12-detached-turns.md
+//! `ChatMessage` shape (docs/internal/design/2026-08-12-unbound-turns.md
 //! §4.4): a pure parts list, where `ChatMessage` carries a `content` string
 //! plus a `content_parts` overlay, flat tool-call/result side fields, and
 //! `reasoning`/`reasoning_details` side fields. It is used in exactly two

@@ -1,11 +1,39 @@
-# Proposal: detached turns — threads as the unit of work
+# Proposal: unbound turns — threads as the unit of work
 
-**Status:** Discussion draft
+**Status:** Implemented (see the implementation deltas below)
 **Grounded in:** `main` @ `d4fa8e1f60`
 **Companion:** [2026-08-12-one-engine-many-surfaces.md](2026-08-12-one-engine-many-surfaces.md)
 — the system-level picture: how every surface (channels, WebUI, automations,
 suggestions, OpenAI-compat) reaches the one coordinator and handles its
 output.
+
+## Implementation deltas (what actually shipped)
+
+The lane shipped end-state-first; where this draft described a staged or
+compat-preserving shape, the implementation went directly to the final
+contract:
+
+- **Naming**: "detached" became **unbound** (threads/profiles/families/
+  concurrency class) and the accept door is **`accept_prepared_context`**
+  over a **`PreparedContextRequest`** with **`PreparedTurnDeclarations`**;
+  the result tool is **`builtin.structured_result`**.
+- **Binding refs were deleted, not optionalized**: `SubmitTurnRequest`,
+  `ResumeTurnRequest`, `RetryTurnRequest`, `TurnRunState`, run metadata, and
+  `SubmitTurnResponse::Accepted` carry no `source_binding_ref` /
+  `reply_target_binding_ref` at all. Reply routing lives purely in
+  product-side conversation state (the run-delivery observer routes from the
+  conversation binding it resolves; the model-delivery same-origin check asks
+  the conversation-binding store which thread a sealed reply-target ref is
+  bound to). Old persisted rows still rehydrate (serde ignores the retired
+  keys); a frozen legacy-shape test proves old readers fail closed on new
+  rows.
+- **Admission derives the profile by probing the thread's journaled
+  prepared-context record** (`PreparedContextSource`), not from a
+  caller-supplied profile hint; an explicit unbound hint without a prepared
+  record is rejected.
+- **Subagent spawn** lands directly on the shared accept door; its synthetic
+  per-child binding refs, `mark_message_submitted` step, and await-edge ref
+  plumbing were deleted in the same change.
 
 ## Summary
 
@@ -32,14 +60,14 @@ keeps exactly one submission method, `submit_turn`, and its binding refs
 become `Option`** — a conversation submission passes `Some` (today's values,
 unchanged); everything else passes `None`. The thread is the required unit
 of work; the binding is the optional relation that makes it a conversation.
-Detached callers get a sibling of `accept_user_message` on the accept side:
-**`accept_detached_context`** mints an **unbound, ownerless thread**, seeds
+Unbound callers get a sibling of `accept_user_message` on the accept side:
+**`accept_prepared_context`** mints an **unbound, ownerless thread**, seeds
 the caller's content (system prompt + messages) as its rows, journals the
 per-run declarations (tools, output contract, limits) beside it, and returns
 the thread + accepted ref — which then go through the *same* `submit_turn`
 as every conversation. Per-request data rides the accept step (exactly where
 conversations put theirs); coordinates ride the submit. No second submit
-method, no request enum, no new port, no new event vocabulary: a **detached
+method, no request enum, no new port, no new event vocabulary: a **unbound
 turn** is simply a run whose thread has no binding and no owner —
 structurally invisible to every conversation surface, because those query by
 owner and binding. (Bonus: subagent spawn stops synthesizing placeholder
@@ -210,7 +238,7 @@ flowchart TB
 
     SuggWf --> PREP
     CompatWf --> PREP
-    PREP["accept_detached_context (NEW, threads tier) — <br/>mint unbound, ownerless thread · seed content rows · <br/>journal declarations (tools · output · limits) → thread + ref"]
+    PREP["accept_prepared_context (NEW, threads tier) — <br/>mint unbound, ownerless thread · seed content rows · <br/>journal declarations (tools · output · limits) → thread + ref"]
 
     Conv -->|"submit_turn — bindings: Some (today's values)"| AE
     PREP -->|"submit_turn — bindings: None"| AE
@@ -226,7 +254,7 @@ flowchart TB
     RT -->|"events + terminal result"| Out["Per-workflow output handling: <br/>conversation → channel reply (manifest-driven) / WebUI stream · <br/>suggestions → validate + store cards · <br/>OpenAI-compat → SSE or final HTTP response"]
 ```
 
-There is one submission path, full stop: detached content becomes an
+There is one submission path, full stop: unbound content becomes an
 unbound, ownerless thread at the accept step, and from `submit_turn` onward
 the two idioms are indistinguishable — same admission, same runtime, same
 materialization. Each workflow interprets the same run output
@@ -241,7 +269,7 @@ honestly, the genuinely new API is one method and a handful of DTOs:
 
 | Class | Types | What they are |
 |---|---|---|
-| **New API** (one accept door + its DTOs) | `accept_detached_context` (threads tier, sibling of `accept_user_message`); `DetachedContextRequest`, `OutputContract`, `TurnRunResult`, `AgentOutput`, `TurnLimits`; plus binding refs on `SubmitTurnRequest`/`ResumeTurnRequest` becoming `Option` | The only truly new contract surface — no new submit method, no new trait, no new identity, no request enum; submission and response stay `submit_turn` → `SubmitTurnResponse` |
+| **New API** (one accept door + its DTOs) | `accept_prepared_context` (threads tier, sibling of `accept_user_message`); `PreparedContextRequest`, `OutputContract`, `TurnRunResult`, `AgentOutput`, `TurnLimits`; plus binding refs on `SubmitTurnRequest`/`ResumeTurnRequest` becoming `Option` | The only truly new contract surface — no new submit method, no new trait, no new identity, no request enum; submission and response stay `submit_turn` → `SubmitTurnResponse` |
 | **Extension of an existing family** | `AgentMessage`, `AgentMessageRole`, `ContentPart`, `ToolCallContent`, `ToolResultContent`, `ArtifactRef` (§4.4) | The canonical cleanup of `ironclaw_llm`'s existing `ChatMessage` vocabulary, defined in that crate — not a new message family |
 | **Read-side views over existing machinery** | `RunEventView`, `RunLiveHint`, `RunStreamItem`, `RunObservationCursor` (§4.7) | Per-run projections of the *existing* durable vocabularies (turn lifecycle + runtime events) and the *existing* live-hint plane; `RunStreamItem` mirrors `ironclaw_event_streams`' stream-item vocabulary. No new durable event language exists |
 | **Referenced, unchanged** | `CapabilityActivityView`, gate refs, run profiles, `ThreadId`/`AcceptedMessageRef`, everything in the runtime | Existing types the expansion consumes as-is |
@@ -259,11 +287,11 @@ pub struct SubmitTurnRequest {
     /// The run acts as this user (run-acts-as-invoker).
     pub actor: TurnActor,
     /// The accepted content pin — from accept_user_message (conversations)
-    /// or accept_detached_context (detached work). Same field either way.
+    /// or accept_prepared_context (unbound work). Same field either way.
     pub accepted_message_ref: AcceptedMessageRef,
 
     /// A conversation is a thread WITH a binding: `Some` on conversation
-    /// submissions (today's values, unchanged), `None` for detached turns —
+    /// submissions (today's values, unchanged), `None` for unbound turns —
     /// and for subagent spawns, which today synthesize placeholder refs
     /// ("subagent-source:{run_id}") only because these are required.
     pub source_binding_ref: Option<SourceBindingRef>,
@@ -277,7 +305,7 @@ pub struct SubmitTurnRequest {
 ```
 
 - `ResumeTurnRequest` carries the same two refs and optionalizes with it
-  (a detached run resuming from an external-tool gate passes `None`).
+  (a unbound run resuming from an external-tool gate passes `None`).
 - The engine's posture toward the refs is unchanged: opaque pass-through,
   never parsed (boundary rule 3 in the companion doc). `None` simply means
   there is nothing to hand the delivery layer — which is correct: no
@@ -294,19 +322,19 @@ pub struct SubmitTurnRequest {
 | `submit_turn` | **the one submission method, for everyone** — signature unchanged; binding refs become `Option` (conversations pass `Some` with today's values) |
 | `prepare_turn` / `get_run_state` / `cancel_run` / `resume_turn` / `retry_turn` / `submit_child_run` | unchanged (`resume_turn`'s binding refs optionalize alongside; `submit_child_run` stops faking refs) |
 | rich per-run `subscribe` | deliberately **not** on this trait — it composes product-tier projections, which a kernel trait must not depend on; it ships as a separate observation façade (§4.7). Today's equivalent is 250 ms polling of `get_run_state` |
-| per-run declarations (`system_prompt`, `tools`, `output`, `limits`) | never on the submit at all — they ride `accept_detached_context` (§4.2), exactly where conversations put *their* per-request data (`accept_user_message`) |
+| per-run declarations (`system_prompt`, `tools`, `output`, `limits`) | never on the submit at all — they ride `accept_prepared_context` (§4.2), exactly where conversations put *their* per-request data (`accept_user_message`) |
 
-### 4.2 The detached accept — one shared door
+### 4.2 The unbound accept — one shared door
 
 ```rust
 /// The ONE shared accept door for every non-channel caller — subagent
-/// spawn, OpenAI-compat, suggestions, and every future detached feature.
+/// spawn, OpenAI-compat, suggestions, and every future unbound feature.
 /// One implementation, threads tier: the sibling of accept_user_message.
 /// That method accepts one user message into a bound conversation; this
 /// one accepts a complete caller-authored context into a fresh unbound
 /// thread. There are exactly two accept doors in the system, and each has
 /// exactly one implementation.
-pub struct DetachedContextRequest {
+pub struct PreparedContextRequest {
     /// WHO — house style, mirroring every accept/submit request.
     pub tenant_id: TenantId,
     pub agent_id: Option<AgentId>,
@@ -324,7 +352,7 @@ pub struct DetachedContextRequest {
     pub messages: Vec<AgentMessage>,
 
     /// Per-run declarations, journaled beside the seeded content and read
-    /// at admission to derive the detached profile. All defaultable —
+    /// at admission to derive the unbound profile. All defaultable —
     /// subagent spawn passes none of them.
     /// A selection, never authority (I3): validated as a subset of the
     /// profile surface, authorized per-call at action time. Empty = none.
@@ -342,7 +370,7 @@ pub struct DetachedContextRequest {
     pub idempotency_key: IdempotencyKey,
 }
 
-pub struct AcceptedDetachedContext {
+pub struct AcceptedUnboundContext {
     /// Held transiently by the trusted workflow to build the TurnScope for
     /// submit — never exposed to untrusted surfaces (ProductSurface
     /// payloads cannot carry or name it), and unbound + ownerless, so no
@@ -365,20 +393,20 @@ hand-rolls the same sequence today (`ensure_thread` +
 `accept_inbound_message` with synthetic event and binding ids) — it
 refactors onto the shared helper, and the synthetic ids retire. Channels
 and conversations keep their own accept door (binding resolution +
-`accept_user_message`), which owns the concerns detached work doesn't have:
+`accept_user_message`), which owns the concerns unbound work doesn't have:
 external-event idempotency, busy → steering settlement, reply targets.
 
 **There is no request enum and no second submit method.** Earlier drafts
-carried a `Thread | Snapshot` context enum, then a `submit_detached_turn`
+carried a `Thread | Snapshot` context enum, then a `submit_unbound_turn`
 sibling; both dissolve, because per-request data was never submit's job.
-Conversations put their per-request data in `accept_user_message`; detached
-callers put theirs in `accept_detached_context`; **submit carries
+Conversations put their per-request data in `accept_user_message`; unbound
+callers put theirs in `accept_prepared_context`; **submit carries
 coordinates, for everyone**. The load-bearing distinction stands unchanged
 underneath: a conversation's context is a *reference* the host keeps
 materializing (steering, compaction, rebuild-on-resume — I1, I2); a
-detached turn's content is supplied once and nothing mutates it. Beneath
+unbound turn's content is supplied once and nothing mutates it. Beneath
 both accept doors there is one kind of thing — a thread — and one runtime.
-(Continuation-style detached callers need nothing new: accept more content
+(Continuation-style unbound callers need nothing new: accept more content
 onto the same unbound thread and submit again — structurally identical to
 a conversation's next turn, minus the binding.)
 
@@ -401,7 +429,7 @@ deriving and *mutating* it for the whole life of the run.
 | Full history serialized per turn | O(n²) journal growth per thread under never-delete; turn state is refs-only by rule. | `ironclaw_turns` guidance ("lifecycle metadata and references only") |
 | Tool results re-rendered by product code | Replayed tool results pass a host-side redaction/validation contract before becoming model-visible; product-tier materialization would duplicate security-critical code. | safe summaries + validated model-visible observations |
 
-A detached turn is precisely the case where none of this dynamism is
+A unbound turn is precisely the case where none of this dynamism is
 wanted — which is why the caller may supply content there, and only there.
 The method split marks the one real boundary (*who materializes*: engine, and it may keep
 mutating; vs. caller, and it is sealed); everything after submit — admission,
@@ -415,7 +443,7 @@ exactly the way accepted conversation messages land today (content refs
 into the transcript/content store — I5), seeds the messages as the thread's
 rows, journals the declarations beside them, and returns the pin. The
 workflow then calls the one `submit_turn` with `None` bindings. The
-detached run's transcript *is* its thread, written by the same lease-fenced
+unbound run's transcript *is* its thread, written by the same lease-fenced
 machinery as every other run. Unbound + ownerless makes it structurally
 invisible: conversation listings query by owner scope, and a follow-up has
 no binding to route through. This is the pattern subagent child runs
@@ -424,9 +452,9 @@ hand-rolled per caller.
 
 **Profiles are derived, not requested.** Every run resolves a
 `ResolvedRunProfile` at submit (I4), and admission derives it from what the
-accepted ref points at: a detached-prepared context resolves the new
-detached profiles (`detached_structured` when the journaled `output` is a
-JSON schema, `detached_default` otherwise — read from the declarations the
+accepted ref points at: a unbound-prepared context resolves the new
+unbound profiles (`unbound_structured` when the journaled `output` is a
+JSON schema, `unbound_default` otherwise — read from the declarations the
 helper stored); a conversation ref resolves exactly as today (`None` → the
 planned default; trigger fires forced onto the deny-mapped
 scheduled-trigger profile; subagent spawns forced onto the subagent
@@ -439,7 +467,7 @@ validated as a subset of the profile surface and every call is still
 authorized at action time; `limits` narrow profile ceilings, never widen
 them; the model preference stays on submit as today's `requested_model`
 layering (preference in, host validates fail-closed, fallback retained).
-And because the declaration fields exist only on the detached accept, a
+And because the declaration fields exist only on the unbound accept, a
 conversation cannot name tools or declare a schema output *by
 construction* — `accept_user_message` has no such fields, and the submit
 never carries any.
@@ -454,12 +482,12 @@ idioms:
   three-stage chain; the result reports the *effective* model.
 - **Run profile policy** (I4). Two new built-in profiles ship with this
   proposal, derived from the request as described above:
-  - `detached_default` — snapshot context source; no memory lane; no skill
+  - `unbound_default` — snapshot context source; no memory lane; no skill
     injection; steering disabled; subagent spawn denied; non-gating surface.
-  - `detached_structured` — `detached_default` plus structured-output reply
+  - `unbound_structured` — `unbound_default` plus structured-output reply
     admission (§4.5).
 - **Materialization** (I1). There is exactly **one materialization path** —
-  the existing thread-backed context port — for both idioms: a detached
+  the existing thread-backed context port — for both idioms: a unbound
   turn materializes from its own seeded thread. The canonical loop,
   compaction, checkpoints, recovery, and `LoopPromptBundleAuthority` apply
   unchanged and unforked. (Per-iteration re-materialization over a thread
@@ -490,8 +518,8 @@ pub enum AgentOutput {
 
 ### 4.4 The `AgentMessage` interface
 
-`AgentMessage` is the message vocabulary of the detached lane, used in
-exactly two places: the detached accept (§4.2) and the terminal
+`AgentMessage` is the message vocabulary of the unbound lane, used in
+exactly two places: the unbound accept (§4.2) and the terminal
 `AgentOutput::AssistantMessage` (§4.3). One vocabulary, both directions.
 Conversation submissions never carry messages across the trait at all — thread
 history stays host-side (I1).
@@ -558,7 +586,7 @@ provider-facing shapes. Provider adapters keep their wire types; nothing else
 in the workspace defines a message type (the mirror-DTO ban applies).
 
 **No `System` role, by construction.** The system prompt is a separate,
-host-composed field on the detached request (§4.2); a role that could smuggle
+host-composed field on the unbound request (§4.2); a role that could smuggle
 system-prompt content through the message list deliberately does not exist.
 
 **Role × part validity** — enforced fail-closed at submission
@@ -595,7 +623,7 @@ at submission, and `BoundedJson` bounds tool arguments. Values mirror the
 bounds the transcript/content layer enforces today — no new size behavior at
 the boundary.
 
-**Detached input vs. thread history.** Detached callers author these messages
+**Unbound input vs. thread history.** Unbound callers author these messages
 directly. Thread-context history never becomes caller-visible
 `AgentMessage`s: it is materialized host-side, where replayed tool results
 remain subject to the transcript safety contract (safe summaries plus
@@ -647,7 +675,7 @@ pub enum OutputContract {
 
 ### 4.6 Gates: explicit policy
 
-Detached profiles expose **non-gating surfaces**: capabilities whose policy
+Unbound profiles expose **non-gating surfaces**: capabilities whose policy
 can require approval or auth are absent from the visible surface (the same
 hide-vs-expose shaping surfaces already implement). If an approval, auth,
 or resource gate fires anyway — policy drift, auth expiry mid-run — the run
@@ -659,7 +687,7 @@ a human-approval gate — its resolver is the submitting client itself
 (OpenAI-compat's client-executed tools park the run on it; the client posts
 the tool output and the run resumes via `resume_turn` with `None`
 bindings, exactly as that flow works today). `AwaitDependentRun` is
-unreachable on detached profiles by construction (subagent spawn is
+unreachable on unbound profiles by construction (subagent spawn is
 denied).
 
 The durable event vocabulary still includes `Blocked`/`Resumed` so the journal
@@ -757,7 +785,7 @@ submissions).
 ### 4.8 Implementation sketch
 
 ```python
-def accept_detached_context(request):
+def accept_prepared_context(request):
     # THE ONE SHARED HELPER — one implementation, threads tier. Every
     # non-channel caller uses it: subagent spawn (refactors onto it,
     # retiring its hand-rolled ensure_thread + accept_inbound_message +
@@ -776,7 +804,7 @@ def accept_detached_context(request):
     # JOURNAL: the declarations, beside the content, read at admission.
     threads.journal_declarations(thread_id, request.tools, request.output, request.limits)
 
-    return AcceptedDetachedContext(thread_id, ref)
+    return AcceptedUnboundContext(thread_id, ref)
 
 # The workflow then calls the ONE submit — literally today's method:
 #   submit_turn(SubmitTurnRequest {
@@ -787,7 +815,7 @@ def accept_detached_context(request):
 #   })
 # Admission resolves the profile from what the ref points at:
 #   conversation ref → conversation profiles, exactly as today;
-#   detached-prepared ref → detached_{structured|default} from the
+#   unbound-prepared ref → unbound_{structured|default} from the
 #   journaled declarations.
 # execute_claimed: UNCHANGED — one host, one thread-backed materialization
 # path, for every run on the system.
@@ -806,19 +834,19 @@ Nothing is replaced.
 | Responsibility | Owner (unchanged) | This proposal adds |
 |---|---|---|
 | Durable admission, dedup, queueing | process journal + coordinator machinery | binding refs become `Option` on `Submit`/`ResumeTurnRequest`; profile derivation reads prepared declarations |
-| Content acceptance | conversation accept door (bindings + `accept_user_message`) | **one shared detached accept door** (`accept_detached_context`, threads tier) used by every non-channel caller — subagent spawn refactors onto it |
+| Content acceptance | conversation accept door (bindings + `accept_user_message`) | **one shared unbound accept door** (`accept_prepared_context`, threads tier) used by every non-channel caller — subagent spawn refactors onto it |
 | Scheduling, leases, crash recovery | `ProcessSupervisor` / scheduler | a run class with its own scheduling/concurrency class |
-| Model/tool loop, checkpoints, recovery, materialization | canonical loop + loop families + the one thread-backed context port | `detached_*` profiles; a schema-validating reply-admission strategy — the materialization path is unchanged and unforked |
+| Model/tool loop, checkpoints, recovery, materialization | canonical loop + loop families + the one thread-backed context port | `unbound_*` profiles; a schema-validating reply-admission strategy — the materialization path is unchanged and unforked |
 | Capability authorization, approvals | `CapabilityHost` + approvals | nothing — action-time auth applies as-is |
 | Durable events, projections, streams | events crates + product projections | a run-scoped observation façade over both planes |
 | Threads, conversation binding, steering | threads/conversations/turn services | nothing — machinery, semantics, and entry point all unchanged; conversations already call the trait being expanded |
 
-**What is genuinely new** (complete list): `accept_detached_context` — one
+**What is genuinely new** (complete list): `accept_prepared_context` — one
 shared implementation for every non-channel caller — with its request DTO
 and journaled declarations record; binding refs on
 `SubmitTurnRequest`/`ResumeTurnRequest` becoming `Option` (and subagent
 spawn's synthetic placeholder refs retiring);
-the `detached_default`/`detached_structured` run profiles; `OutputContract` +
+the `unbound_default`/`unbound_structured` run profiles; `OutputContract` +
 the reply-admission strategy enforcing it; the run observation
 façade (cursor + subscription); the typed `GateNotSupported` failure; and
 the codified taxonomy rule — *a conversation is a thread with a binding* —
@@ -835,7 +863,7 @@ listings.
 3. **Subagent spawn refactor onto the shared helper** — its own PR right
    behind this one (live-path change, wants its own revert unit): replace
    the hand-rolled `ensure_thread` + `accept_inbound_message` + synthetic
-   ids with `accept_detached_context` + `None` bindings on
+   ids with `accept_prepared_context` + `None` bindings on
    `submit_child_run`.
 4. **Full `SubmitTurnRequest` slimming** (optional future hygiene): with
    the refs already `Option`, the remaining step is moving conversation
@@ -856,7 +884,7 @@ two binding refs in `Some(...)`.
 ```python
 def generate_suggestions(surface_caller, suggestion_request):
     # Step 1 — the shared accept door (same helper subagents/OpenAI use).
-    prepared = detached_context.accept(DetachedContextRequest(
+    prepared = unbound_context.accept(PreparedContextRequest(
         tenant_id=surface_caller.tenant_id,
         agent_id=surface_caller.agent_id,
         project_id=surface_caller.project_id,
@@ -899,7 +927,7 @@ never prompts, tools, or authority.
 
 ```python
 def chat_completion(api_caller, openai_request):
-    prepared = detached_context.accept(DetachedContextRequest(
+    prepared = unbound_context.accept(PreparedContextRequest(
         tenant_id=api_caller.tenant_id,
         agent_id=api_caller.agent_id,
         project_id=api_caller.project_id,
@@ -940,20 +968,20 @@ any new feature shipping.
   slimming follow-up (§5), which changes where routing refs live, not what
   happens.
 - No durable text deltas; no new retention semantics ("LLM data is never
-  deleted" applies to detached turns' threads as to everything else — which is
+  deleted" applies to unbound turns' threads as to everything else — which is
   exactly why they store refs, not copies).
-- No gate-resolution surface for detached turns (typed failure instead).
-- No subagent spawn from detached turns (denied by profile).
+- No gate-resolution surface for unbound turns (typed failure instead).
+- No subagent spawn from unbound turns (denied by profile).
 
 ## 7. Crate placement (proposal — needs architecture review)
 
 | Piece | Home | Rationale |
 |---|---|---|
-| `accept_detached_context` + `DetachedContextRequest` (one shared impl) | `ironclaw_threads` — the sibling of `accept_inbound_message` | one accept door, one implementation, every non-channel caller |
+| `accept_prepared_context` + `PreparedContextRequest` (one shared impl) | `ironclaw_threads` — the sibling of `accept_inbound_message` | one accept door, one implementation, every non-channel caller |
 | Binding-ref optionalization + declaration-driven profile derivation | `ironclaw_host_api` / `ironclaw_turns` | request-family change on existing types; admission reads the prepared declarations via a port |
 | `RunObservation` façade + view DTOs | product tier (`ironclaw_assistant` projection family) | composes projections; must not live in the kernel |
 | Neutral message/content extensions | `ironclaw_llm` | owns provider-neutral model vocabulary; no mirror DTOs |
-| `OutputContract` enforcement (reply admission) | `ironclaw_agent_loop` strategy + `detached_*` families | reuses the existing retry/repair machinery; schema is carried in-request |
+| `OutputContract` enforcement (reply admission) | `ironclaw_agent_loop` strategy + `unbound_*` families | reuses the existing retry/repair machinery; schema is carried in-request |
 | Suggestions (when real) and other workflows | `ironclaw_assistant` | product orchestration |
 | Wiring | `ironclaw_composition` | assembly only |
 
@@ -966,7 +994,7 @@ convention.
 | State | Owner |
 |---|---|
 | Conversation transcript and continuity | Thread store, via its binding (unchanged) |
-| Detached turn transcript (seeded request + run output) | Its own unbound, ownerless thread — the same thread store as every run |
+| Unbound turn transcript (seeded request + run output) | Its own unbound, ownerless thread — the same thread store as every run |
 | Run lifecycle, resolved profile, idempotency, result settlement | Process journal (unchanged — as every run today) |
 | Artifact bytes and authorization | Artifact/filesystem store (unchanged) |
 | Output schema | The execution request (journaled with it) |
@@ -979,10 +1007,10 @@ convention.
 
 - **One submit; optional bindings; one shared accept door.** The design
   passed through three spellings — an `AgentExecution` port with a
-  `Thread | Snapshot` request enum, then a `submit_detached_turn` sibling
+  `Thread | Snapshot` request enum, then a `submit_unbound_turn` sibling
   method — before landing here: per-request data was never submit's job.
-  Conversations put theirs in `accept_user_message`; detached callers put
-  theirs in the one shared `accept_detached_context` (threads tier, single
+  Conversations put theirs in `accept_user_message`; unbound callers put
+  theirs in the one shared `accept_prepared_context` (threads tier, single
   implementation, used by subagent spawn, OpenAI-compat, suggestions, and
   every future non-channel caller); **`submit_turn` carries coordinates,
   for everyone**, with its binding refs now `Option` — the request type
@@ -995,7 +1023,7 @@ convention.
   fields.
 
 - **Threads are the unit of work; a conversation is a thread with a
-  binding.** Detached turns are runs on **unbound, ownerless threads**
+  binding.** Unbound turns are runs on **unbound, ownerless threads**
   minted by the coordinator at admission; the thread id stays internal
   (the run id is the caller's handle). Each consequence replaces an
   earlier design element: there is **no snapshot-backed context port** (one
@@ -1011,12 +1039,12 @@ convention.
   stores its schemas is that feature's decision when it ships.
 - **Validation is strict-only.** The tolerant (`strict: false`) mode is cut.
 - **No new `ProcessKind`** *(supersedes an earlier resolution that added
-  one)*. A detached turn is an ordinary `AgentTurn` process — same kind,
+  one)*. A unbound turn is an ordinary `AgentTurn` process — same kind,
   same projection, same executor; from `submit_turn` onward the idioms are
   indistinguishable, so a separate kind would be exactly the fork this
   design forbids. Rolling compatibility reframes onto what actually
   changes: rows whose binding refs are `None` and whose profile id is a
-  `detached_*` value, with one tolerance test proving an old-style reader
+  `unbound_*` value, with one tolerance test proving an old-style reader
   treats them fail-closed. The kind-enum legacy audit decouples into
   optional hygiene.
 - **`TurnLimits` maps onto the existing budget machinery** (iteration
@@ -1026,7 +1054,7 @@ convention.
 - **Crate placement as tabled in §7**, finalized in PR review.
 - **Message bounds mirror today's transcript/content bounds** (§4.4) — no
   new size behavior at the seam.
-- **No per-tool crash-replay declaration.** Detached turns inherit the
+- **No per-tool crash-replay declaration.** Unbound turns inherit the
   standard recovery semantics conversation runs already have (bounded
   reclaims, checkpoint resume, invocation fingerprinting) — behavior stays
   exactly as it is now.
@@ -1037,13 +1065,13 @@ convention.
    single schema-validated completion, it can ship on `SystemInferencePort`
    and adopt the method when it needs the loop. The first committed
    adopter may be OpenAI-compat rather than suggestions.
-2. **Detached concurrency cap:** the shared worker pool already enforces
+2. **Unbound concurrency cap:** the shared worker pool already enforces
    per-class concurrency limits from config (`max_concurrent_trigger_runs`,
-   `max_concurrent_conversation_runs`); detached turns get a third cap
+   `max_concurrent_conversation_runs`); unbound turns get a third cap
    the same way so a burst of them cannot occupy every worker and delay live
-   chats. Open: the default value, and whether interactive detached callers
+   chats. Open: the default value, and whether interactive unbound callers
    (a user waiting on a panel) ever need a priority path — deferred until
    there is latency data.
 3. **Gate-resolve affordance:** a design sketch for the future revision that
-   allows gating tools on detached turns (actor model, rendering
+   allows gating tools on unbound turns (actor model, rendering
    surface, lease semantics) — deliberately unresolved here.
