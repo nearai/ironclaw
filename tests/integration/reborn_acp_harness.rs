@@ -65,10 +65,14 @@ async fn host_placement_reuses_session_and_auto_approves_permissions() {
         .await
         .expect("harness builds");
 
-    harness
+    let first_run = harness
         .submit_turn("first")
         .await
         .expect("first turn completes");
+    harness
+        .assert_streamed_model_text(first_run, &["fake ACP ", "fake ACP reply 1"])
+        .await
+        .expect("ACP chunks stream as cumulative model text");
     harness
         .assert_reply_contains("fake ACP reply 1")
         .await

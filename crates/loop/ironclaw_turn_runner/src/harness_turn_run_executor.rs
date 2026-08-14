@@ -21,10 +21,14 @@ use ironclaw_host_api::failure::categories::{
 };
 use ironclaw_loop_contracts::{
     AssistantReply, FinalizeAssistantMessage, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopRunInfoPort as _,
+    sanitize_model_visible_text,
 };
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{MessageKind, SessionThreadService, ThreadMessageId, ThreadScope};
-use ironclaw_turns::{SanitizedFailure, TurnError, runner::ClaimedTurnRun};
+use ironclaw_turns::{
+    SanitizedFailure, TurnError, loop_exit::LoopExitApplier, runner::ClaimedTurnRun,
+};
 use tracing::debug;
 
 use crate::{
@@ -69,6 +73,8 @@ pub struct HarnessTurnRunExecutor {
     host_factory: Arc<dyn HostFactory>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
+    loop_exit_applier: Arc<LoopExitApplier>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     config: HarnessExecutorConfig,
 }
 
@@ -77,6 +83,8 @@ impl HarnessTurnRunExecutor {
         host_factory: Arc<dyn HostFactory>,
         thread_service: Arc<dyn SessionThreadService>,
         thread_scope: ThreadScope,
+        loop_exit_applier: Arc<LoopExitApplier>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: HarnessExecutorConfig,
     ) -> Result<Self, String> {
         if config.timeout.is_zero() {
@@ -89,12 +97,26 @@ impl HarnessTurnRunExecutor {
             host_factory,
             thread_service,
             thread_scope,
+            loop_exit_applier,
+            milestone_sink,
             config,
         })
     }
 
     async fn execute_harness(&self, claimed: ClaimedTurnRun) -> Result<(), TurnRunExecutorError> {
         let prompt = self.load_prompt(&claimed).await?;
+        let host = self
+            .host_factory
+            .create_host(&claimed)
+            .await
+            .map_err(|_| failure("host_creation_failed"))?;
+        let milestones = LoopHostMilestoneEmitter::new(
+            host.run_context().clone(),
+            Arc::clone(&self.milestone_sink),
+        );
+        if let Err(error) = milestones.model_started(None).await {
+            debug!(?error, "ACP model-started milestone could not be published");
+        }
         let mut process = self
             .config
             .placement
@@ -114,6 +136,7 @@ impl HarnessTurnRunExecutor {
                     workspace,
                     working_directory,
                     Lines::new(outgoing, incoming),
+                    milestones,
                 );
                 match tokio::time::timeout(self.config.timeout, protocol).await {
                     Ok(result) => result,
@@ -128,11 +151,6 @@ impl HarnessTurnRunExecutor {
             .map_err(|_| failure("driver_failed"))?;
         let reply = result?;
 
-        let host = self
-            .host_factory
-            .create_host(&claimed)
-            .await
-            .map_err(|_| failure("host_creation_failed"))?;
         let reply_ref = host
             .finalize_assistant_message(FinalizeAssistantMessage {
                 reply: AssistantReply { content: reply },
@@ -152,10 +170,11 @@ impl HarnessTurnRunExecutor {
             model_usage: None,
             exit_id,
         });
-        self.fallback
-            .apply_exit(&claimed, exit)
+        self.loop_exit_applier
+            .apply(&claimed, exit)
             .await
-            .map_err(|()| failure("exit_application_failed"))
+            .map(|_| ())
+            .map_err(|_| failure("exit_application_failed"))
     }
 
     async fn load_prompt(&self, claimed: &ClaimedTurnRun) -> Result<String, TurnRunExecutorError> {
@@ -192,9 +211,11 @@ impl HarnessTurnRunExecutor {
         workspace: std::path::PathBuf,
         working_directory: std::path::PathBuf,
         transport: Lines<AgentLineSink, AgentLineStream>,
+        milestones: LoopHostMilestoneEmitter<dyn LoopHostMilestoneSink>,
     ) -> Result<String, TurnRunExecutorError> {
         let output = Arc::new(Mutex::new(BoundedOutput::new(self.config.max_update_bytes)));
         let output_for_updates = Arc::clone(&output);
+        let milestones_for_updates = milestones.clone();
         let session_file = workspace.join(SESSION_ID_FILE);
 
         agent_client_protocol::Client
@@ -206,9 +227,20 @@ impl HarnessTurnRunExecutor {
                         content: ContentBlock::Text(text),
                         ..
                     }) = notification.update
-                        && let Ok(mut output) = output_for_updates.lock()
                     {
-                        output.push(&text.text);
+                        let cumulative_text = match output_for_updates.lock() {
+                            Ok(mut output) if output.push(&text.text) => {
+                                Some(sanitize_model_visible_text(output.render()))
+                            }
+                            Ok(_) | Err(_) => None,
+                        };
+                        if let Some(cumulative_text) = cumulative_text
+                            && let Err(error) = milestones_for_updates
+                                .model_text_delta(cumulative_text)
+                                .await
+                        {
+                            debug!(?error, "ACP model-text milestone could not be published");
+                        }
                     }
                     Ok(())
                 },
@@ -312,11 +344,14 @@ impl BoundedOutput {
         }
     }
 
-    fn push(&mut self, value: &str) {
+    fn push(&mut self, value: &str) -> bool {
         if self.text.len() >= self.limit {
+            let changed = !self.truncated;
             self.truncated = true;
-            return;
+            return changed;
         }
+        let previous_len = self.text.len();
+        let was_truncated = self.truncated;
         let remaining = self.limit - self.text.len();
         if value.len() <= remaining {
             self.text.push_str(value);
@@ -328,6 +363,7 @@ impl BoundedOutput {
             self.text.push_str(&value[..end]);
             self.truncated = true;
         }
+        self.text.len() != previous_len || self.truncated != was_truncated
     }
 
     fn render(&self) -> String {
@@ -385,7 +421,16 @@ mod tests {
     #[test]
     fn bounded_output_truncates_at_utf8_boundary_with_marker() {
         let mut output = BoundedOutput::new(5);
-        output.push("abc😀");
+        assert!(output.push("abc😀"));
+        assert_eq!(output.render(), "abc\n[ACP output truncated]");
+    }
+
+    #[test]
+    fn bounded_output_reports_only_visible_changes() {
+        let mut output = BoundedOutput::new(3);
+        assert!(output.push("abc"));
+        assert!(output.push("d"));
+        assert!(!output.push("e"));
         assert_eq!(output.render(), "abc\n[ACP output truncated]");
     }
 }

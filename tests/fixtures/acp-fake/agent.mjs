@@ -52,7 +52,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ jsonrpc: "2.0", method: "session/update", params: {
       sessionId: pendingPrompt.sessionId,
       update: { sessionUpdate: "agent_message_chunk", content: {
-        type: "text", text: `fake ACP reply ${count}`
+        type: "text", text: "fake ACP "
+      }}
+    }});
+    send({ jsonrpc: "2.0", method: "session/update", params: {
+      sessionId: pendingPrompt.sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: {
+        type: "text", text: `reply ${count}`
       }}
     }});
     send({ jsonrpc: "2.0", id: pendingPrompt.id, result: { stopReason: "end_turn" }});

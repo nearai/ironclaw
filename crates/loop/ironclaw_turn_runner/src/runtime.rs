@@ -865,6 +865,7 @@ where
             parts.thread_scope.clone(),
         ))
     });
+    let harness_milestone_sink = Arc::clone(&parts.milestone_sink);
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope.clone(),
@@ -956,6 +957,8 @@ where
                     host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
                     Arc::clone(&parts.thread_service),
                     parts.thread_scope.clone(),
+                    Arc::clone(&loop_exit_applier),
+                    harness_milestone_sink,
                     harness_config,
                 )
                 .map_err(DefaultPlannedRuntimeBuildError::Harness)?,

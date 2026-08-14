@@ -28,7 +28,9 @@ before anything durable commits. It never decides durability itself.
 - `HarnessTurnRunExecutor` (`harness_turn_run_executor.rs`) — an ACP-only
   external-agent executor that is unaware of routing and other loop
   implementations. `agent_placement.rs` keeps host-process and Docker policy
-  outside the ACP conversation executor.
+  outside the ACP conversation executor. ACP text chunks publish cumulative,
+  sanitized `ModelTextDelta` milestones through the same live projection used
+  by the canonical loop; only the final reply is persisted.
 - `DriverRegistry` + the two production drivers: `PlannedDriver` (adapts
   `ironclaw_agent_loop`) and `text_loop_driver.rs` (smallest supported
   behavior). Fallback between them is an explicit profile/readiness decision,

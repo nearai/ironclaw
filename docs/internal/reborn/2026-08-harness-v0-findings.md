@@ -23,6 +23,11 @@ the maintained package replaces that implementation.
 - ACP gives Ironclaw a small, typed integration surface: initialize, session
   new/load, prompt, updates, and permission requests. Keeping the protocol at
   this boundary avoided translating Claude Code internals into Ironclaw tools.
+- ACP agent-message chunks are accumulated, bounded, and sanitized before they
+  enter the existing cumulative `ModelTextDelta` milestone path. The WebUI can
+  therefore show the reply while it is generated without a harness-specific
+  transport or one durable transcript write per chunk; the completed reply is
+  still finalized once through the canonical transcript boundary.
 - A stable workspace derived from the typed thread id is enough to retain both
   repository changes and the ACP session id across turns without putting ACP
   state into tenant storage.
@@ -41,9 +46,10 @@ the maintained package replaces that implementation.
 ## Evaluation status
 
 The deterministic fake-adapter host tests cover protocol compatibility,
-multi-turn session reuse, permission handling, process death, timeout cleanup,
-lease release, and reply persistence without paid API use. The same fake runs
-through Docker in the repository's gated Docker lane to pin placement parity.
+cumulative live text updates, multi-turn session reuse, permission handling,
+process death, timeout cleanup, lease release, and reply persistence without
+paid API use. The same fake runs through Docker in the repository's gated
+Docker lane to pin placement parity.
 A live Claude Code smoke run still requires an operator-provided developer key
 through the explicitly named host environment variable. No live latency or cost
 numbers are recorded here because no credential was supplied during
