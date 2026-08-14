@@ -926,10 +926,9 @@ mod tests {
             assert_eq!(events.len(), 1, "ModelStarted must not be persisted");
             assert_eq!(events[0].kind, expected_kind);
             assert!(
-                events[0]
-                    .duration_ms
-                    .is_some_and(|duration| duration > 0
-                        && duration <= MAX_RUNTIME_EVENT_DURATION_MS),
+                events[0].duration_ms.is_some_and(
+                    |duration| duration > 0 && duration <= MAX_RUNTIME_EVENT_DURATION_MS
+                ),
                 "terminal model event must carry a positive bounded duration"
             );
         }
@@ -937,10 +936,9 @@ mod tests {
 
     #[tokio::test]
     async fn durable_milestone_waits_for_full_coalescing_channel_without_loss() {
-        let (started, thread_id, run_id) =
-            fixture_milestone(LoopHostMilestoneKind::ModelStarted {
-                requested_model_profile_id: None,
-            });
+        let (started, thread_id, run_id) = fixture_milestone(LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        });
         let mut terminal = started.clone();
         terminal.kind = LoopHostMilestoneKind::ModelCompleted {
             effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("test-model")

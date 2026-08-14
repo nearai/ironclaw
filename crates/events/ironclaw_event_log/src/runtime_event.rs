@@ -1530,11 +1530,9 @@ mod tests {
             serde_json::from_str(&completed_wire).expect("deserialize model completion");
         assert_eq!(completed_round_trip, completed);
 
-        let mut raw_wire = serde_json::to_value(RuntimeEvent::model_completed(
-            scope(),
-            capability(),
-        ))
-        .expect("serialize raw terminal event fixture");
+        let mut raw_wire =
+            serde_json::to_value(RuntimeEvent::model_completed(scope(), capability()))
+                .expect("serialize raw terminal event fixture");
         raw_wire
             .as_object_mut()
             .expect("runtime event must serialize as an object")

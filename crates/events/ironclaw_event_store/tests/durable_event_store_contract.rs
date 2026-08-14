@@ -541,11 +541,7 @@ async fn libsql_model_duration_present_and_historical_absent_round_trip() {
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Libsql {
-            path_or_url: temp
-                .path()
-                .join("model-duration.db")
-                .display()
-                .to_string(),
+            path_or_url: temp.path().join("model-duration.db").display().to_string(),
             auth_token: None,
         },
     )

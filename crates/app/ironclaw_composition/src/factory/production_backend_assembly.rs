@@ -248,21 +248,21 @@ where
     )
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
     let event_stores = match event_store {
-        ProductionEventStoresInput::Config(config) => ironclaw_event_store::build_reborn_event_stores(
-            ironclaw_event_store::RebornProfile::Production,
-            config,
-        )
-        .await?,
+        ProductionEventStoresInput::Config(config) => {
+            ironclaw_event_store::build_reborn_event_stores(
+                ironclaw_event_store::RebornProfile::Production,
+                config,
+            )
+            .await?
+        }
         ProductionEventStoresInput::Prebuilt(stores) => stores,
     };
     let runtime_event_sink: Arc<dyn EventSink> = Arc::new(CoalescingEventSink::new(
         Arc::clone(&event_stores.events),
         EventBatchConfig::default(),
     ));
-    let services = services.with_production_reborn_event_stores_and_sink(
-        event_stores,
-        runtime_event_sink,
-    );
+    let services =
+        services.with_production_reborn_event_stores_and_sink(event_stores, runtime_event_sink);
     let services = apply_production_runtime_process_binding(services, process_binding);
     let services = match PostEditCheckConfig::from_env() {
         Ok(Some(config)) => services.with_post_edit_check(config),
