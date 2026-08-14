@@ -19,10 +19,14 @@ fn config(args: &Args) -> Result<DbProbeConfig, String> {
 
 fn measurement_config(args: &Args) -> Result<DbProbeConfig, DbProbeError> {
     config(args).map_err(|message| {
+        let backend = match args.backend {
+            Backend::Libsql => "libsql",
+            Backend::Postgres => "postgres",
+        };
         DbProbeError::operation(
-            "postgres",
+            backend,
             "resolve target",
-            format!("postgres probe failed: {message}"),
+            format!("{backend} probe failed: {message}"),
         )
     })
 }
