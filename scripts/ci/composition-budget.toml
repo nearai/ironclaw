@@ -218,7 +218,7 @@ observed_date = "2026-08-08"
 # `ironclaw_assistant::UnboundPreparedTurnService`; composition holds only
 # the wire-DTO mapping, port adapter, and mount wiring. The deltas are
 # disjoint and the ceiling is the gate's exact merged-tree measurement.
-loc_ceiling = 42299
+loc_ceiling = 42086
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -229,7 +229,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42299
+loc_observed = 42086
 loc_observed_date = "2026-08-14"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
