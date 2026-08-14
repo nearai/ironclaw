@@ -42,9 +42,27 @@ contract:
 The follow-up surfaces PR (#7634) completed the switchover; the conformance
 audit against this draft recorded these further landed-vs-drafted deltas:
 
+- **Unbound threads are caller-owned, not ownerless**: the draft's
+  "unbound, ownerless thread" shipped, then was revised — the product lane
+  (`UnboundTurnService`) names its authenticated caller as the thread
+  owner (`ExplicitUser`). The owner keeps unbound threads sharded
+  per-user (never the tenant `__system__` storage slot, where every
+  deployment's completions would co-mingle with isolation resting only on
+  thread-id secrecy), makes `get_run_state` reject foreign-owner reads,
+  and gives owner-scoped retention/deletion a path to these rows.
+  Invisibility is unchanged: prepared threads are hidden from
+  conversation listings by the unconditional `prepared_context` metadata
+  stamp, never by ownerlessness. `TurnThreadOwner::Ownerless` remains a
+  supported engine state (subagent evidence paths and journal
+  reconstruction still traverse it); retiring it — and the equally
+  non-discriminating `ActorFallback` — is follow-up work gated on
+  legacy-journal compatibility (an omitted `thread_owner` key
+  deserializes as `ActorFallback`) and a per-owner concurrency-cap
+  decision (`max_running_per_owner` currently exempts owner-less process
+  snapshots).
 - **Thread-id visibility (§4.2/§9)**: on OpenAI-compat the server-minted
   public completion id doubles as the unbound thread id on the wire. Ids are
-  always server-generated; isolation rests on ownerless scoping plus the
+  always server-generated; isolation rests on owner scoping plus the
   caller-scoped ref store, not on keeping the id secret. The run id rides
   the ack; the public id is the HTTP caller's handle.
 - **Thread ids are caller-supplied (server-minted upstream)**: the drafted
@@ -67,8 +85,8 @@ audit against this draft recorded these further landed-vs-drafted deltas:
 - **Artifact parts (§4.4)**: the ref-only vocabulary shipped as the existing
   `ironclaw_common::AttachmentRef` (mirror-DTO ban); access goes through the
   scoped filesystem under the run's thread resource scope. Unbound threads
-  are ownerless, so there is no per-user identity axis to re-authorize
-  against inside that scope.
+  are caller-owned, so that scope resolves to the caller's own identity
+  axis (see the caller-owned delta above).
 - **Result surface (§4.3)**: no `TurnRunResult`/`AgentOutput` DTO was
   minted. The result surface is `SubmitTurnResponse` + `get_run_state`
   (`TurnRunState` carries `model_usage` and `resolved_model_route`, which
@@ -1093,7 +1111,9 @@ convention.
   fields.
 
 - **Threads are the unit of work; a conversation is a thread with a
-  binding.** Unbound turns are runs on **unbound, ownerless threads**
+  binding.** Unbound turns are runs on **unbound threads** (✎ landed
+  shape: caller-owned, not ownerless — the product lane threads its
+  authenticated caller as thread owner; see the caller-owned delta above)
   minted and seeded by `accept_prepared_context` BEFORE submission —
   admission only reads the journaled declarations back and derives the
   profile (the run id is the caller's handle). Each consequence replaces an

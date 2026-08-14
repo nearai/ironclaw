@@ -61,12 +61,16 @@ pub const PREPARED_CONTEXT_RECORD_SCHEMA_VERSION: u32 = 1;
 /// The prepared-context accept request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedContextRequest {
-    /// Scope of the minted thread. `owner_user_id: None` is the unbound
-    /// default — the thread is structurally invisible to every owner-scoped
-    /// conversation listing. `Some(owner)` exists solely to preserve the
-    /// subagent child thread's owner-mirroring behavior (its evidence checks
-    /// read the child edge back under the parent's real-owner scope);
-    /// product callers must pass `None`.
+    /// Scope of the minted thread. Callers name a real owner: product
+    /// surfaces pass the authenticated caller (`UnboundTurnService` threads
+    /// its actor), and subagent spawn mirrors the parent thread's owner so
+    /// its evidence checks read the child edge back under the parent's
+    /// real-owner scope. The owner shards prepared threads per-user and is
+    /// NOT what hides them — invisibility to every owner-scoped
+    /// conversation listing comes from the unconditional `prepared_context`
+    /// metadata stamp. `owner_user_id: None` remains accepted for legacy
+    /// engine-level callers but lands the thread in the tenant system slot;
+    /// do not introduce new `None` producers.
     pub scope: ThreadScope,
     /// Acting identity recorded on the seeded user rows
     /// (run-acts-as-invoker).

@@ -4,16 +4,20 @@
 //! asserted at the thread-store and run-state seams.
 //!
 //! What this file pins (unbound-turn design, docs/internal/design/):
-//! - The accept door mints a deterministic ownerless thread, seeds the
-//!   prepared messages as ordinary rows, and replays idempotently by key.
+//! - The accept door mints a deterministic thread, seeds the prepared
+//!   messages as ordinary rows, and replays idempotently by key. The
+//!   engine-level tests drive the still-supported ownerless scope; the
+//!   PRODUCT lane threads its authenticated caller as the thread owner
+//!   (pinned by `unbound_service_threads_caller_as_thread_owner`).
 //! - Admission derives the unbound profile from the journaled declarations
 //!   (no requested profile on the wire; JSON-schema output → structured).
 //! - A structured run completes by recording a validated result through
 //!   `builtin.structured_result` — including the invalid-then-valid repair
 //!   loop — with no assistant reply required.
 //! - A default (assistant-message) unbound run completes on a plain final.
-//! - The ownerless thread never appears in the owner-scoped listing a
-//!   conversation UI reads.
+//! - A prepared thread never appears in the owner-scoped listing a
+//!   conversation UI reads — hidden by the prepared-context stamp, whether
+//!   the thread is ownerless or caller-owned.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]

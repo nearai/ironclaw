@@ -198,7 +198,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
-| A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread never appears in conversation listings | `unbound_turns.rs` |
+| A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
 
 **Tools**
 | Behavior | Evidence |

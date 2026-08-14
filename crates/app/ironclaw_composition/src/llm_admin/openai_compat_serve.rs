@@ -99,7 +99,7 @@ pub async fn build_openai_compat_route_mount(
     // The prepared-context door shared by structured-output / tool-history
     // chat requests: same thread service and coordinator the runtime's own
     // turn path uses, scoped to the deployment's default agent/project axes
-    // with the ownerless unbound owner.
+    // with the authenticated caller threaded through as the thread owner.
     let prepared_turn_gateway = Arc::new(OpenAiCompatPreparedTurnGateway {
         service: Arc::new(UnboundTurnService::new(
             runtime.product_thread_service(),
@@ -147,7 +147,7 @@ pub async fn build_openai_compat_route_mount(
 struct OpenAiChatCompletionThreadProjectionReader {
     product_surface: Arc<dyn ProductSurface>,
     poll_interval: Duration,
-    /// Prepared-lane resolver: unbound runs live on ownerless threads the
+    /// Prepared-lane resolver: unbound runs live on stamped-hidden threads the
     /// caller-scoped timeline projection never surfaces, so their outcome is
     /// read from run state + the unbound thread directly.
     prepared_lane: Option<Arc<OpenAiCompatPreparedTurnGateway>>,
