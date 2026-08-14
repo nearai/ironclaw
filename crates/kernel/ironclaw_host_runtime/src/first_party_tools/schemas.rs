@@ -933,15 +933,53 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
-            "description": "Create a scheduled trigger. Pass the trigger object itself with top-level fields `name`, `prompt`, and `schedule`; do not wrap the schedule in `operation`, `data`, or a parser request object.",
+            "description": "Create a scheduled trigger from a structured execution contract. Existing stored legacy prompts remain runnable, but new triggers must use `execution_contract`.",
             "properties": {
                 "name": {
                     "type": "string",
                     "description": "Human-readable trigger name. Runtime validation caps UTF-8 content at 256 bytes."
                 },
-                "prompt": {
-                    "type": "string",
-                    "description": "Prompt submitted when the trigger fires, written for a future run with no memory of this conversation. Write the whole task, including any delivery the user wants: name the destination in an explicit step by pinned target id from builtin__outbound_delivery_targets_list, picked while the user is present (for example \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description a fire would have to look up). A bare \"send me\" means the surface the user is asking from — never ask which channel: from a channel conversation, default to the channel this conversation is on and pin its target id; from the web app with no external destination named there is no delivery step: the fire's final reply IS the delivery (the run thread records it), so end the prompt with the reply itself and write no delivery step; only an explicit ask to be notified in the browser makes the catalog's browser-push target a destination to pin. When the user names an external destination (\"send me this in my messaging app\"), that IS a delivery step even from the web app: pin its target id and write the builtin__outbound_deliver step — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver, never through integration messaging tools, which act as the user. Each fire's final reply is recorded in the routine's own run thread automatically, so a fire that makes no delivery call delivers nothing externally. Do not describe creating, scheduling, or configuring the trigger. Runtime validation caps UTF-8 content at 32768 bytes."
+                "execution_contract": {
+                    "type": "object",
+                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Referenced capabilities only narrow the scheduled surface; required skills must activate before the first model call.",
+                    "properties": {
+                        "version": { "const": 1 },
+                        "goal": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "The complete task for a future run with no memory of this conversation. Include explicit external-delivery steps using builtin__outbound_deliver and target ids selected now from builtin__outbound_delivery_targets_list. A bare send-me request from the web app needs no external-delivery step; the final reply is recorded in the run thread."
+                        },
+                        "success_criteria": {
+                            "type": "array", "minItems": 1, "maxItems": 32,
+                            "items": { "type": "string", "minLength": 1 }
+                        },
+                        "output_instructions": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Required final-answer shape and destination-independent presentation. For a web-app request with no named external destination, this final reply is the delivery."
+                        },
+                        "no_result_text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Exact useful response when the task finds no result."
+                        },
+                        "policy": {
+                            "type": "object",
+                            "properties": {
+                                "allowed_capability_ids": {
+                                    "type": ["array", "null"], "maxItems": 64,
+                                    "items": { "type": "string" }
+                                },
+                                "required_skills": {
+                                    "type": "array", "maxItems": 8,
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text"],
+                    "additionalProperties": false
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
@@ -969,7 +1007,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     ]
                 }
             },
-            "required": ["name", "prompt", "schedule"],
+            "required": ["name", "execution_contract", "schedule"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({
@@ -1173,58 +1211,17 @@ mod tests {
     }
 
     #[test]
-    fn trigger_create_prompt_description_warns_against_self_referential_creation_prompts() {
-        // Issue #5505 (generation-time defense): the model must write the
-        // trigger's per-fire action steps, not meta-instructions describing
-        // creating/scheduling the trigger itself — otherwise a fired trigger
-        // re-invokes trigger_create instead of doing the task ("a routine
-        // that creates routines").
+    fn trigger_create_requires_structured_execution_contract() {
         let schema =
             resolve_builtin_input_schema_ref("schemas/builtin/trigger_create.input.v1.json")
                 .expect("trigger_create schema is registered");
-        let description = schema["properties"]["prompt"]["description"]
-            .as_str()
-            .expect("prompt description is a string");
-
         assert!(
-            description
-                .contains("Do not describe creating, scheduling, or configuring the trigger"),
-            "prompt description must warn against self-referential creation prompts: {description}"
+            schema["properties"].get("prompt").is_none(),
+            "new trigger creation must not advertise the legacy raw prompt path"
         );
-    }
-
-    #[test]
-    fn trigger_create_prompt_description_scopes_web_app_no_delivery_to_unnamed_destinations() {
-        // The categorical "never call builtin__outbound_deliver" web-app
-        // clause was observed live being over-applied when the user DID name
-        // a destination ("send me a Slack message"): creation turns reasoned
-        // "web app → never outbound_deliver" and wrote act-as-user vendor
-        // send_message steps to reach the requester instead. The no-delivery
-        // default must be scoped to unnamed destinations, and the
-        // named-destination case must steer to the pinned
-        // builtin__outbound_deliver step, mirroring TRIGGER_CREATE_DESCRIPTION.
-        let schema =
-            resolve_builtin_input_schema_ref("schemas/builtin/trigger_create.input.v1.json")
-                .expect("trigger_create schema is registered");
-        let description = schema["properties"]["prompt"]["description"]
-            .as_str()
-            .expect("prompt description is a string");
-
-        assert!(
-            description.contains("no external destination named"),
-            "the web-app no-delivery default must be scoped to unnamed destinations: {description}"
-        );
-        assert!(
-            !description.contains("never call builtin__outbound_deliver"),
-            "the categorical never-clause invites vendor-send improvisation when a destination IS named: {description}"
-        );
-        assert!(
-            description.contains("names an external destination"),
-            "the named-destination case must be explicit, web app included: {description}"
-        );
-        assert!(
-            description.contains("never through integration messaging tools"),
-            "messages to the requester must be steered away from act-as-user vendor sends: {description}"
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["name", "execution_contract", "schedule"])
         );
     }
 

@@ -3,6 +3,7 @@ use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, SeqNo};
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
     Timestamp,
+    execution_policy::{RequiredSkill, TurnExecutionPolicy},
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     path::VirtualPath,
 };
@@ -11,8 +12,8 @@ use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
-    TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerDeliveryTargetId, TriggerError, TriggerExecutionSpec, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use {
     ironclaw_triggers::LibSqlTriggerRepository,
@@ -55,6 +56,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -68,11 +70,24 @@ fn sample_record(
 }
 
 async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
-    let due = sample_record(
+    let mut due = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
         tenant("tenant-a"),
         ts(1_704_067_200),
     );
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Summarize unread mail".to_string(),
+        success_criteria: vec!["Include every unread message".to_string()],
+        output_instructions: "Return concise Markdown".to_string(),
+        no_result_text: "There is no unread mail.".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: None,
+            required_skills: vec![RequiredSkill::new("mail-summary").expect("skill")],
+        },
+    };
+    due.prompt = spec.render_prompt();
+    due.execution_spec = Some(spec);
     let later = sample_record(
         TriggerId::parse("01J00000000000000000000000").expect("ulid"),
         tenant("tenant-a"),
@@ -1721,6 +1736,7 @@ fn malformed_row_cases() -> Vec<(&'static str, &'static str, &'static str, ReadM
         ("schedule_kind", "quarterly", "schedule_kind", Get),
         ("prompt", "", "prompt", Get),
         ("prompt", "\t  ", "prompt", Get),
+        ("execution_spec_json", "{", "execution_spec_json", Get),
         ("next_run_at", "not-a-timestamp", "next_run_at", Get),
         ("last_run_at", "not-a-timestamp", "last_run_at", Get),
         ("last_fired_slot", "not-a-timestamp", "last_fired_slot", Get),

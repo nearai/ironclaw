@@ -22,7 +22,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
-                    "prompt": "remind me once (webui automations list check)",
+                    "execution_contract": super::support::trigger_execution_contract("remind me once (webui automations list check)"),
                     "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
                 }),
             ),
