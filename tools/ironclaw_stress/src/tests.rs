@@ -428,6 +428,18 @@ fn db_write_measurement_rejects_unsupported_combinations() {
                 "postgres",
                 "--preset",
                 "db-write-measurement",
+                "--process-journal-backend",
+                "memory-journal",
+            ],
+            "do not override its workload shape",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
                 "--tool-calls-per-turn",
                 "4",
             ],

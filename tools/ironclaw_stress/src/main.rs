@@ -1137,6 +1137,10 @@ fn validate_args(args: &Args) -> Result<(), String> {
             || args.users != 1
             || args.active_thread_count != 1
             || args.tenants != 1
+            || !matches!(
+                args.process_journal_backend,
+                ProcessJournalBackend::FilesystemJournal
+            )
             || args.gate_blocked_every != 0
             || args.tool_calls_per_turn != 10
             || args.tool_failure_every != 0

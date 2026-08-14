@@ -294,9 +294,9 @@ cargo run -p ironclaw_stress --release -- \
 
 ### DB write measurement
 
-`db-write-measurement` is a fixed workload: one user, one thread, one turn, and
-10 successful tool calls. Unlike general presets, its workload-shape flags
-cannot be overridden.
+`db-write-measurement` is a fixed workload: one user, one thread, one turn, 10
+successful tool calls, and the production `filesystem-journal` process store.
+Unlike general presets, its workload-shape flags cannot be overridden.
 
 On Postgres, the report contains before/after/delta `pg_stat_user_tables`
 insert/update/delete counters and normalized `pg_stat_statements` calls for
