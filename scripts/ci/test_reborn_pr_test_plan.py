@@ -432,6 +432,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertNotEqual(plan["mode"], "none")
 
+    def test_document_fixture_change_runs_a_representative_integration_lane(
+        self,
+    ) -> None:
+        # A binary fixture is consumed by integration tests via `include_bytes!`;
+        # it must schedule a lane rather than hard-error as an unmapped path.
+        plan = self.plan("pull_request", ["tests/fixtures/redlined-contract.docx"])
+        self.assertEqual(plan["integration_lanes"], [0])
+
     def test_recorded_fixture_change_runs_only_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request",
@@ -440,6 +448,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
+
+    def test_non_qa_trace_fixture_does_not_fall_into_document_fixtures(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                ["tests/fixtures/llm_traces/unowned/example.json"],
+            )
 
     def test_reborn_e2e_scenario_change_is_owned_by_e2e_workflow(self) -> None:
         plan = self.plan(
@@ -1716,6 +1731,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
+
+    def test_direct_root_support_runs_both_representative_tiers(self) -> None:
+        # tests/support/mod.rs is compiled into the root suites AND the
+        # integration group targets (via `#[path = "../../support/mod.rs"]`),
+        # so a change must schedule a representative lane of each tier.
+        plan = self.plan("pull_request", ["tests/support/mod.rs"])
+        self.assertEqual(plan["root_partitions"], [0])
+        self.assertEqual(plan["integration_lanes"], [0])
 
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
         for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():

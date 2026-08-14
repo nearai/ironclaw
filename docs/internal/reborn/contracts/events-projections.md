@@ -120,7 +120,7 @@ Reducer rules:
   `crates/events/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs`,
   plus `product_event_stream_snapshot_keeps_nested_dispatch_failure_out_of_run_status`
   and `product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run_status`
-  in `crates/app/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs`.
+  in `crates/product/ironclaw_assistant/src/projection/tests/nested_dispatch_stream.rs`.
 - capability activity rows are keyed by stable invocation/activity identity.
   The loop assigns this identity before capability dispatch, and gate
   checkpoints must persist it even when a producer blocks without a resume
@@ -353,9 +353,10 @@ The current standalone durable backends are JSONL, PostgreSQL, and libSQL. Each 
 - `LocalDev` and `Test` may explicitly use in-memory stores.
 - `Production` rejects in-memory stores before returning a service graph.
 - `Production` may use JSONL only when the config explicitly accepts single-node durable storage.
-- PostgreSQL and libSQL adapters are available behind the crate's `postgres`
-  and `libsql` features. Their schema files live in
-  `crates/events/ironclaw_event_store/migrations/`. The standalone `Libsql`
+- PostgreSQL and libSQL adapters are part of the crate; their schemas are
+  created and migrated by the owning storage substrate
+  (`crates/substrates/ironclaw_filesystem`) — the caller runs backend
+  migrations before the event store opens. The standalone `Libsql`
   configuration owns opening its target and running its migrations before
   returning the service graph.
 - Production libSQL composition passes the already-migrated

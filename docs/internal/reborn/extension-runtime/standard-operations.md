@@ -38,12 +38,37 @@ manifest-parse time (§3); the enum itself has no other constructor.
 | Reads (6) | `list_conversations`, `get_conversation_info`, `get_conversation_history`, `get_thread_replies`, `get_message`, `search_messages` |
 | People (4) | `get_user_info`, `resolve_user`, `list_members`, `whoami` |
 
-Slack binds 8 of the 16 (`search_messages`, `list_conversations`,
-`get_conversation_info`, `get_conversation_history`, `get_thread_replies`,
-`get_user_info`, `whoami`, `send_message`) — a re-badge of its pre-existing
-tools, zero new vendor mechanics. `acme-messenger`
-(`tests/fixtures/extensions/acme-messenger/`) is the conformance fixture and
-binds all 16.
+Slack binds all 16. Eight were the original re-badge of its pre-existing
+tools (`search_messages`, `list_conversations`, `get_conversation_info`,
+`get_conversation_history`, `get_thread_replies`, `get_user_info`, `whoami`,
+`send_message`) with zero new vendor mechanics; the other eight
+(`edit_message`, `delete_message`, `add_reaction`, `remove_reaction`,
+`open_dm`, `get_message`, `resolve_user`, `list_members`) landed afterwards as
+the deferred fast-follow the framework spec §13 named, and did add vendor
+mechanics plus three OAuth scopes (`reactions:read`, `reactions:write`,
+`im:write`). Three of them are worth knowing about as precedents for the next
+vendor:
+
+- **`get_message` has no vendor endpoint.** Slack offers no single-message
+  read, so the adapter addresses `conversations.history` at the exact
+  timestamp and falls back to `conversations.replies` for a threaded reply,
+  accepting only an exact `ts` match. An op whose canonical shape a vendor
+  cannot serve directly is still bindable when the adapter can compose it
+  honestly; returning a *near* match instead would have been the failure.
+- **`remove_reaction`'s optional `emoji` is real work.** §4.1 leaves `emoji`
+  optional because some vendors cannot name the reaction being removed.
+  Slack's endpoint *requires* a name, so the omit-emoji variant reads the
+  message's reactions first and removes each one the connected account added
+  — which is why the adapter requests `reactions:read` alongside
+  `reactions:write`, and why that variant returns no `emoji`.
+- **Idempotent vendor rejections are successes, not errors.** Slack's
+  `already_reacted` / `no_reaction` mean the requested end state already
+  holds, and Slack only returns them for a message it resolved. The adapter
+  reports them as applied/removed rather than pushing the model into retrying
+  a call that cannot change anything.
+
+`acme-messenger` (`tests/fixtures/extensions/acme-messenger/`) remains the
+conformance fixture and also binds all 16.
 
 ### Reserved (13) — name claimed, `contract()` returns `None`
 
@@ -285,7 +310,7 @@ of the channel these codes actually ride:
   `StructuredWasmGuestErrorKind` — not the spec's illustrative class-column
   labels verbatim). There is no separate "detail" slot alongside `code`. The
   Slack WASM module (`slack_error_to_standard_code` in
-  `assets/slack/wasm-src/src/api.rs`) therefore puts the **canonical**
+  `crates/extensions/packages/slack/wasm-src/src/api.rs`) therefore puts the **canonical**
   `messaging.*` string into `code` and never the raw Slack error — the raw
   vendor code is consumed by the mapping function but does not cross the
   guest→host boundary on this channel at all.

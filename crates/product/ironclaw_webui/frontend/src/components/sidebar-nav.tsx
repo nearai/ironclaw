@@ -19,6 +19,13 @@ const ROUTE_ICONS = {
 
 const navRoutes = primaryRoutes.filter((r) => r.id !== "chat" && !r.hidden);
 
+export function visibleSidebarSubRoutes(routeId, isAdmin) {
+  return (EXPANDABLE_SUB_ROUTES[routeId] || []).filter(
+    (subRoute) =>
+      isAdmin || !(routeId === "settings" && subRoute.id === "users")
+  );
+}
+
 function NavItem({ route, label, onNavigate }) {
   return (
     <NavLink
@@ -130,11 +137,7 @@ export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate 
 
       <nav className="mt-2 flex flex-col gap-1">
         {visibleRoutes.map((route) => {
-          const subRoutes = (EXPANDABLE_SUB_ROUTES[route.id] || []).filter(
-            (subRoute) =>
-              isAdmin ||
-              !(route.id === "settings" && ["users", "inference"].includes(subRoute.id))
-          );
+          const subRoutes = visibleSidebarSubRoutes(route.id, isAdmin);
           if (subRoutes.length > 0) {
             return (
               <ExpandableNavItem

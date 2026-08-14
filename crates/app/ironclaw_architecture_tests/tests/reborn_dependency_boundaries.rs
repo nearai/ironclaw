@@ -795,7 +795,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // in ironclaw_agent_loop; this crate owns only shared failure
         // vocabulary. Union re-measured on the merged tree (2026-08-12);
         // count read from this test's own failure message.
-        ("ironclaw_host_api", 19_026),
+        // 19_086 -> 19_186 (#7532): add the provider-neutral turn execution
+        // policy and validated required-skill identity shared by trusted
+        // trigger ingress and the runner. Resolution, activation, and
+        // capability enforcement remain in their owning implementation crates.
+        ("ironclaw_host_api", 19_186),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

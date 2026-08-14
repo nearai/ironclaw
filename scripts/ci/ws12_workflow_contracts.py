@@ -1208,6 +1208,12 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             "AGENTS.md",
             "CLAUDE.md",
             "docs/internal/reborn/guidance-conventions.md",
+            # check-guidance.py scans the docs/ surface (published pages, the
+            # zh/ mirror, docs/internal/reborn/contracts/) since 2026-08-07 —
+            # a narrowed trigger that drops public docs must fail here, not
+            # silently skip the gate.
+            "docs/api/responses.mdx",
+            "docs/zh/index.mdx",
         ),
         out_of_scope=(
             # Crate-tier guidance rides `has_code`'s `crates/` prefix; this

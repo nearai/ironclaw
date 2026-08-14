@@ -63,6 +63,7 @@ pub struct ConversationTurnSubmission {
     /// The run-origin adapter the accepted message arrived on.
     pub origin_adapter: RunOriginAdapter,
     pub surface_type: Option<TurnSurfaceType>,
+    pub execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
 }
 
 /// The retry/idempotency partition of a submission failure.

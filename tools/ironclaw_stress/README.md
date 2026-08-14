@@ -261,6 +261,7 @@ defaults.
 | --- | --- |
 | `chat-baseline` | Baseline user-turn storage latency and throughput. |
 | `hot-thread` | Same-thread serialization and busy-thread rejection behavior. |
+| `db-write-measurement` | One deterministic user turn with 10 tool calls, plus an idle write window. |
 | `large-context` | Context read amplification with prefilled history. |
 | `tool-heavy` | Tool transcript writes and larger tool output payloads. |
 | `model-tail` | Tail-spike synthetic model latency. |
@@ -290,6 +291,65 @@ cargo run -p ironclaw_stress --release -- \
   --human-read \
   --bottleneck-report
 ```
+
+### DB write measurement
+
+`db-write-measurement` is a fixed workload: one user, one thread, one turn, 10
+successful tool calls, and the production `filesystem-journal` process store.
+Unlike general presets, its workload-shape flags cannot be overridden.
+
+On Postgres, the report contains before/after/delta `pg_stat_user_tables`
+insert/update/delete counters and normalized `pg_stat_statements` calls for
+RootFilesystem entry/event/index/sequence tables and trigger tables. Statement
+output contains query IDs, operation names, and table names, never SQL text.
+
+```bash
+export IRONCLAW_FILESYSTEM_POSTGRES_URL='postgresql://USER:PASSWORD@HOST:PORT/DB'
+
+cargo run -p ironclaw_stress --release -- \
+  --backend postgres \
+  --preset db-write-measurement \
+  --db-write-idle-seconds 300 \
+  --human-read
+```
+
+For libSQL, use an isolated database path:
+
+```bash
+cargo run -p ironclaw_stress --release -- \
+  --backend libsql \
+  --libsql-path /tmp/ironclaw-write-measurement.db \
+  --preset db-write-measurement \
+  --db-write-idle-seconds 300 \
+  --human-read
+```
+
+The harness installs row-level audit triggers on the measured tables for the
+measurement window, then removes them. These counters include writes caused by
+the filesystem's own index and full-text-search triggers. The report excludes
+audit-counter rows from the table totals. Audit-counter writes still contribute
+to DB/WAL byte growth, so
+use the byte metrics only as supplementary evidence. libSQL does not expose a
+database-wide equivalent of `pg_stat_statements`; the libSQL report therefore
+does not claim per-statement counts.
+
+The default uses non-destructive snapshots scoped to the current database.
+`pg_stat_statements` must be installed and loaded; the command fails with setup
+instructions when it is unavailable. The optional statistics reset requires
+`pg_stat_statements` 1.7 or newer.
+
+For this preset, `--db-write-idle-seconds` defaults to 300. The tool waits that
+long after the turn and then captures an idle snapshot. Set it to 0 to skip the
+idle snapshot and report workload deltas only. Statement-to-table attribution
+matches bare table identifiers in normalized SQL, so it does not distinguish
+same-named tables in different schemas; per-table write counters are reported
+with schema-qualified names.
+
+`--db-write-reset-stats` resets the selected backend's counters. On Postgres,
+it is destructive to shared statistics: it resets normalized statement
+counters for the current database and counters for the measured tables. Use it
+only on an isolated measurement database. On libSQL, it clears only the
+harness-owned audit counter table.
 
 ## Suites
 
@@ -718,8 +778,9 @@ done with libsql. To use Postgres, pass `--postgres-url` or set:
 export IRONCLAW_FILESYSTEM_POSTGRES_URL='postgresql://USER:PASSWORD@HOST:PORT/DB'
 ```
 
-The URL is redacted in output. Postgres DB probe fields include database size
-and active/idle/waiting connection counts.
+The URL is redacted in output. Regular Postgres DB probe fields remain database
+size and active/idle/waiting connection counts. The `db-write-measurement`
+preset adds table-write and normalized-statement before/after/delta reports.
 
 ## Practical Workflow
 

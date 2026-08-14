@@ -35,6 +35,7 @@ use ironclaw_host_api::{
         OriginGatePolicy, PermissionMode, UNGATED_LOOP_RUN_CAPABILITIES,
     },
     dispatch::{DispatchFailureDetail, DispatchInputIssueCode},
+    execution_policy::TurnExecutionPolicy,
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse, RuntimeHttpSavedBody,
@@ -45,28 +46,28 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
-    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate},
+    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate, ResourceScope},
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
-    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
-    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, ToolCallHttpEgress,
-    TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    CapabilitySurfaceVersion, DOCUMENT_EDIT_CAPABILITY_ID, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
+    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    ToolCallHttpEgress, TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
@@ -94,6 +95,16 @@ use ironclaw_trust::{
 };
 use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
+
+fn trigger_execution_contract(goal: impl Into<String>) -> Value {
+    json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
 
 #[tokio::test]
 async fn builtin_first_party_package_declares_expected_capabilities() {
@@ -686,8 +697,11 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
         .and_then(Value::as_str)
         .expect("trigger_create schema must describe the top-level input shape");
     assert!(
-        root_description.contains("top-level fields `name`, `prompt`, and `schedule`"),
-        "trigger_create schema should steer models to the top-level trigger shape; got {root_description:?}"
+        root_description.contains("new triggers must use `execution_contract`")
+            && !schema["properties"]
+                .as_object()
+                .is_some_and(|properties| properties.contains_key("prompt")),
+        "trigger_create schema should require structured new writes; got {root_description:?}"
     );
 
     // The `schedule` property must have a `oneOf`.
@@ -743,7 +757,7 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     let validator = jsonschema::validator_for(schema).expect("trigger_create schema must compile");
     let input = json!({
         "name": "Tuesday reminder",
-        "prompt": "Send the Tuesday reminder",
+        "execution_contract": trigger_execution_contract("Send the Tuesday reminder"),
         "schedule": {
             "kind": "cron",
             "expression": "0 14 * * 2",
@@ -756,7 +770,7 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
 
     let once_input = json!({
         "name": "Dog walking reminder",
-        "prompt": "Walk the dog",
+        "execution_contract": trigger_execution_contract("Walk the dog"),
         "schedule": {
             "kind": "once",
             "at": "2026-06-23T14:00:00",
@@ -886,7 +900,7 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Daily summary",
-            "prompt": "Summarize yesterday",
+            "execution_contract": trigger_execution_contract("Summarize yesterday"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -917,7 +931,14 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].prompt, "Summarize yesterday");
+    assert_eq!(
+        records[0]
+            .execution_spec
+            .as_ref()
+            .expect("new trigger stores execution contract")
+            .goal,
+        "Summarize yesterday"
+    );
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
@@ -944,7 +965,7 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "interactive control",
-            "prompt": "remain scheduled",
+            "execution_contract": trigger_execution_contract("remain scheduled"),
             "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
         }),
         context.clone(),
@@ -965,7 +986,7 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
             TRIGGER_CREATE_CAPABILITY_ID,
             json!({
                 "name": "forbidden child",
-                "prompt": "replicate",
+                "execution_contract": trigger_execution_contract("replicate"),
                 "schedule": { "kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC" }
             }),
         ),
@@ -1012,7 +1033,7 @@ async fn builtin_trigger_create_rejects_the_retired_delivery_target_id() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Routed summary",
-            "prompt": "Summarize yesterday",
+            "execution_contract": trigger_execution_contract("Summarize yesterday"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "delivery_target_id": "slack:personal-dm:T123:user-a"
         }),
@@ -1032,6 +1053,47 @@ async fn builtin_trigger_create_rejects_the_retired_delivery_target_id() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_rejects_new_legacy_prompt_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Legacy raw prompt",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::InputEncode);
+    assert_failure_has_input_issue(
+        &failure,
+        "unexpected_field",
+        DispatchInputIssueCode::UnexpectedField,
+        "legacy raw prompt",
+    );
+    assert_failure_has_input_issue(
+        &failure,
+        "execution_contract",
+        DispatchInputIssueCode::MissingRequired,
+        "legacy raw prompt",
+    );
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejected legacy creation must not persist a trigger"
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_accepts_weekly_tuesday_cron_schedule() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -1042,7 +1104,7 @@ async fn builtin_trigger_create_accepts_weekly_tuesday_cron_schedule() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Tuesday reminder",
-            "prompt": "Send the Tuesday reminder",
+            "execution_contract": trigger_execution_contract("Send the Tuesday reminder"),
             "schedule": {
                 "kind": "cron",
                 "expression": "0 14 * * 2",
@@ -1063,7 +1125,14 @@ async fn builtin_trigger_create_accepts_weekly_tuesday_cron_schedule() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].name, "Tuesday reminder");
-    assert_eq!(records[0].prompt, "Send the Tuesday reminder");
+    assert_eq!(
+        records[0]
+            .execution_spec
+            .as_ref()
+            .expect("new trigger stores execution contract")
+            .goal,
+        "Send the Tuesday reminder"
+    );
 }
 
 #[tokio::test]
@@ -1078,7 +1147,7 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Hooked trigger",
-            "prompt": "Pair trigger creator",
+            "execution_contract": trigger_execution_contract("Pair trigger creator"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1089,7 +1158,14 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
     let hooked_records = hook.records();
     assert_eq!(hooked_records.len(), 1);
     assert_eq!(hooked_records[0].name, "Hooked trigger");
-    assert_eq!(hooked_records[0].prompt, "Pair trigger creator");
+    assert_eq!(
+        hooked_records[0]
+            .execution_spec
+            .as_ref()
+            .expect("new trigger stores execution contract")
+            .goal,
+        "Pair trigger creator"
+    );
     assert_eq!(
         hooked_records[0].creator_user_id,
         context.resource_scope.user_id
@@ -1122,7 +1198,7 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Hook failure",
-            "prompt": "Do not persist this trigger",
+            "execution_contract": trigger_execution_contract("Do not persist this trigger"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1154,7 +1230,7 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Rollback failure",
-            "prompt": "Surface the rollback failure as the user-visible cause",
+            "execution_contract": trigger_execution_contract("Surface the rollback failure as the user-visible cause"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1188,7 +1264,7 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Too fast",
-            "prompt": "Run constantly",
+            "execution_contract": trigger_execution_contract("Run constantly"),
             "schedule": { "kind": "cron", "expression": "* * * * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1225,7 +1301,7 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Expired finite schedule",
-            "prompt": "Run once in the finite year",
+            "execution_contract": trigger_execution_contract("Run once in the finite year"),
             "schedule": { "kind": "cron", "expression": format!("0 0 8 * * * {future_year}"), "timezone": "UTC" }
         }),
         context.clone(),
@@ -1286,7 +1362,7 @@ async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Invalid timezone trigger",
-            "prompt": "Run something",
+            "execution_contract": trigger_execution_contract("Run something"),
             "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
         }),
         context.clone(),
@@ -1306,7 +1382,7 @@ async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence() {
+async fn builtin_trigger_create_rejects_blank_name_or_goal_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -1316,21 +1392,21 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
             "blank name",
             json!({
                 "name": " ",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             "name",
             "non-empty trigger name",
         ),
         (
-            "blank prompt",
+            "blank goal",
             json!({
-                "name": "Blank prompt",
-                "prompt": " ",
+                "name": "Blank goal",
+                "execution_contract": trigger_execution_contract(" "),
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
-            "prompt",
-            "non-empty trigger prompt",
+            "trigger",
+            "invalid_record",
         ),
     ] {
         let failure = invoke_failure_with_context(
@@ -1360,7 +1436,7 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persistence() {
+async fn builtin_trigger_create_rejects_oversized_name_or_goal_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -1370,21 +1446,21 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
             "oversized name",
             json!({
                 "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             "name",
             "trigger name within the allowed byte limit",
         ),
         (
-            "oversized prompt",
+            "oversized goal",
             json!({
-                "name": "Oversized prompt",
-                "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
+                "name": "Oversized goal",
+                "execution_contract": trigger_execution_contract("x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1)),
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
-            "prompt",
-            "trigger prompt within the allowed byte limit",
+            "trigger",
+            "invalid_record",
         ),
     ] {
         let failure = invoke_failure_with_context(
@@ -1424,7 +1500,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Large ignored field",
-            "prompt": "Run work",
+            "execution_contract": trigger_execution_contract("Run work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "padding": "x".repeat(1_048_576)
         }),
@@ -1454,7 +1530,7 @@ async fn builtin_trigger_create_rejects_invalid_schedule_kind_before_persistence
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Invalid schedule kind trigger",
-            "prompt": "Run work",
+            "execution_contract": trigger_execution_contract("Run work"),
             "schedule": { "kind": "monthly", "expression": "0 8 1 * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1484,7 +1560,7 @@ async fn builtin_trigger_create_rejects_missing_schedule_before_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Missing schedule trigger",
-            "prompt": "Run work"
+            "execution_contract": trigger_execution_contract("Run work")
         }),
         context.clone(),
     )
@@ -1509,7 +1585,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "old flat cron field",
             json!({
                 "name": "Legacy shape",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "cron": "*/3 * * * *",
                 "timezone": "UTC"
             }),
@@ -1527,7 +1603,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "non-string name",
             json!({
                 "name": 42,
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
             vec![("name", DispatchInputIssueCode::TypeMismatch)],
@@ -1536,7 +1612,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "non-object schedule",
             json!({
                 "name": "Bad schedule",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": "*/3 * * * *"
             }),
             vec![("schedule", DispatchInputIssueCode::TypeMismatch)],
@@ -1545,7 +1621,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "missing schedule kind",
             json!({
                 "name": "Missing kind",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
             vec![("schedule.kind", DispatchInputIssueCode::MissingRequired)],
@@ -1554,7 +1630,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "non-string schedule kind",
             json!({
                 "name": "Bad kind",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": 7, "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
             vec![("schedule.kind", DispatchInputIssueCode::TypeMismatch)],
@@ -1563,7 +1639,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "missing schedule timezone",
             json!({
                 "name": "Missing timezone",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "*/3 * * * *" }
             }),
             vec![("schedule.timezone", DispatchInputIssueCode::MissingRequired)],
@@ -1572,7 +1648,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "unexpected root field",
             json!({
                 "name": "Extra root",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "extra": true,
                 "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
@@ -1582,7 +1658,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "unexpected schedule field",
             json!({
                 "name": "Extra schedule",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": {
                     "kind": "cron",
                     "expression": "*/3 * * * *",
@@ -1599,7 +1675,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "invalid cron cadence",
             json!({
                 "name": "Too fast",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "* * * * * *", "timezone": "UTC" }
             }),
             vec![("schedule.expression", DispatchInputIssueCode::InvalidValue)],
@@ -1608,7 +1684,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             "invalid timezone",
             json!({
                 "name": "Invalid timezone",
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "Not/A/Timezone" }
             }),
             vec![("schedule.timezone", DispatchInputIssueCode::InvalidValue)],
@@ -1659,7 +1735,7 @@ async fn builtin_trigger_create_accepts_once_schedule() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "One-shot reminder 2099",
-            "prompt": "Check the archives",
+            "execution_contract": trigger_execution_contract("Check the archives"),
             "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1684,7 +1760,14 @@ async fn builtin_trigger_create_accepts_once_schedule() {
 
     let record = &records[0];
     assert_eq!(record.name, "One-shot reminder 2099");
-    assert_eq!(record.prompt, "Check the archives");
+    assert_eq!(
+        record
+            .execution_spec
+            .as_ref()
+            .expect("new trigger stores execution contract")
+            .goal,
+        "Check the archives"
+    );
 
     // Verify the stored schedule is Once with the correct UTC instant.
     match &record.schedule {
@@ -1718,7 +1801,7 @@ async fn builtin_trigger_create_rejects_invalid_once_schedule_before_persistence
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "DST overlap reminder",
-            "prompt": "This should be rejected",
+            "execution_contract": trigger_execution_contract("This should be rejected"),
             "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
         }),
         context.clone(),
@@ -1756,7 +1839,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Owned trigger",
-            "prompt": "Run owned work",
+            "execution_contract": trigger_execution_contract("Run owned work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
@@ -1841,7 +1924,7 @@ async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Active trigger",
-            "prompt": "Run active work",
+            "execution_contract": trigger_execution_contract("Run active work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -1910,7 +1993,7 @@ async fn builtin_trigger_pause_and_resume_are_caller_scoped() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Pauseable trigger",
-            "prompt": "Run work",
+            "execution_contract": trigger_execution_contract("Run work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
@@ -2022,7 +2105,7 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Scoped trigger",
-            "prompt": "Run scoped work",
+            "execution_contract": trigger_execution_contract("Run scoped work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
@@ -2106,7 +2189,7 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Unscoped trigger",
-            "prompt": "Run unscoped work",
+            "execution_contract": trigger_execution_contract("Run unscoped work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context,
@@ -2133,7 +2216,7 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
             TRIGGER_CREATE_CAPABILITY_ID,
             json!({
                 "name": format!("Trigger {index}"),
-                "prompt": "Run work",
+                "execution_contract": trigger_execution_contract("Run work"),
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             context.clone(),
@@ -2199,7 +2282,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Historical trigger",
-            "prompt": "Create history rows",
+            "execution_contract": trigger_execution_contract("Create history rows"),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -2339,7 +2422,7 @@ async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Zero run limit trigger",
-            "prompt": "Create history rows",
+            "execution_contract": trigger_execution_contract("Create history rows"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -2378,7 +2461,7 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Oversized run limit trigger",
-            "prompt": "Create many history rows",
+            "execution_contract": trigger_execution_contract("Create many history rows"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -2431,7 +2514,7 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "One-shot reminder",
-            "prompt": "Remind me about the meeting",
+            "execution_contract": trigger_execution_contract("Remind me about the meeting"),
             "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
         }),
         context.clone(),
@@ -2676,7 +2759,7 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Backend create",
-            "prompt": "Run work",
+            "execution_contract": trigger_execution_contract("Run work"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -2717,7 +2800,7 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Batch history failure",
-            "prompt": "Create trigger before listing history",
+            "execution_contract": trigger_execution_contract("Create trigger before listing history"),
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
@@ -9349,6 +9432,15 @@ impl PersistedRecordTriggerCreateHook {
 
 #[async_trait]
 impl TriggerCreateHook for PersistedRecordTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // Accept-all: this double pins the after-persist path only.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let persisted = self
             .repository
@@ -9369,6 +9461,15 @@ struct FailingTriggerCreateHook;
 
 #[async_trait]
 impl TriggerCreateHook for FailingTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // Accept-all: this double pins the after-persist failure path.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Err(TriggerError::Backend {
             reason: "hook unavailable".to_string(),
@@ -10213,6 +10314,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         APPLY_PATCH_CAPABILITY_ID,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        HTML_TO_PDF_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_UPDATE_CAPABILITY_ID,
@@ -10902,4 +11005,604 @@ fn trust_decision() -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: chrono::Utc::now(),
     }
+}
+#[tokio::test]
+async fn builtin_write_file_rejects_extracted_read_representation_at_unlisted_extension() {
+    // The extension guard names the OOXML/PDF containers, but `read_file` also
+    // extracts .rtf — which the guard deliberately does not list. This is the
+    // only live surface of the second defense (the recorded READ REPRESENTATION),
+    // and it is what stops an extracted-text read from authorizing a raw
+    // overwrite for any format the extension list does not enumerate.
+    let temp = tempfile::tempdir().unwrap();
+    let original = br"{\rtf1\ansi Original clause text.\par}".to_vec();
+    let document_path = temp.path().join("contract.rtf");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.rtf"}),
+        context.clone(),
+    )
+    .await
+    .expect("rtf reads as extracted text");
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.rtf", "content": "Revised clause text."}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn builtin_write_file_rejects_macro_enabled_ooxml_formats() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    for extension in ["docm", "xlsm", "pptm"] {
+        let path = format!("/workspace/macro.{extension}");
+        let failure = invoke_failure_with_context(
+            &runtime,
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": path, "content": "not office bytes"}),
+            context.clone(),
+        )
+        .await;
+        assert_eq!(failure.kind, FailureKind::OperationFailed);
+        assert!(
+            failure
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("binary documents cannot be edited with text tools"),
+            "{extension}: {:?}",
+            failure.message
+        );
+        assert!(!temp.path().join(format!("macro.{extension}")).exists());
+    }
+}
+
+#[tokio::test]
+async fn builtin_write_file_still_overwrites_text_log_with_stray_nul() {
+    // The binary backstop on the write path must use the SAME leniency as the
+    // read path (`read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs`).
+    // A strict any-NUL probe here makes a syslog the model just read
+    // unwritable — and reports it as a "binary document", which it is not.
+    let temp = tempfile::tempdir().unwrap();
+    let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    original.push(0u8); // one stray NUL: tolerated on read, must stay writable
+    original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+    let log_path = temp.path().join("syslog.log");
+    std::fs::write(&log_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with a stray NUL must read");
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+        context,
+    )
+    .await
+    .expect("a text log the model could read must stay writable");
+    assert_eq!(std::fs::read(&log_path).unwrap(), b"redacted log\n");
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_rejects_a_binary_document_with_an_actionable_reason() {
+    // #6898 named this as the sibling defect: apply_patch already refused a
+    // docx, but via the bare binary probe, so the model saw an opaque failure
+    // and could not tell why. It must now fail for the SAME stated reason
+    // write_file does, and leave the bytes alone.
+    let temp = tempfile::tempdir().unwrap();
+    let original = skill_bundle_zip(&[(
+        "word/document.xml",
+        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Original text</w:t></w:r></w:p></w:body></w:document>"#,
+    )]);
+    let document_path = temp.path().join("review.docx");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/review.docx",
+            "old_string": "Original text",
+            "new_string": "Revised text",
+        }),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools"),
+        "apply_patch must explain itself like write_file does, got {:?}",
+        failure.message
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+// --- document capabilities (#6898 item 3) ----------------------------------
+
+/// A `.docx` carrying a real redline: "sixty" struck out, "thirty" proposed.
+fn redlined_contract_docx() -> Vec<u8> {
+    let body = concat!(
+        r#"<w:p><w:r><w:t>Master Services Agreement</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:t xml:space="preserve">Clause 4: the review period is </w:t></w:r>"#,
+        r#"<w:del w:id="1" w:author="Reviewer"><w:r><w:delText>sixty</w:delText></w:r></w:del>"#,
+        r#"<w:ins w:id="2" w:author="Reviewer"><w:r><w:t>thirty</w:t></w:r></w:ins>"#,
+        r#"<w:r><w:t xml:space="preserve"> days.</w:t></w:r></w:p>"#,
+    );
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+    );
+    skill_bundle_zip(&[
+        ("[Content_Types].xml", br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#),
+        ("word/styles.xml", br#"<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#),
+        ("word/document.xml", document.as_bytes()),
+    ])
+}
+
+#[tokio::test]
+async fn read_file_surfaces_docx_tracked_changes_instead_of_flattened_text() {
+    // The read half of #6898 item 3, folded into read_file. Flat extraction
+    // showed the struck-out "sixty" as if it were still in the contract; the
+    // structured view separates it as a Deleted revision and keeps it out of
+    // the paragraph's final text.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context,
+    )
+    .await
+    .unwrap();
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("\"format\": \"docx\""), "{content}");
+    assert!(content.contains("\"kind\": \"deleted\""), "{content}");
+    assert!(content.contains("\"author\": \"Reviewer\""), "{content}");
+    // Paragraph ids are what document_edit addresses, so the read must expose them.
+    assert!(content.contains("\"id\": \"p2\""), "{content}");
+}
+
+#[tokio::test]
+async fn document_edit_accepts_redlines_into_a_new_file_leaving_the_original_intact() {
+    // The user-facing journey: a redlined contract in, a clean contract out,
+    // and the original still exactly as it was uploaded.
+    let temp = tempfile::tempdir().unwrap();
+    let original = redlined_contract_docx();
+    let source = temp.path().join("contract.docx");
+    std::fs::write(&source, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let edited = invoke_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/contract-final.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["success"], json!(true));
+
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        original,
+        "document_edit must never modify its source"
+    );
+
+    let reread = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract-final.docx"}),
+        context,
+    )
+    .await
+    .unwrap();
+    let content = reread["content"].as_str().unwrap();
+    assert!(
+        content.contains("thirty"),
+        "accepted insertion survives: {content}"
+    );
+    assert!(
+        !content.contains("sixty"),
+        "accepted deletion is gone: {content}"
+    );
+    assert!(
+        !content.contains("\"kind\":"),
+        "the result must carry no unresolved revisions: {content}"
+    );
+}
+
+#[tokio::test]
+async fn an_edited_document_requires_a_fresh_structured_read_before_another_edit() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    invoke_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/first.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/first.docx",
+            "output_path": "/workspace/second.docx",
+            "edits": [{"op": "replace_paragraph_text", "paragraph": "p1", "text": "Changed"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read it in full with read_file"),
+        "{:?}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn oversized_structured_views_fail_instead_of_authorizing_partial_addresses() {
+    let temp = tempfile::tempdir().unwrap();
+    let paragraphs = (0..1200)
+        .map(|index| {
+            format!(
+                r#"<w:p><w:r><w:t>paragraph {index} {}</w:t></w:r></w:p>"#,
+                "x".repeat(60)
+            )
+        })
+        .collect::<String>();
+    let document = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}</w:body></w:document>"#
+    );
+    let docx = skill_bundle_zip(&[("word/document.xml", document.as_bytes())]);
+    std::fs::write(temp.path().join("large.docx"), docx).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/large.docx"}),
+        context.clone(),
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("structured document view exceeds the response limit"),
+        "{:?}",
+        failure.message
+    );
+    let edit_failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/large.docx",
+            "output_path": "/workspace/out.docx",
+            "edits": [{"op": "replace_paragraph_text", "paragraph": "p1", "text": "Changed"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        edit_failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read it in full with read_file")
+    );
+}
+
+#[tokio::test]
+async fn document_edit_requires_a_prior_structured_read() {
+    // Same read-before-edit guarantee write_file has, on the representation
+    // whose addresses the edits name.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/out.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read it in full with read_file"),
+        "got {:?}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn document_edit_refuses_to_write_over_its_own_source() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/contract.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must differ from path"),
+        "got {:?}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn document_edit_refuses_to_overwrite_an_existing_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = redlined_contract_docx();
+    let existing = b"existing output must survive";
+    std::fs::write(temp.path().join("contract.docx"), source).unwrap();
+    std::fs::write(temp.path().join("contract-final.docx"), existing).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/contract-final.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("will not overwrite"),
+        "got {:?}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("contract-final.docx")).unwrap(),
+        existing,
+        "the refused edit must leave the existing output untouched"
+    );
+}
+
+#[tokio::test]
+async fn html_to_pdf_writes_a_pdf_and_refuses_to_overwrite_an_existing_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let rendered = invoke_with_context(
+        &runtime,
+        HTML_TO_PDF_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/report.pdf",
+            "html": "<h1>Quarterly Report</h1><p>Revenue up <strong>12%</strong>.</p>",
+            "title": "Quarterly Report",
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rendered["success"], json!(true));
+    let bytes = std::fs::read(temp.path().join("report.pdf")).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"), "must be a real PDF");
+
+    // A rendered PDF is derived; silently replacing one the user uploaded is
+    // the same class of loss the binary-write guard prevents.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTML_TO_PDF_CAPABILITY_ID,
+        json!({"path": "/workspace/report.pdf", "html": "<p>again</p>"}),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("will not overwrite"),
+        "got {:?}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("report.pdf")).unwrap(),
+        bytes,
+        "the refused render must leave the existing file untouched"
+    );
+}
+
+#[tokio::test]
+async fn html_to_pdf_rejects_unbounded_html_before_rendering() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTML_TO_PDF_CAPABILITY_ID,
+        json!({"path": "/workspace/large.pdf", "html": "x".repeat(1024 * 1024 + 1)}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::Resource);
+    assert!(!temp.path().join("large.pdf").exists());
+}
+
+#[tokio::test]
+async fn a_structured_read_still_does_not_authorize_a_raw_write_file_overwrite() {
+    // The #6898 guard and the new structured path must not cancel each other:
+    // reading a docx structurally gives document_edit authority, never
+    // write_file authority.
+    let temp = tempfile::tempdir().unwrap();
+    let original = redlined_contract_docx();
+    let path = temp.path().join("contract.docx");
+    std::fs::write(&path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx", "content": "Clause 4: thirty days."}),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools"),
+        "got {:?}",
+        failure.message
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }

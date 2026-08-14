@@ -128,6 +128,70 @@ fn complete_protocol_metadata_is_normalized_without_file_bytes() {
 }
 
 #[test]
+fn sticker_updates_normalize_with_truthful_mime_types() {
+    // Regression: stickers hardcoded `image/webp` + kind `Sticker`, a pair the
+    // descriptor validator rejected — the whole update failed parse and
+    // Telegram's redelivery queue wedged behind it. Static stickers are WEBP,
+    // animated stickers are gzipped Lottie (.tgs), video stickers are WEBM.
+    let cases = [
+        (
+            r#"{"file_id": "st-static", "file_size": 4096}"#,
+            "image/webp",
+        ),
+        (
+            r#"{"file_id": "st-animated", "file_size": 4096, "is_animated": true}"#,
+            "application/x-tgsticker",
+        ),
+        (
+            r#"{"file_id": "st-video", "file_size": 4096, "is_video": true}"#,
+            "video/webm",
+        ),
+    ];
+    for (sticker_json, expected_mime) in cases {
+        let payload = format!(
+            r#"{{
+                "update_id": 601,
+                "message": {{
+                    "message_id": 91,
+                    "date": 1700000000,
+                    "from": {{"id": 777, "is_bot": false, "first_name": "Alice"}},
+                    "chat": {{"id": 777, "type": "private"}},
+                    "sticker": {sticker_json}
+                }}
+            }}"#
+        );
+        let message = message(payload.as_bytes());
+        assert!(message.text.is_empty());
+        assert_eq!(message.pending_attachments.len(), 1, "{sticker_json}");
+        let descriptor = &message.pending_attachments[0].descriptor;
+        assert_eq!(descriptor.mime_type, expected_mime, "{sticker_json}");
+        assert_eq!(descriptor.kind, ProductAttachmentKind::Sticker);
+    }
+}
+
+#[test]
+fn voice_updates_normalize_as_voice_attachments() {
+    // Regression twin of the sticker case: `audio/ogg` + kind `Voice` was
+    // unconstructible for the same reason.
+    let payload = br#"{
+        "update_id": 602,
+        "message": {
+            "message_id": 92,
+            "date": 1700000000,
+            "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+            "chat": {"id": 777, "type": "private"},
+            "voice": {"file_id": "voice-1", "mime_type": "audio/ogg", "file_size": 2048}
+        }
+    }"#;
+    let message = message(payload);
+    assert!(message.text.is_empty());
+    assert_eq!(message.pending_attachments.len(), 1);
+    let descriptor = &message.pending_attachments[0].descriptor;
+    assert_eq!(descriptor.mime_type, "audio/ogg");
+    assert_eq!(descriptor.kind, ProductAttachmentKind::Voice);
+}
+
+#[test]
 fn media_group_fragments_share_one_event_but_keep_distinct_fragment_ids() {
     let payload = |update_id: i64, message_id: i64, file_id: &str| {
         serde_json::to_vec(&serde_json::json!({

@@ -97,7 +97,9 @@ pub use loop_exit::{
     LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind,
 };
 pub use memory_context::{
-    EmptyMemoryPromptContextService, MemoryPromptContextRequest, MemoryPromptContextService,
+    EmptyMemoryPromptContextService, MemoryPromptContextLoad, MemoryPromptContextRequest,
+    MemoryPromptContextService, MemoryRetrievalDegradation, MemoryRetrievalFailureKind,
+    MemoryRetrievalLane,
 };
 pub use milestones::{
     HookDecisionSummary, HookMilestoneSink, InMemoryHookMilestoneSink,

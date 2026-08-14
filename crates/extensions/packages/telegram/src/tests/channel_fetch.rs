@@ -137,6 +137,137 @@ async fn fetch_attachment_looks_up_then_downloads_through_restricted_egress() {
 }
 
 #[tokio::test]
+async fn receive_degrades_permanently_failed_attachments_and_keeps_the_message() {
+    // Regression: a permanently failing transfer used to fail the whole
+    // update, so ingress answered non-2xx and Telegram's in-order redelivery
+    // wedged the chat behind a payload that could never improve.
+    let egress = ScriptedEgress::new(vec![ScriptedEgress::response(403, Vec::new())]);
+    let config = [(
+        TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+        "ironclaw_test_bot".to_string(),
+    )];
+    let outcome = TelegramChannelAdapter::default()
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &config,
+                body: br#"{
+                    "update_id": 510,
+                    "message": {
+                        "message_id": 51,
+                        "date": 1710000000,
+                        "from": {"id": 1001, "is_bot": false, "first_name": "Alice"},
+                        "chat": {"id": 555, "type": "private"},
+                        "caption": "look at this",
+                        "document": {
+                            "file_id": "vendor-file-id",
+                            "file_name": "original.txt",
+                            "mime_type": "text/plain",
+                            "file_size": 5
+                        }
+                    }
+                }"#,
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            &egress,
+        )
+        .await
+        .expect("permanent transfer failure degrades instead of failing the update");
+    let InboundOutcome::Messages(messages) = outcome else {
+        panic!("expected degraded message");
+    };
+    assert_eq!(messages[0].text, "look at this");
+    assert!(messages[0].attachments.is_empty());
+}
+
+#[tokio::test]
+async fn receive_ignores_updates_degraded_to_nothing() {
+    // A sticker-only update whose transfer fails permanently leaves neither
+    // text nor attachments: acknowledge and ignore rather than start an empty
+    // turn (and never hand the vendor a redeliverable failure status).
+    let egress = ScriptedEgress::new(vec![ScriptedEgress::response(403, Vec::new())]);
+    let config = [(
+        TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+        "ironclaw_test_bot".to_string(),
+    )];
+    let outcome = TelegramChannelAdapter::default()
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &config,
+                body: br#"{
+                    "update_id": 511,
+                    "message": {
+                        "message_id": 52,
+                        "date": 1710000000,
+                        "from": {"id": 1001, "is_bot": false, "first_name": "Alice"},
+                        "chat": {"id": 555, "type": "private"},
+                        "sticker": {"file_id": "st-1", "file_size": 4096}
+                    }
+                }"#,
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            &egress,
+        )
+        .await
+        .expect("fully degraded update is acknowledged");
+    assert!(matches!(outcome, InboundOutcome::Ignore), "expected Ignore");
+}
+
+#[tokio::test]
+async fn receive_propagates_retryable_attachment_failures() {
+    // Transient transfer failures must keep failing the request so ingress
+    // answers 503 and vendor redelivery can succeed later with full content.
+    let egress = ScriptedEgress::new(vec![ScriptedEgress::response(500, Vec::new())]);
+    let config = [(
+        TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+        "ironclaw_test_bot".to_string(),
+    )];
+    let result = TelegramChannelAdapter::default()
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &config,
+                body: br#"{
+                    "update_id": 512,
+                    "message": {
+                        "message_id": 53,
+                        "date": 1710000000,
+                        "from": {"id": 1001, "is_bot": false, "first_name": "Alice"},
+                        "chat": {"id": 555, "type": "private"},
+                        "caption": "look at this",
+                        "document": {
+                            "file_id": "vendor-file-id",
+                            "file_name": "original.txt",
+                            "mime_type": "text/plain",
+                            "file_size": 5
+                        }
+                    }
+                }"#,
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            &egress,
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("retryable transfer failure must propagate");
+    };
+    assert!(matches!(
+        error,
+        ChannelError::AttachmentTransfer {
+            retryable: true,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn fetch_attachment_downloads_when_optional_size_metadata_is_absent() {
     let egress = ScriptedEgress::new(vec![
         ScriptedEgress::response(

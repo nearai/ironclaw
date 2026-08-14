@@ -27,11 +27,11 @@ use ironclaw_loop_contracts::{
 };
 
 use crate::state::{
-    CapabilityCallSignature, CapabilityOutputObservation, CheckpointKind,
-    DeferredCompactionWatermark, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
-    ModelErrorObservationClass, ModelErrorRecoveryObservation, PendingApprovalResume,
-    PendingAuthResume, PendingModelRetryDirective, RepeatedCallWarningPhase,
-    RepeatedCallWarningState, TerminalWarningObservation,
+    CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
+    ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
+    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
+    TerminalWarningObservation,
 };
 use crate::strategies::{
     BoundedParallelBatchPolicyStrategy, CapabilityBatchTurnSummary, CapabilityFilter,
@@ -1960,29 +1960,14 @@ async fn assistant_reply_stage_returns_reply_summary() {
     };
 
     let step = AssistantReplyStage
-        .process(
-            ctx,
-            AssistantReplyInput {
-                state,
-                reply,
-                usage: None,
-            },
-        )
+        .process(ctx, AssistantReplyInput { state, reply })
         .await
         .expect("assistant reply stage");
 
     match step {
         TurnCompletedStep::Continue { state, summary } => {
             assert_eq!(state.assistant_refs, vec![message_ref("msg:assistant")]);
-            assert_eq!(
-                state
-                    .recent_output_token_counts
-                    .iter()
-                    .copied()
-                    .collect::<Vec<_>>(),
-                vec![2],
-                "missing provider usage should still feed no-progress detection"
-            );
+            assert!(state.recent_output_token_counts.is_empty());
             assert_eq!(
                 summary,
                 TurnSummary::reply_only(message_ref("msg:assistant"))
@@ -2442,10 +2427,7 @@ async fn capability_stage_returns_after_batch_summary() {
                     CapabilityBatchTurnSummary {
                         invocation_count: 1,
                         terminate_hint_count: 0,
-                        no_progress_count: 0,
-                        observed_signatures: vec![signature.clone()],
-                        made_progress_signatures: vec![signature],
-                        no_change_signatures: Vec::new(),
+                        observed_signatures: vec![signature],
                     },
                 )
             );
@@ -4522,7 +4504,7 @@ async fn parallel_batch_merges_exiting_sibling_state_into_gate_checkpoint() {
     // State-side durability: the first gate's BeforeBlock checkpoint — the
     // state a resumer reads — retains the exiting sibling's error ref,
     // explanation ref, and failure bookkeeping alongside the successful
-    // sibling's result and seen output digest.
+    // sibling's result.
     let before_block = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
     assert_eq!(
         before_block.result_refs,
@@ -4545,23 +4527,6 @@ async fn parallel_batch_merges_exiting_sibling_state_into_gate_checkpoint() {
             LoopFailureKind::CapabilityProtocolError,
         ],
         "the resume checkpoint must retain the exiting sibling's failure bookkeeping"
-    );
-    let expected_signature = CapabilityCallSignature::from_call(
-        capability_id(),
-        &serde_json::json!({ "input_ref": "input:success" }),
-    )
-    .expect("signature");
-    assert_eq!(
-        before_block
-            .seen_capability_output_digests
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec![CapabilityOutputObservation {
-            signature: expected_signature,
-            output_digest: digest,
-        }],
-        "the resume checkpoint must retain the successful sibling's seen output digest"
     );
     assert_eq!(
         before_block.last_gate.as_ref(),
@@ -7399,13 +7364,10 @@ async fn repeated_multi_call_failures_do_not_trip_no_progress_and_run_can_recove
 }
 
 #[tokio::test]
-async fn completed_output_digest_is_recorded_into_seen_capability_output_digests() {
-    // PR2 plumbing: the executor must record a completed result's `output_digest`
-    // into the checkpointed `seen_capability_output_digests` ring. Asserted through
-    // the executor (not the state helper) so the single production wiring line in
-    // `append_completed_capability_result` cannot silently regress while it is still
-    // inert — nothing reads the ring until output-aware detection lands in a later
-    // change, so a behavior-only test would stay green even if the push were removed.
+async fn completed_output_digest_is_not_promoted_to_loop_progress_policy() {
+    // The digest remains part of the host result contract, but the loop does not
+    // retain it as heuristic no-progress evidence. Repetition is advisory-only
+    // and keyed by consecutive call signatures.
     let digest = ironclaw_loop_contracts::ContentDigest(4242);
     let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
@@ -7437,8 +7399,8 @@ async fn completed_output_digest_is_recorded_into_seen_capability_output_digests
         .map(|observation| observation.output_digest)
         .collect();
     assert!(
-        recorded.contains(&digest),
-        "executor must record the completed result's output_digest into the ring; got {recorded:?}"
+        recorded.is_empty(),
+        "digest policy ring must stay inert; got {recorded:?}"
     );
 }
 

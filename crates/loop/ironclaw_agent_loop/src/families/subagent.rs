@@ -12,7 +12,7 @@ const SUBAGENT_WALL_CLOCK_LIMIT: Option<Duration> = None;
 
 #[cfg(test)]
 const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
-    "ironclaw_agent_loop.subagent_family.v2:",
+    "ironclaw_agent_loop.subagent_family.v3:",
     "family_id=subagent;",
     "identity=component_identity_v1;",
     "planner=DefaultPlanner;",
@@ -25,14 +25,14 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:DefaultGateHandlingStrategy(block),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
-    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
+    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 const SUBAGENT_PARALLEL_FAMILY_FINGERPRINT: &[u8] = concat!(
-    "ironclaw_agent_loop.subagent_family.v2:",
+    "ironclaw_agent_loop.subagent_family.v3:",
     "family_id=subagent;",
     "identity=component_identity_v1;",
     "planner=DefaultPlanner;",
@@ -45,15 +45,15 @@ const SUBAGENT_PARALLEL_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:DefaultGateHandlingStrategy(block),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
-    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
+    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x88, 0x4b, 0xff, 0x3d, 0xcb, 0x30, 0x50, 0x04, 0xd0, 0x77, 0x50, 0x6d, 0x55, 0xdd, 0x4f, 0x97,
-    0x6e, 0x9c, 0xf2, 0xf0, 0x5d, 0xd2, 0x45, 0xaa, 0x4e, 0xc6, 0x3f, 0x91, 0x19, 0x77, 0x92, 0x43,
+    0x5e, 0xaa, 0x14, 0xa7, 0x06, 0x28, 0x60, 0x59, 0x96, 0x77, 0x7b, 0xdd, 0x6c, 0xa5, 0x9f, 0xdd,
+    0xd5, 0xb2, 0x03, 0x93, 0xa5, 0x67, 0x99, 0x6b, 0xea, 0xbf, 0x67, 0xe2, 0x52, 0x93, 0xe6, 0x4a,
 ]);
 
 pub fn subagent() -> LoopFamily {

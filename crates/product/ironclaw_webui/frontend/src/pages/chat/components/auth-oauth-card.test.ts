@@ -244,6 +244,10 @@ test("AuthOauthCard shows the button loading + waiting label while the popup is 
 test("AuthOauthCard surfaces closed-before-finish feedback after the popup closes", () => {
   // opened=true, closedNotice=true
   const body = JSON.stringify(renderCardWithStates([true, "", true, 1]));
-  assert.match(body, /closed before you finished/, "closed-before-finish notice appears");
+  assert.match(
+    body,
+    /authGate\.popupClosed.*Slack/,
+    "closed-before-finish notice is translated with the provider label",
+  );
   assert.doesNotMatch(body, /authGate\.authorizing/, "no waiting label once closed");
 });

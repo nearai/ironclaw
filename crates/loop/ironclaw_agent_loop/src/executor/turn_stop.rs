@@ -3,8 +3,8 @@ use ironclaw_loop_contracts::LoopExit;
 use tracing::debug;
 
 use crate::{
-    state::{BoundedRing, LoopExecutionState, TerminalWarningKind, TerminalWarningObservation},
-    strategies::{StopKind, StopOutcome, TurnEndKind, TurnSummary},
+    state::{BoundedRing, LoopExecutionState, TerminalWarningObservation},
+    strategies::{StopKind, StopOutcome, TurnSummary},
 };
 
 use super::{AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext};
@@ -108,24 +108,13 @@ impl StopStage {
         input: StopInput,
     ) -> Result<StopStep, AgentLoopExecutorError> {
         let mut state = input.state;
-        let warning_turn_repeated_no_progress = state.terminal_warning_state.active()
-            == Some(TerminalWarningKind::NoProgressDetected)
-            && input.summary.kind == TurnEndKind::AfterCapabilityBatch
-            && input.summary.capability_batch.invocation_count > 0
-            && input.summary.capability_batch.no_progress_count
-                == input.summary.capability_batch.invocation_count;
         // `decide` is also a cancellation boundary for callers that split
         // observation from the terminal decision.
-        let outcome = if warning_turn_repeated_no_progress {
-            StopOutcome::Stop {
-                kind: StopKind::NoProgressDetected,
-            }
-        } else {
-            ctx.planner
-                .stop()
-                .should_stop_after_observed_turn(&state, &input.summary)
-                .await
-        };
+        let outcome = ctx
+            .planner
+            .stop()
+            .should_stop_after_observed_turn(&state, &input.summary)
+            .await;
         state.terminal_warning_state.clear_active();
 
         match outcome {
@@ -154,10 +143,9 @@ impl StopStage {
     }
 }
 
-/// Convert the first no-progress terminal into one normal loop iteration with
-/// typed model-visible recovery context. The evidence windows are reset so a
-/// changed action can make progress; `TerminalWarningState::active` separately
-/// makes an all-`NoChange` warning response terminal on that same turn.
+/// Convert an explicit strategy's first no-progress terminal into one normal
+/// loop iteration with typed model-visible recovery context. The default stop
+/// strategy does not emit this terminal; its repeated-call signal is advisory.
 fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind) -> bool {
     if !matches!(kind, StopKind::NoProgressDetected) {
         return false;

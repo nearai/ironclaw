@@ -768,6 +768,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_capabilities", "kernel"),
     ("ironclaw_common", "contracts"),
     ("ironclaw_conversations", "substrates"),
+    ("ironclaw_documents", "substrates"),
     ("ironclaw_event_projections", "substrates"),
     ("ironclaw_event_streams", "substrates"),
     ("ironclaw_event_log", "substrates"),

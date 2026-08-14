@@ -24,8 +24,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, MemoryPromptContextRequest,
-    MemoryPromptContextService, memory_snippet_display_ref,
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, MemoryPromptContextLoad,
+    MemoryPromptContextRequest, MemoryPromptContextService, MemoryRetrievalDegradation,
+    MemoryRetrievalFailureKind, MemoryRetrievalLane, memory_snippet_display_ref,
 };
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
@@ -69,15 +70,15 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
     async fn load_memory_snippets(
         &self,
         request: MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+    ) -> Result<MemoryPromptContextLoad, AgentLoopHostError> {
         if request.max_snippets == 0 {
-            return Ok(Vec::new());
+            return Ok(MemoryPromptContextLoad::default());
         }
         // Fail closed at the host before any provider call: a memory-disabled
         // profile returns no snippets without touching the memory service (the
         // memory service keeps an equivalent check as defense in depth).
         if memory_context_disabled(request.context_profile_id.as_str()) {
-            return Ok(Vec::new());
+            return Ok(MemoryPromptContextLoad::default());
         }
         // The host-resolved `ContextProfileId` is already validated, so this
         // construction won't fail in practice — but propagate rather than unwrap.
@@ -95,7 +96,7 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         let query_long = self.lifecycle.declares(MemoryLifecycleHook::ReadLongTerm);
         let query_short = self.lifecycle.declares(MemoryLifecycleHook::ReadShortTerm);
         if !query_long && !query_short {
-            return Ok(Vec::new());
+            return Ok(MemoryPromptContextLoad::default());
         }
         let invocation = invocation_for_context_request(&request);
         let expected = ExpectedScope::from_scope(&invocation.scope);
@@ -128,11 +129,28 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
                 }
             },
         );
+        let mut degradations = Vec::new();
         let short_term = short_term
-            .map(|lane| admit_lane(&expected, lane, request.max_snippets, "short_term"))
+            .map(|lane| {
+                admit_lane(
+                    &expected,
+                    lane,
+                    request.max_snippets,
+                    MemoryRetrievalLane::ShortTerm,
+                    &mut degradations,
+                )
+            })
             .unwrap_or_default();
         let long_term = long_term
-            .map(|lane| admit_lane(&expected, lane, request.max_snippets, "long_term"))
+            .map(|lane| {
+                admit_lane(
+                    &expected,
+                    lane,
+                    request.max_snippets,
+                    MemoryRetrievalLane::LongTerm,
+                    &mut degradations,
+                )
+            })
             .unwrap_or_default();
 
         // Concatenate short-term before long-term so active-thread memory keeps
@@ -155,20 +173,31 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             total_bytes = total_bytes.saturating_add(snippet_bytes);
             admitted.push(loop_snippet);
         }
-        Ok(admitted)
+        Ok(MemoryPromptContextLoad {
+            snippets: admitted,
+            degradations,
+        })
     }
 }
 
 /// Host admission for one raw provider lane: drop any out-of-scope snippet,
 /// sanitize the rest into untrusted-enveloped, size-capped text, and cap the
-/// lane at `max_snippets`. A lane retrieval failure degrades to empty
+/// lane at `max_snippets`. A lane retrieval failure still degrades to empty
 /// (best-effort: memory never breaks a turn) — including the `unavailable` an
-/// unimplemented lane reports.
+/// unimplemented lane reports — but it is now RECORDED in `degradations`
+/// instead of vanishing into a log line, so the caller can tell "the backend
+/// failed" from "there was nothing to recall".
+///
+/// The log half stays at `debug!` deliberately: `info!`/`warn!` output is
+/// rendered by the REPL and corrupts the terminal UI, and this runs on a
+/// background prompt-build path. Operator visibility comes from the returned
+/// value and the driver note the loop host emits from it, not from the level.
 fn admit_lane(
     expected: &ExpectedScope,
     lane: Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError>,
     max_snippets: usize,
-    lane_label: &'static str,
+    lane_label: MemoryRetrievalLane,
+    degradations: &mut Vec<MemoryRetrievalDegradation>,
 ) -> Vec<MemoryServiceContextSnippet> {
     match lane {
         Ok(raw) => raw
@@ -177,11 +206,18 @@ fn admit_lane(
             .take(max_snippets)
             .collect(),
         Err(error) => {
+            let kind = match error.kind() {
+                MemoryServiceErrorKind::Input => MemoryRetrievalFailureKind::Input,
+                MemoryServiceErrorKind::Operation | MemoryServiceErrorKind::Unavailable => {
+                    MemoryRetrievalFailureKind::Unavailable
+                }
+            };
             tracing::debug!(
-                lane = lane_label,
-                kind = ?error.kind(),
+                lane = lane_label.as_str(),
+                kind = kind.as_str(),
                 "memory context lane retrieval failed; degrading lane to empty"
             );
+            degradations.push(MemoryRetrievalDegradation::new(lane_label, kind));
             Vec::new()
         }
     }

@@ -14,6 +14,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
     ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
+    MemoryRetrievalDegradation, MemoryRetrievalFailureKind, MemoryRetrievalLane,
     memory_snippet_display_ref,
 };
 use ironclaw_memory::{
@@ -198,7 +199,8 @@ async fn empty_memory_returns_empty_snippets() {
     let result = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
     assert!(result.is_empty());
 }
 
@@ -240,7 +242,8 @@ async fn provider_supplied_cross_scope_snippets_are_dropped_by_the_host() {
     let snippets = make_service(memory_service)
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(
         snippets.len(),
@@ -261,7 +264,8 @@ async fn max_snippets_zero_returns_empty_without_memory_service_call() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 0))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert!(snippets.is_empty());
     assert!(
@@ -284,7 +288,11 @@ async fn memory_disabled_context_profile_returns_empty_without_memory_service_ca
     let mut request = test_request("tenant-a", "user-x", None, None, 10);
     request.context_profile_id = ContextProfileId::new("memory_disabled").unwrap();
 
-    let snippets = service.load_memory_snippets(request).await.unwrap();
+    let snippets = service
+        .load_memory_snippets(request)
+        .await
+        .unwrap()
+        .snippets;
 
     assert!(snippets.is_empty());
     assert!(
@@ -300,11 +308,49 @@ async fn unavailable_memory_service_degrades_both_lanes_to_empty() {
     // replaces the pre-two-lane contract where an unavailable service surfaced a
     // host error — memory is now best-effort and never fails the turn.
     let service = make_service(Arc::new(MockMemoryService::with_error()));
-    let snippets = service
+    let load = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
         .expect("a memory retrieval outage must not error the whole call");
-    assert!(snippets.is_empty());
+    assert!(load.snippets.is_empty());
+    // #7185: degrading is not the same as having nothing to recall. The outage
+    // is recorded in the returned value, so callers and operator surfaces can
+    // tell a broken backend from an empty memory.
+    assert!(load.is_degraded());
+    assert_eq!(
+        load.degradations,
+        vec![
+            MemoryRetrievalDegradation::new(
+                MemoryRetrievalLane::ShortTerm,
+                MemoryRetrievalFailureKind::Unavailable
+            ),
+            MemoryRetrievalDegradation::new(
+                MemoryRetrievalLane::LongTerm,
+                MemoryRetrievalFailureKind::Unavailable
+            ),
+        ]
+    );
+}
+
+/// The other half of the distinction: a healthy backend that simply matched
+/// nothing reports NO degradation. Without this pin, an implementation that
+/// always reported degradation would satisfy the outage test above.
+#[tokio::test]
+async fn empty_result_from_healthy_lanes_reports_no_degradation() {
+    let service = make_service(Arc::new(MockMemoryService::with_lane_snippets(
+        Vec::new(),
+        Vec::new(),
+    )));
+    let load = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .expect("an empty memory must not error");
+    assert!(load.snippets.is_empty());
+    assert!(
+        !load.is_degraded(),
+        "no matching memory is not a retrieval failure; got {:?}",
+        load.degradations
+    );
 }
 
 #[tokio::test]
@@ -373,7 +419,8 @@ async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     // Both lane methods were queried exactly once.
     let captured = memory_service.captured();
@@ -410,7 +457,8 @@ async fn undeclared_short_term_lane_is_not_queried() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     let lanes: Vec<Lane> = memory_service
         .captured()
@@ -439,7 +487,8 @@ async fn empty_lifecycle_issues_no_retrieval_queries() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert!(snippets.is_empty());
     assert!(
@@ -461,13 +510,25 @@ async fn load_memory_snippets_degrades_when_one_lane_fails() {
     ));
     let service = make_service(memory_service);
 
-    let snippets = service
+    let load = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
         .expect("one lane failing must not error the whole call");
 
-    assert_eq!(snippets.len(), 1);
-    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
+    assert_eq!(load.snippets.len(), 1);
+    assert_eq!(
+        load.snippets[0].snippet_ref,
+        expected_ref("notes/long-term.md")
+    );
+    // The surviving lane's results are returned AND the failed lane is named,
+    // so a partially degraded retrieval is not reported as a healthy one.
+    assert_eq!(
+        load.degradations,
+        vec![MemoryRetrievalDegradation::new(
+            MemoryRetrievalLane::ShortTerm,
+            MemoryRetrievalFailureKind::Unavailable
+        )]
+    );
 }
 
 #[tokio::test]
@@ -489,7 +550,8 @@ async fn load_memory_snippets_aggregate_budget_bounds_combined_lanes_short_term_
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 40))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert!(
         !snippets.is_empty(),
@@ -526,7 +588,8 @@ async fn host_hashes_reference_and_wraps_raw_provider_text() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(snippets.len(), 1);
     assert_eq!(snippets[0].snippet_ref, expected_ref("notes/plan.md"));
@@ -566,7 +629,8 @@ async fn host_builds_stable_legacy_memory_snippet_reference() {
             10,
         ))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(snippets.len(), 1);
     assert_eq!(snippets[0].snippet_ref, "memory-snippet:cb96ed00b13e6ae4");
@@ -587,7 +651,8 @@ async fn adapter_enforces_max_snippets_after_memory_service_returns() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 1))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(snippets.len(), 1);
     assert_eq!(snippets[0].snippet_ref, expected_ref("notes/one.md"));
@@ -623,7 +688,8 @@ async fn adapter_retains_security_prose_and_paths_redacts_credentials_and_drops_
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(snippets.len(), 5);
     assert_eq!(snippets[0].snippet_ref, expected_ref("notes/clean.md"));
@@ -681,7 +747,8 @@ async fn adapter_re_sanitizes_provider_supplied_untrusted_prefix() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(snippets.len(), 1);
     assert_eq!(
@@ -704,7 +771,8 @@ async fn adapter_truncates_oversized_raw_snippet_text() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     assert_eq!(snippets.len(), 1);
     assert!(snippets[0].model_content.len() <= 512);
@@ -730,7 +798,8 @@ async fn adapter_caps_aggregate_model_content_bytes() {
     let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 20))
         .await
-        .unwrap();
+        .unwrap()
+        .snippets;
 
     let total_bytes: usize = snippets
         .iter()

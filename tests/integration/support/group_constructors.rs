@@ -315,6 +315,19 @@ impl RebornIntegrationGroup {
     pub async fn attachment_tools() -> HarnessResult<Self> {
         Self::builder().attachment_tools().await
     }
+
+    /// Group pairing the inbound attachment lander with the `read_file` /
+    /// `write_file` capabilities at auto-approve, so a landed document can be
+    /// read and then edited through real capability dispatch in one journey.
+    /// `attachment_tools()` deliberately surfaces no capabilities, and
+    /// `live_approvals()` gates every call — this is the combination a
+    /// document-editing journey needs. Attachments land under the SAME
+    /// `/workspace` mount `file_tools_profile` grants
+    /// (`ProjectScopedAttachmentLander` → `/workspace/attachments/...`), so the
+    /// model addresses the landed file by its stored `storage_key`.
+    pub async fn document_edit_tools() -> HarnessResult<Self> {
+        Self::builder().document_edit_tools().await
+    }
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -366,6 +379,13 @@ impl RebornIntegrationGroupBuilder {
     pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a document-edit group. See [`RebornIntegrationGroup::document_edit_tools`].
+    pub async fn document_edit_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::file::document_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

@@ -119,7 +119,7 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `memory-native/` | `ironclaw.memory` | 5 memory tools + `[memory]` provider | — | first_party | crate `ironclaw_memory_native` |
 | `nearai-mcp/` | `nearai` | `[mcp]` hosted server + 1 pinned tool | `nearai` (api_key) | mcp | data-only |
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
-| `slack/` | `slack` | 8 tools + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`) | `slack` | wasm (tools) + first-party channel capabilities | crate `ironclaw_slack_extension` + `wasm/` |
+| `slack/` | `slack` | 16 tools (all 16 core standard messaging ops) + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`) | `slack` | wasm (tools) + first-party channel capabilities | crate `ironclaw_slack_extension` + `wasm/` |
 | `telegram/` | `telegram` | channel only (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`; no tools/auth recipe, deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
 | `web-app/` | `web-app` | channel only (host-owned `authenticated_session` ingress + host-owned stream reply + push `[channel.delivery]`; package binds delivery only, VAPID auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_app_extension` |
 | `web-access/` | `web-access` | 2 tools | — | first_party | data-only (executor: `extension_support::web_access`) |

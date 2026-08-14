@@ -130,6 +130,8 @@ enum AdapterMode {
     Panic,
     ParseError,
     ConfigurationError,
+    PermanentTransferError,
+    RetryableTransferError,
 }
 
 struct ScriptedChannelAdapter {
@@ -160,6 +162,14 @@ impl ChannelIngress for ScriptedChannelAdapter {
             }),
             AdapterMode::ConfigurationError => Err(ChannelError::Configuration {
                 reason: "scripted host configuration failure".to_string(),
+            }),
+            AdapterMode::PermanentTransferError => Err(ChannelError::AttachmentTransfer {
+                reason: "scripted permanent transfer failure".to_string(),
+                retryable: false,
+            }),
+            AdapterMode::RetryableTransferError => Err(ChannelError::AttachmentTransfer {
+                reason: "scripted retryable transfer failure".to_string(),
+                retryable: true,
             }),
             AdapterMode::Ignore => Ok(InboundOutcome::Ignore),
             AdapterMode::Respond => Ok(InboundOutcome::Respond(ImmediateResponse {
@@ -719,8 +729,13 @@ async fn provider_batch_rejects_aggregate_attachment_bytes_before_staging() {
         .handle(signed_request(second_body.as_bytes()))
         .await;
     assert_eq!(
-        second.status, 400,
-        "the fragment that exceeds the batch-wide budget is a permanent rejection"
+        second.status, 200,
+        "the fragment that exceeds the batch-wide budget is acknowledged and discarded \
+         (a non-2xx would have the vendor redeliver an update that can only re-fail)"
+    );
+    assert_eq!(
+        second.body, br#"{"status":"acknowledged_discarded"}"#,
+        "the discard is distinguishable from an ordinary ack"
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -926,13 +941,16 @@ async fn inconsistent_provider_batch_fails_closed_without_partial_admission() {
     let (first_response, second_response) =
         tokio::join!(harness.router.handle(first), harness.router.handle(second));
 
-    let mut statuses = [first_response.status, second_response.status];
-    statuses.sort_unstable();
+    assert_eq!(first_response.status, 200);
+    assert_eq!(second_response.status, 200);
+    let discarded = [&first_response, &second_response]
+        .iter()
+        .filter(|response| response.body == br#"{"status":"acknowledged_discarded"}"#)
+        .count();
     assert_eq!(
-        statuses,
-        [200, 400],
-        "the first durable fragment is acknowledged, while the conflicting \
-         fragment rejects and tombstones the whole batch"
+        discarded, 1,
+        "the first durable fragment is acknowledged, while the conflicting fragment \
+         is acknowledged-and-discarded and tombstones the whole batch"
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
@@ -1287,37 +1305,49 @@ async fn adapter_panic_is_isolated_and_the_router_survives() {
     );
 }
 
+/// Deterministic adapter failures are acknowledged (2xx) and discarded with
+/// nothing admitted; transient failures stay 503 so vendor redelivery can
+/// help. A non-2xx on a deterministic failure hands the vendor an update it
+/// will redeliver forever — Telegram delivers per chat in order, so one
+/// unparseable update wedged the whole chat behind it (the retired WASM
+/// channel acked malformed payloads for exactly this reason).
 #[tokio::test]
-async fn adapter_errors_distinguish_payload_from_host_configuration() {
+async fn adapter_errors_distinguish_deterministic_discard_from_transient_retry() {
     let body = br#"{"text":"hi","event":"ev-error","conversation":"C-1"}"#;
 
-    let malformed = harness_with_activation(HarnessOptions {
-        adapter_mode: AdapterMode::ParseError,
-        ..HarnessOptions::default()
-    })
-    .await;
-    let malformed_response = malformed.router.handle(signed_request(body)).await;
-    assert_eq!(malformed_response.status, 400);
-    assert_eq!(malformed_response.body, br#"{"error":"malformed_payload"}"#);
+    for deterministic_mode in [AdapterMode::ParseError, AdapterMode::PermanentTransferError] {
+        let harness = harness_with_activation(HarnessOptions {
+            adapter_mode: deterministic_mode,
+            ..HarnessOptions::default()
+        })
+        .await;
+        let response = harness.router.handle(signed_request(body)).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, br#"{"status":"acknowledged_discarded"}"#);
+        assert!(harness.admitted.lock().expect("admitted").is_empty());
+    }
 
-    let misconfigured = harness_with_activation(HarnessOptions {
-        adapter_mode: AdapterMode::ConfigurationError,
-        ..HarnessOptions::default()
-    })
-    .await;
-    let misconfigured_response = misconfigured.router.handle(signed_request(body)).await;
-    assert_eq!(misconfigured_response.status, 503);
-    assert_eq!(
-        misconfigured_response.body,
-        br#"{"error":"temporarily_unavailable"}"#
-    );
-    assert!(malformed.admitted.lock().expect("admitted").is_empty());
-    assert!(misconfigured.admitted.lock().expect("admitted").is_empty());
+    for transient_mode in [
+        AdapterMode::ConfigurationError,
+        AdapterMode::RetryableTransferError,
+    ] {
+        let harness = harness_with_activation(HarnessOptions {
+            adapter_mode: transient_mode,
+            ..HarnessOptions::default()
+        })
+        .await;
+        let response = harness.router.handle(signed_request(body)).await;
+        assert_eq!(response.status, 503);
+        assert_eq!(response.body, br#"{"error":"temporarily_unavailable"}"#);
+        assert!(harness.admitted.lock().expect("admitted").is_empty());
+    }
 }
 
-/// ING-8 (unit leg): 2xx only after the durable admission commit — a failing
-/// sink yields retryable 503 / permanent 400 with nothing acked; a duplicate
-/// commit still acks 200.
+/// ING-8 (unit leg): 2xx only after the durable admission commit or a
+/// conscious, logged discard — a retryably-failing sink yields 503 with
+/// nothing acked; a permanently-failing sink is acknowledged-and-discarded
+/// (redelivery replays the identical rejection and would wedge ordered
+/// vendors) with nothing admitted; a duplicate commit still acks 200.
 #[tokio::test]
 async fn two_hundred_only_after_durable_admission_commit() {
     let body = br#"{"text":"hi","event":"ev-5","conversation":"C-1"}"#;
@@ -1352,10 +1382,13 @@ async fn two_hundred_only_after_durable_admission_commit() {
         ..HarnessOptions::default()
     })
     .await;
+    let permanent_response = permanent.router.handle(signed_request(body)).await;
+    assert_eq!(permanent_response.status, 200);
     assert_eq!(
-        permanent.router.handle(signed_request(body)).await.status,
-        400
+        permanent_response.body,
+        br#"{"status":"acknowledged_discarded"}"#
     );
+    assert!(permanent.admitted.lock().expect("admitted").is_empty());
 
     // A secrets-port outage is a retryable 503, never an unauthenticated 401.
     let outage = harness_with_activation(HarnessOptions {

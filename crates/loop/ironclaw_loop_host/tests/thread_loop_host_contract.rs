@@ -6898,14 +6898,16 @@ impl ironclaw_loop_contracts::MemoryPromptContextService for RecordingMemoryProm
     async fn load_memory_snippets(
         &self,
         request: ironclaw_loop_contracts::MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
         self.calls.lock().expect("memory calls lock").push(request);
-        Ok(vec![LoopContextSnippet {
-            snippet_ref: "memory-snippet:test".to_string(),
-            model_content: "remembered fact".to_string(),
-            safe_summary: "remembered fact".to_string(),
-            metadata: None,
-        }])
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad::healthy(
+            vec![LoopContextSnippet {
+                snippet_ref: "memory-snippet:test".to_string(),
+                model_content: "remembered fact".to_string(),
+                safe_summary: "remembered fact".to_string(),
+                metadata: None,
+            }],
+        ))
     }
 }
 
@@ -6967,4 +6969,98 @@ async fn thread_context_port_loads_memory_snippets_through_wired_service_once_pe
     assert_eq!(calls[0].max_snippets, 8);
     assert_eq!(calls[0].scope, run_context.scope);
     assert_eq!(calls[0].actor.user_id, owner);
+}
+
+/// Reports a long-term lane that FAILED rather than matching nothing, so the
+/// port has a degradation to publish.
+struct DegradedMemoryPromptContextService;
+
+#[async_trait]
+impl ironclaw_loop_contracts::MemoryPromptContextService for DegradedMemoryPromptContextService {
+    async fn load_memory_snippets(
+        &self,
+        _request: ironclaw_loop_contracts::MemoryPromptContextRequest,
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad {
+            snippets: Vec::new(),
+            degradations: vec![ironclaw_loop_contracts::MemoryRetrievalDegradation::new(
+                ironclaw_loop_contracts::MemoryRetrievalLane::LongTerm,
+                ironclaw_loop_contracts::MemoryRetrievalFailureKind::Unavailable,
+            )],
+        })
+    }
+}
+
+/// A transient milestone-sink failure must not permanently suppress the
+/// degraded-retrieval note.
+///
+/// The note is the ONLY operator-visible signal that retrieval broke rather
+/// than simply matching nothing. Marking it emitted before the publish
+/// succeeds would mean one failed sink call put the operator back in exactly
+/// the state this behavior exists to escape — for the rest of the run, with no
+/// second chance. Same guarantee, and same two-step guard, as
+/// `context_port_survives_personal_context_admitted_milestone_sink_failure`.
+#[traced_test]
+#[tokio::test]
+async fn context_port_retries_memory_degradation_note_after_milestone_sink_failure() {
+    let fixture = ThreadFixture::new().await;
+    let owner = fixture
+        .thread_scope
+        .owner_user_id
+        .clone()
+        .expect("fixture thread scope carries an owner");
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(owner));
+    let milestone_sink = Arc::new(FailOnceMilestoneSink::default());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_memory_context_service(Arc::new(DegradedMemoryPromptContextService) as Arc<_>)
+    .with_milestone_sink(milestone_sink.clone());
+
+    let request = || LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+    };
+
+    // First prompt build: the publish is attempted and fails. The turn survives.
+    adapter.load_loop_context(request()).await.unwrap();
+    wait_for_fail_once_attempts(&milestone_sink, 1).await;
+    assert!(
+        milestone_sink.milestones().is_empty(),
+        "the first publish failed, so no note was delivered"
+    );
+    assert!(logs_contain("failed to emit memory degradation milestone"));
+
+    // Second prompt build of the SAME run: the cached load still records the
+    // degradation, and the note is retried rather than suppressed.
+    adapter.load_loop_context(request()).await.unwrap();
+    wait_for_fail_once_attempts(&milestone_sink, 2).await;
+    let milestones = milestone_sink.milestones();
+    assert_eq!(
+        milestones.len(),
+        1,
+        "exactly one note reaches the operator: retried after the failure, not duplicated"
+    );
+    assert!(matches!(
+        &milestones[0].kind,
+        LoopHostMilestoneKind::DriverNote { kind, safe_summary }
+            if *kind == LoopDriverNoteKind::Context
+                && safe_summary.as_str() == "memory retrieval degraded (long_term:unavailable)"
+    ));
+
+    // A third build must NOT publish again — the success is remembered.
+    adapter.load_loop_context(request()).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        milestone_sink.milestones().len(),
+        1,
+        "the note stays at one per run once it has actually been delivered"
+    );
 }
