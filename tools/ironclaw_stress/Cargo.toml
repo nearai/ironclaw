@@ -2,6 +2,7 @@
 name = "ironclaw_stress"
 version = "0.1.0"
 edition = "2024"
+default-run = "ironclaw_stress"
 rust-version = "1.92"
 description = "Stress suite for IronClaw infrastructure bottleneck discovery"
 authors = ["NEAR AI <support@near.ai>"]
