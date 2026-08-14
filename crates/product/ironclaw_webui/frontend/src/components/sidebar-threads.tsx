@@ -6,6 +6,7 @@ import { MarqueeText } from "./marquee-text";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
 import { deleteThreadErrorMessage } from "../lib/thread-errors";
+import { toast } from "../lib/toast";
 
 /* React adapter for the pinned-thread store. Lives here (not in pin-store.ts)
  * so the store stays a pure, unit-testable module free of a React import. */
@@ -104,7 +105,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         .then(() => setDeleteDialogOpen(false))
         .catch((error) => {
           console.error("Failed to delete thread:", error);
-          window.alert(deleteThreadErrorMessage(error, t));
+          toast(deleteThreadErrorMessage(error, t), { tone: "error" });
         })
         .finally(() => setIsDeleting(false));
     },

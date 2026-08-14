@@ -11,8 +11,6 @@ import {
 } from "../lib/sidebar-active-thread";
 import { useSidebar } from "../hooks/useSidebar";
 import { useT } from "../lib/i18n";
-import { toast } from "../lib/toast";
-import { deleteThreadErrorMessage } from "../lib/thread-errors";
 import { useThreads } from "../pages/chat/hooks/useThreads";
 import { Sidebar } from "../components/sidebar";
 import { PageHeader } from "../components/page-header";
@@ -108,17 +106,12 @@ export function GatewayLayout({
   const handleDeleteThread = React.useCallback(
     async (threadId) => {
       const wasActive = activeRouteThreadId === threadId;
-      try {
-        await threadsState.deleteThread(threadId);
-        if (wasActive) {
-          navigate("/chat", { replace: true });
-        }
-      } catch (error) {
-        console.error("Failed to delete thread:", error);
-        toast(deleteThreadErrorMessage(error, t), { tone: "error" });
+      await threadsState.deleteThread(threadId);
+      if (wasActive) {
+        navigate("/chat", { replace: true });
       }
     },
-    [activeRouteThreadId, navigate, threadsState, t]
+    [activeRouteThreadId, navigate, threadsState]
   );
   if (needsOnboarding && !onboardingExempt) {
     return (<Navigate to="/welcome" replace />);
