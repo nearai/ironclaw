@@ -78,6 +78,18 @@ pub(crate) fn parse_response_format(
                         "response_format.json_schema.schema".to_string(),
                     ))
                 })?;
+            // Same in-process-call pattern as `prepared_seed_from_chat` below:
+            // call the accept door's own schema validator directly, BEFORE
+            // the idempotency reservation, so an oversized or pathologically
+            // nested schema never burns the caller's key. No mirrored bound.
+            ironclaw_threads::validate_output_schema(&schema).map_err(|error| {
+                OpenAiCompatHttpError::invalid_request(Some(match error {
+                    ironclaw_threads::SessionThreadError::InvalidPreparedContext { reason } => {
+                        reason
+                    }
+                    other => other.to_string(),
+                }))
+            })?;
             Ok(Some(OutputContract::JsonSchema { schema }))
         }
         _ => Err(OpenAiCompatHttpError::invalid_request(Some(
@@ -169,9 +181,14 @@ pub(crate) fn agent_messages_from_chat(
             "external_tool.{}",
             name.to_ascii_lowercase()
         ))
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::debug!(
+                ?error,
+                tool_name = name,
+                "tool name cannot be represented as a capability id"
+            );
             OpenAiCompatHttpError::invalid_request(Some(format!(
-                "tool name {name:?} cannot be represented as a capability id"
+                "tool name {name:?} cannot be represented as a capability id: {error}"
             )))
         })
     }
@@ -262,6 +279,7 @@ pub(crate) fn prepared_seed_from_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OpenAiCompatErrorType;
     use serde_json::json;
 
     fn base_request(messages: Vec<OpenAiChatMessage>) -> OpenAiChatCompletionRequest {
@@ -318,6 +336,38 @@ mod tests {
             },
             user_message("continue"),
         ]
+    }
+
+    #[test]
+    fn invalid_tool_name_reports_the_capability_id_cause() {
+        let messages = vec![
+            user_message("go"),
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Assistant,
+                content: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
+                    id: "call_1".to_string(),
+                    kind: crate::chat::OpenAiChatToolKind::Function,
+                    function: crate::chat::OpenAiChatToolCallFunction {
+                        name: "look up!".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+            },
+        ];
+        let error = agent_messages_from_chat(&messages).expect_err("invalid tool name");
+        // Wire shape stays a sanitized 400 invalid_request regardless of the
+        // underlying capability-id validation cause (never exposed raw to the
+        // client); the cause itself is bound and carried into the request
+        // string / debug! log rather than dropped by the map_err closure —
+        // see the non-`|_|` binding at the call site above.
+        assert_eq!(error.status_code(), 400);
+        assert_eq!(
+            error.body().error.error_type(),
+            OpenAiCompatErrorType::InvalidRequestError
+        );
     }
 
     #[test]
@@ -395,6 +445,40 @@ mod tests {
         let mut request = base_request(vec![user_message("go")]);
         request.response_format = Some(json!({"type": "xml"}));
         assert!(parse_response_format(request.response_format.as_ref()).is_err());
+    }
+
+    /// The accept door's own schema bounds run here, in-process, BEFORE the
+    /// idempotency reservation in `chat_workflow.rs` — see
+    /// `oversized_declared_json_schema_is_rejected_before_reserving_the_idempotency_key`
+    /// in `tests/chat_workflow_handlers_contract.rs` for the route-level
+    /// proof that no key gets burned.
+    #[test]
+    fn oversized_json_schema_is_rejected_before_reaching_the_prepared_lane() {
+        let big_enum: Vec<String> = (0..(ironclaw_threads::PREPARED_OUTPUT_SCHEMA_MAX_BYTES / 8))
+            .map(|i| format!("v{i:06}"))
+            .collect();
+        let response_format = json!({
+            "type": "json_schema",
+            "json_schema": {"name": "s", "schema": {"type": "string", "enum": big_enum}}
+        });
+        let error =
+            parse_response_format(Some(&response_format)).expect_err("oversized schema rejected");
+        assert_eq!(error.status_code(), 400);
+    }
+
+    #[test]
+    fn over_deep_json_schema_is_rejected_before_reaching_the_prepared_lane() {
+        let mut schema = json!("leaf");
+        for _ in 0..(ironclaw_threads::PREPARED_OUTPUT_SCHEMA_MAX_DEPTH + 1) {
+            schema = json!([schema]);
+        }
+        let response_format = json!({
+            "type": "json_schema",
+            "json_schema": {"name": "s", "schema": schema}
+        });
+        let error =
+            parse_response_format(Some(&response_format)).expect_err("over-deep schema rejected");
+        assert_eq!(error.status_code(), 400);
     }
 
     #[test]

@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::ThreadId;
-use ironclaw_host_api::prepared_context::PreparedTurnDeclarations;
+use ironclaw_host_api::prepared_context::{OutputContract, PreparedTurnDeclarations};
 use ironclaw_host_api::turn::AcceptedMessageRef;
 use ironclaw_llm::agent_message::{
     AGENT_MESSAGE_TEXT_PART_MAX_BYTES, AgentMessage, AgentMessageRole, ContentPart,
@@ -57,6 +57,26 @@ const PREPARED_SEED_REASONING_MAX_BYTES: usize = ironclaw_safety::PROVIDER_METAD
 
 /// Current schema version for [`PreparedContextRecord`] rows.
 pub const PREPARED_CONTEXT_RECORD_SCHEMA_VERSION: u32 = 1;
+
+/// Serialized-size cap for a declared `response_format` JSON Schema output
+/// contract. Chosen at the same scale as [`AGENT_MESSAGE_TEXT_PART_MAX_BYTES`]
+/// (the transcript's own per-part text budget): the schema is journaled with
+/// the rest of the declarations and, unlike ordinary transcript text, is
+/// compiled into a `jsonschema` validator once per RUN
+/// (`ironclaw_loop_host::structured_result::validator_for`) — an unbounded
+/// caller-supplied schema is request-triggered CPU/memory amplification, so
+/// it gets the same budget as the other untrusted-content parts rather than
+/// riding the raw 14 MiB chat-body cap.
+pub const PREPARED_OUTPUT_SCHEMA_MAX_BYTES: usize = AGENT_MESSAGE_TEXT_PART_MAX_BYTES;
+
+/// Nesting-depth cap for a declared `response_format` JSON Schema output
+/// contract, mirroring [`ironclaw_safety`]'s existing tool-argument depth
+/// bound (`PROVIDER_ARGUMENTS_MAX_DEPTH` / the validator's `MAX_DEPTH`).
+/// Measured iteratively over an explicit stack — never recursively — because
+/// the schema is untrusted request content and a recursive walk would let a
+/// pathologically deep (but small) schema exhaust the stack while merely
+/// being measured.
+pub const PREPARED_OUTPUT_SCHEMA_MAX_DEPTH: usize = 32;
 
 /// The prepared-context accept request.
 #[derive(Debug, Clone, PartialEq)]
@@ -210,7 +230,62 @@ pub(crate) fn validate_prepared_context_request(
     if request.actor_id.is_empty() {
         return Err(invalid("actor_id must not be empty"));
     }
-    validate_prepared_seed_content(&request.system_prompt, &request.messages)
+    validate_prepared_seed_content(&request.system_prompt, &request.messages)?;
+    validate_output_contract(&request.declarations.output)
+}
+
+/// Validate a declared output contract's JSON Schema against the door's size
+/// and nesting bounds, fail-closed before any state is minted. This is the
+/// ONE authoritative check: `ironclaw_openai_compat::prepared_turn::parse_response_format`
+/// calls [`validate_output_schema`] directly, in-process, before its own
+/// idempotency reservation — the same in-process-call pattern
+/// `validate_prepared_seed_content` already uses — so there is no mirrored
+/// bound to drift.
+pub fn validate_output_contract(output: &OutputContract) -> Result<(), SessionThreadError> {
+    match output {
+        OutputContract::AssistantMessage => Ok(()),
+        OutputContract::JsonSchema { schema } => validate_output_schema(schema),
+    }
+}
+
+/// Bounds-check a declared JSON Schema value: serialized size and nesting
+/// depth. See [`PREPARED_OUTPUT_SCHEMA_MAX_BYTES`] and
+/// [`PREPARED_OUTPUT_SCHEMA_MAX_DEPTH`] for why these bounds exist.
+pub fn validate_output_schema(schema: &serde_json::Value) -> Result<(), SessionThreadError> {
+    let serialized = serde_json::to_string(schema)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    if serialized.len() > PREPARED_OUTPUT_SCHEMA_MAX_BYTES {
+        return Err(invalid(format!(
+            "response_format json_schema exceeds {PREPARED_OUTPUT_SCHEMA_MAX_BYTES} bytes"
+        )));
+    }
+    if json_value_max_depth(schema) > PREPARED_OUTPUT_SCHEMA_MAX_DEPTH {
+        return Err(invalid(format!(
+            "response_format json_schema exceeds {PREPARED_OUTPUT_SCHEMA_MAX_DEPTH} levels of nesting"
+        )));
+    }
+    Ok(())
+}
+
+/// Iterative (explicit-stack) nesting-depth measurement over untrusted JSON.
+/// No recursion: an adversarial deeply-nested-but-small schema must not be
+/// able to blow the call stack while its depth is merely being measured.
+fn json_value_max_depth(value: &serde_json::Value) -> usize {
+    let mut max_depth = 0usize;
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(value, 1)];
+    while let Some((current, depth)) = stack.pop() {
+        max_depth = max_depth.max(depth);
+        match current {
+            serde_json::Value::Array(items) => {
+                stack.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            serde_json::Value::Object(map) => {
+                stack.extend(map.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    max_depth
 }
 
 /// The content-deterministic half of the accept door's validation: message
@@ -943,6 +1018,127 @@ mod tests {
             again.rows[2].tool_result_ref, tool_row.tool_result_ref,
             "seeded result refs are deterministic"
         );
+    }
+
+    #[test]
+    fn seeded_external_tool_provider_name_matches_the_live_lane() {
+        // The live external-tool lane (`ironclaw_loop_host::external_tool_capability`)
+        // advertises and matches the bare client-declared tool name for a
+        // capability id under the `external_tool.` namespace (e.g.
+        // `external_tool.lookup` -> tool name `lookup`), never the blanket
+        // `.` -> `__` encoding every other capability id gets. Seeded replay
+        // history must derive the SAME name or it names a tool no declared
+        // external tool matches (mirrors
+        // `external_tool_surface_maps_provider_name_to_capability_id` in
+        // `ironclaw_loop_host`).
+        let mut request = request();
+        request.messages = tool_round_messages("call_ext_1", "external_tool.lookup");
+        let thread_id = request.thread_id.clone();
+        validate_prepared_context_request(&request).expect("tool history validates");
+        let seed = prepared_seed(&request, &thread_id, Utc::now()).expect("seed");
+
+        let tool_row = &seed.rows[2];
+        let provider_call = tool_row
+            .tool_result_provider_call
+            .as_ref()
+            .expect("provider call envelope");
+        assert_eq!(provider_call.capability_id.as_str(), "external_tool.lookup");
+        assert_eq!(
+            provider_call.provider_tool_name.as_str(),
+            "lookup",
+            "seeded provider tool name must match the live external-tool lane's \
+             bare client-declared name, not a double-underscore encoding"
+        );
+    }
+
+    /// A deeply-nested-but-tiny schema is JSON's classic CPU/stack-amplification
+    /// shape: `[[[...]]]` many levels deep serializes to only a few hundred
+    /// bytes, so the byte cap alone would not catch it — the nesting-depth
+    /// cap is the check that does. Each wrap adds exactly one level, so
+    /// `nested_value(levels)` has `json_value_max_depth == levels + 1`
+    /// (the leaf itself sits at depth 1).
+    fn nested_value(levels: usize) -> serde_json::Value {
+        let mut value = serde_json::json!("leaf");
+        for _ in 0..levels {
+            value = serde_json::json!([value]);
+        }
+        value
+    }
+
+    #[test]
+    fn oversized_schema_is_rejected_by_the_door() {
+        let big_enum: Vec<String> = (0..(PREPARED_OUTPUT_SCHEMA_MAX_BYTES / 8))
+            .map(|i| format!("v{i:06}"))
+            .collect();
+        let schema = serde_json::json!({"type": "string", "enum": big_enum});
+        assert!(
+            serde_json::to_string(&schema).expect("serialize").len()
+                > PREPARED_OUTPUT_SCHEMA_MAX_BYTES
+        );
+        assert!(matches!(
+            validate_output_schema(&schema),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
+    }
+
+    #[test]
+    fn over_deep_schema_is_rejected_by_the_door() {
+        // depth == PREPARED_OUTPUT_SCHEMA_MAX_DEPTH + 1, one past the cap.
+        let schema = nested_value(PREPARED_OUTPUT_SCHEMA_MAX_DEPTH);
+        assert_eq!(
+            json_value_max_depth(&schema),
+            PREPARED_OUTPUT_SCHEMA_MAX_DEPTH + 1
+        );
+        assert!(matches!(
+            validate_output_schema(&schema),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
+    }
+
+    #[test]
+    fn boundary_size_and_depth_schemas_are_accepted() {
+        // Exactly at the depth cap.
+        let schema = nested_value(PREPARED_OUTPUT_SCHEMA_MAX_DEPTH - 1);
+        assert_eq!(
+            json_value_max_depth(&schema),
+            PREPARED_OUTPUT_SCHEMA_MAX_DEPTH
+        );
+        validate_output_schema(&schema).expect("boundary depth accepted");
+
+        // A comfortably small, shallow schema.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        });
+        validate_output_schema(&schema).expect("small schema accepted");
+
+        // Wired through the full request-level door too.
+        let mut req = request();
+        req.declarations.output = OutputContract::JsonSchema { schema };
+        validate_prepared_context_request(&req).expect("request-level door accepts it");
+    }
+
+    #[test]
+    fn assistant_message_output_contract_skips_schema_bounds() {
+        let mut req = request();
+        req.declarations.output = OutputContract::AssistantMessage;
+        validate_prepared_context_request(&req).expect("assistant message needs no schema");
+    }
+
+    #[test]
+    fn oversized_declared_schema_is_rejected_at_the_request_door() {
+        let big_enum: Vec<String> = (0..(PREPARED_OUTPUT_SCHEMA_MAX_BYTES / 8))
+            .map(|i| format!("v{i:06}"))
+            .collect();
+        let mut req = request();
+        req.declarations.output = OutputContract::JsonSchema {
+            schema: serde_json::json!({"type": "string", "enum": big_enum}),
+        };
+        assert!(matches!(
+            validate_prepared_context_request(&req),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
     }
 
     #[test]

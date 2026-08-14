@@ -259,17 +259,7 @@ impl OpenAiCompatPreparedTurnGateway {
         projection.effective_model = outcome.effective_model;
         projection.usage = outcome
             .model_usage
-            .map(|usage| ironclaw_openai_compat::OpenAiUsage {
-                prompt_tokens: usage.input_tokens,
-                completion_tokens: usage.output_tokens,
-                total_tokens: usage.input_tokens.saturating_add(usage.output_tokens),
-                prompt_tokens_details: (usage.cache_read_input_tokens > 0).then_some(
-                    ironclaw_openai_compat::OpenAiPromptTokensDetails {
-                        cached_tokens: usage.cache_read_input_tokens,
-                    },
-                ),
-                cost: None,
-            });
+            .map(|usage| chat_usage_from_model_usage(&usage));
         Ok(projection)
     }
 }
@@ -1352,17 +1342,43 @@ fn response_object(
     }
 }
 
+/// Total prompt/input tokens including cache-creation writes. `cache_read` is
+/// already a subset of `LoopModelUsage::input_tokens` and must NOT be added
+/// again; `cache_creation` is a separate write-side count that OpenAI folds
+/// into the reported input/prompt total. Shared chokepoint for both
+/// OpenAI-compatible usage shapes (Responses `input_tokens` and Chat
+/// Completions `prompt_tokens`) so this accounting has exactly one
+/// definition.
+fn total_prompt_tokens_with_cache_creation(usage: &LoopModelUsage) -> u32 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_creation_input_tokens)
+}
+
+/// Build the Chat Completions `usage` object from a run's cumulative token
+/// totals (unbound-turns prepared-chat lane, §4.3). Mirrors
+/// `response_usage_from_model_usage`'s cache-creation accounting through the
+/// shared `total_prompt_tokens_with_cache_creation` chokepoint so the two
+/// OpenAI-compatible wire shapes never drift.
+fn chat_usage_from_model_usage(usage: &LoopModelUsage) -> ironclaw_openai_compat::OpenAiUsage {
+    let prompt_tokens = total_prompt_tokens_with_cache_creation(usage);
+    ironclaw_openai_compat::OpenAiUsage {
+        prompt_tokens,
+        completion_tokens: usage.output_tokens,
+        total_tokens: prompt_tokens.saturating_add(usage.output_tokens),
+        prompt_tokens_details: (usage.cache_read_input_tokens > 0).then_some(
+            ironclaw_openai_compat::OpenAiPromptTokensDetails {
+                cached_tokens: usage.cache_read_input_tokens,
+            },
+        ),
+        cost: None,
+    }
+}
+
 /// Build the OpenAI-compatible `usage` object from a run's cumulative token
 /// totals, pricing it for the given effective model.
 fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenAiResponseUsage {
-    // OpenAI reports total input (including cache) as `input_tokens`, with the
-    // cached subset broken out under `input_tokens_details`. `cache_read` is
-    // already a subset of `LoopModelUsage::input_tokens`, so it must NOT be
-    // added again; `cache_creation` is a separate write-side count and is
-    // added on top.
-    let total_input = usage
-        .input_tokens
-        .saturating_add(usage.cache_creation_input_tokens);
+    let total_input = total_prompt_tokens_with_cache_creation(usage);
     OpenAiResponseUsage {
         input_tokens: total_input,
         output_tokens: usage.output_tokens,

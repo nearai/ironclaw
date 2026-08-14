@@ -127,17 +127,29 @@ fn external_tool_capability_id(
     })
 }
 
+/// Derives the provider tool name for a client-declared external tool by
+/// routing through the SAME capability id this decorator itself mints
+/// (`external_tool_capability_id`) and the ONE capability-id ->
+/// provider-tool-name mapping (`ProviderToolName::for_capability` in
+/// `ironclaw_host_api::ids`). That mapping carves the `external_tool.`
+/// namespace out of its usual `.` -> `__` encoding and hands the suffix back
+/// verbatim, so this necessarily agrees with prepared-context history
+/// seeding (`ironclaw_threads::prepared_context`), which derives a seeded
+/// external tool call's provider name through the identical mapping.
 fn provider_tool_name_for_external_tool(
     tool_name: &str,
 ) -> Result<ProviderToolName, AgentLoopHostError> {
-    let provider_tool_name = tool_name.to_ascii_lowercase();
-    ProviderToolDefinition::validate_name(&provider_tool_name).map_err(|error| {
+    let lowered = tool_name.to_ascii_lowercase();
+    let capability_id = CapabilityId::new(format!("external_tool.{lowered}")).map_err(|_| {
         AgentLoopHostError::new(
-            error.kind,
-            format!(
-                "external tool name cannot be represented as a provider tool name: {}",
-                error.safe_summary
-            ),
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "external tool name cannot be represented as a capability id",
+        )
+    })?;
+    ProviderToolName::for_capability(&capability_id).map_err(|error| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("external tool name cannot be represented as a provider tool name: {error}"),
         )
     })
 }

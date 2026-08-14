@@ -1211,6 +1211,49 @@ fn response_usage_adds_cache_creation_on_top_of_input() {
 }
 
 #[test]
+fn chat_usage_reports_prompt_tokens_including_cache_and_breaks_out_cached_tokens() {
+    // Mirrors `response_usage_reports_total_input_including_cache_and_breaks_out_cached_tokens`
+    // for the Chat Completions (prepared-turn) usage shape: `cache_read_input_tokens`
+    // is a subset of `input_tokens`, so it must NOT be added on top.
+    let usage = LoopModelUsage {
+        input_tokens: 3_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 2_000,
+        cache_creation_input_tokens: 0,
+    };
+    let built = chat_usage_from_model_usage(&usage);
+    assert_eq!(built.prompt_tokens, 3_000);
+    assert_eq!(built.completion_tokens, 500);
+    assert_eq!(built.total_tokens, 3_500);
+    assert_eq!(
+        built
+            .prompt_tokens_details
+            .expect("cached detail")
+            .cached_tokens,
+        2_000
+    );
+}
+
+#[test]
+fn chat_usage_adds_cache_creation_on_top_of_prompt_tokens() {
+    // Regression for the prepared-chat lane omitting `cache_creation_input_tokens`
+    // (unlike the Responses adapter's `response_usage_from_model_usage`): the
+    // prompt/total totals must include cache-creation writes, not just
+    // `input_tokens`. Uses the shared `total_prompt_tokens_with_cache_creation`
+    // chokepoint so both OpenAI-compatible shapes stay consistent.
+    let usage = LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 3_000,
+    };
+    let built = chat_usage_from_model_usage(&usage);
+    assert_eq!(built.prompt_tokens, 4_000); // 1000 + 3000
+    assert_eq!(built.total_tokens, 4_500);
+    assert!(built.prompt_tokens_details.is_none());
+}
+
+#[test]
 fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     // gpt-4o rates: input 0.0000025/tok, output 0.00001/tok; OpenAI cache-read
     // discount is 2x (50% off). `input_tokens` is the total (3000), of which

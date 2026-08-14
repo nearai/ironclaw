@@ -1568,6 +1568,67 @@ async fn oversized_prepared_request_fails_before_reserving_the_idempotency_key()
 }
 
 #[tokio::test]
+async fn oversized_declared_json_schema_fails_before_reserving_the_idempotency_key() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("{\"verdict\":\"good\"}"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        reader.clone(),
+    )
+    .with_prepared_turn_port(port.clone());
+
+    // A `response_format.json_schema.schema` big enough to exceed the accept
+    // door's serialized-size cap; the in-process pre-reservation call must
+    // reject it so the idempotency key stays unburned (mirrors the oversized
+    // message-history case above).
+    let big_enum: Vec<String> = (0..(ironclaw_threads::PREPARED_OUTPUT_SCHEMA_MAX_BYTES / 8))
+        .map(|i| format!("v{i:06}"))
+        .collect();
+    let oversized = serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": [{"role": "user", "content": "classify the release"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "verdict", "schema": {"type": "string", "enum": big_enum}}
+        }
+    });
+    let body = serde_json::to_vec(&oversized).expect("body");
+    let error = service
+        .complete_chat(
+            caller(),
+            &body,
+            Some(OpenAiCompatIdempotencyKey::new("schema-retry-key").expect("key")),
+        )
+        .await
+        .expect_err("oversized schema request must fail");
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(port.requests().len(), 0, "the door must not be reached");
+
+    // The corrected request reuses the SAME idempotency key and succeeds —
+    // proof the failed attempt reserved nothing.
+    let corrected = serde_json::to_vec(&json_schema_chat_body()).expect("body");
+    let response = service
+        .complete_chat(
+            caller(),
+            &corrected,
+            Some(OpenAiCompatIdempotencyKey::new("schema-retry-key").expect("key")),
+        )
+        .await
+        .expect("corrected retry succeeds on the same key");
+    assert_eq!(
+        response.choices[0].message.content,
+        Some(serde_json::Value::String(
+            "{\"verdict\":\"good\"}".to_string()
+        ))
+    );
+    assert_eq!(port.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn json_schema_chat_routes_through_the_prepared_door() {
     let surface = Arc::new(FakeProductSurface::new());
     let port = Arc::new(RecordingPreparedTurnPort::new());
@@ -1710,7 +1771,14 @@ async fn prepared_lane_fails_closed_without_a_wired_port() {
 }
 
 #[tokio::test]
-async fn streaming_with_json_schema_is_rejected_loudly() {
+async fn complete_chat_rejects_stream_true_before_the_prepared_lane() {
+    // complete_chat/complete_chat_request is the non-streaming entry point;
+    // it rejects any `stream: true` body outright before ever consulting
+    // the prepared lane (prepared_lane_output, which owns the json_schema
+    // + stream specific rejection exercised at the real streaming entry
+    // point in streaming_with_json_schema_is_rejected_loudly, in
+    // streaming_handlers_contract.rs). This pins that blanket, entry-point
+    // guard as its own distinct behavior.
     let surface = Arc::new(FakeProductSurface::new());
     let port = Arc::new(RecordingPreparedTurnPort::new());
     let service = OpenAiChatCompletionsWorkflow::new(
