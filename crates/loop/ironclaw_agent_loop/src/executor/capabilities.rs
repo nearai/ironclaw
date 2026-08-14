@@ -204,6 +204,33 @@ fn resolution_stops_parallel_launch(resolution: &Resolution) -> bool {
 }
 
 impl CapabilityStage {
+    fn nothing_to_report_is_eligible(
+        ctx: StageContext<'_>,
+        surface: &CapabilitySurfaceIndex<'_>,
+        call: &CapabilityCallCandidate,
+    ) -> bool {
+        capability_is_visible(surface, call)
+            && ctx
+                .host
+                .run_context()
+                .product_context
+                .as_ref()
+                .filter(|context| {
+                    context.origin == ironclaw_host_api::turn::TurnOriginKind::ScheduledTrigger
+                })
+                .and_then(|context| context.execution_policy.as_ref())
+                .is_some_and(|policy| {
+                    policy.result_delivery
+                        == ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+                })
+            && call.provider_replay.as_ref().is_some_and(|replay| {
+                replay
+                    .arguments
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty)
+            })
+    }
+
     async fn complete_nothing_to_report(
         &self,
         ctx: StageContext<'_>,
@@ -317,16 +344,16 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         ctx: StageContext<'_>,
         input: CapabilityInput,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+        let surface_index = CapabilitySurfaceIndex::new(&input.surface);
         if input.calls.len() == 1
             && input.calls[0].capability_id.as_str() == NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID
+            && Self::nothing_to_report_is_eligible(ctx, &surface_index, &input.calls[0])
         {
             return self.complete_nothing_to_report(ctx, input.state).await;
         }
         let mut state = input.state;
         let result_refs_start = state.result_refs.len();
         let mut capability_batch = CapabilityBatchTurnSummary::default();
-        let surface = &input.surface;
-        let surface_index = CapabilitySurfaceIndex::new(surface);
         let calls = input.calls;
         let denied_auth_activity_id = state
             .pending_auth_resume
@@ -342,6 +369,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let mut visible_calls = Vec::new();
         let mut denied_calls = Vec::new();
         for call in calls {
+            if call.capability_id.as_str() == NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID {
+                denied_calls.push(call);
+                continue;
+            }
             // A denied auth gate terminalizes the exact already-admitted
             // invocation. It is not a new capability dispatch, so removal from
             // the current surface must not strand the durable BlockedAuth
