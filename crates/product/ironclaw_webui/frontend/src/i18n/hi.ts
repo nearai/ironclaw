@@ -113,6 +113,10 @@ registerPack("hi", {
   "chat.modeAutoReview": "ऑटो-रिव्यू",
   "chat.runtimeLocal": "स्थानीय रूप से काम करें",
   "chat.statusWorking": "काम हो रहा है",
+  "chat.processWorking": "काम हो रहा है…",
+  "chat.workedFor": "{duration} तक काम किया",
+  "chat.reloadHistory": "इतिहास फिर से लोड करें",
+  "chat.busyRejectedResend": "IronClaw व्यस्त था, इसलिए यह संदेश नहीं भेजा गया। दोबारा कोशिश करने के लिए इसे फिर भेजें।",
   "chat.identityUser": "आप",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "नवीनतम पर जाएं",
@@ -206,6 +210,7 @@ registerPack("hi", {
   "authGate.oauthProviderFallback": "प्रदाता",
   "authGate.serviceUnavailable": "सेवा उपलब्ध नहीं है",
   "authGate.popupBlocked": "प्राधिकरण पॉपअप अवरुद्ध कर दिया गया।",
+  "authGate.popupClosed": "कनेक्शन पूरा होने से पहले {provider} प्राधिकरण विंडो बंद हो गई। फिर से कोशिश करने के लिए इसे ऊपर से दोबारा खोलें।",
   "authGate.pillAuthorize": "अधिकृत करें",
   "authGate.pillEnterToken": "टोकन दर्ज करें",
   "authGate.unsupportedChallenge": "इस प्रमाणीकरण चरण को पूरा करने के लिए सेटिंग्स खोलें।",
@@ -1001,6 +1006,19 @@ registerPack("hi", {
   // Admin — tabs
   "admin.tab.users": "उपयोगकर्ता",
   "admin.tab.configuration": "कॉन्फ़िगरेशन",
+  "admin.configuration.loading": "कॉन्फ़िगरेशन लोड हो रहा है",
+  "admin.configuration.loadFailed": "एक्सटेंशन कॉन्फ़िगरेशन लोड नहीं हो सका।",
+  "admin.configuration.title": "एक्सटेंशन कॉन्फ़िगरेशन",
+  "admin.configuration.description": "एक्सटेंशन द्वारा घोषित डिप्लॉयमेंट-स्वामित्व वाले मान कॉन्फ़िगर करें। मान सहेजने से कोई एक्सटेंशन इंस्टॉल, कनेक्ट, सक्रिय या हटाया नहीं जाता।",
+  "admin.configuration.empty": "किसी एक्सटेंशन को डिप्लॉयमेंट कॉन्फ़िगरेशन की आवश्यकता नहीं है।",
+  "admin.configuration.statusConfigured": "कॉन्फ़िगर किया गया",
+  "admin.configuration.statusRequired": "कॉन्फ़िगरेशन आवश्यक",
+  "admin.configuration.usedBy": "इनके द्वारा उपयोग किया गया",
+  "admin.configuration.installed": "इंस्टॉल किया गया",
+  "admin.configuration.secretHint": "कॉन्फ़िगर किया गया। संग्रहीत मान बनाए रखने के लिए खाली छोड़ें।",
+  "admin.configuration.save": "कॉन्फ़िगरेशन सहेजें",
+  "admin.configuration.saved": "कॉन्फ़िगरेशन सहेजा गया।",
+  "admin.configuration.saveFailed": "कॉन्फ़िगरेशन सहेजा नहीं जा सका।",
 
   // Admin — dashboard
 
