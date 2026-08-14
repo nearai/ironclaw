@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const STATIC_IMPORT_RE =
   /(^|\n)[ \t]*import(?:\s+[\s\S]*?\s+from\s*)?\s*["'][^"'\n]+["'](?:\s+(?:assert|with)\s*\{[\s\S]*?\})?\s*;?[ \t]*(?=\n|$)/g;
 const NAMED_EXPORT_DECLARATION_RE =
-  /^(\s*)export\s+(?=(?:async\s+)?function\b|class\b|(?:const|let|var)\b)/gm;
+  /^(\s*)export\s+(?=(?:async\s+)?function\b|class\b|interface\b|type\b|(?:const|let|var)\b)/gm;
 const NAMED_EXPORT_LIST_RE = /^(\s*)export\s*\{([\s\S]*?)\}\s*;?[ \t]*$/gm;
 
 export function sourceForVmTest(path, exportNames, metaUrl) {

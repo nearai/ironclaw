@@ -33,6 +33,10 @@ test("VM harness captures exported declarations and named export aliases", () =>
   const exports = evaluate(
     `
 const base = 41;
+export interface AnswerMetadata {
+  source: string;
+}
+export type Answer = number;
 export const answer = base + 1;
 function readAnswer() {
   return answer;
