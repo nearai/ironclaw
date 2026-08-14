@@ -113,6 +113,10 @@ registerPack("ja", {
   "chat.modeAutoReview": "自動レビュー",
   "chat.runtimeLocal": "ローカルで作業",
   "chat.statusWorking": "作業中",
+  "chat.processWorking": "作業中…",
+  "chat.workedFor": "作業時間: {duration}",
+  "chat.reloadHistory": "履歴を再読み込み",
+  "chat.busyRejectedResend": "IronClaw が処理中だったため、このメッセージは送信されませんでした。再送信してもう一度お試しください。",
   "chat.identityUser": "あなた",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "最新にジャンプ",
@@ -206,6 +210,7 @@ registerPack("ja", {
   "authGate.oauthProviderFallback": "プロバイダー",
   "authGate.serviceUnavailable": "サービスを利用できません",
   "authGate.popupBlocked": "認証ポップアップがブロックされました。",
+  "authGate.popupClosed": "接続が完了する前に {provider} の認証ウィンドウが閉じられました。上から再度開いてお試しください。",
   "authGate.pillAuthorize": "承認",
   "authGate.pillEnterToken": "トークンを入力",
   "authGate.unsupportedChallenge": "設定を開いてこの認証手順を完了します。",
@@ -1001,6 +1006,19 @@ registerPack("ja", {
   // Admin — tabs
   "admin.tab.users": "ユーザー",
   "admin.tab.configuration": "設定",
+  "admin.configuration.loading": "設定を読み込み中",
+  "admin.configuration.loadFailed": "拡張機能の設定を読み込めませんでした。",
+  "admin.configuration.title": "拡張機能の設定",
+  "admin.configuration.description": "拡張機能で宣言されたデプロイ所有の値を設定します。値を保存しても、拡張機能のインストール、接続、有効化、削除は行われません。",
+  "admin.configuration.empty": "デプロイ設定が必要な拡張機能はありません。",
+  "admin.configuration.statusConfigured": "設定済み",
+  "admin.configuration.statusRequired": "設定が必要です",
+  "admin.configuration.usedBy": "使用元",
+  "admin.configuration.installed": "インストール済み",
+  "admin.configuration.secretHint": "設定済みです。保存済みの値を維持するには空欄のままにしてください。",
+  "admin.configuration.save": "設定を保存",
+  "admin.configuration.saved": "設定を保存しました。",
+  "admin.configuration.saveFailed": "設定を保存できませんでした。",
 
   // Admin — dashboard
 

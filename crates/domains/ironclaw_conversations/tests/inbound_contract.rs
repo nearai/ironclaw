@@ -4043,12 +4043,19 @@ impl CapacityFailureTurnCoordinator {
 /// coordinator receives rather than a paraphrase of it. The production copy is
 /// pinned by that adapter's own seam tests.
 fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequest {
-    let product_context = product_context::resolve_inbound(
+    let is_trusted_trigger = matches!(
+        submission.classification,
+        ConversationInboundClassification::TrustedTrigger
+    );
+    let mut product_context = product_context::resolve_inbound(
         inbound_classification(submission.classification),
         submission.origin_adapter,
         submission.surface_type,
         submission.scope.product_owner(&submission.actor),
     );
+    if is_trusted_trigger {
+        product_context.execution_policy = submission.execution_policy;
+    }
     SubmitTurnRequest {
         requested_model: None,
         scope: submission.scope,

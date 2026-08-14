@@ -113,6 +113,10 @@ registerPack("fr", {
   "chat.modeAutoReview": "Revue automatique",
   "chat.runtimeLocal": "Travailler localement",
   "chat.statusWorking": "Travail en cours",
+  "chat.processWorking": "Travail en cours…",
+  "chat.workedFor": "Travail effectué pendant {duration}",
+  "chat.reloadHistory": "Recharger l’historique",
+  "chat.busyRejectedResend": "Ce message n’a pas été envoyé car IronClaw était occupé. Renvoyez-le pour réessayer.",
   "chat.identityUser": "Vous",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Aller aux dernières",
@@ -206,6 +210,7 @@ registerPack("fr", {
   "authGate.oauthProviderFallback": "le fournisseur",
   "authGate.serviceUnavailable": "Service indisponible",
   "authGate.popupBlocked": "La fenêtre contextuelle d'autorisation a été bloquée.",
+  "authGate.popupClosed": "La fenêtre d’autorisation {provider} s’est fermée avant la fin de la connexion. Rouvrez-la ci-dessus pour réessayer.",
   "authGate.pillAuthorize": "Autoriser",
   "authGate.pillEnterToken": "Entrer le jeton",
   "authGate.unsupportedChallenge": "Ouvrir les paramètres pour terminer cette étape d'authentification.",
@@ -1001,6 +1006,19 @@ registerPack("fr", {
   // Admin — tabs
   "admin.tab.users": "Utilisateurs",
   "admin.tab.configuration": "Configuration",
+  "admin.configuration.loading": "Chargement de la configuration",
+  "admin.configuration.loadFailed": "Impossible de charger la configuration des extensions.",
+  "admin.configuration.title": "Configuration des extensions",
+  "admin.configuration.description": "Configurez les valeurs propres au déploiement déclarées par les extensions. Leur enregistrement n’installe, ne connecte, n’active ni ne supprime aucune extension.",
+  "admin.configuration.empty": "Aucune extension ne nécessite de configuration de déploiement.",
+  "admin.configuration.statusConfigured": "Configuré",
+  "admin.configuration.statusRequired": "Configuration requise",
+  "admin.configuration.usedBy": "Utilisé par",
+  "admin.configuration.installed": "installé",
+  "admin.configuration.secretHint": "Configuré. Laissez ce champ vide pour conserver la valeur enregistrée.",
+  "admin.configuration.save": "Enregistrer la configuration",
+  "admin.configuration.saved": "Configuration enregistrée.",
+  "admin.configuration.saveFailed": "Impossible d’enregistrer la configuration.",
 
   // Admin — dashboard
 

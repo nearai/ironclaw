@@ -21,6 +21,8 @@ test("TypingIndicator keeps the brief action label beside the working indicator"
   };
   const context = {
     ...components,
+    useT: () => (key, params) =>
+      params ? `${key}:${JSON.stringify(params)}` : key,
     globalThis: {},
   };
 
@@ -32,7 +34,7 @@ test("TypingIndicator keeps the brief action label beside the working indicator"
     componentProps(indicator, components.NearProcessIndicator),
     {
       state: "working",
-      label: "Working…",
+      label: "chat.processWorking",
     },
   );
 });
@@ -43,6 +45,8 @@ test("TypingIndicator keeps the static mark with elapsed time after completion",
   };
   const context = {
     ...components,
+    useT: () => (key, params) =>
+      params ? `${key}:${JSON.stringify(params)}` : key,
     globalThis: {},
   };
 
@@ -57,7 +61,7 @@ test("TypingIndicator keeps the static mark with elapsed time after completion",
     componentProps(indicator, components.NearProcessIndicator),
     {
       state: "done",
-      label: "Worked for 12s",
+      label: 'chat.workedFor:{"duration":"12s"}',
     },
   );
 });
@@ -73,6 +77,8 @@ test.each([
     };
     const context = {
       ...components,
+      useT: () => (key, params) =>
+        params ? `${key}:${JSON.stringify(params)}` : key,
       globalThis: {},
     };
 
@@ -87,7 +93,7 @@ test.each([
       componentProps(indicator, components.NearProcessIndicator),
       {
         state: "done",
-        label,
+        label: `chat.workedFor:${JSON.stringify({ duration: label.replace("Worked for ", "") })}`,
       },
     );
   },

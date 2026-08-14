@@ -113,6 +113,10 @@ registerPack("zh-CN", {
   "chat.modeAutoReview": "自动审查",
   "chat.runtimeLocal": "本地工作",
   "chat.statusWorking": "正在工作",
+  "chat.processWorking": "正在工作…",
+  "chat.workedFor": "已工作 {duration}",
+  "chat.reloadHistory": "重新加载历史记录",
+  "chat.busyRejectedResend": "IronClaw 正忙，此消息未发送。请重新发送后再试。",
   "chat.identityUser": "你",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "跳转至最新",
@@ -206,6 +210,7 @@ registerPack("zh-CN", {
   "authGate.oauthProviderFallback": "该提供商",
   "authGate.serviceUnavailable": "服务不可用",
   "authGate.popupBlocked": "授权弹出窗口已被拦截。",
+  "authGate.popupClosed": "{provider} 授权窗口在连接完成前已关闭。请在上方重新打开后重试。",
   "authGate.pillAuthorize": "授权",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "请打开设置完成此身份验证步骤。",
@@ -1000,6 +1005,19 @@ registerPack("zh-CN", {
   // Admin — tabs
   "admin.tab.users": "用户",
   "admin.tab.configuration": "配置",
+  "admin.configuration.loading": "正在加载配置",
+  "admin.configuration.loadFailed": "无法加载扩展配置。",
+  "admin.configuration.title": "扩展配置",
+  "admin.configuration.description": "配置由扩展声明且归部署所有的值。保存值不会安装、连接、激活或移除扩展。",
+  "admin.configuration.empty": "没有扩展需要部署配置。",
+  "admin.configuration.statusConfigured": "已配置",
+  "admin.configuration.statusRequired": "需要配置",
+  "admin.configuration.usedBy": "使用方",
+  "admin.configuration.installed": "已安装",
+  "admin.configuration.secretHint": "已配置。留空可保留已存储的值。",
+  "admin.configuration.save": "保存配置",
+  "admin.configuration.saved": "配置已保存。",
+  "admin.configuration.saveFailed": "无法保存配置。",
 
   // Admin — dashboard
 

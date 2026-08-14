@@ -130,7 +130,7 @@ function MessageBubbleImpl({
   commands,
 }: MessageBubbleProps) {
   const t = useT();
-  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp, commandResult } = message;
+  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, errorKey, toolCalls, timestamp, commandResult } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
   const finalReplyState =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
@@ -384,7 +384,7 @@ function MessageBubbleImpl({
 
           {status === "error" && (
             <div className={["mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300", contentOpacityClass].join(" ")}>
-              <span>{error}</span>
+              <span>{errorKey ? t(errorKey) : error}</span>
             </div>
           )}
 

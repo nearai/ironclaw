@@ -4,28 +4,29 @@ import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";
 import { Panel } from "../../../design-system/primitives";
 import { clientActionId } from "../../../lib/api";
+import { useT } from "../../../lib/i18n";
 import { useAdminConfiguration } from "../hooks/useAdminConfiguration";
 
 export function AdminConfigurationTab() {
+  const t = useT();
   const state = useAdminConfiguration();
   if (state.query.isLoading) {
-    return <div className="v2-skeleton h-48 rounded-xl" aria-label="Loading configuration" />;
+    return <div className="v2-skeleton h-48 rounded-xl" aria-label={t("admin.configuration.loading")} />;
   }
   if (state.query.error) {
-    return <p className="text-sm text-red-200" role="alert">Unable to load extension configuration.</p>;
+    return <p className="text-sm text-red-200" role="alert">{t("admin.configuration.loadFailed")}</p>;
   }
   return (
     <section className="space-y-5" data-testid="admin-configuration-page">
       <header>
-        <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">Admin</p>
-        <h1 className="mt-2 text-xl font-semibold text-iron-50">Extension configuration</h1>
+        <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("nav.admin")}</p>
+        <h1 className="mt-2 text-xl font-semibold text-iron-50">{t("admin.configuration.title")}</h1>
         <p className="mt-2 max-w-3xl text-sm text-iron-300">
-          Configure deployment-owned values declared by extensions. Saving values does not install,
-          connect, activate, or remove an extension.
+          {t("admin.configuration.description")}
         </p>
       </header>
       {state.groups.length === 0 ? (
-        <Panel className="p-6 text-sm text-iron-300">No extensions require deployment configuration.</Panel>
+        <Panel className="p-6 text-sm text-iron-300">{t("admin.configuration.empty")}</Panel>
       ) : state.groups.map((group) => (
         <ConfigurationGroup key={group.group_id} group={group} state={state} />
       ))}
@@ -62,6 +63,7 @@ function mergeRefetchedConfigurationValues(fields, current, dirtyHandles) {
 }
 
 export function ConfigurationGroup({ group, state }) {
+  const t = useT();
   const initialValues = React.useMemo(
     () => configurationValuesFromFields(group.fields),
     [group.fields],
@@ -105,14 +107,18 @@ export function ConfigurationGroup({ group, state }) {
             <div className="flex items-center gap-2">
               <h2 className="text-base font-semibold text-iron-50">{group.display_name}</h2>
               <span className={group.complete ? "text-xs text-signal" : "text-xs text-amber-200"}>
-                {group.complete ? "Configured" : "Configuration required"}
+                {group.complete
+                  ? t("admin.configuration.statusConfigured")
+                  : t("admin.configuration.statusRequired")}
               </span>
             </div>
             {group.description && <p className="mt-1 text-sm text-iron-300">{group.description}</p>}
             <p className="mt-2 text-xs text-iron-400">
-              Used by {group.used_by.map((extension) => (
+              {t("admin.configuration.usedBy")} {group.used_by.map((extension) => (
                 <span key={extension.package_id} className="mr-2 inline-block">
-                  {extension.display_name}{extension.installed ? " · installed" : ""}
+                  {extension.display_name}{extension.installed
+                    ? ` · ${t("admin.configuration.installed")}`
+                    : ""}
                 </span>
               ))}
             </p>
@@ -123,7 +129,7 @@ export function ConfigurationGroup({ group, state }) {
         <div className="mt-5 grid gap-4 md:grid-cols-2">
           {group.fields.map((field) => {
             const hint = field.secret && field.provided
-              ? "Configured. Leave blank to keep the stored value."
+              ? t("admin.configuration.secretHint")
               : null;
             const descriptionId = field.description
               ? `${group.group_id}-${field.handle}-description`
@@ -159,11 +165,11 @@ export function ConfigurationGroup({ group, state }) {
         </div>
         <div className="mt-5 flex items-center gap-3">
           <Button type="submit" size="sm" loading={isSaving} disabled={state.isSaving}>
-            Save configuration
+            {t("admin.configuration.save")}
           </Button>
-          {saved && <span className="text-sm text-signal" role="status">Configuration saved.</span>}
+          {saved && <span className="text-sm text-signal" role="status">{t("admin.configuration.saved")}</span>}
           {state.saveError && state.savingGroupId === group.group_id && (
-            <span className="text-sm text-red-200" role="alert">Unable to save configuration.</span>
+            <span className="text-sm text-red-200" role="alert">{t("admin.configuration.saveFailed")}</span>
           )}
         </div>
       </form>

@@ -197,6 +197,16 @@ struct NoopTestTriggerCreateHook;
 
 #[async_trait::async_trait]
 impl TriggerCreateHook for NoopTestTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _policy: &ironclaw_host_api::execution_policy::TurnExecutionPolicy,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        // Never exercised (see the struct doc): only `builtin.trigger_list`
+        // is ever routed to this runtime.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(
         &self,
         _record: &ironclaw_triggers::TriggerRecord,

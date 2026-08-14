@@ -2,20 +2,51 @@ use chrono::{Datelike, TimeZone};
 
 use super::*;
 
-/// Delivery is now a step the *prompt* owns, not a stored routing field: a
+/// Accept-all preflight for tests that pin persistence/round-trip behavior of
+/// restrictive policies, which `NoopTriggerCreateHook` now fails closed on.
+#[derive(Debug)]
+struct AcceptAllTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for AcceptAllTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        Ok(())
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
+fn execution_contract(goal: impl Into<String>) -> Value {
+    let goal = goal.into();
+    json!({
+        "version": 1,
+        "goal": goal,
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
+
+/// Delivery is now a step the structured contract owns, not a stored routing field: a
 /// routine's fire delivers externally only by calling
 /// `builtin__outbound_deliver` itself. The description must therefore teach
-/// (a) the prompt is the whole task, written for a memory-less future run,
-/// (b) any wanted delivery is an explicit prompt step naming its destination,
+/// (a) the goal is the whole task, written for a memory-less future run,
+/// (b) any wanted delivery is an explicit goal step naming its destination,
 /// picked while the user is present, and (c) a fire that makes no delivery
 /// call delivers nothing externally — its reply only lands in the routine's
 /// own run thread. It must NOT resurrect the retired `delivery_target_id`
 /// input, which no longer exists on this capability.
 #[test]
-fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_target() {
+fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_target() {
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
-        "trigger_create description must say the prompt is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
+        "trigger_create description must say the goal is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("no memory of this conversation"),
@@ -23,8 +54,8 @@ fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_targe
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
-            .contains("write that as an explicit step in the prompt naming the destination"),
-        "trigger_create description must make delivery an explicit prompt step: {TRIGGER_CREATE_DESCRIPTION}"
+            .contains("write delivery as an explicit goal step naming the destination"),
+        "trigger_create description must make delivery an explicit goal step: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_deliver"),
@@ -122,7 +153,7 @@ fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
 fn trigger_create_input_rejects_missing_timezone() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": execution_contract("check mail"),
         "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
     });
     let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
@@ -136,7 +167,7 @@ fn trigger_create_input_rejects_missing_timezone() {
 fn trigger_create_input_rejects_invalid_timezone() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": execution_contract("check mail"),
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -157,7 +188,13 @@ fn trigger_create_input_rejects_invalid_timezone() {
 fn trigger_create_input_accepts_cron_schedule() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Check mail",
+            "success_criteria": ["Report the mail check result"],
+            "output_instructions": "Return a concise summary",
+            "no_result_text": "No mail found"
+        },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -174,10 +211,160 @@ fn trigger_create_input_accepts_cron_schedule() {
 }
 
 #[test]
+fn trigger_create_input_rejects_new_legacy_prompt() {
+    let input = serde_json::json!({
+        "name": "daily",
+        "prompt": "check mail",
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let error = match serde_json::from_value::<TriggerCreateInput>(input) {
+        Ok(_) => panic!("new trigger creation must require an execution contract"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("unknown field `prompt`"),
+        "prompt-only creation should fail as a retired field: {error}"
+    );
+}
+
+#[test]
+fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "required_skills": ["payment-operations"]
+            }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
+    assert_eq!(parsed.execution_contract.version, 1);
+}
+
+#[test]
+fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
+    let both = serde_json::json!({
+        "name": "invalid",
+        "prompt": "legacy",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failures",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failures"
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+    let neither = serde_json::json!({
+        "name": "invalid",
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    assert!(serde_json::from_value::<TriggerCreateInput>(both).is_err());
+    assert!(serde_json::from_value::<TriggerCreateInput>(neither).is_err());
+}
+
+#[tokio::test]
+async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("structured-trigger-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+        },
+        "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+    });
+
+    let output = create_trigger(
+        &repository,
+        &AcceptAllTriggerCreateHook,
+        &scope,
+        input,
+        Utc::now(),
+    )
+    .await
+    .expect("structured trigger created");
+    assert_eq!(output["trigger"]["execution_contract"]["version"], 1);
+
+    let records = repository
+        .list_triggers(scope.tenant_id.clone())
+        .await
+        .expect("list records");
+    let record = records.first().expect("created record");
+    let spec = record.execution_spec.as_ref().expect("stored contract");
+    assert_eq!(record.prompt, spec.render_prompt());
+    assert!(record.prompt.contains("## Success criteria"));
+}
+
+#[tokio::test]
+async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
+    // The compatibility registration path (`NoopTriggerCreateHook`) has no
+    // preflight service; a contract carrying capability/skill restrictions
+    // must fail closed at creation instead of persisting unvalidated
+    // restrictions that every fired run would then trip over.
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("preflightless-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+        },
+        "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+    });
+
+    create_trigger(
+        &repository,
+        &NoopTriggerCreateHook,
+        &scope,
+        input,
+        Utc::now(),
+    )
+    .await
+    .expect_err("restrictive policy without a preflight service must be rejected");
+
+    let records = repository
+        .list_triggers(scope.tenant_id.clone())
+        .await
+        .expect("list records");
+    assert!(
+        records.is_empty(),
+        "a rejected restrictive policy must not persist a trigger"
+    );
+}
+
+#[test]
 fn trigger_create_input_rejects_missing_schedule() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail"
+        "execution_contract": execution_contract("check mail")
     });
     let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
     assert!(
@@ -191,7 +378,7 @@ fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
     // 2099-06-24T17:00:00 UTC is unambiguous and in the future
     let input = serde_json::json!({
         "name": "one-off reminder",
-        "prompt": "remind me about the meeting",
+        "execution_contract": execution_contract("remind me about the meeting"),
         "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
     });
     let parsed: TriggerCreateInput =
@@ -215,7 +402,7 @@ fn trigger_create_input_rejects_dst_ambiguous_time() {
     // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
     let input = serde_json::json!({
         "name": "ambiguous",
-        "prompt": "test",
+        "execution_contract": execution_contract("test"),
         "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -237,7 +424,7 @@ fn trigger_create_input_rejects_dst_gap_time() {
     // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
     let input = serde_json::json!({
         "name": "dst-gap",
-        "prompt": "test",
+        "execution_contract": execution_contract("test"),
         "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -281,6 +468,7 @@ fn test_record(active_fire_slot: Option<DateTime<Utc>>) -> TriggerRecord {
             timezone: "UTC".to_string(),
         },
         prompt: "check mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: now,
@@ -381,7 +569,7 @@ const MUTATION_CAPABILITIES: &[&str] = &[
 fn once_create_input(name: &str) -> Value {
     json!({
         "name": name,
-        "prompt": "remind me later",
+        "execution_contract": execution_contract("remind me later"),
         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
     })
 }
@@ -587,7 +775,7 @@ async fn trigger_create_rejects_the_retired_delivery_target_id_input() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "retired-target-field",
-            "prompt": "deliver here",
+            "execution_contract": execution_contract("deliver here"),
             "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
             "delivery_target_id": "slack:personal-dm:T123:user-a",
         }),

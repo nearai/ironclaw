@@ -231,6 +231,10 @@ impl TriggerPollerWorker {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
+            execution_policy: record
+                .execution_spec
+                .as_ref()
+                .map(|spec| spec.policy.clone()),
         };
         match disposition {
             FailedFireDisposition::Retryable => {

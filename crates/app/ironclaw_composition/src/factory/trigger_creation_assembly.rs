@@ -1,6 +1,16 @@
 use super::*;
 
+use ironclaw_host_api::{execution_policy::TurnExecutionPolicy, resource::ResourceScope};
 use ironclaw_turns::TurnError;
+
+#[async_trait::async_trait]
+pub(crate) trait TriggerExecutionPolicyPreflight: Send + Sync {
+    async fn validate(
+        &self,
+        scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError>;
+}
 
 /// Late-bindable [`AgentTurnRuntimePort`] view over the runtime's own turn
 /// state — the run-state source every caller-initiated "which run is this"
@@ -72,13 +82,44 @@ impl ironclaw_turns::AgentTurnRuntimePort for LateBoundAgentTurnRuntime {
     }
 }
 
-pub(super) struct TriggerCreatorPairingHook {
+pub(crate) struct TriggerCreatorPairingHook {
     pub(super) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(super) conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
+    pub(super) execution_preflight: tokio::sync::OnceCell<Arc<dyn TriggerExecutionPolicyPreflight>>,
+}
+
+impl TriggerCreatorPairingHook {
+    pub(crate) fn bind_execution_preflight(
+        &self,
+        preflight: Arc<dyn TriggerExecutionPolicyPreflight>,
+    ) -> Result<(), TriggerError> {
+        self.execution_preflight
+            .set(preflight)
+            .map_err(|_| TriggerError::Backend {
+                reason: "trigger execution preflight was already bound".to_string(),
+            })
+    }
 }
 
 #[async_trait::async_trait]
 impl TriggerCreateHook for TriggerCreatorPairingHook {
+    async fn validate_execution_policy(
+        &self,
+        scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // An unbound preflight is a composition wiring fault, not a defect in
+        // the caller's contract — `Backend` (like double binding above), never
+        // `InvalidRecord`, which would tell the caller to fix a valid contract.
+        let preflight = self
+            .execution_preflight
+            .get()
+            .ok_or_else(|| TriggerError::Backend {
+                reason: "trigger execution preflight is not bound".to_string(),
+            })?;
+        preflight.validate(scope, policy).await
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let filesystem = Arc::clone(&self.scoped_filesystem);
         let conversations = self

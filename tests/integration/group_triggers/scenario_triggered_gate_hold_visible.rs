@@ -29,7 +29,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
-                    "prompt": "write the scheduled report",
+                    "execution_contract": super::support::trigger_execution_contract("write the scheduled report"),
                     "schedule": {"kind": "cron", "expression": "* * * * *", "timezone": "UTC"},
                 }),
             ),

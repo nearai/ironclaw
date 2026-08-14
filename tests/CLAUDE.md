@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **55** group scenarios · **55** flat integration bins (49 in
+Totals: **55** group scenarios · **56** flat integration bins (50 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -164,7 +164,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (56)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -201,6 +201,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
 | A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
+| Uploaded DOCX files cannot be corrupted by raw text writes; structured DOCX/XLSX/PPTX edits produce new downloadable files without changing the originals; and HTML renders to a persisted PDF | `document_edit.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
@@ -250,7 +251,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 56 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

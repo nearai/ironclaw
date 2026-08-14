@@ -113,6 +113,10 @@ registerPack("es", {
   "chat.modeAutoReview": "Revision automatica",
   "chat.runtimeLocal": "Trabajar localmente",
   "chat.statusWorking": "Trabajando",
+  "chat.processWorking": "Trabajando…",
+  "chat.workedFor": "Trabajó durante {duration}",
+  "chat.reloadHistory": "Volver a cargar el historial",
+  "chat.busyRejectedResend": "El mensaje no se envió porque IronClaw estaba ocupado. Vuelve a enviarlo para intentarlo de nuevo.",
   "chat.identityUser": "Tú",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Saltar a lo último",
@@ -206,6 +210,7 @@ registerPack("es", {
   "authGate.oauthProviderFallback": "el proveedor",
   "authGate.serviceUnavailable": "Servicio no disponible",
   "authGate.popupBlocked": "La ventana emergente de autorización fue bloqueada.",
+  "authGate.popupClosed": "La ventana de autorización de {provider} se cerró antes de completar la conexión. Vuelve a abrirla arriba para intentarlo de nuevo.",
   "authGate.pillAuthorize": "Autorizar",
   "authGate.pillEnterToken": "Ingresar token",
   "authGate.unsupportedChallenge": "Abrir configuración para completar este paso de autenticación.",
@@ -1001,6 +1006,19 @@ registerPack("es", {
   // Admin — tabs
   "admin.tab.users": "Usuarios",
   "admin.tab.configuration": "Configuración",
+  "admin.configuration.loading": "Cargando configuración",
+  "admin.configuration.loadFailed": "No se pudo cargar la configuración de extensiones.",
+  "admin.configuration.title": "Configuración de extensiones",
+  "admin.configuration.description": "Configura los valores de la implementación declarados por las extensiones. Guardarlos no instala, conecta, activa ni elimina una extensión.",
+  "admin.configuration.empty": "Ninguna extensión requiere configuración de implementación.",
+  "admin.configuration.statusConfigured": "Configurado",
+  "admin.configuration.statusRequired": "Configuración requerida",
+  "admin.configuration.usedBy": "Usado por",
+  "admin.configuration.installed": "instalado",
+  "admin.configuration.secretHint": "Configurado. Déjalo en blanco para conservar el valor almacenado.",
+  "admin.configuration.save": "Guardar configuración",
+  "admin.configuration.saved": "Configuración guardada.",
+  "admin.configuration.saveFailed": "No se pudo guardar la configuración.",
 
   // Admin — dashboard
 
