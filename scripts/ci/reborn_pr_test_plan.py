@@ -82,11 +82,13 @@ DOCS_MINTIGNORE = "docs/.mintignore"
 @functools.cache
 def _publication_fence() -> list[str]:
     """The `.mintignore` patterns, parsed from the authoritative file so a
-    removed fence entry widens the routing with the sweep it selects."""
-    text = (Path(__file__).resolve().parents[2] / DOCS_MINTIGNORE).read_text(
-        encoding="utf-8"
-    )
-    return docs_publication_boundary.parse_mintignore(text)
+    removed fence entry widens the routing with the sweep it selects. A
+    missing file means no fence (everything published), matching
+    docs_publication_boundary.find_violations()."""
+    path = Path(__file__).resolve().parents[2] / DOCS_MINTIGNORE
+    if not path.exists():
+        return []
+    return docs_publication_boundary.parse_mintignore(path.read_text(encoding="utf-8"))
 
 
 def _doc_fact_selections(path: str) -> list[tuple[str, str]]:

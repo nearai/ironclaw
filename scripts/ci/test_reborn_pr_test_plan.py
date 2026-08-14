@@ -1698,6 +1698,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ],
         )
 
+    def test_absent_mintignore_means_no_fence_not_a_crash(self) -> None:
+        """Deleting docs/.mintignore must widen routing to every page (the
+        boundary script's missing-file semantics), not crash the planner."""
+        planner._publication_fence.cache_clear()
+        self.addCleanup(planner._publication_fence.cache_clear)
+        with mock.patch.object(planner, "DOCS_MINTIGNORE", "docs/.mintignore-gone"):
+            plan = self.plan_real_owners(["docs/internal/plans/whatever.md"])
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+
     def test_fenced_and_non_page_docs_stay_prose(self) -> None:
         """Fenced trees (unpublished, read by no cargo test) and non-Markdown
         docs files keep the prose classification."""
