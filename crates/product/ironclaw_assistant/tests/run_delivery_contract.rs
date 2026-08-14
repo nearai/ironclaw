@@ -3108,6 +3108,32 @@ async fn triggered_nothing_to_report_records_suppression_without_delivery_attemp
 }
 
 #[tokio::test]
+async fn triggered_deliver_policy_does_not_suppress_nothing_to_report_outcome() {
+    let harness = build_triggered_harness(
+        vec![scripted_completed_outcome(
+            TurnExecutionOutcome::NothingToReport,
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "No changes").await;
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::Skipped,
+        "NothingToReport is suppressible only when the request explicitly opts in"
+    );
+}
+
+#[tokio::test]
 async fn triggered_suppression_is_distinct_from_missing_notification_configuration() {
     let harness = build_triggered_harness(
         vec![scripted_completed_outcome(

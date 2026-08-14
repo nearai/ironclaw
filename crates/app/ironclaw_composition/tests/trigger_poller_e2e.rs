@@ -64,7 +64,7 @@ use ironclaw_triggers::{
     TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
     TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -1485,7 +1485,7 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         TriggeredRunDeliveryOutcomeKind::Skipped,
     )
     .await;
-    wait_for_recorded_outcome(
+    let suppressed_run_id = wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         suppressed_trigger,
@@ -1499,6 +1499,37 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         TriggeredRunDeliveryOutcomeKind::Skipped,
     )
     .await;
+
+    let suppressed_thread_id = repository
+        .list_trigger_run_history(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            suppressed_trigger,
+            1,
+        )
+        .await
+        .expect("read suppressed trigger run history")
+        .into_iter()
+        .find(|run| run.run_id == Some(suppressed_run_id))
+        .and_then(|run| run.thread_id)
+        .expect("suppressed run has a canonical thread id");
+    let outbound_state = runtime
+        .outbound_delivery_stores_for_test()
+        .expect("local runtime exposes the production outbound state store")
+        .0;
+    let suppressed_attempts = outbound_state
+        .list_delivery_attempts(TurnScope::new_with_owner(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            Some(AgentId::new(AGENT).expect("valid agent id")),
+            None,
+            suppressed_thread_id,
+            Some(UserId::new(USER).expect("valid user id")),
+        ))
+        .await
+        .expect("read suppressed run delivery attempts");
+    assert!(
+        suppressed_attempts.is_empty(),
+        "suppression must happen before delivery reservation: {suppressed_attempts:?}"
+    );
 
     assert!(
         slack_provider.provider_messages().is_empty(),

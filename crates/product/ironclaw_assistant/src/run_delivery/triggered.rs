@@ -788,7 +788,8 @@ async fn notify_background_run(
         };
 
         let trigger_label = prompts::triggered_label_from_prompt(&prompt);
-        if state.status == TurnStatus::Completed
+        if result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            && state.status == TurnStatus::Completed
             && state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport)
         {
             retract_stale_prompts(
