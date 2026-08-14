@@ -62,6 +62,16 @@ use parity_qa_support::model_replay::{
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
+fn execution_contract(goal: impl Into<String>) -> Value {
+    json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested routine task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
+
 struct RoutineCreationCase {
     room: &'static str,
     event_id: &'static str,
@@ -83,7 +93,7 @@ async fn run_routine_creation(case: RoutineCreationCase) {
                 "call_qa_trigger_create",
                 json!({
                     "name": case.trigger_name,
-                    "prompt": case.prompt,
+                    "execution_contract": execution_contract(case.prompt),
                     "schedule": {
                         "kind": "cron",
                         "expression": case.cron,
@@ -331,7 +341,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
         &runtime,
         json!({
             "name": "Deployment health watcher",
-            "prompt": QA_ROUTINE_PROMPT,
+            "execution_contract": execution_contract(QA_ROUTINE_PROMPT),
             "schedule": {
                 "kind": "cron",
                 "expression": "*/5 * * * *",
@@ -487,7 +497,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         &runtime,
         json!({
             "name": "Deployment health watcher action",
-            "prompt": QA_ROUTINE_PROMPT,
+            "execution_contract": execution_contract(QA_ROUTINE_PROMPT),
             "schedule": {
                 "kind": "cron",
                 "expression": "*/5 * * * *",

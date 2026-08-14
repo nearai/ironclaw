@@ -45,8 +45,9 @@
 //!   equivalent pin is that removal deletes the binding outright, so a fresh
 //!   reconnect succeeds with no stale-state conflict (`bind_user_identity`
 //!   would reject a binding held by a different user);
-//! - **bindings are deleted, not tombstoned**: `has_any_active_identity_binding`
-//!   reads record absence rather than tombstone state.
+//! - **bindings are logically deleted with a CAS tombstone**:
+//!   `has_any_active_identity_binding` ignores tombstones, while their retained
+//!   versions fence stale rollback receipts from deleting a later reconnect.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;

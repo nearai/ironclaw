@@ -487,6 +487,17 @@ DOCKER_RUNTIME_CONFIG_OWNERS = {
     "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
     "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
 }
+# Repository configuration that a Reborn crate test reads as an asserted input.
+# These paths are not static CI control: changing one must schedule the test that
+# defines its product/security contract. The linked-device supply-chain test
+# parses Dependabot's Cargo ignore rules so the exact grammers pin cannot be
+# silently reopened by an automated dependency update.
+REPO_CONFIG_TEST_OWNERS = {
+    ".github/dependabot.yml": (
+        "crates/app/ironclaw_architecture_tests/tests/"
+        "reborn_linked_device_supply_chain_pin.rs"
+    ),
+}
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
@@ -823,6 +834,24 @@ def build_plan(
             # fail-closed until their consumers are mapped deliberately.
             shared_reborn_action_changed = True
             continue
+        if path in REPO_CONFIG_TEST_OWNERS:
+            owner = REPO_CONFIG_TEST_OWNERS[path]
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"repository config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"repository config parsed by {owner}: {path}")
+            continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
@@ -900,6 +929,18 @@ def build_plan(
                 "shared root-test support changed; PR runs a representative partition"
             )
             continue
+        if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
+            # Direct shared root-test support (tests/support/mod.rs and the
+            # modules it declares). The integration group targets also compile
+            # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
+            # representative lane of each tier.
+            root_partitions.add(0)
+            integration_lanes.add(0)
+            reasons.append(
+                "shared root-test support changed; PR runs a representative "
+                "partition and integration lane"
+            )
+            continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
@@ -934,6 +975,18 @@ def build_plan(
         }:
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
+            continue
+        if path.startswith("tests/fixtures/") and not path.startswith(
+            "tests/fixtures/llm_traces/"
+        ):
+            # Document/binary fixtures (docx, xlsx, pptx, pdf) are consumed by
+            # integration tests through `include_bytes!`, so changing one
+            # changes what those tests assert. Recorded LLM traces under
+            # `reborn_qa` are handled by the QA-evidence arm above;
+            # other trace families require an explicit owner rather than
+            # silently becoming generic integration fixtures.
+            integration_lanes.add(0)
+            reasons.append(f"integration fixture changed: {path}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")

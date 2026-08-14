@@ -9,7 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::HostApiError;
+use crate::{
+    error::HostApiError,
+    messaging::{StandardOpContract, StandardSchemaDirection},
+};
 
 fn validate_schema_ref(value: &str) -> Result<(), HostApiError> {
     if value.is_empty() {
@@ -76,7 +79,7 @@ impl CapabilityProfileSchemaRef {
     pub fn standard_messaging_input(
         op: crate::messaging::StandardMessagingOp,
     ) -> Result<Self, HostApiError> {
-        Self::standard_messaging(op, "input")
+        Self::standard_messaging(op, StandardSchemaDirection::Input)
     }
 
     /// Builds the host-owned canonical output schema ref for one implemented
@@ -84,23 +87,33 @@ impl CapabilityProfileSchemaRef {
     pub fn standard_messaging_output(
         op: crate::messaging::StandardMessagingOp,
     ) -> Result<Self, HostApiError> {
-        Self::standard_messaging(op, "output")
+        Self::standard_messaging(op, StandardSchemaDirection::Output)
     }
 
+    /// Mints the ref at the op's **current** schema version — the version a
+    /// new binding pins. Earlier versions are never minted here but keep
+    /// resolving (`resolve_standard_schema_ref`), so an already-installed
+    /// binding is untouched until its own manifest digest changes.
     fn standard_messaging(
         op: crate::messaging::StandardMessagingOp,
-        direction: &'static str,
+        direction: StandardSchemaDirection,
     ) -> Result<Self, HostApiError> {
-        if op.contract().is_none() {
+        let Some(contract) = op.contract() else {
             return Err(HostApiError::invalid_path(
                 op.op_name(),
                 "reserved standard messaging operation has no schema",
             ));
-        }
+        };
+        let version = match direction {
+            StandardSchemaDirection::Input => StandardOpContract::INPUT_SCHEMA_VERSION,
+            StandardSchemaDirection::Output => contract.output_schema_version,
+        };
         Ok(Self(format!(
-            "{}{}.{direction}.v1",
+            "{}{}.{}.{}",
             crate::messaging::STANDARD_SCHEMA_REF_PREFIX,
-            op.op_name()
+            op.op_name(),
+            direction.as_str(),
+            version.as_str()
         )))
     }
 

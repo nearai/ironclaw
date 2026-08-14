@@ -9,8 +9,7 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_host_api::{ids::InvocationId, resolution::Resolution, result_meta::FailureKind};
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, ConcurrencyHint,
-    resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, resolution,
 };
 
 use super::{
@@ -32,7 +31,6 @@ where
             SKILL_ACTIVATE_CAPABILITY_ID,
             SKILL_ACTIVATE_PROVIDER_TOOL_NAME,
             SKILL_ACTIVATE_DESCRIPTION,
-            ConcurrencyHint::Exclusive,
             skill_activate_input_schema(),
         )?,
         Arc::new(SkillActivationHandler {
@@ -228,6 +226,12 @@ fn skill_activation_host_error(error: SkillActivationSelectionError) -> AgentLoo
         SkillActivationSelectionError::ContextBudgetExceeded => {
             AgentLoopHostErrorKind::BudgetExceeded
         }
+        // Matches `HostSkillContextBuildError::RequiredSkillUnavailable` in
+        // `skill_context.rs`: the run's execution policy names a skill the
+        // catalog cannot activate — a policy denial, not a malformed call.
+        SkillActivationSelectionError::RequiredSkillUnavailable { .. } => {
+            AgentLoopHostErrorKind::PolicyDenied
+        }
         SkillActivationSelectionError::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
         SkillActivationSelectionError::Internal => AgentLoopHostErrorKind::Internal,
     };
@@ -319,6 +323,19 @@ fn build_activation_output(activated: &[String], feedback: &[String]) -> serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unavailable required skill is a policy denial, classified the same
+    /// way as `HostSkillContextBuildError::RequiredSkillUnavailable` in
+    /// `skill_context.rs` — the two paths report one condition and must not
+    /// drift apart.
+    #[test]
+    fn required_skill_unavailable_is_classified_as_policy_denied() {
+        let error =
+            skill_activation_host_error(SkillActivationSelectionError::RequiredSkillUnavailable {
+                reason: "missing-skill: not found".to_string(),
+            });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    }
 
     /// A refusal must reach the MODEL, not just the live projection. Without this the reason is
     /// built and dropped, and the model sees an empty result it cannot act on.

@@ -4475,6 +4475,123 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
 }
 
 #[tokio::test]
+async fn resolve_binding_after_actor_reassignment_creates_a_fresh_direct_thread() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let resolver = Arc::new(MutableProductActorUserResolver::new(Some(
+        ResolvedProductActorUser::new(UserId::new("user:alice").expect("user")),
+    )));
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations, resolver.clone());
+    let first = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope("direct-owner-alice"))
+                .expect("verified envelope binding request"),
+        )
+        .await
+        .expect("first owner resolves");
+
+    resolver.set(Some(ResolvedProductActorUser::new(
+        UserId::new("user:bob").expect("user"),
+    )));
+    let rebound = binding
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&sample_envelope("direct-owner-bob"))
+                .expect("verified envelope binding request"),
+        )
+        .await
+        .expect("newly authorized owner resolves without inheriting the old route");
+
+    assert_eq!(rebound.actor_user_id.as_str(), "user:bob");
+    assert_ne!(
+        rebound.thread_id, first.thread_id,
+        "a reassigned actor must receive a fresh direct thread"
+    );
+}
+
+#[tokio::test]
+async fn resolve_binding_repairs_a_stale_direct_route_for_the_current_actor() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let user_id = UserId::new("user:alice").expect("user");
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha")
+                .expect("installation"),
+            actor_ref.clone(),
+            user_id.clone(),
+        )
+        .await;
+    let envelope = sample_envelope("stale-direct-route");
+    let request =
+        ResolveBindingRequest::from_envelope(&envelope).expect("verified envelope binding request");
+    let old = ConversationBindingPort::resolve_or_create_binding_with_trusted_scope(
+        conversations.as_ref(),
+        ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: TenantId::new("tenant:alpha").expect("tenant"),
+            adapter_kind: ironclaw_conversations::AdapterKind::new("test_adapter")
+                .expect("adapter"),
+            adapter_installation_id: ironclaw_conversations::AdapterInstallationId::new(
+                "install_alpha",
+            )
+            .expect("installation"),
+            external_actor_ref: actor_ref.clone(),
+            external_conversation_ref: envelope.external_conversation_ref().clone(),
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:seed-stale-direct-route",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            requested_agent_id: None,
+            requested_project_id: None,
+        },
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("seed the pre-existing direct route");
+
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> = Arc::new(
+        AccessDeniedOnceConversationBindingService::new(conversations.clone()),
+    );
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let actor_resolver = Arc::new(RecordingProductActorUserResolver::new([(
+        actor_ref.clone(),
+        user_id.clone(),
+    )]));
+    let scope = ProductInstallationScope::with_default_scope(
+        TenantId::new("tenant:alpha").expect("tenant"),
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_actor_user_resolver(actor_resolver, actor_pairings);
+    let binding = ProductConversationBindingService::new(
+        conversation_port,
+        StaticProductInstallationResolver::new([(
+            ProductInstallationKey::new(
+                ProductAdapterId::new("test_adapter").expect("adapter"),
+                AdapterInstallationId::new("install_alpha").expect("installation"),
+            ),
+            scope,
+        )]),
+    );
+
+    let repaired = binding
+        .resolve_binding(request)
+        .await
+        .expect("a current actor should recover from a stale direct route");
+
+    assert_eq!(repaired.actor_user_id, user_id);
+    assert_ne!(
+        repaired.thread_id, old.turn_scope.thread_id,
+        "repair must revoke the inaccessible direct route and mint a fresh thread"
+    );
+}
+
+#[tokio::test]
 async fn lookup_binding_rechecks_direct_actor_revocation_after_the_route_was_created() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let resolver = Arc::new(MutableProductActorUserResolver::new(Some(
@@ -6608,6 +6725,90 @@ struct CountingConversationBindingService {
     inner: Arc<InMemoryConversationServices>,
     lookup_count: AtomicUsize,
     trusted_resolve_count: AtomicUsize,
+}
+
+struct AccessDeniedOnceConversationBindingService {
+    inner: Arc<InMemoryConversationServices>,
+    resolve_calls: AtomicUsize,
+}
+
+impl AccessDeniedOnceConversationBindingService {
+    fn new(inner: Arc<InMemoryConversationServices>) -> Self {
+        Self {
+            inner,
+            resolve_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ironclaw_conversations::ConversationBindingService
+    for AccessDeniedOnceConversationBindingService
+{
+    async fn resolve_or_create_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.resolve_or_create_binding_with_trusted_scope(request, None, None, None)
+            .await
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+        trusted_owner_user_id: Option<UserId>,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        if self.resolve_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(ironclaw_conversations::InboundTurnError::AccessDenied {
+                actor_id: "user:alice".to_string(),
+                thread_id: "stale-thread".to_string(),
+            });
+        }
+        self.inner
+            .resolve_or_create_binding_with_trusted_scope(
+                request,
+                trusted_agent_id,
+                trusted_project_id,
+                trusted_owner_user_id,
+            )
+            .await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        request: ironclaw_conversations::LinkConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::LinkedConversationBinding,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.inner.link_conversation_to_thread(request).await
+    }
+
+    async fn validate_reply_target(
+        &self,
+        request: ironclaw_conversations::ValidateReplyTargetRequest,
+    ) -> Result<ironclaw_conversations::ReplyTargetBinding, ironclaw_conversations::InboundTurnError>
+    {
+        self.inner.validate_reply_target(request).await
+    }
 }
 
 impl CountingConversationBindingService {

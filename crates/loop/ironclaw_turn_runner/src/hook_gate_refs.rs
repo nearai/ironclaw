@@ -367,8 +367,8 @@ impl HookGateInvocationScopePort {
 
 #[async_trait]
 impl LoopCapabilityPort for HookGateInvocationScopePort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        true
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {

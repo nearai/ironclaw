@@ -58,6 +58,7 @@ fn setup_kind(setup: &RuntimeCredentialAccountSetup) -> &'static str {
         RuntimeCredentialAccountSetup::OAuth { .. } => "oauth",
         RuntimeCredentialAccountSetup::Retired => "retired",
         RuntimeCredentialAccountSetup::Pairing => "pairing",
+        RuntimeCredentialAccountSetup::DeviceLink => "device_link",
     }
 }
 
@@ -274,13 +275,19 @@ fn assert_projection_parity_with_additions(dir: &str, additions: &PackageAdditio
         assert_eq!(a.visibility, b.visibility, "{dir}/{id}: visibility");
         // A `standard_op`-bound tool's schema refs are host-synthesized
         // (standardized messaging framework, task 9: `standard:messaging/<op>.
-        // {input,output}.v1`), replacing the package-authored refs the frozen
-        // v2 baseline recorded — an intentional divergence from the v2->v3
-        // rewrite this suite otherwise pins byte-for-byte, not a projection
-        // bug. Assert the synthesized shape instead of baseline equality;
-        // every other declared field (effects, permission, visibility,
-        // prompt_doc_ref, credentials) still must match the v2 baseline
-        // exactly, same as any other tool.
+        // {input,output}.<version>`), replacing the package-authored refs the
+        // frozen v2 baseline recorded — an intentional divergence from the
+        // v2->v3 rewrite this suite otherwise pins byte-for-byte, not a
+        // projection bug. Assert the synthesized shape instead of baseline
+        // equality; every other declared field (effects, permission,
+        // visibility, prompt_doc_ref, credentials) still must match the v2
+        // baseline exactly, same as any other tool.
+        //
+        // The output version is read from the op's own contract, not spelled
+        // `.v1`: `send_message` graduated to `.output.v2` (the
+        // `sent_unverified` evidence branch), and hardcoding a version here
+        // would pin the ratchet to whichever ops had graduated the day it was
+        // written.
         match b.standard_op {
             Some(op) => {
                 assert_eq!(
@@ -288,11 +295,22 @@ fn assert_projection_parity_with_additions(dir: &str, additions: &PackageAdditio
                     format!("standard:messaging/{}.input.v1", op.op_name()),
                     "{dir}/{id}: standard_op input_schema_ref must be host-synthesized"
                 );
+                let output_version = op
+                    .contract()
+                    .unwrap_or_else(|| panic!("{dir}/{id}: bound to a reserved standard op"))
+                    .output_schema_version;
                 assert_eq!(
                     b.output_schema_ref
                         .as_ref()
                         .map(|schema_ref| schema_ref.as_str()),
-                    Some(format!("standard:messaging/{}.output.v1", op.op_name()).as_str()),
+                    Some(
+                        format!(
+                            "standard:messaging/{}.output.{}",
+                            op.op_name(),
+                            output_version.as_str()
+                        )
+                        .as_str()
+                    ),
                     "{dir}/{id}: standard_op output_schema_ref must be host-synthesized"
                 );
             }
@@ -634,19 +652,29 @@ fn slack_v3_appends_the_remaining_standard_ops() {
             .find(|capability| capability.id.as_str() == *id)
             .expect("capability just enumerated");
 
-        // Host-canonical schemas on both directions: the output half is what
-        // makes a send that cannot produce a message_ref a failure instead of
-        // a silent pass-through.
+        // Host-canonical schemas on both directions: each operation pins the
+        // current output version declared by its contract. The output half is
+        // what makes a send that cannot produce provider evidence fail instead
+        // of silently passing through.
         assert_eq!(
             capability.input_schema_ref.as_str(),
             format!("standard:messaging/{}.input.v1", op.op_name())
+        );
+        let output_version = op
+            .contract()
+            .unwrap_or_else(|| panic!("{id}: bound to a reserved standard op"))
+            .output_schema_version;
+        let expected_output_ref = format!(
+            "standard:messaging/{}.output.{}",
+            op.op_name(),
+            output_version.as_str()
         );
         assert_eq!(
             capability
                 .output_schema_ref
                 .as_ref()
                 .map(|schema_ref| schema_ref.as_str()),
-            Some(format!("standard:messaging/{}.output.v1", op.op_name()).as_str())
+            Some(expected_output_ref.as_str())
         );
 
         // Write ops must declare external_write (spec §6 rule 4) — this is

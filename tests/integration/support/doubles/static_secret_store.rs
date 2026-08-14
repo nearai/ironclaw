@@ -66,6 +66,34 @@ impl SecretStorePort for StaticSecretStore {
         })
     }
 
+    async fn put_versioned(
+        &self,
+        _scope: ResourceScope,
+        _handle: SecretHandle,
+        _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
+        _expected: ironclaw_secrets::SecretCasExpectation,
+    ) -> Result<ironclaw_secrets::SecretCasWriteOutcome, SecretStoreError> {
+        // Fail loud: this double serves one immutable secret for injection
+        // tests; a compare-and-swap write reaching it is a wiring bug.
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "static secret store double does not support versioned writes".to_string(),
+        })
+    }
+
+    async fn read_versioned(
+        &self,
+        _scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<ironclaw_secrets::VersionedSecretMaterial>, SecretStoreError> {
+        Ok(
+            (handle == &self.handle).then(|| ironclaw_secrets::VersionedSecretMaterial {
+                material: self.material.clone(),
+                version: ironclaw_secrets::SecretVersion::from_backend(1),
+            }),
+        )
+    }
+
     async fn put_if_absent(
         &self,
         _scope: ResourceScope,

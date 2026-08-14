@@ -117,6 +117,11 @@ registerPack("en", {
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",
+  "chat.processWorking": "Working…",
+  "chat.workedFor": "Worked for {duration}",
+  "chat.reloadHistory": "Reload history",
+  "chat.busyRejectedResend":
+    "This message wasn't sent because IronClaw was busy. Resend it to try again.",
   "chat.identityUser": "You",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
@@ -211,6 +216,8 @@ registerPack("en", {
   "authGate.oauthProviderFallback": "the provider",
   "authGate.serviceUnavailable": "Service unavailable",
   "authGate.popupBlocked": "Authorization popup was blocked.",
+  "authGate.popupClosed":
+    "The {provider} authorization window closed before you finished connecting. Re-open it above to try again.",
   "authGate.pillAuthorize": "Authorize",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "Open settings to complete this authentication step.",
@@ -1098,6 +1105,23 @@ registerPack("en", {
   // Admin — tabs
   "admin.tab.users": "Users",
   "admin.tab.configuration": "Configuration",
+  "admin.configuration.loading": "Loading configuration",
+  "admin.configuration.loadFailed": "Unable to load extension configuration.",
+  "admin.configuration.title": "Extension configuration",
+  "admin.configuration.description":
+    "Configure deployment-owned values declared by extensions. Saving values does not install, connect, activate, or remove an extension.",
+  "admin.configuration.empty": "No extensions require deployment configuration.",
+  "admin.configuration.statusConfigured": "Configured",
+  "admin.configuration.statusRequired": "Configuration required",
+  "admin.configuration.usedBy": "Used by",
+  "admin.configuration.installed": "installed",
+  "admin.configuration.secretHint":
+    "Configured. Leave blank to keep the stored value.",
+  "admin.configuration.save": "Save configuration",
+  "admin.configuration.saved": "Configuration saved.",
+  "admin.configuration.saveConflict":
+    "Configuration changed elsewhere. Review the refreshed values and save again.",
+  "admin.configuration.saveFailed": "Unable to save configuration.",
 
   // Admin — dashboard
 
@@ -1353,6 +1377,8 @@ registerPack("en", {
   "extensions.opening": "Opening...",
   "extensions.authorize": "Authorize",
   "extensions.reauthorize": "Reauthorize",
+  "extensions.updateAccess": "Update access",
+  "extensions.updateAccessHint": "New permissions are available for this connection. Re-approve access to enable the latest capabilities.",
   "extensions.reconnect": "Reconnect",
   "extensions.reconnectExpired": "Reconnect",
   "extensions.accountExpired": "This connection expired — reconnect to continue.",
@@ -1495,5 +1521,47 @@ registerPack("en", {
   "telegramPairing.paired": "Telegram paired",
   "telegramPairing.disconnect": "Disconnect",
   "telegramPairing.disconnectFailed": "Disconnecting Telegram failed.",
-  "telegramPairing.loadFailed": "Could not get a Telegram pairing code."
+  "telegramPairing.loadFailed": "Could not get a Telegram pairing code.",
+  "deviceLink.title": "Link your {name} account",
+  "deviceLink.pillLink": "Link account",
+  "deviceLink.startFailed": "Could not start linking {name}.",
+  "deviceLink.pollFailed": "Could not refresh the link.",
+  "deviceLink.submitFailed": "That value was not accepted. Try again.",
+  "deviceLink.qrAlt": "{name} device-link QR",
+  "deviceLink.copyCode": "Copy code",
+  "deviceLink.openIn": "Open in {name}",
+  "deviceLink.expiresIn": "Expires in {time}",
+  "deviceLink.expired": "This code expired.",
+  "deviceLink.refresh": "Get a new code",
+  // Fallbacks ONLY. The mode switch is labelled from the recipe's own
+  // `default_mode_label` / `alternate_mode_label`; this copy is what a card
+  // says when the extension supplied none. It is shared by every device-link
+  // extension, so it must never name one vendor's ceremony.
+  "deviceLink.useAlternate": "Use another way to link",
+  "deviceLink.useDefault": "Use the first way to link instead",
+  "deviceLink.awaiting": "Waiting for {name} to confirm the link…",
+  "deviceLink.identifierLabel": "Phone number",
+  "deviceLink.codeLabel": "Login code",
+  "deviceLink.passwordLabel": "Account password",
+  "deviceLink.submit": "Continue",
+  "deviceLink.linked": "{name} account linked",
+  "deviceLink.confirmDeviceAccount": "Linked as {account}",
+  // Vendor-neutral on purpose: the check is "one new device, just now", and
+  // every service names the screen that shows it differently. Naming one
+  // vendor's menu path here sends every other vendor's users looking for a
+  // menu that does not exist.
+  "deviceLink.confirmDevice": "Now open your linked-device settings in {name} and check that exactly one new IronClaw device appeared, just now. If you see more than one, or one you did not expect, revoke it there and unlink here.",
+  "deviceLink.revokeHint": "IronClaw now shows up as a device in {name}. If you ever see a device you do not recognize, revoke it there.",
+  "deviceLink.startAgain": "Start again",
+  "deviceLink.cannotRetry": "This {name} account cannot be linked.",
+  "deviceLink.error.expired": "The code expired before it was used.",
+  "deviceLink.error.unknown_flow": "This link is no longer open.",
+  "deviceLink.error.declined": "The device was refused.",
+  "deviceLink.error.invalid_input": "That value was not accepted.",
+  "deviceLink.error.rate_limited": "Too many attempts. Wait a moment before trying again.",
+  "deviceLink.error.account_unavailable": "This account cannot be linked.",
+  "deviceLink.error.identity_conflict": "This account is already linked. Unlink it from the IronClaw account where it is connected, then try again.",
+  "deviceLink.error.vendor_unavailable": "The service is temporarily unavailable.",
+  "deviceLink.error.custody_failed": "The link could not be saved securely.",
+  "deviceLink.error.internal": "Something went wrong while linking."
 });

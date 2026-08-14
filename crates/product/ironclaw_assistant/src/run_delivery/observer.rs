@@ -974,6 +974,17 @@ impl RunDeliveryObserver {
                                 Some(AuthPromptChallengeKind::OAuthUrl) | None => {
                                     prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
                                 }
+                                // Unreachable in practice — `DeviceLink` is
+                                // never serviceable, so it exits through the
+                                // cancel-and-redirect arm below rather than
+                                // reaching this private-target narrowing. The
+                                // arm still carries its own copy so that the
+                                // day a device-link frame becomes deliverable,
+                                // the fallback names the real next step
+                                // instead of the generic dead end.
+                                Some(AuthPromptChallengeKind::DeviceLink) => {
+                                    prompts::DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.to_string()
+                                }
                                 Some(
                                     AuthPromptChallengeKind::ManualToken
                                     | AuthPromptChallengeKind::Other,

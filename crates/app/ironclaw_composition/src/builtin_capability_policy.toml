@@ -191,6 +191,18 @@ mounts = "workspace"
 network = "default"
 
 [[grants]]
+capability = "builtin.document_edit"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.html_to_pdf"
+effects = ["dispatch_capability", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
 capability = "builtin.list_dir"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "workspace"

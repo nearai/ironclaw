@@ -12,8 +12,8 @@ use ironclaw_agent_loop::{
 };
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_loop_contracts::{
-    CompactionInitiator, ConcurrencyHint, LoopBlockedKind, LoopCompactionResponse,
-    LoopContextCompactionKind, LoopExit, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
+    CompactionInitiator, LoopBlockedKind, LoopCompactionResponse, LoopContextCompactionKind,
+    LoopExit, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
 };
 
 #[tokio::test(start_paused = true)]
@@ -157,7 +157,7 @@ async fn calls_then_reply_completes() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn parallel_policy_batches_two_calls_in_one_iteration() {
+async fn model_batch_invokes_each_call_through_the_host() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![
@@ -168,17 +168,17 @@ async fn parallel_policy_batches_two_calls_in_one_iteration() {
                 text: "done".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::from([
             ScriptedCapabilityOutcome::completed("result:a"),
             ScriptedCapabilityOutcome::completed("result:b"),
-        ]]),
-        single_call_retry_outcomes: VecDeque::new(),
+        ]),
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder()
         .visible_capabilities(vec![
-            capability_descriptor(capability_id("demo.a"), ConcurrencyHint::SafeForParallel),
-            capability_descriptor(capability_id("demo.b"), ConcurrencyHint::SafeForParallel),
+            capability_descriptor(capability_id("demo.a")),
+            capability_descriptor(capability_id("demo.b")),
         ])
         .script(script)
         .build();
@@ -190,15 +190,13 @@ async fn parallel_policy_batches_two_calls_in_one_iteration() {
         .expect("loop execution should succeed");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert!(host.call_log().iter().any(|call| {
-        matches!(
-            call,
-            MockHostCall::InvokeCapabilityBatch {
-                call_count: 2,
-                stop_on_first_suspension: false
-            }
-        )
-    }));
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -208,19 +206,19 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
             ScriptedCapabilityCall::new("demo.a"),
             ScriptedCapabilityCall::new("demo.b"),
         ])]),
-        capability_outcomes: VecDeque::from([vec![
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::from([
             ScriptedCapabilityOutcome::completed("result:a"),
             ScriptedCapabilityOutcome::ApprovalRequired {
                 gate_ref: "gate:approval".to_string(),
             },
-        ]]),
-        single_call_retry_outcomes: VecDeque::new(),
+        ]),
         pending_inputs: VecDeque::new(),
     };
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
         .visible_capabilities(vec![
-            capability_descriptor(capability_id("demo.a"), ConcurrencyHint::SafeForParallel),
-            capability_descriptor(capability_id("demo.b"), ConcurrencyHint::SafeForParallel),
+            capability_descriptor(capability_id("demo.a")),
+            capability_descriptor(capability_id("demo.b")),
         ])
         .script(script)
         .build();
@@ -237,15 +235,13 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
         }
         other => panic!("expected blocked exit, got {other:?}"),
     }
-    assert!(host.call_log().iter().any(|call| {
-        matches!(
-            call,
-            MockHostCall::InvokeCapabilityBatch {
-                call_count: 2,
-                stop_on_first_suspension: false
-            }
-        )
-    }));
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+            .count(),
+        2
+    );
     checkpoints.assert_sequence(&[
         (CheckpointKind::BeforeModel, 0),
         (CheckpointKind::BeforeSideEffect, 0),
@@ -275,10 +271,7 @@ async fn await_dependent_run_blocks_with_dependent_gate_kind() {
         pending_inputs: VecDeque::new(),
     };
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
-        .visible_capabilities(vec![capability_descriptor(
-            capability_id("demo.spawn"),
-            ConcurrencyHint::Exclusive,
-        )])
+        .visible_capabilities(vec![capability_descriptor(capability_id("demo.spawn"))])
         .script(script)
         .build();
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -321,10 +314,7 @@ async fn spawned_child_run_appends_result_ref_and_continues() {
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder()
-        .visible_capabilities(vec![capability_descriptor(
-            capability_id("demo.spawn"),
-            ConcurrencyHint::Exclusive,
-        )])
+        .visible_capabilities(vec![capability_descriptor(capability_id("demo.spawn"))])
         .script(script)
         .build();
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -351,7 +341,7 @@ async fn spawned_child_run_appends_result_ref_and_continues() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sequential_batch_when_exclusive_present() {
+async fn descriptor_metadata_does_not_change_model_batch_semantics() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![
@@ -362,17 +352,17 @@ async fn sequential_batch_when_exclusive_present() {
                 text: "done".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::from([
             ScriptedCapabilityOutcome::completed("result:safe"),
             ScriptedCapabilityOutcome::completed("result:exclusive"),
-        ]]),
-        single_call_retry_outcomes: VecDeque::new(),
+        ]),
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder()
         .visible_capabilities(vec![
-            capability_descriptor(capability_id("demo.safe"), ConcurrencyHint::SafeForParallel),
-            capability_descriptor(capability_id("demo.exclusive"), ConcurrencyHint::Exclusive),
+            capability_descriptor(capability_id("demo.safe")),
+            capability_descriptor(capability_id("demo.exclusive")),
         ])
         .script(script)
         .build();
@@ -384,15 +374,13 @@ async fn sequential_batch_when_exclusive_present() {
         .expect("loop execution should succeed");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert!(host.call_log().iter().any(|call| {
-        matches!(
-            call,
-            MockHostCall::InvokeCapabilityBatch {
-                call_count: 2,
-                stop_on_first_suspension: true
-            }
-        )
-    }));
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test(start_paused = true)]

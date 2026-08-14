@@ -1,12 +1,13 @@
 # `crates/substrates/` — privileged mechanism substrates
 
-**Layer(s):** substrates · **Crates:** 6 — `ironclaw_filesystem`, `ironclaw_libsql_runtime`, `ironclaw_secrets`, `ironclaw_network`, `ironclaw_safety`, `ironclaw_observability` · **Security posture:** each crate is a mediated mechanism invoked on behalf of an already-decided effect; none of the six makes an authority decision itself — containment, custody, admission, policy enforcement, and detection only, fail-closed by local invariant, never by ambient trust.
+**Layer(s):** substrates · **Crates:** 7 — `ironclaw_filesystem`, `ironclaw_documents`, `ironclaw_libsql_runtime`, `ironclaw_secrets`, `ironclaw_network`, `ironclaw_safety`, `ironclaw_observability` · **Security posture:** each crate is a mediated mechanism invoked on behalf of an already-decided effect; none makes an authority decision itself — containment, custody, admission, policy enforcement, detection, and bounded document transformation only, fail-closed by local invariant, never by ambient trust.
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
 ```text
 crates/substrates/
 ├── ironclaw_filesystem        storage fabric: mounts, containment, CAS
+├── ironclaw_documents         bounded, structure-preserving document transforms
 ├── ironclaw_libsql_runtime    libSQL connection admission: one read pool, one write lane
 ├── ironclaw_secrets           secret custody & one-shot leases
 ├── ironclaw_network           egress policy & hardened transport
@@ -16,7 +17,7 @@ crates/substrates/
 
 ## Role
 
-Substrate holds the durable, reusable mechanisms the kernel mediates: storage fabric, database-connection admission, secret storage, network policy and transport, safety scanning, and cross-cutting tracing. A crate belongs here exactly when it is a backend-generic mechanism with a real containment story and a fail-closed local invariant; it does not belong here if it makes an authority decision, which is kernel's job, or if it owns domain record grammar, which is domains' job. Six crates satisfy that test, and each is isolated from the others by a genuine dependency cone — a database driver stack, a connection-pool implementation, an operating-system keychain integration, an HTTP client and DNS resolver, or a pattern-matching engine — never by categorization for its own sake.
+Substrate holds the durable, reusable mechanisms the kernel mediates: storage fabric, bounded document transformation, database-connection admission, secret storage, network policy and transport, safety scanning, and cross-cutting tracing. A crate belongs here exactly when it is a backend-generic mechanism with a real containment story and a fail-closed local invariant; it does not belong here if it makes an authority decision, which is kernel's job, or if it owns domain record grammar, which is domains' job. Seven crates satisfy that test, and each is isolated from the others by a genuine dependency cone — a document parser and renderer, database driver stack, connection-pool implementation, operating-system keychain integration, HTTP client and DNS resolver, or pattern-matching engine — never by categorization for its own sake.
 
 ## Boundaries — what makes this family distinct
 
@@ -72,6 +73,17 @@ Every crate in this family executes a kernel-mediated responsibility without dec
 - **Never depends on:** anything above substrates.
 - **Security & authority role:** path containment and mount authority are kernel-listed responsibilities, executed here on every call; this crate is also the sole point of isolation for the durable-storage driver cone, so nothing above it needs to compile against a database client directly.
 - **Why a separate crate:** one contract, many production backends, and a driver cone wide enough that no crate should acquire it by accident — isolating it here is what lets the rest of the workspace stay backend-agnostic.
+
+### `ironclaw_documents`
+
+- **Purpose:** bounded, structure-preserving OOXML reads and typed transforms for DOCX, XLSX, and PPTX, plus deterministic HTML-subset PDF generation.
+- **Owns:** addressable document views, typed format-specific edits, bounded OOXML package parsing, copy-through serialization for untargeted parts, and the deterministic local PDF renderer.
+- **Never contains:** filesystem access, path selection, authorization, approvals, product workflow, vendor behavior, or ambient network and credential access.
+- **Public surface:** `read_document` and `edit_document`, the format-specific `docx`, `xlsx`, and `pptx` views and edit types, `html_to_pdf`, and `DocumentError`.
+- **Depends on:** contracts-free parsing and rendering libraries only; it remains vendor-blind and has no dependency on another workspace crate.
+- **Never depends on:** filesystem or any crate above substrates; mediated callers supply bounded bytes and own all authority decisions.
+- **Security & authority role:** no authority decision. It fails closed on malformed, ambiguous, duplicate, or oversized packages through the bounded package limits in `ooxml.rs`, and copies every untargeted package part through unchanged.
+- **Why a separate crate:** document transformation has a distinct parser/rendering dependency cone and a loss-avoidance invariant shared by host-runtime and integration callers without granting those libraries filesystem authority.
 
 ### `ironclaw_libsql_runtime`
 
@@ -151,9 +163,9 @@ Every crate in this family executes a kernel-mediated responsibility without dec
 
 Each family root states, for every crate beneath it, the same four things a reviewer needs without reading source: what admission test a new type must pass before it can live here; which two-or-more consumers justify it; which crate implements each port declared here, and where the boundary between declaring a port and implementing one sits; and the closed set of frameworks and cross-family dependencies this family may never acquire. `crates/substrates/AGENTS.md` states, specifically:
 
-- Each crate's mediation story: who may call it directly, and which callers must instead go through kernel mediation — since this is the one thing every crate in the family answers differently, and the tightest of the six, secrets, shows why that boundary matters most.
+- Each crate's mediation story: who may call it directly, and which callers must instead go through kernel mediation — since this is the one thing every crate in the family answers differently, and the tightest of the seven, secrets, shows why that boundary matters most.
 - The "mechanism, not authority" line: a substrate crate enforces its own local invariant but never decides whether the caller was entitled to invoke it — that decision always comes from the kernel before the call reaches here.
-- The dependency-cone rationale per crate, so a reviewer sees why six crates exist instead of one — each crate's dependency list is the enforcement mechanism, this file is the explanation.
+- The dependency-cone rationale per crate, so a reviewer sees why seven crates exist instead of one — each crate's dependency list is the enforcement mechanism, this file is the explanation.
 - The three sanctioned substrate-on-substrate dependencies — filesystem on safety, filesystem on the libSQL runtime, secrets on filesystem — as the only internal edges within the family.
 - The persistence rule, in two halves. **Admission is singular:** only this family's libSQL runtime may construct a libSQL pool or hand out a connection, because a second pool over the same database silently breaks the single-writer invariant. **Driver dependencies are a closed, shrink-only set:** outside the libSQL runtime, this family's storage fabric, the durable event backend, and the assembly root that opens each database once, no crate may depend on a database driver directly — with two documented, shrink-only exceptions, the trigger and hook predicate stores, carrying ADR-or-converge status.
 - What backend parity does and does not mean: the same observable contract across backends — commit and rollback, ordering, uniqueness, error classification — but not the same connection machinery. Writer admission is a libSQL-specific contract because SQLite admits one writer and PostgreSQL does not; a future backend earns its own admission crate if its concurrency model demands one, and never a second lane over a database that already has one.

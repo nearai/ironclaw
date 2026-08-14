@@ -56,6 +56,16 @@ pub(crate) const AUTH_UNAVAILABLE_MESSAGE: &str = "This authentication step can'
 /// Posted for a typed credential-entry challenge. It explicitly redirects
 /// secret entry to the private WebUI surface without echoing prompt material.
 pub(crate) const MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
+/// Posted for a device-link challenge, on every surface. Unlike OAuth (one
+/// link the user follows away from chat) and pairing (one host-issued code the
+/// user carries to the vendor), a device link is a multi-round exchange that
+/// asks for secrets — a one-time code, an account password — so there is no
+/// private-DM variant that would make it safe here. It is authored in
+/// `prompts/device_link_auth_unavailable.md` because it runs to a paragraph;
+/// `trim_ascii_end` drops the file's trailing newline so the copy is not
+/// delivered with a dangling blank line.
+pub(crate) const DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE: &str =
+    include_str!("../../prompts/device_link_auth_unavailable.md").trim_ascii_end();
 /// Posted when a pairing challenge reaches a non-private target: the pairing
 /// code itself is a bearer secret and must not be echoed into a shared thread.
 pub(crate) const PAIRING_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to connect or pair this extension in a private setup surface, then ask me again here.";
@@ -235,6 +245,9 @@ pub(crate) fn actionable_auth_prompt_body(view: &AuthPromptView) -> String {
             .as_ref()
             .map(|pairing| pairing.instructions.clone())
             .unwrap_or_else(|| PAIRING_PRIVATE_SETUP_MESSAGE.to_string()),
+        Some(AuthPromptChallengeKind::DeviceLink) => {
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.to_string()
+        }
         Some(AuthPromptChallengeKind::Other) => AUTH_UNAVAILABLE_MESSAGE.to_string(),
         Some(AuthPromptChallengeKind::OAuthUrl) | None => view.body.clone(),
     }
@@ -259,7 +272,16 @@ pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
                 && !pairing.instructions.trim().is_empty()
                 && !pairing.code.trim().is_empty()
         }),
-        Some(AuthPromptChallengeKind::ManualToken | AuthPromptChallengeKind::Other) => false,
+        // A device link never is, and for a stronger reason than manual-token:
+        // the flow is a multi-round conversation the host drives through a
+        // card (display a payload, poll, ask for a code, ask for a password).
+        // A chat surface has nowhere to put that, and two of its steps are
+        // secrets. It is completed in the web app or not at all.
+        Some(
+            AuthPromptChallengeKind::ManualToken
+            | AuthPromptChallengeKind::DeviceLink
+            | AuthPromptChallengeKind::Other,
+        ) => false,
         // Compatibility for prompt rows created before challenge_kind became
         // part of the additive wire contract.
         None => view
@@ -275,6 +297,7 @@ pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
 pub(crate) fn unserviceable_auth_prompt_message(view: Option<&AuthPromptView>) -> &'static str {
     match view.and_then(|view| view.challenge_kind) {
         Some(AuthPromptChallengeKind::ManualToken) => MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
+        Some(AuthPromptChallengeKind::DeviceLink) => DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE,
         _ => AUTH_UNAVAILABLE_MESSAGE,
     }
 }
@@ -464,6 +487,7 @@ mod tests {
             expires_at: None,
             connection: None,
             pairing: None,
+            device_link: None,
         }
     }
 
@@ -565,6 +589,44 @@ mod tests {
         assert_eq!(
             unserviceable_auth_prompt_message(Some(&token_view)),
             MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE
+        );
+    }
+
+    /// A device link is a multi-round exchange that asks for a one-time code
+    /// and an account password, so it can never be completed from a chat
+    /// surface — not even a private DM, unlike OAuth and pairing. It also must
+    /// not inherit the manual-token copy: telling a device-link user to go find
+    /// an API key names a credential that does not exist for this method, and
+    /// the generic dead-end copy does not say where to finish instead.
+    #[test]
+    fn device_link_challenge_is_never_serviceable_and_points_at_the_web_app() {
+        let link_view = view(Some(AuthPromptChallengeKind::DeviceLink));
+
+        assert!(
+            !auth_prompt_is_serviceable(&link_view),
+            "a device link cannot be driven from a chat surface"
+        );
+        assert_eq!(
+            unserviceable_auth_prompt_message(Some(&link_view)),
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE
+        );
+        assert_eq!(
+            actionable_auth_prompt_body(&link_view),
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE,
+            "the body must never fall through to the raw gate text"
+        );
+        assert_ne!(
+            unserviceable_auth_prompt_message(Some(&link_view)),
+            MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
+            "a device-link user has no API key to go and find"
+        );
+        assert!(
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.contains("web app"),
+            "the copy has to name where the link CAN be completed"
+        );
+        assert!(
+            !DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.ends_with('\n'),
+            "the prompt file's trailing newline must be trimmed before delivery"
         );
     }
 

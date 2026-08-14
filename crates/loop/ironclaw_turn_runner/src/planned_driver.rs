@@ -596,25 +596,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_planned_driver_uses_individual_parallel_capability_calls() {
-        let registry =
-            build_loop_family_registry_with_overrides(None, None, true).expect("registry");
+    async fn default_planned_driver_has_stable_family_identity() {
+        let registry = build_loop_family_registry_with_overrides(None, None).expect("registry");
         let family = registry
             .get(&LoopFamilyId::DEFAULT)
             .expect("default family");
-        // Pin the family's replay identity to the bounded-parallel
-        // composition: the override must recompose the family (digest differs
-        // from the host-batch default) and must do so deterministically (the
-        // same digest on rebuild). If the override were silently ignored and
-        // execution stayed sequential, this assertion fails outright — the
-        // family would carry the static DEFAULT_FAMILY_DIGEST.
-        assert_ne!(
+        // With no overrides, the registry must retain the static default
+        // family identity and reproduce it deterministically on rebuild.
+        assert_eq!(
             family.version().digest,
             DEFAULT_FAMILY_DIGEST,
-            "the bounded-parallel override must recompose the family identity"
+            "model-batch execution is part of the default family identity"
         );
         let rebuilt =
-            build_loop_family_registry_with_overrides(None, None, true).expect("rebuilt registry");
+            build_loop_family_registry_with_overrides(None, None).expect("rebuilt registry");
         assert_eq!(
             rebuilt
                 .get(&LoopFamilyId::DEFAULT)
@@ -622,7 +617,7 @@ mod tests {
                 .version()
                 .digest,
             family.version().digest,
-            "the bounded-parallel family identity must be a pure function of the selected strategy"
+            "the family identity must be deterministic"
         );
         let descriptor = descriptor_for_driver_id(
             planned_default_driver_id().expect("driver id"),

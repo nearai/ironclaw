@@ -385,7 +385,15 @@ impl CredentialAccountRecordSource for UnsupportedCredentialAccountRecordSource 
         &self,
         _scope: &AuthProductScope,
     ) -> Result<Vec<crate::CredentialAccount>, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
+        // Typed as *unsupported* rather than *unavailable* so callers can tell
+        // "this bundle has no account read model" from "the read model
+        // failed". Linked-device cleanup needs exactly that distinction: the
+        // former means there is no device to log out, the latter must never be
+        // treated as one. The projected `AuthErrorCode` is unchanged
+        // (`BackendUnavailable`), so nothing on the wire moves.
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "accounts_for_owner",
+        })
     }
 }
 
@@ -603,6 +611,18 @@ pub struct RebornProductAuthServices {
     auth_engine: Option<Arc<crate::AuthEngine>>,
     /// One recipe-driven blocked-gate OAuth driver covering every vendor.
     oauth_gate_driver: Option<Arc<OAuthGateFlowDriver>>,
+    /// One recipe-driven device-link flow driver covering every vendor.
+    ///
+    /// A deferred slot rather than a builder because the build order inverts:
+    /// the vendor half is the extension host's snapshot driver, and the
+    /// extension host is composed *after* this bundle. Filled once by
+    /// [`RebornProductAuthServices::attach_device_link`]; absent, the
+    /// device-link routes answer unavailable.
+    device_link_driver: Arc<std::sync::OnceLock<Arc<crate::DeviceLinkFlowDriver>>>,
+    /// The linked-device revoker behind lifecycle cleanup — same deferred
+    /// shape, same reason. Unfilled it fails closed: a deactivate quarantines
+    /// `RevokeFailed` rather than silently skipping the vendor logout.
+    linked_device_revoker: Arc<crate::DeferredLinkedDeviceRevoker>,
     /// Optional read projection for WebUI/standalone auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -706,6 +726,8 @@ impl RebornProductAuthServices {
             host_managed_nearai_credential_scope: None,
             auth_engine: None,
             oauth_gate_driver: None,
+            device_link_driver: Arc::new(std::sync::OnceLock::new()),
+            linked_device_revoker: Arc::new(crate::DeferredLinkedDeviceRevoker::default()),
             flow_record_source: None,
             continuation_dispatch_inflight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -906,6 +928,28 @@ impl RebornProductAuthServices {
 
     pub fn oauth_gate_driver(&self) -> Option<Arc<OAuthGateFlowDriver>> {
         self.oauth_gate_driver.clone()
+    }
+
+    /// Fill the deferred device-link slots: the flow driver the routes
+    /// dispatch to, and the revoker lifecycle cleanup logs devices out
+    /// through. One method because the two halves are the same engine — an
+    /// attach that wired only one would leave either un-completable links or
+    /// silently-skipped logouts.
+    ///
+    /// `&self` and idempotent by construction (first fill wins): the bundle is
+    /// already shared by the time the extension host — whose snapshot the
+    /// vendor half rides — exists.
+    pub fn attach_device_link(
+        &self,
+        driver: Arc<crate::DeviceLinkFlowDriver>,
+        revoker: Arc<dyn crate::LinkedDeviceRevoker>,
+    ) {
+        let _ = self.device_link_driver.set(driver);
+        self.linked_device_revoker.fill(revoker);
+    }
+
+    pub fn device_link_driver(&self) -> Option<Arc<crate::DeviceLinkFlowDriver>> {
+        self.device_link_driver.get().cloned()
     }
 
     fn with_manual_token_flow_service(
@@ -1115,8 +1159,25 @@ impl RebornProductAuthServices {
         &self,
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, RebornCredentialLifecycleError> {
-        let report = self
-            .cleanup_service
+        // Linked devices are logged out **before** the credential they hang
+        // off is unbound (PROPOSAL §4.5) — after the unbind, the session blob
+        // the logout needs is gone and the extension that could make the
+        // vendor call may be deactivated. The ordering lives in
+        // `LinkedDeviceCleanupService`, which is composed here rather than at
+        // construction: the record source it reads is only final once every
+        // builder has run, and a decorator captured earlier would have
+        // discovered devices through the unsupported default.
+        //
+        // Behavior-preserving where no device exists: the decorator acts only
+        // on accounts pinned `ExtensionOwned` with a live `link_revision`.
+        // Where one does and the revoker slot is unfilled, it quarantines
+        // `RevokeFailed` rather than silently skipping the vendor logout.
+        let cleanup = crate::LinkedDeviceCleanupService::new(
+            self.credential_account_record_source.clone(),
+            self.linked_device_revoker.clone() as Arc<dyn crate::LinkedDeviceRevoker>,
+            self.cleanup_service.clone(),
+        );
+        let report = cleanup
             .cleanup_for_lifecycle(request)
             .await
             .map_err(RebornCredentialLifecycleError::from)?;
@@ -1432,8 +1493,25 @@ impl RebornProductAuthServices {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
+        self.flow_record(scope, flow_id)
+            .await
+            .map(|record| record.status)
+    }
+
+    /// The durable flow record itself, for callers that must project more than
+    /// its status — the device-link card needs the whole frame (§8.12).
+    ///
+    /// Shares `flow_status`'s existence semantics exactly, and must: the
+    /// cross-scope remap below is the control that stops a caller probing
+    /// another owner's flows, and a sibling reader that skipped it would be an
+    /// oracle around the one that has it.
+    pub async fn flow_record(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
-            Ok(Some(record)) => Ok(record.status),
+            Ok(Some(record)) => Ok(record),
             Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
             // Never distinguish "owned by another scope" from "unknown": both
             // return not-found so a caller cannot probe another owner's flows.

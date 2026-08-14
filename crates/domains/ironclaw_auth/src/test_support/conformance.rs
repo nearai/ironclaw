@@ -28,9 +28,13 @@ use chrono::{Duration, Utc};
 
 use crate::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
-    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, AuthorizationCodeHash,
-    CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackInput,
-    OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
+    AuthFlowStatus, AuthFlowStepAdvanceInput, AuthProductError, AuthProductScope, AuthProviderId,
+    AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl,
+    OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
+    ProviderCallbackOutcome,
+};
+use ironclaw_extension_contracts::device_link::{
+    DeviceLinkMode, DeviceLinkStep, DeviceLinkStepKind,
 };
 use ironclaw_host_api::ids::SecretHandle;
 
@@ -136,6 +140,321 @@ pub async fn assert_auth_flow_callback_conformance(
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
     state_hash_mismatch_denies_without_burning_the_flow(flows, scope, provider).await;
+}
+
+/// Run the multi-step (device-link) step-machine conformance cases.
+///
+/// Separate entry point from the callback suite because the two are answered
+/// by different halves of an implementation and a store may legitimately ship
+/// one before the other — but any implementation that serves a device link
+/// must satisfy every case here, or the driver's "never re-invoke the adapter"
+/// rule is unenforceable at exactly the tier where it matters.
+pub async fn assert_auth_flow_step_conformance(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    step_advance_is_revision_gated_and_a_loser_is_not_an_error(flows, scope, provider).await;
+    step_advance_rejects_a_terminal_flow(flows, scope, provider).await;
+    step_advance_never_moves_a_flow_deadline_earlier(flows, scope, provider).await;
+}
+
+/// Run the **port-level** device-link conformance cases against a real
+/// [`DeviceLinkDriver`] implementation.
+///
+/// Why this exists, stated as the defect it was written for: the auth tier
+/// re-mints a lapsed frame by calling [`DeviceLinkDriver::begin`] again on the
+/// same flow, and an implementation once refused exactly that as an internal
+/// error. Both halves were individually tested and both suites passed — the
+/// auth fake accepted the second `begin`, the implementation's own tests
+/// asserted the refusal — because nothing ran the two halves against one
+/// contract. Every case here is a cross-half obligation, so it belongs with
+/// the port and not with either implementation.
+///
+/// `binding` must name an extension whose manifest declares a device-link auth
+/// surface with a bound adapter, and `flow` must be an id no other case is
+/// using.
+pub async fn assert_device_link_driver_conformance(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+    flow: AuthFlowId,
+) {
+    re_begin_on_a_live_flow_is_admitted(driver, binding, flow).await;
+    cancel_is_idempotent(driver, binding, flow).await;
+    poll_on_an_unknown_flow_is_restartable(driver, binding).await;
+}
+
+/// The obligation the auth step machine depends on: a `begin` naming a flow the
+/// implementation already knows is a RE-MINT of that attempt, not a second
+/// attempt, and it must be admitted. An implementation that refuses it
+/// terminalizes every link whose step clock lapses before the user finishes.
+async fn re_begin_on_a_live_flow_is_admitted(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+    flow: AuthFlowId,
+) {
+    let case = "re_begin_on_a_live_flow_is_admitted";
+    driver
+        .begin(crate::DeviceLinkBeginRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            mode: DeviceLinkMode::Default,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("[{case}] the first begin must succeed: {error:?}"));
+
+    driver
+        .begin(crate::DeviceLinkBeginRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            mode: DeviceLinkMode::Default,
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "[{case}] a second begin on a live flow is the auth tier's re-mint and must be \
+                 admitted, not refused: {error:?}"
+            )
+        });
+
+    let _ = driver
+        .cancel(crate::DeviceLinkCancelRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            reason: crate::DeviceLinkCancelReason::UserCanceled,
+        })
+        .await;
+}
+
+/// Cancel is the abort path every TTL reap and every user abandonment takes, so
+/// it must tolerate being called on a flow that is already gone.
+async fn cancel_is_idempotent(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+    flow: AuthFlowId,
+) {
+    let case = "cancel_is_idempotent";
+    driver
+        .begin(crate::DeviceLinkBeginRequest {
+            flow_id: flow,
+            binding: binding.clone(),
+            mode: DeviceLinkMode::Default,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("[{case}] begin must succeed: {error:?}"));
+
+    for attempt in 1..=2 {
+        driver
+            .cancel(crate::DeviceLinkCancelRequest {
+                flow_id: flow,
+                binding: binding.clone(),
+                reason: crate::DeviceLinkCancelReason::UserCanceled,
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("[{case}] cancel attempt {attempt} must not error: {error:?}")
+            });
+    }
+}
+
+/// A poll for a flow the implementation never had — a restarted process, a
+/// reaped flow, a stale card — must be reported as something the user can
+/// restart, never as a dead end.
+async fn poll_on_an_unknown_flow_is_restartable(
+    driver: &dyn crate::DeviceLinkDriver,
+    binding: &crate::DeviceLinkBinding,
+) {
+    let case = "poll_on_an_unknown_flow_is_restartable";
+    let unknown = AuthFlowId::new();
+    match driver
+        .poll(crate::DeviceLinkPollRequest {
+            flow_id: unknown,
+            binding: binding.clone(),
+        })
+        .await
+    {
+        Ok(_) => panic!("[{case}] an unknown flow must not report progress"),
+        Err(error) => assert!(
+            error.restartable(),
+            "[{case}] an unknown flow must be restartable so the card can re-mint: {error:?}"
+        ),
+    }
+}
+
+fn device_link_challenge(revision: u64, expires_at: chrono::DateTime<Utc>) -> AuthChallenge {
+    AuthChallenge::DeviceLinkStep {
+        extension_id: ironclaw_host_api::ids::ExtensionId::new("conformance-device-link")
+            .expect("conformance extension id is valid"),
+        display_name: "Conformance account".to_string(),
+        default_mode_label: None,
+        alternate_mode_label: None,
+        mode: DeviceLinkMode::Default,
+        step: DeviceLinkStep::AwaitingVendor {
+            retry_in: std::time::Duration::from_secs(3),
+        },
+        revision,
+        expires_at,
+    }
+}
+
+fn step_advance(
+    flow_id: AuthFlowId,
+    expected_revision: u64,
+    now: chrono::DateTime<Utc>,
+) -> AuthFlowStepAdvanceInput {
+    AuthFlowStepAdvanceInput {
+        flow_id,
+        expected_revision,
+        challenge: device_link_challenge(expected_revision + 1, now + Duration::seconds(30)),
+        status: AuthFlowStatus::AwaitingVendor,
+        step_kind: DeviceLinkStepKind::AwaitingVendor,
+        step_expires_at: now + Duration::seconds(30),
+        flow_expires_at: None,
+        polled_at: Some(now),
+        error: None,
+        credential_account_id: None,
+    }
+}
+
+/// The contract that makes a duplicated poll safe: exactly one write applies,
+/// the loser gets `Ok` with the winner's record, and the loser can tell.
+///
+/// An implementation that returned an *error* to the loser would push callers
+/// into retrying — and a retry re-runs a vendor transition that is not
+/// idempotent, which is the failure this whole mechanism exists to prevent.
+async fn step_advance_is_revision_gated_and_a_loser_is_not_an_error(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "step advance revision gate";
+    let tag = "conformance-step-cas";
+    let now = Utc::now();
+    let flow = flows
+        .create_flow(new_flow(scope, provider, tag, now + Duration::minutes(5)))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create_flow: {error:?}"));
+    assert_eq!(
+        flow.step_revision(),
+        0,
+        "[{CASE}] a flow that has produced no step is at revision 0"
+    );
+
+    let winner = flows
+        .advance_flow_step(scope, step_advance(flow.id, 0, now))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] first advance: {error:?}"));
+    assert!(winner.applied, "[{CASE}] the first advance applies");
+    assert_eq!(
+        winner.record.step_revision(),
+        1,
+        "[{CASE}] applying advances the revision"
+    );
+    assert_eq!(
+        winner.record.status,
+        AuthFlowStatus::AwaitingVendor,
+        "[{CASE}] the advance carries the step's lifecycle status"
+    );
+
+    let loser = flows
+        .advance_flow_step(scope, step_advance(flow.id, 0, now))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("[{CASE}] a lost compare-and-swap must be Ok, not an error: {error:?}")
+        });
+    assert!(
+        !loser.applied,
+        "[{CASE}] the loser must be told its write did not apply"
+    );
+    assert_eq!(
+        loser.record.step_revision(),
+        1,
+        "[{CASE}] the loser is handed the already-advanced record"
+    );
+
+    let record = read_flow(flows, scope, flow.id, CASE).await;
+    assert_eq!(
+        record.step_revision(),
+        1,
+        "[{CASE}] the duplicated advance left exactly one write behind"
+    );
+    let state = record
+        .step_state
+        .unwrap_or_else(|| panic!("[{CASE}] an advanced flow carries durable step state"));
+    assert_eq!(
+        state.poll_attempts, 1,
+        "[{CASE}] only the applied advance may account a poll"
+    );
+}
+
+/// A late step must never resurrect a finished link.
+async fn step_advance_rejects_a_terminal_flow(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "step advance on a terminal flow";
+    let tag = "conformance-step-terminal";
+    let now = Utc::now();
+    let flow = flows
+        .create_flow(new_flow(scope, provider, tag, now + Duration::minutes(5)))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create_flow: {error:?}"));
+    flows
+        .cancel_flow(scope, flow.id)
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] cancel_flow: {error:?}"));
+
+    let error = flows
+        .advance_flow_step(scope, step_advance(flow.id, 0, now))
+        .await
+        .expect_err("advancing a terminal flow must be rejected");
+    assert_eq!(
+        error,
+        AuthProductError::FlowAlreadyTerminal,
+        "[{CASE}] a canceled link cannot be stepped back to life"
+    );
+}
+
+/// The flow clock extends and never contracts. A caller that computed a
+/// shorter deadline (a clock skew, a stale cap) must not be able to shorten a
+/// link the user is still working through.
+async fn step_advance_never_moves_a_flow_deadline_earlier(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "step advance flow deadline";
+    let tag = "conformance-step-deadline";
+    let now = Utc::now();
+    let original_deadline = now + Duration::minutes(5);
+    let flow = flows
+        .create_flow(new_flow(scope, provider, tag, original_deadline))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create_flow: {error:?}"));
+
+    let mut shrinking = step_advance(flow.id, 0, now);
+    shrinking.flow_expires_at = Some(now + Duration::seconds(1));
+    let advanced = flows
+        .advance_flow_step(scope, shrinking)
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] advance: {error:?}"));
+    assert!(
+        advanced.record.expires_at >= original_deadline,
+        "[{CASE}] a shorter proposed deadline must be ignored, not applied"
+    );
+
+    let mut extending = step_advance(flow.id, advanced.record.step_revision(), now);
+    let extended_deadline = original_deadline + Duration::minutes(5);
+    extending.flow_expires_at = Some(extended_deadline);
+    let extended = flows
+        .advance_flow_step(scope, extending)
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] extend: {error:?}"));
+    assert_eq!(
+        extended.record.expires_at, extended_deadline,
+        "[{CASE}] a later deadline is the one shape that does apply"
+    );
 }
 
 /// Happy completion, then both replay arms — the exact split the hosted

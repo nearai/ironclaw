@@ -271,7 +271,9 @@ def next_llm_trace_response(
         if expected_input not in actual_input:
             state["error"] = (
                 "recorded LLM trace user input does not match the conversation "
-                f"before response {next_index}"
+                f"before response {next_index}: expected the last user message "
+                f"to contain {expected_input[:120]!r}; the live last user "
+                f"message ends with {actual_input[-400:]!r}"
             )
             raise web.HTTPConflict(text=state["error"])
 
@@ -289,7 +291,8 @@ def next_llm_trace_response(
     ):
         state["error"] = (
             "recorded LLM trace observed a failed capability result before response "
-            f"{next_index}: {failed_result['summary']}"
+            f"{next_index}: {failed_result['summary']}; the failing result "
+            f"content begins with {failed_result['content'][:400]!r}"
         )
         raise web.HTTPConflict(text=state["error"])
 

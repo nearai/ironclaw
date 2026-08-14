@@ -95,52 +95,6 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
-/// Environment variable that enables bounded concurrent capability batches.
-pub const REBORN_PARALLEL_TOOL_BATCH_ENV: &str = "REBORN_PARALLEL_TOOL_BATCH";
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ParallelToolBatchMode {
-    #[default]
-    Off,
-    On,
-}
-
-impl ParallelToolBatchMode {
-    pub fn from_env() -> Self {
-        match std::env::var(REBORN_PARALLEL_TOOL_BATCH_ENV) {
-            Ok(value) => Self::from_raw(Some(&value)),
-            Err(std::env::VarError::NotPresent) => Self::Off,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
-                    "REBORN_PARALLEL_TOOL_BATCH is not valid UTF-8; falling back to Off"
-                );
-                Self::Off
-            }
-        }
-    }
-
-    fn from_raw(raw: Option<&str>) -> Self {
-        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-            Some("on" | "1" | "true") => Self::On,
-            None | Some("" | "off" | "0" | "false") => Self::Off,
-            Some(_) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
-                    "unrecognized REBORN_PARALLEL_TOOL_BATCH value; falling back to Off"
-                );
-                Self::Off
-            }
-        }
-    }
-
-    fn enables_parallel_batches(self) -> bool {
-        matches!(self, Self::On)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -160,9 +114,6 @@ pub struct DefaultPlannedRuntimeConfig {
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
-    /// Rollout switch for bounded concurrent execution of batches whose
-    /// capability descriptors all permit parallel execution.
-    pub parallel_tool_batch: ParallelToolBatchMode,
     /// Profile-owned visibility preferences, keyed by capability-surface
     /// profile id. Values are canonical capability ids and never grant access.
     pub tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
@@ -185,7 +136,6 @@ impl Default for DefaultPlannedRuntimeConfig {
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
-            parallel_tool_batch: ParallelToolBatchMode::from_env(),
             tool_disclosure_profile_pins: HashMap::new(),
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
@@ -695,7 +645,6 @@ where
     let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
         parts.config.planned_model_availability_retry_attempts,
-        parts.config.parallel_tool_batch.enables_parallel_batches(),
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
@@ -1009,6 +958,14 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             .resolve(run_context)
             .await
             .map_err(capability_resolve_error_to_agent_host_error)?;
+        if let Some(allowed) = run_context
+            .product_context
+            .as_ref()
+            .and_then(|context| context.execution_policy.as_ref())
+            .and_then(|execution_policy| execution_policy.allowed_capability_ids.as_ref())
+        {
+            policy = policy.narrow_to_capability_ids(allowed.iter().cloned());
+        }
         let mut denied = self.global_denied.clone();
         if run_context
             .resolved_run_profile
@@ -1106,18 +1063,19 @@ mod tests {
     };
 
     use super::{
-        DefaultPlannedRuntimeConfig, ParallelToolBatchMode,
-        REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV, RuntimeProfiledCapabilityPortFactory,
-        SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
-        ToolDisclosureMode, parse_tool_disclosure_profile_pins, scheduler_permit_count,
-        turn_run_scheduler_config,
+        DefaultPlannedRuntimeConfig, REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
+        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
+        ToolDisclosureCapabilityDecorator, ToolDisclosureMode, parse_tool_disclosure_profile_pins,
+        scheduler_permit_count, turn_run_scheduler_config,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
         capability_surface::CapabilitySurfacePolicy,
-        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
+        execution_policy::TurnExecutionPolicy,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
         resolution::{Resolution, ResolutionBatch},
         runtime::RuntimeKind,
+        turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
@@ -1125,9 +1083,9 @@ mod tests {
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, ConcurrencyHint,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-        LoopRunContext, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, InMemoryRunProfileResolver,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+        RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     };
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
@@ -1146,38 +1104,6 @@ mod tests {
             std::time::Duration::from_secs(15)
         );
         assert_eq!(scheduler_config.max_consecutive_heartbeat_failures(), 3);
-    }
-
-    #[test]
-    fn parallel_tool_batch_mode_fails_closed_to_off() {
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(None),
-            ParallelToolBatchMode::Off
-        );
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(Some("")),
-            ParallelToolBatchMode::Off
-        );
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(Some("garbage")),
-            ParallelToolBatchMode::Off
-        );
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(Some("off")),
-            ParallelToolBatchMode::Off
-        );
-        assert!(!ParallelToolBatchMode::Off.enables_parallel_batches());
-    }
-
-    #[test]
-    fn parallel_tool_batch_mode_accepts_explicit_on_values() {
-        for raw in ["on", "ON", "1", "true", "TRUE"] {
-            assert_eq!(
-                ParallelToolBatchMode::from_raw(Some(raw)),
-                ParallelToolBatchMode::On
-            );
-        }
-        assert!(ParallelToolBatchMode::On.enables_parallel_batches());
     }
 
     #[test]
@@ -1617,6 +1543,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn structured_trigger_allowlist_narrows_the_canonical_surface_policy() {
+        let policies = Arc::new(Mutex::new(Vec::new()));
+        let allowed = CapabilityId::new("demo.allowed").expect("allowed id");
+        let excluded = CapabilityId::new("demo.excluded").expect("excluded id");
+        let inner = Arc::new(InnerPort {
+            label: "inner",
+            log: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(RecordingSurfacePolicyFactory {
+                port: inner,
+                policies: Arc::clone(&policies),
+            }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied: Vec::new(),
+            scheduled_trigger_denied: Vec::new(),
+            tool_disclosure_profile_pins: HashMap::new(),
+        };
+        let mut context = test_run_context().await;
+        let mut product_context = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: UserId::new("user-runtime-test").expect("user id"),
+            },
+        );
+        product_context.execution_policy = Some(TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![allowed.clone()]),
+            required_skills: Vec::new(),
+        });
+        context.product_context = Some(product_context);
+
+        factory
+            .create_capability_port(&context)
+            .await
+            .expect("profiled capability port");
+
+        let policies = policies.lock().unwrap();
+        assert!(policies[0].permits_capability_id(&allowed));
+        assert!(!policies[0].permits_capability_id(&excluded));
+    }
+
     // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────
 
     /// Fixed-surface inner port standing in for the host capability port.
@@ -1662,7 +1638,6 @@ mod tests {
             safe_name: capability_id.to_string(),
             safe_description: format!("{capability_id} description"),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         }
     }

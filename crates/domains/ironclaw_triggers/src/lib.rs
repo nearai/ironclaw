@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 mod automation;
+mod execution_spec;
 mod fire_access;
 mod in_memory;
 mod libsql;
@@ -39,6 +40,7 @@ mod worker;
 /// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
 /// below is the same bound under this crate's own noun.
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use execution_spec::TriggerExecutionSpec;
 /// Fire-time access: the check contract plus the checkers that are pure
 /// trigger-scope policy. The deployment *grant* value and the identity-directory
 /// checker stay in the composition root — see `fire_access`'s module doc
@@ -100,6 +102,7 @@ pub enum TriggerRecordValidationKind {
     NameTooLong,
     PromptEmpty,
     PromptTooLong,
+    ExecutionSpecInvalid,
     Other,
 }
 
@@ -352,6 +355,10 @@ pub struct TriggerRecord {
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
     pub prompt: String,
+    /// Versioned authoring contract for structured routines. The rendered
+    /// `prompt` is frozen alongside it so scheduling remains prompt-based.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_spec: Option<TriggerExecutionSpec>,
     /// Retired per-trigger delivery route, read-tolerated only.
     ///
     /// Fires used to push their final reply here; they no longer do — a
@@ -386,6 +393,13 @@ impl TriggerRecord {
                 kind: TriggerRecordValidationKind::PromptTooLong,
                 reason: format!("trigger prompt must be at most {MAX_TRIGGER_PROMPT_BYTES} bytes"),
             });
+        }
+        if let Some(spec) = &self.execution_spec {
+            // The persisted prompt (rendered at creation) is authoritative and
+            // deliberately NOT compared against a re-render: `validate()` runs
+            // on stored records before every fire, so requiring equality with
+            // the current template would brick them on any template edit.
+            spec.validate()?;
         }
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
             return Err(TriggerError::InvalidRecord {
@@ -904,6 +918,8 @@ pub struct TriggerFire {
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
 }
 
 #[async_trait]
@@ -1065,6 +1081,10 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
+            execution_policy: record
+                .execution_spec
+                .as_ref()
+                .map(|spec| spec.policy.clone()),
         }))
     }
 }

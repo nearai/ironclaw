@@ -75,8 +75,8 @@ impl CapabilitySurfaceVisibleFilter {
 
 #[async_trait]
 impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -176,8 +176,8 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
 
 #[async_trait]
 impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -557,8 +557,7 @@ mod tests {
         runtime::RuntimeKind,
     };
     use ironclaw_loop_contracts::{
-        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
-        resolution,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, resolution,
     };
     use ironclaw_turns::{LoopGateRef, LoopResultRef};
 
@@ -732,7 +731,6 @@ mod tests {
             safe_name: capability.to_string(),
             safe_description: format!("{capability} description"),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }
     }

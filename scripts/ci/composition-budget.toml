@@ -203,11 +203,19 @@ observed_date = "2026-08-08"
 # The gate's NUDGE fired at 283 LOC of slack; this locks the improvement in rather
 # than banking it as headroom. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh`.
+# Re-seeded 41533 -> 41726 on 2026-08-12 for #7532: structured-trigger creation
+# must preflight against the production extension registry, selectable-skill
+# source, and scheduled-run profile. That cross-owner adapter is service-graph
+# assembly and therefore remains in composition; measured exactly on this branch
+# with `bash scripts/ci/check-composition-budget.sh --print`, with no padding.
 # Union re-measured on 2026-08-12 after merging main (#7365's composition
 # eviction + #7373 re-equalization) into the unified-channel branch: main
 # evicted the memory-save guidance while this branch added the channel
 # registration/capability assembly; the merged tree is measured, not summed.
-loc_ceiling = 41780
+# Union re-measured at 41973 on 2026-08-13 after merging that channel assembly
+# and current main into #7532's structured-trigger assembly. The deltas are
+# disjoint and the ceiling is the gate's exact merged-tree measurement.
+loc_ceiling = 41973
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -218,8 +226,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41780
-loc_observed_date = "2026-08-12"
+loc_observed = 41973
+loc_observed_date = "2026-08-13"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
@@ -290,6 +298,10 @@ loc_observed_date = "2026-08-12"
 # Union re-measured on 2026-08-12 after merging main into the unified-channel
 # branch (both sides re-equalized on their own trees: 838 here, 831 on main);
 # measured on the merged tree, keeping the designed 15-site window.
-arc_dyn_ceiling = 823
+# 823 -> 826 on 2026-08-13 after merging #7532: the structured-trigger path
+# adds the production preflight seam and carries its existing multi-impl
+# capability/create-hook ports through assembly. The merged tree reports 841;
+# 826 + 15 tolerance = 841, preserving zero hidden headroom.
+arc_dyn_ceiling = 826
 arc_dyn_tolerance = 15
-arc_dyn_observed = 838
+arc_dyn_observed = 841

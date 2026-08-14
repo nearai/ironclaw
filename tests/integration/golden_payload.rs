@@ -139,7 +139,6 @@ async fn golden_context_surfacing() {
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
-        .with_parallel_tool_batches()
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.write_file",

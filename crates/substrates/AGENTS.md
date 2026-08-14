@@ -1,6 +1,6 @@
 # `crates/substrates/` — privileged mechanism, never authority
 
-**Layer(s):** `substrates` · **Crates:** 6 · **May depend on:** `ironclaw_host_api`
+**Layer(s):** `substrates` · **Crates:** 7 · **May depend on:** `ironclaw_host_api`
 (contracts), `ironclaw_observability`, plus exactly three charted sibling edges
 (below) · **Depended on by:** every layer above — kernel services mediate
 filesystem/secrets/network for the tiers above them, domain crates hold direct
@@ -22,6 +22,7 @@ in `crates/kernel/` before the call arrives.
 | Crate | Charter (one line) | Go here when |
 | --- | --- | --- |
 | [`ironclaw_filesystem`](./ironclaw_filesystem) | Storage fabric: `RootFilesystem` trait, `ScopedFilesystem` mount enforcement, mount catalog, CAS floor, disk/libSQL/Postgres/in-memory backends | Bytes or records need a durable home behind the one trait |
+| [`ironclaw_documents`](./ironclaw_documents) | Bounded, structure-preserving OOXML transforms and deterministic HTML-subset PDF rendering | Document bytes need addressable reads or typed, loss-averse transforms without filesystem authority |
 | [`ironclaw_libsql_runtime`](./ironclaw_libsql_runtime) | libSQL connection admission: one bounded read pool + exactly one writer lane per database | You need a libSQL connection — this is the only legal source |
 | [`ironclaw_network`](./ironclaw_network) | Egress policy and hardened outbound transport; the workspace's only `reqwest` owner | An outbound HTTP call must be policy-checked before it exists |
 | [`ironclaw_observability`](./ironclaw_observability) | Zero-cost-when-off latency-trace macros; exactly one dependency (`tracing`) | You want to time an operation without adopting a tracing stack |
@@ -52,6 +53,9 @@ stated per crate):
   `extension_host`, `extension_manager`, `host_runtime`, `sandbox`, `stress`);
   the surplus is tracked narrowing (PROPOSAL §6.2.2, `extension_manager` in
   #7095), not permission.
+- `ironclaw_documents` — pure byte-transform callers may invoke it directly;
+  filesystem path selection, overwrite policy, and writes stay in the mediated
+  host-runtime caller.
 
 ## What never belongs here
 

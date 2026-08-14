@@ -615,14 +615,18 @@ impl GenericChannelHostAssembly {
         // per-extension provider identity the workflow's actor resolver uses
         // below, so the actor a command's role is resolved for is always the
         // same actor the conversation binding resolved.
-        let (command_role_provider, command_role_lookup) = self.provider_identity_lookup(source);
-        let command_roles = Arc::new(crate::channel_command_roles::ChannelActorRoleResolver::new(
-            command_role_provider,
-            command_role_lookup,
-            Arc::clone(&self.deps.admin_users),
-            self.deps.identity.tenant_id.clone(),
-            self.deps.identity.operator_user_id.clone(),
-        ));
+        let (command_role_provider, command_role_keyspace, command_role_lookup) =
+            self.provider_identity_lookup(source);
+        let command_roles = Arc::new(
+            crate::channel_command_roles::ChannelActorRoleResolver::new(
+                command_role_provider,
+                command_role_lookup,
+                Arc::clone(&self.deps.admin_users),
+                self.deps.identity.tenant_id.clone(),
+                self.deps.identity.operator_user_id.clone(),
+            )
+            .with_identity_keyspace(command_role_keyspace),
+        );
 
         let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
@@ -630,7 +634,7 @@ impl GenericChannelHostAssembly {
         // Per-user identity iff a provider lookup exists (OAuth vendor or
         // pairing strategy); the `None` arm is the operator resolver, which
         // must never be combined with shared-conversation admission.
-        let actor_identity_is_per_user = self.provider_identity_lookup(source).1.is_some();
+        let actor_identity_is_per_user = self.provider_identity_lookup(source).2.is_some();
         let graph = self
             .deps
             .channel_workflow
@@ -714,8 +718,17 @@ impl GenericChannelHostAssembly {
         source: &HostedChannelSource,
     ) -> (
         String,
+        crate::channel_identity::ChannelIdentityKeyspace,
         Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
     ) {
+        let identity_keyspace = crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
+            source
+                .resolved()
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.connection.as_ref())
+                .map(|connection| connection.strategy),
+        );
         let pairing_extension = self
             .deps
             .channel_pairing
@@ -725,17 +738,25 @@ impl GenericChannelHostAssembly {
             self.deps.identity_lookup.as_ref(),
             source.resolved().auth.first(),
         ) {
-            (Some(lookup), Some(auth)) => {
-                (auth.vendor.as_str().to_string(), Some(Arc::clone(lookup)))
-            }
+            (Some(lookup), Some(auth)) => (
+                auth.vendor.as_str().to_string(),
+                identity_keyspace,
+                Some(Arc::clone(lookup)),
+            ),
             // Pairing-strategy channels have no OAuth vendor; verified
             // inbound actors resolve through the bindings the pairing
             // consume wrote, keyed by the extension id as provider. Unbound
             // actors fail closed instead of inheriting the operator.
-            (Some(lookup), None) if pairing_extension => {
-                (source.extension_id().to_string(), Some(Arc::clone(lookup)))
-            }
-            _ => (source.extension_id().to_string(), None),
+            (Some(lookup), None) if pairing_extension => (
+                source.extension_id().to_string(),
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
+                Some(Arc::clone(lookup)),
+            ),
+            _ => (
+                source.extension_id().to_string(),
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
+                None,
+            ),
         }
     }
 
@@ -748,14 +769,15 @@ impl GenericChannelHostAssembly {
         &self,
         source: &HostedChannelSource,
     ) -> Arc<dyn ProductActorUserResolver> {
-        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        let (provider, identity_keyspace, provider_lookup) = self.provider_identity_lookup(source);
         match provider_lookup {
             Some(lookup) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     provider,
                     source.extension_id(),
                     lookup,
-                ),
+                )
+                .with_identity_keyspace(identity_keyspace),
             ),
             None => Arc::new(OperatorActorUserResolver {
                 operator_user_id: self.deps.identity.operator_user_id.clone(),
@@ -825,15 +847,35 @@ impl GenericChannelHostAssembly {
         })
     }
 
-    /// The connect/pair notice wording for one extension: the pairing
-    /// service's own policy when it has one, otherwise the generic wording
-    /// derived from the extension's display name.
+    /// The connect notice wording for one extension: the pairing service's
+    /// own policy when it has one, otherwise the manifest connection policy
+    /// for non-pairing strategies such as `device_link`, then generic copy.
     fn connection_notices(&self, source: &HostedChannelSource) -> ChannelConnectionNoticePolicy {
         self.deps
             .channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(source.extension_id()))
             .map(|service| service.connection_notices().clone())
+            .or_else(|| {
+                source
+                    .resolved()
+                    .channel
+                    .as_ref()
+                    .and_then(|channel| channel.connection.as_ref())
+                    .map(|connection| ChannelConnectionNoticePolicy {
+                        connect_required: connection.notices.connect_required.clone(),
+                        paired: connection.notices.paired.clone(),
+                        already_paired_same_user: connection
+                            .notices
+                            .already_paired_same_user
+                            .clone(),
+                        already_bound_to_other_user: connection
+                            .notices
+                            .already_bound_to_other_user
+                            .clone(),
+                        expired_or_unknown: connection.notices.expired_or_unknown.clone(),
+                    })
+            })
             .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&source.resolved().name))
     }
 
