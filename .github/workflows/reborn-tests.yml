@@ -662,6 +662,27 @@ jobs:
       - name: Build Python sandbox worker
         run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
+      - name: Build fake ACP adapter
+        run: docker build -f tests/fixtures/acp-fake/Dockerfile -t ironclaw-acp-fake:latest tests/fixtures/acp-fake
+
+      - name: Build pinned Claude Code ACP adapter
+        run: docker build -f Dockerfile.claude-code-acp -t ironclaw-claude-code-acp:dev .
+
+      - name: Verify pinned Claude Code ACP handshake
+        run: |
+          timeout 20 docker run --rm -i \
+            -e ANTHROPIC_API_KEY=protocol-canary \
+            ironclaw-claude-code-acp:dev \
+            < tests/fixtures/acp-claude-code/initialize-request.json \
+            > "${RUNNER_TEMP}/claude-code-acp-initialize.json"
+          expected_version="$(sed -n 's/^ARG CLAUDE_AGENT_ACP_VERSION=//p' Dockerfile.claude-code-acp)"
+          test -n "${expected_version}"
+          jq -e --arg expected_version "${expected_version}" '
+            .result.protocolVersion == 1 and
+            .result.agentCapabilities.loadSession == true and
+            .result.agentInfo.version == $expected_version
+          ' "${RUNNER_TEMP}/claude-code-acp-initialize.json"
+
       - name: Verify production local-sandbox profile wiring
         run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
 
@@ -670,6 +691,9 @@ jobs:
 
       - name: Run full-turn sandbox shell integration
         run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
+
+      - name: Run full-turn ACP harness integration
+        run: cargo test -p ironclaw_integration_tests --test reborn_integration_acp_harness -- --nocapture
 
   reborn-integration-coverage:
     name: Reborn integration tests (${{ matrix.lane }})

@@ -205,9 +205,18 @@ pub struct RebornIntegrationHarnessBuilder {
     fail_append_tool_result_reference: bool,
     /// Additive raw-provider call recording for terminal side-effect assertions.
     record_model_calls: bool,
+    acp_harness: Option<ironclaw_turn_runner::harness_turn_run_executor::HarnessTurnRunConfig>,
 }
 
 impl RebornIntegrationHarnessBuilder {
+    pub fn with_acp_harness_for_test(
+        mut self,
+        harness: ironclaw_turn_runner::harness_turn_run_executor::HarnessTurnRunConfig,
+    ) -> Self {
+        self.acp_harness = Some(harness);
+        self
+    }
+
     /// Set the scripted model replies (consumed in order at the raw-provider seam).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
@@ -774,6 +783,9 @@ impl RebornIntegrationHarnessBuilder {
         if self.fail_append_tool_result_reference {
             group_builder = group_builder.fail_append_tool_result_reference_for_test();
         }
+        if let Some(harness) = self.acp_harness {
+            group_builder = group_builder.with_acp_harness_for_test(harness);
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -900,6 +912,7 @@ impl RebornIntegrationHarness {
             fail_append_finalized_assistant_message: false,
             fail_append_tool_result_reference: false,
             record_model_calls: false,
+            acp_harness: None,
         }
     }
 

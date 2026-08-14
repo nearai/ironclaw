@@ -893,6 +893,7 @@ impl RebornBinaryE2EHarness {
             )),
             subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
+            harness: None,
             config: runtime_config,
             model_route_resolver: None,
             cancellation_factory: None,

@@ -189,6 +189,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
+| A neutral profile router keeps unselected turns on the canonical executor while an explicitly routed ACP turn uses the ACP-only executor under host and Docker placements, streams cumulative text chunks, auto-approves adapter permissions, persists the final reply, reuses its per-thread session, and tears down terminal failures | `reborn_acp_harness.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |

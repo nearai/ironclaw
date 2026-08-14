@@ -117,6 +117,34 @@ impl ToolErrorClass {
 }
 
 impl RebornIntegrationHarness {
+    /// Assert the cumulative model-text updates published for one run.
+    pub async fn assert_streamed_model_text(
+        &self,
+        run_id: TurnRunId,
+        expected: &[&str],
+    ) -> HarnessResult<()> {
+        let actual = self
+            .loop_milestones()
+            .into_iter()
+            .filter(|milestone| milestone.run_id == run_id)
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::ModelTextDelta { safe_text } => Some(safe_text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected = expected
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected cumulative model text updates {expected:?} for run {run_id}; saw {actual:?}"
+        )
+        .into())
+    }
+
     /// Assert the complete fail-closed outcome shared by assistant and tool
     /// transcript-write failures.
     pub async fn assert_transcript_failure_terminal(

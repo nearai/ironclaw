@@ -164,6 +164,7 @@ QA_HARNESS_PREFIXES = (
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 SANDBOX_DOCKER_EXACT_PATHS = {
+    "Dockerfile.claude-code-acp",
     "Dockerfile.sandbox-worker",
     "crates/app/ironclaw_cli/src/runtime/mod.rs",
     "crates/app/ironclaw_composition/src/sandbox.rs",
@@ -173,6 +174,7 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
     "crates/app/ironclaw_composition/src/input.rs",
     "crates/app/ironclaw_config/src/profile.rs",
+    "crates/app/ironclaw_config/src/config_file.rs",
     "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
     "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
     "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
@@ -182,6 +184,13 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
     "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
     "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+    "crates/loop/ironclaw_turn_runner/src/agent_placement.rs",
+    "crates/loop/ironclaw_turn_runner/src/harness_turn_run_executor.rs",
+    "scripts/install-claude-code-acp.sh",
+    "tests/fixtures/acp-fake/Dockerfile",
+    "tests/fixtures/acp-fake/agent.mjs",
+    "tests/fixtures/acp-claude-code/initialize-request.json",
+    "tests/integration/reborn_acp_harness.rs",
     "tests/integration/reborn_sandbox_shell_turn.rs",
     "tests/e2e_trace_runtime_policy_serde.rs",
     "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
@@ -266,6 +275,8 @@ def _is_shipped_asset_markdown(path: str) -> bool:
         return True
     return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
+    "tests/fixtures/acp-fake/Dockerfile": "tests/integration/reborn_acp_harness.rs",
+    "tests/fixtures/acp-fake/agent.mjs": "tests/integration/reborn_acp_harness.rs",
     "tests/fixtures/extensions/acme-messenger/manifest.toml": (
         "tests/integration/extension_runtime.rs"
     ),
@@ -882,6 +893,7 @@ def build_plan(
                 not path.startswith("crates/")
                 and path not in root_inventory
                 and path not in integration_inventory
+                and path not in INTEGRATION_SUPPORT_OWNERS
             ):
                 continue
         if path.startswith(_webui_frontend_prefix()):

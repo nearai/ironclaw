@@ -205,9 +205,17 @@ default_owner  = "reborn-cli"
 # additional = ["planned"]
 
 # [harness]
-# # Active harness lands with epic #3036. Leave this section commented in
-# # this slice; `run` rejects it rather than silently ignoring operator intent.
-# id = "red-team"
+# # Experimental and default-off. Only standalone development profiles may
+# # route listed run profiles to this harness. Hosted policy pins Docker.
+# id = "claude-code-acp"
+# run_profiles = ["reborn-planned-default"]
+# placement = "host" # "host" or "docker"
+# command = "claude-agent-acp" # host placement only
+# image = "ironclaw-claude-code-acp:dev"
+# timeout_secs = 600
+# max_update_bytes = 1048576
+# anthropic_api_key_env = "ANTHROPIC_API_KEY"
+# vcs_token_env = "GH_TOKEN"
 
 [runner]
 heartbeat_interval_secs = 5

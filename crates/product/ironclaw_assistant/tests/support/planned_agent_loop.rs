@@ -424,6 +424,7 @@ impl ProductLiveAgentLoopHarness {
                 )
                 .with_cancellation_factory(cancellation_factory.clone()),
             ),
+            harness: None,
             config: DefaultPlannedRuntimeConfig::default(),
             model_route_resolver: Some(model_route_resolver),
             cancellation_factory: Some(cancellation_factory.clone()),

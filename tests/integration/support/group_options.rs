@@ -29,6 +29,14 @@ use super::super::builder::StorageMode;
 use super::RebornIntegrationGroupBuilder;
 
 impl RebornIntegrationGroupBuilder {
+    pub fn with_acp_harness_for_test(
+        mut self,
+        harness: ironclaw_turn_runner::harness_turn_run_executor::HarnessTurnRunConfig,
+    ) -> Self {
+        self.harness = Some(harness);
+        self
+    }
+
     /// Select the durable storage backend (default: `StorageMode::InMemory`).
     /// Use `StorageMode::LibSql` to exercise on-disk durability across
     /// `assert_reply_persists_after_reopen`.

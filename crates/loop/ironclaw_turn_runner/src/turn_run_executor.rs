@@ -349,7 +349,11 @@ impl RebornTurnRunExecutor {
     ///   `record_runner_failure` fail — a double-failure that leaves the run in
     ///   an unknown state. The caller (`execute_claimed_run`) converts this to a
     ///   `TurnRunExecutorError` so the scheduler can record a terminal failure.
-    async fn apply_exit(&self, claimed: &ClaimedTurnRun, mut exit: LoopExit) -> Result<(), ()> {
+    pub(crate) async fn apply_exit(
+        &self,
+        claimed: &ClaimedTurnRun,
+        mut exit: LoopExit,
+    ) -> Result<(), ()> {
         let started_at = live_latency_started_at();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;

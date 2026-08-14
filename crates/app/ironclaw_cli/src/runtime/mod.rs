@@ -1,4 +1,5 @@
 // arch-exempt: large_file, Google OAuth resolution hardening remains at the existing runtime config seam, plan #4088
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,12 +10,14 @@ use ironclaw_composition::TriggerFireAccessPolicy;
 use ironclaw_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_composition::{
-    KeepaliveSweepSettings, OAuthClientConfig, PollSettings, RebornCompositionProfile,
-    RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    HarnessPlacementSettings, HarnessRuntimeSettings, KeepaliveSweepSettings, OAuthClientConfig,
+    PollSettings, RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_config::{
-    REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
+    HarnessPlacement, REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile,
+    seed_default_config_file_if_missing,
 };
 use ironclaw_extension_host::FirstPartyPackageBundle;
 use ironclaw_operator::OperatorLogLayer;
@@ -616,10 +619,104 @@ pub(crate) fn build_runtime_input_with_options(
     if let Some(manifest_url) = ironhub_manifest_url_from_env()? {
         runtime_input = runtime_input.with_ironhub_manifest_url(manifest_url);
     }
+    if let Some(harness) = harness_runtime_settings(config, runtime_services.config_file.as_ref())?
+    {
+        runtime_input = runtime_input.with_harness_settings(harness);
+    }
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
     })
+}
+
+fn harness_runtime_settings(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+) -> anyhow::Result<Option<HarnessRuntimeSettings>> {
+    let Some(section) = config_file.and_then(|file| file.harness.as_ref()) else {
+        return Ok(None);
+    };
+    let Some(id) = section.id.as_deref() else {
+        return Ok(None);
+    };
+    if id != "claude-code-acp" {
+        anyhow::bail!("unsupported [harness].id `{id}`; expected `claude-code-acp`");
+    }
+
+    let run_profile_ids = section
+        .run_profiles
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("[harness].run_profiles is required when the harness is enabled")
+        })?
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let placement = match section.placement.unwrap_or(HarnessPlacement::Docker) {
+        HarnessPlacement::Host => {
+            if !matches!(
+                config.profile(),
+                RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted
+            ) {
+                anyhow::bail!(
+                    "deployment profile `{}` pins harness placement to `docker`",
+                    config.profile()
+                );
+            }
+            HarnessPlacementSettings::Host {
+                command: section
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| "claude-agent-acp".to_string()),
+            }
+        }
+        HarnessPlacement::Docker => HarnessPlacementSettings::Docker {
+            image: section.image.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[harness].image is required when Docker harness placement is enabled"
+                )
+            })?,
+        },
+    };
+    if !matches!(
+        config.profile(),
+        RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted
+    ) {
+        anyhow::bail!("ACP harness routing is only available in standalone development profiles");
+    }
+    let anthropic_env = section.anthropic_api_key_env.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("[harness].anthropic_api_key_env is required when the harness is enabled")
+    })?;
+    let mut environment = vec![format!(
+        "ANTHROPIC_API_KEY={}",
+        required_harness_host_env(anthropic_env)?
+    )];
+    if let Some(host_env) = section.vcs_token_env.as_deref() {
+        environment.push(format!("GH_TOKEN={}", required_harness_host_env(host_env)?));
+    }
+
+    HarnessRuntimeSettings::new(
+        run_profile_ids,
+        config.home().path().join("harness-workspaces"),
+        placement,
+        environment,
+        Duration::from_secs(section.timeout_secs.unwrap_or(600)),
+        section.max_update_bytes.unwrap_or(1_048_576),
+    )
+    .map(Some)
+    .map_err(anyhow::Error::msg)
+}
+
+fn required_harness_host_env(name: &str) -> anyhow::Result<String> {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(std::env::VarError::NotPresent) => {
+            anyhow::bail!("host environment variable `{name}` required by [harness] is unset")
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("host environment variable `{name}` required by [harness] is not UTF-8")
+        }
+    }
 }
 
 pub(crate) fn ironhub_manifest_url_from_env()
@@ -1487,9 +1584,6 @@ fn reject_unsupported_runtime_sections(
     if file.drivers.is_some() {
         sections.push("[drivers]");
     }
-    if file.harness.is_some() {
-        sections.push("[harness]");
-    }
     if sections.is_empty() {
         Ok(())
     } else {
@@ -1710,9 +1804,10 @@ mod tests {
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
+        build_runtime_input_with_options, harness_runtime_settings,
+        initialize_local_runtime_storage_root, no_assistant_text_message,
+        protect_reborn_log_filter, resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -1746,6 +1841,121 @@ mod tests {
             &std::path::PathBuf::from("/test/config.toml"),
         )
         .expect("must parse")
+    }
+
+    #[test]
+    fn harness_host_placement_is_accepted_for_standalone_profile() {
+        let _runtime_env = lock_runtime_env();
+        let _key = EnvGuard::set("IRONCLAW_TEST_HARNESS_KEY", "developer-key");
+        let config_toml = r#"
+[harness]
+id = "claude-code-acp"
+run_profiles = ["reborn-planned-default"]
+placement = "host"
+command = "claude-agent-acp"
+anthropic_api_key_env = "IRONCLAW_TEST_HARNESS_KEY"
+"#;
+        let (_temp, config) = boot_config_with_config_toml("local-dev", config_toml);
+        let config_file =
+            ironclaw_config::RebornConfigFile::load(&config.home().config_file_path())
+                .expect("config loads")
+                .expect("config exists");
+
+        harness_runtime_settings(&config, Some(&config_file))
+            .expect("standalone host placement is allowed")
+            .expect("harness enabled");
+    }
+
+    #[test]
+    fn harness_host_placement_requires_explicit_developer_credentials() {
+        let _runtime_env = lock_runtime_env();
+        let _missing = EnvGuard::clear("IRONCLAW_TEST_MISSING_HARNESS_KEY");
+        let config_toml = r#"
+[harness]
+id = "claude-code-acp"
+run_profiles = ["reborn-planned-default"]
+placement = "host"
+command = "claude-agent-acp"
+anthropic_api_key_env = "IRONCLAW_TEST_MISSING_HARNESS_KEY"
+"#;
+        let (_temp, config) = boot_config_with_config_toml("local-dev", config_toml);
+        let config_file =
+            ironclaw_config::RebornConfigFile::load(&config.home().config_file_path())
+                .expect("config loads")
+                .expect("config exists");
+
+        let error = match harness_runtime_settings(&config, Some(&config_file)) {
+            Ok(_) => panic!("host placement must require configured developer credentials"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("IRONCLAW_TEST_MISSING_HARNESS_KEY"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn hosted_profile_rejects_host_harness_placement() {
+        let _runtime_env = lock_runtime_env();
+        let _key = EnvGuard::set("IRONCLAW_TEST_HARNESS_KEY", "developer-key");
+        let config_toml = r#"
+[harness]
+id = "claude-code-acp"
+run_profiles = ["reborn-planned-default"]
+placement = "host"
+command = "claude-agent-acp"
+anthropic_api_key_env = "IRONCLAW_TEST_HARNESS_KEY"
+"#;
+        let (_temp, config) =
+            boot_config_with_config_toml("hosted-single-tenant-volume", config_toml);
+        let config_file =
+            ironclaw_config::RebornConfigFile::load(&config.home().config_file_path())
+                .expect("config loads")
+                .expect("config exists");
+
+        let error = match harness_runtime_settings(&config, Some(&config_file)) {
+            Ok(_) => panic!("hosted profile must pin Docker placement"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("pins harness placement to `docker`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn hosted_profile_rejects_docker_harness_routing_until_hosted_rollout() {
+        let _runtime_env = lock_runtime_env();
+        let _key = EnvGuard::set("IRONCLAW_TEST_HARNESS_KEY", "developer-key");
+        let config_toml = r#"
+[harness]
+id = "claude-code-acp"
+run_profiles = ["reborn-planned-default"]
+placement = "docker"
+image = "ironclaw-claude-code-acp:dev"
+anthropic_api_key_env = "IRONCLAW_TEST_HARNESS_KEY"
+"#;
+        let (_temp, config) =
+            boot_config_with_config_toml("hosted-single-tenant-volume", config_toml);
+        let config_file =
+            ironclaw_config::RebornConfigFile::load(&config.home().config_file_path())
+                .expect("config loads")
+                .expect("config exists");
+
+        let error = match harness_runtime_settings(&config, Some(&config_file)) {
+            Ok(_) => panic!("hosted harness routing must remain disabled"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("only available in standalone development profiles"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -205,8 +205,9 @@ pub use runtime::{
 // check contract (`TriggerFireAccessCheck`/`Checker`/`Decision`/`Error`) is NOT
 // forwarded — `ironclaw_triggers` is its one import path (§11.2.4).
 pub use runtime_input::{
-    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
-    TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings, TurnRunnerSettings,
+    HarnessPlacementSettings, HarnessRuntimeSettings, KeepaliveSweepSettings, PollSettings,
+    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessGrant, TriggerFireAccessPolicy,
+    TriggerPollerSettings, TurnRunnerSettings,
 };
 
 /// Re-exported IronHub command vocabulary for the `ironclaw` binary's

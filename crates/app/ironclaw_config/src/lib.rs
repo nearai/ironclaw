@@ -46,8 +46,8 @@ pub use capability_remediation::{
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
     GoogleFieldUpdate, GoogleOauthConfigUpdate, GoogleOauthConfigUpdateSession, GoogleSection,
-    HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, MemoryAdminOverride,
-    MemorySection, PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile,
+    HarnessPlacement, HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection,
+    MemoryAdminOverride, MemorySection, PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile,
     RebornConfigFileError, RebornConfigFileUpdateError, RunnerSection, StorageBackend,
     StorageSection, TriggerPollerConfigSection, begin_default_llm_slot_update,
     begin_google_oauth_config_update, update_default_llm_slot, update_google_oauth_config,

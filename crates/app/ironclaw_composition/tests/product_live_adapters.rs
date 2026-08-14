@@ -1429,6 +1429,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
                 as Arc<dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             thread_scope,
         )),
+        harness: None,
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(adapters.model_route_resolver),
         cancellation_factory: Some(adapters.cancellation_factory),
