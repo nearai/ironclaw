@@ -41,3 +41,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 rig = { package = "rig-core", version = "0.33" }
+ironclaw_auth = { path = "../../crates/domains/ironclaw_auth" }
+ironclaw_composition = { path = "../../crates/app/ironclaw_composition", features = ["test-support"] }
+ironclaw_libsql_runtime = { path = "../../crates/substrates/ironclaw_libsql_runtime" }
+ironclaw_triggers = { path = "../../crates/domains/ironclaw_triggers" }
+secrecy = "0.10"
+tempfile = "3"
