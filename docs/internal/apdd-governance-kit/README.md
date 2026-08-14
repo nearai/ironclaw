@@ -38,7 +38,7 @@ A visual, diagram-first overview of the kit's benefits, functionality, and the
 agentic-OS framework — plus the IronClaw overlap/gap map and rollout — lives in
 [explorer.html](explorer.html): a **self-contained** page (no build step; open
 in any browser, or render it without cloning via
-[html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/eval/apdd-governance-kit/docs/plans/apdd-governance-kit/explorer.html)).
+[html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/eval/apdd-governance-kit/docs/internal/apdd-governance-kit/explorer.html)).
 It is a convenience view; the Markdown in this folder is the source of truth.
 
 ## What this branch contains

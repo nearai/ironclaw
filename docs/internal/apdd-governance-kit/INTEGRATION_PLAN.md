@@ -204,7 +204,7 @@ list every path by design). File/dir references only — **no dependency names
 here** (those are Check 2):
 
 ```bash
-rg --hidden --glob '!.git' --glob '!**/node_modules/**' --glob '!docs/plans/apdd-governance-kit/**' -n \
+rg --hidden --glob '!.git' --glob '!**/node_modules/**' --glob '!docs/internal/apdd-governance-kit/**' -n \
   'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md'
 ```
 
