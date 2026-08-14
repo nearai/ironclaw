@@ -188,4 +188,9 @@ fn turn_run_profile_defaults_admission_class_when_absent() {
     }))
     .expect("rows without admission_class must deserialize");
     assert_eq!(profile.id.as_str(), "reborn-planned-default");
+    assert_eq!(
+        profile.admission_class,
+        ironclaw_turns::TurnAdmissionClass::interactive(),
+        "the absence default must stay interactive for old rows"
+    );
 }

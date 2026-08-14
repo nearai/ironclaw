@@ -386,6 +386,89 @@ fn family_with_budget_strategy(
     LoopFamily::new(id, version, std::sync::Arc::new(planner))
 }
 
+/// A FAILED result-tool attempt must not complete a structured run: the
+/// error path records no completed signature, so the stop strategy keeps
+/// the run alive for the repair retry, counts the all-failed batch, and
+/// aborts as invalid model output only after the threshold. (Recording
+/// errored calls into `observed_signatures` completed structured runs off
+/// a failed validation attempt with NO durable result.)
+#[tokio::test]
+async fn structured_stop_ignores_failed_result_attempts_and_counts_all_failed_batches() {
+    use crate::state::CapabilityCallSignature;
+    use crate::strategies::{
+        CapabilityBatchTurnSummary, StopConditionStrategy as _, StopKind, StopOutcome,
+        StructuredResultStopStrategy, TurnEndKind, TurnSummary,
+    };
+    use ironclaw_host_api::ids::CapabilityId;
+
+    let host = MockHost::new(Vec::new());
+    let strategy = StructuredResultStopStrategy::new(
+        CapabilityId::new("builtin.structured_result").expect("valid"),
+    );
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    // The only invocation in the batch FAILED: no completed signature.
+    let failed_batch = TurnSummary {
+        kind: TurnEndKind::AfterCapabilityBatch,
+        assistant_message_ref: None,
+        batch_result_refs: Vec::new(),
+        capability_batch: CapabilityBatchTurnSummary {
+            invocation_count: 1,
+            terminate_hint_count: 0,
+            observed_signatures: Vec::new(),
+        },
+    };
+    let observed = strategy.observe_completed_turn(&state, &failed_batch).await;
+    assert_eq!(
+        observed.trailing_all_failed_batches, 1,
+        "an all-failed batch must count toward the abort threshold"
+    );
+    assert!(
+        matches!(
+            strategy
+                .should_stop_after_observed_turn(&state, &failed_batch)
+                .await,
+            StopOutcome::Continue {}
+        ),
+        "a failed result attempt must keep the run alive for the repair retry"
+    );
+
+    let mut exhausted = state.clone();
+    exhausted.stop_state.trailing_all_failed_batches = 3;
+    assert!(matches!(
+        strategy
+            .should_stop_after_observed_turn(&exhausted, &failed_batch)
+            .await,
+        StopOutcome::Stop {
+            kind: StopKind::Aborted(ironclaw_loop_contracts::LoopFailureKind::InvalidModelOutput)
+        }
+    ));
+
+    // A COMPLETED result-tool call stops the run gracefully.
+    let completed_batch = TurnSummary {
+        capability_batch: CapabilityBatchTurnSummary {
+            invocation_count: 1,
+            terminate_hint_count: 1,
+            observed_signatures: vec![
+                CapabilityCallSignature::from_call(
+                    CapabilityId::new("builtin.structured_result").expect("valid"),
+                    &serde_json::json!({"sentiment": "positive"}),
+                )
+                .expect("signature"),
+            ],
+        },
+        ..failed_batch.clone()
+    };
+    assert!(matches!(
+        strategy
+            .should_stop_after_observed_turn(&state, &completed_batch)
+            .await,
+        StopOutcome::Stop {
+            kind: StopKind::GracefulStop
+        }
+    ));
+}
+
 #[tokio::test]
 async fn budget_stage_hard_stops_on_wall_clock_limit_without_a_warning_turn() {
     let host = MockHost::new(Vec::new());

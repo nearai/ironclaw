@@ -624,7 +624,7 @@ pub(crate) fn replay_prepared_context(
     let accepted_message_ref = AcceptedMessageRef::new(record.accepted_message_ref.clone())
         .map_err(|error| {
             SessionThreadError::Backend(format!(
-                "stored unbound context carries an invalid accepted ref: {error}"
+                "stored prepared context carries an invalid accepted ref: {error}"
             ))
         })?;
     Ok(AcceptedPreparedContext {

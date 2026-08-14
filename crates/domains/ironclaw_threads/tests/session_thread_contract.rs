@@ -4510,6 +4510,63 @@ async fn list_threads_for_scope_excludes_prepared_context_threads_even_when_scop
     );
 }
 
+/// Replaying against an EXISTING prepared thread is guarded on both axes:
+/// the same explicit thread id with a different idempotency key is a key
+/// mismatch, and the same key from a different actor is an actor mismatch —
+/// a prepared thread can never be silently rebound.
+#[tokio::test]
+async fn prepared_replay_rejects_key_and_actor_mismatches_through_the_service() {
+    let service = InMemorySessionThreadService::default();
+    let mut request = prepared_request("replay-guard", "replay-guard-key-1");
+    request.thread_id = Some(ThreadId::new("unbound-replay-guard-1").unwrap());
+    service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+
+    let mut wrong_key = request.clone();
+    wrong_key.idempotency_key = "replay-guard-key-2".to_string();
+    assert!(matches!(
+        service.accept_prepared_context(wrong_key).await,
+        Err(ironclaw_threads::SessionThreadError::PreparedContextKeyMismatch { .. })
+    ));
+
+    let mut wrong_actor = request;
+    wrong_actor.actor_id = "user-someone-else".to_string();
+    assert!(matches!(
+        service.accept_prepared_context(wrong_actor).await,
+        Err(ironclaw_threads::SessionThreadError::IdempotentReplayActorMismatch { .. })
+    ));
+}
+
+/// Deleting a prepared thread deletes its journaled record with it: the same
+/// accept re-run afterwards mints a FRESH thread instead of replaying the
+/// deleted one (an orphaned record would resurrect a thread whose rows are
+/// gone).
+#[tokio::test]
+async fn deleting_a_prepared_thread_deletes_its_replay_record() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("delete-replay", "delete-replay-key-1");
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    assert!(!first.idempotent_replay);
+    service
+        .delete_thread(&request.scope, &first.thread_id)
+        .await
+        .expect("delete");
+
+    let second = service
+        .accept_prepared_context(request)
+        .await
+        .expect("re-accept after delete");
+    assert!(
+        !second.idempotent_replay,
+        "a deleted prepared thread must re-mint, not replay its deleted record"
+    );
+}
+
 fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
     ironclaw_threads::PreparedContextRequest {
         scope: ThreadScope {

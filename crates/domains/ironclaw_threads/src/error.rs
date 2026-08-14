@@ -63,9 +63,9 @@ pub enum SessionThreadError {
         context: &'static str,
         violation: TimestampViolation,
     },
-    #[error("invalid unbound context: {reason}")]
+    #[error("invalid prepared context: {reason}")]
     InvalidPreparedContext { reason: String },
-    #[error("unbound context replay key mismatch for thread {thread_id}")]
+    #[error("prepared context replay key mismatch for thread {thread_id}")]
     PreparedContextKeyMismatch { thread_id: ThreadId },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),

@@ -6135,6 +6135,138 @@ fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::Prep
     }
 }
 
+/// Two racing accepts for the SAME prepared request converge: deterministic
+/// ids make the seeds collide row-by-row (CAS Absent; losers skip), and the
+/// commit marker written last decides exactly one non-replay winner. Both
+/// callers get the same thread and pin, and the rows are not duplicated.
+#[tokio::test(flavor = "multi_thread")]
+async fn filesystem_concurrent_duplicate_prepared_accepts_converge() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let request = filesystem_prepared_request("race-fs", "race-fs-key-1");
+
+    let left = {
+        let service = Arc::clone(&service);
+        let request = request.clone();
+        tokio::spawn(async move { service.accept_prepared_context(request).await })
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let request = request.clone();
+        tokio::spawn(async move { service.accept_prepared_context(request).await })
+    };
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("join").expect("left accept");
+    let right = right.expect("join").expect("right accept");
+
+    assert_eq!(left.thread_id, right.thread_id);
+    assert_eq!(left.accepted_message_ref, right.accepted_message_ref);
+    assert_eq!(
+        [left.idempotent_replay, right.idempotent_replay]
+            .iter()
+            .filter(|replayed| !**replayed)
+            .count(),
+        1,
+        "exactly one racer is the non-replay winner (left={left:?} right={right:?})"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: left.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "racing accepts must not duplicate the seeded rows: {:?}",
+        history.messages.iter().map(|m| m.kind).collect::<Vec<_>>()
+    );
+}
+
+/// A crash BEFORE the commit marker (rows seeded, record write fails) is
+/// retryable: the retry converges on the same thread, writes the marker, and
+/// reports the accept as fresh — never an orphaned half-seeded thread.
+#[tokio::test]
+async fn filesystem_prepared_accept_retries_after_a_crash_before_the_commit_marker() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("marker-crash-fs", "marker-crash-fs-key-1");
+
+    // The commit marker is the ONE write to `prepared_context.json`.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("prepared_context.json")
+            .nth(1)
+            .backend("crash before commit marker"),
+    );
+    let error = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect_err("the poisoned marker write must fail the accept");
+    assert!(
+        !matches!(
+            error,
+            SessionThreadError::InvalidPreparedContext { .. }
+                | SessionThreadError::PreparedContextKeyMismatch { .. }
+        ),
+        "the crash must surface as a backend failure, not a validation shape: {error:?}"
+    );
+
+    let retried = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("the retry succeeds once the fault clears");
+    assert!(
+        !retried.idempotent_replay,
+        "no commit marker landed, so the retry is the first completed accept"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: retried.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "the crashed attempt's rows converge instead of duplicating: {:?}",
+        history.messages.iter().map(|m| m.kind).collect::<Vec<_>>()
+    );
+}
+
+/// Filesystem twin of the delete-then-re-accept pin: the journaled record
+/// lives under the thread root, so the delete removes it and the same
+/// accept re-run mints fresh.
+#[tokio::test]
+async fn filesystem_deleting_a_prepared_thread_deletes_its_replay_record() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("delete-replay-fs", "delete-replay-fs-key-1");
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    assert!(!first.idempotent_replay);
+    service
+        .delete_thread(&request.scope, &first.thread_id)
+        .await
+        .expect("delete");
+
+    let second = service
+        .accept_prepared_context(request)
+        .await
+        .expect("re-accept after delete");
+    assert!(
+        !second.idempotent_replay,
+        "a deleted prepared thread must re-mint, not replay its deleted record"
+    );
+}
+
 /// Filesystem twin of the in-memory listing-exclusion pin, plus the cursor
 /// invariant that only matters here: the page cursor advances over the
 /// FETCHED index rows, so a page consisting entirely of hidden

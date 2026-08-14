@@ -1085,9 +1085,12 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             )
             .await
             .map_err(|error| {
+                // debug!, not warn!: background diagnostics stay off the REPL.
+                // Stable summary, no backend detail (redaction discipline).
+                tracing::debug!(%error, "unbound declarations read failed");
                 AgentLoopHostError::new(
                     ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                    format!("unbound declarations read failed: {error}"),
+                    "unbound declarations read failed",
                 )
             })?;
             if let Some(declarations) = declarations

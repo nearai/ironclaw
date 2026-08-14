@@ -1504,7 +1504,6 @@ impl CapabilityStage {
                         &call,
                         &summary,
                         model_observation.clone(),
-                        capability_batch,
                     )
                     .await?;
                     CheckpointStage
@@ -1538,7 +1537,6 @@ impl CapabilityStage {
                         &call,
                         &summary,
                         model_observation.clone(),
-                        capability_batch,
                     )
                     .await?;
                     if let Some(signal) = ctx.host.observe_cancellation() {
@@ -1696,7 +1694,6 @@ impl CapabilityStage {
             &call,
             &summary,
             model_observation,
-            capability_batch,
         )
         .await?;
         // Route through the single failure-explanation chokepoint so the
@@ -2338,22 +2335,20 @@ async fn append_spawned_child_result(
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
 
+/// Errored calls are deliberately NOT recorded into `observed_signatures`:
+/// that list means COMPLETED calls (its only consumer is the
+/// structured-result stop strategy, which completes the run on the result
+/// tool's completed signature and aborts on all-failed batches). Recording
+/// errors here completed structured runs off a FAILED validation attempt —
+/// with no durable result — and masked the all-failed abort.
 async fn append_blocked_capability_error_result(
     host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     summary: &CapabilityErrorSummary,
     model_observation: Option<ironclaw_loop_contracts::ModelVisibleToolObservation>,
-    capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
-    append_capability_error_ref(host, state, call, summary, model_observation).await?;
-    if capability_batch.invocation_count > 0
-        && call.provider_replay.is_some()
-        && let Ok(signature) = capability_call_signature(call)
-    {
-        capability_batch.record_result(signature, false);
-    }
-    Ok(())
+    append_capability_error_ref(host, state, call, summary, model_observation).await
 }
 
 async fn append_completed_capability_result(

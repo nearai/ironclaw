@@ -56,7 +56,7 @@ pub fn structured_result_capability(
     let validator = jsonschema::validator_for(&schema).map_err(|error| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
-            "declared declared output schema does not compile",
+            "declared output schema does not compile",
         )
         .with_detail(format!("schema compilation failed: {error}"))
     })?;

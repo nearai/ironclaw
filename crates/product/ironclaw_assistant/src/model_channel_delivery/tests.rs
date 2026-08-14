@@ -146,6 +146,10 @@ fn bare_provider(
 enum ScriptedBindingLookup {
     Origin,
     NotOrigin,
+    /// Route-authority failure on the ORIGIN thread: bound here, actor denied.
+    DeniedSameThread,
+    /// Route-authority failure on a DIFFERENT thread: definitively non-origin.
+    DeniedOtherThread,
     Error,
     Unreachable,
 }
@@ -217,6 +221,14 @@ impl ironclaw_conversations::ConversationBindingService for ScriptedBindingServi
                 )
                 .expect("conversation ref"),
                 route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            }),
+            ScriptedBindingLookup::DeniedSameThread => Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor_user_id.as_str().to_string(),
+                thread_id: request.current_thread_id.as_str().to_string(),
+            }),
+            ScriptedBindingLookup::DeniedOtherThread => Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor_user_id.as_str().to_string(),
+                thread_id: "thread-somewhere-else".to_string(),
             }),
             ScriptedBindingLookup::NotOrigin => Err(InboundTurnError::ThreadNotFound {
                 thread_id: request.reply_target_binding_ref.as_str().to_string(),
@@ -586,6 +598,34 @@ async fn deliver_for_model_denies_origin_conversation_target() {
         .await
         .expect_err("origin target denied");
     assert_eq!(error, ModelChannelDeliveryError::OriginConversationTarget);
+
+    // Bound to the origin thread but the actor's route authority failed:
+    // still the origin conversation — the authority edge case must not
+    // re-open the origin lane.
+    let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
+    let harness = build_harness(vec![entry], ScriptedBindingLookup::DeniedSameThread, vec![]);
+    let request = base_request(target_id("acme-chat-1"), "hello");
+    let error = harness
+        .deliverer
+        .deliver_for_model(request)
+        .await
+        .expect_err("same-thread authority denial stays origin-denied");
+    assert_eq!(error, ModelChannelDeliveryError::OriginConversationTarget);
+
+    // Denied on a DIFFERENT thread: definitively non-origin; delivery
+    // proceeds through the discovered target.
+    let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");
+    let harness = build_harness(
+        vec![entry],
+        ScriptedBindingLookup::DeniedOtherThread,
+        vec![],
+    );
+    let request = base_request(target_id("acme-chat-1"), "hello");
+    harness
+        .deliverer
+        .deliver_for_model(request)
+        .await
+        .expect("other-thread denial is not the origin conversation");
 
     // Run-state read error: fail closed as Unavailable.
     let entry = external_target_entry("acme-chat-1", "reply:acme-chat-1");

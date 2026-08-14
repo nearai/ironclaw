@@ -285,7 +285,9 @@ where
                 }
                 return Ok((request, None));
             }
-            Err(_) => {
+            Err(error) => {
+                // debug!, not warn!: background diagnostics stay off the REPL.
+                debug!(%error, "prepared-context read failed during unbound admission");
                 return Err(TurnError::AdmissionRejected(AdmissionRejection::new(
                     AdmissionRejectionReason::Unavailable,
                 )));

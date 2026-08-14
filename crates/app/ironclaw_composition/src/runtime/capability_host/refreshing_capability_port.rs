@@ -347,9 +347,13 @@ impl RefreshingCapabilityPort {
             )
             .await
             .map_err(|error| {
+                // debug!, not warn!: background diagnostics stay off the REPL.
+                // The stable summary carries no backend detail (redaction
+                // discipline; the cause is in the trace).
+                tracing::debug!(%error, "unbound structured declarations read failed");
                 AgentLoopHostError::new(
                     ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                    format!("unbound structured declarations read failed: {error}"),
+                    "unbound structured declarations read failed",
                 )
             })?
             .ok_or_else(|| {

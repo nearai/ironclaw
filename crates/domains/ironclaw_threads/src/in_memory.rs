@@ -1221,6 +1221,10 @@ impl SessionThreadService for InMemorySessionThreadService {
         state
             .inbound_idempotency
             .retain(|_, record| &record.thread_id != thread_id);
+        // The prepared-context journal rides the thread (the filesystem
+        // backend stores it under the thread root, so its delete removes it
+        // implicitly); an orphaned record here would replay a deleted thread.
+        state.prepared_contexts.remove(thread_id);
         Ok(())
     }
 

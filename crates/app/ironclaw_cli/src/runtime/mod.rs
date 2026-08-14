@@ -1892,12 +1892,13 @@ mod tests {
         let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section(
-            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
+            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\nmax_concurrent_unbound_runs = 0\n",
         );
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert!(settings.max_concurrent_runs_per_user.is_none());
         assert!(settings.max_concurrent_trigger_runs.is_none());
         assert!(settings.max_concurrent_conversation_runs.is_none());
+        assert!(settings.max_concurrent_unbound_runs.is_none());
     }
 
     #[test]
@@ -1905,7 +1906,7 @@ mod tests {
         let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section(
-            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
+            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\nmax_concurrent_unbound_runs = 7\n",
         );
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert_eq!(
@@ -1915,6 +1916,10 @@ mod tests {
         assert_eq!(
             settings.max_concurrent_trigger_runs.map(|v| v.get()),
             Some(5)
+        );
+        assert_eq!(
+            settings.max_concurrent_unbound_runs.map(|v| v.get()),
+            Some(7)
         );
         assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
@@ -2328,6 +2333,10 @@ api_key_env = "NEARAI_API_KEY"
             "2",
         );
         let settings = runner_settings(None).expect("should succeed");
+        assert_eq!(
+            settings.max_concurrent_unbound_runs.map(|v| v.get()),
+            Some(7)
+        );
         assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
             Some(2)

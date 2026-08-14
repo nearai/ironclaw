@@ -247,7 +247,7 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
             thread_id: run.thread_id.clone(),
         })
         .await?;
-    let result_rows = history
+    let result_ref = history
         .messages
         .iter()
         .filter(|message| {
@@ -256,23 +256,52 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
         })
-        .count();
-    assert!(
-        result_rows >= 1,
-        "the structured result must land as a durable tool-result row; rows={:?}",
-        history
-            .messages
-            .iter()
-            .map(|m| (m.kind, m.status))
-            .collect::<Vec<_>>()
+        .filter_map(|message| message.tool_result_ref.clone())
+        .next_back()
+        .unwrap_or_else(|| {
+            panic!(
+                "the structured result must land as a durable tool-result row; rows={:?}",
+                history
+                    .messages
+                    .iter()
+                    .map(|m| (m.kind, m.status))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let chunk = thread_service
+        .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+            scope: ownerless_thread_scope()?,
+            thread_id: run.thread_id.clone(),
+            result_ref,
+            offset: 0,
+            max_bytes: ironclaw_threads::effective_tool_result_read_max_bytes(),
+        })
+        .await?
+        .ok_or("the recorded structured result must be durable")?;
+    let payload: serde_json::Value = serde_json::from_slice(&chunk.content)?;
+    assert_eq!(
+        payload,
+        json!({"sentiment": "positive", "confidence": 0.9}),
+        "the durable record must hold the exact validated payload"
     );
 
     // Taxonomy: the ownerless thread is structurally invisible to the
-    // owner-scoped listing every conversation UI reads.
+    // owner-scoped listing every conversation UI reads. An anchor thread in
+    // the caller's scope keeps the assertion non-vacuous — the listing must
+    // show the conversation AND hide the unbound thread.
     let caller_scope = ThreadScope {
         owner_user_id: Some(UserId::new(CALLER)?),
         ..ownerless_thread_scope()?
     };
+    let anchor = thread_service
+        .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+            scope: caller_scope.clone(),
+            thread_id: Some(ironclaw_host_api::ids::ThreadId::new("t-listing-anchor")?),
+            created_by_actor_id: CALLER.to_string(),
+            title: Some("visible conversation".to_string()),
+            metadata_json: None,
+        })
+        .await?;
     let listed = thread_service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: caller_scope,
@@ -280,6 +309,13 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
             cursor: None,
         })
         .await?;
+    assert!(
+        listed
+            .threads
+            .iter()
+            .any(|thread| thread.thread_id == anchor.thread_id),
+        "the owner-scoped listing must surface the caller's conversation"
+    );
     assert!(
         listed
             .threads
@@ -318,6 +354,56 @@ async fn structured_unbound_run_repairs_an_invalid_result_payload() -> HarnessRe
         TurnStatus::Completed,
         "failure={:?}",
         run.state.failure
+    );
+
+    // The durable record holds the CORRECTED payload, not the rejected one.
+    let thread_service = harness.thread_service_for_test()?;
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ownerless_thread_scope()?,
+            thread_id: run.thread_id.clone(),
+        })
+        .await?;
+    let result_refs: Vec<String> = history
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_result_ref.clone())
+        .collect();
+    assert!(
+        !result_refs.is_empty(),
+        "the repaired structured result must land as a durable row"
+    );
+    let mut stored_payloads = Vec::new();
+    for result_ref in result_refs {
+        // The rejected attempt's row may carry no durable record; only the
+        // validated result is required to be durable.
+        if let Some(chunk) = thread_service
+            .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+                scope: ownerless_thread_scope()?,
+                thread_id: run.thread_id.clone(),
+                result_ref,
+                offset: 0,
+                max_bytes: ironclaw_threads::effective_tool_result_read_max_bytes(),
+            })
+            .await?
+        {
+            stored_payloads.push(serde_json::from_slice::<serde_json::Value>(&chunk.content)?);
+        }
+    }
+    assert!(
+        stored_payloads.contains(&json!({"sentiment": "negative"})),
+        "the durable record must hold the corrected payload; stored={stored_payloads:?} rows={:?}",
+        history
+            .messages
+            .iter()
+            .map(|m| (m.kind, m.tool_result_ref.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !stored_payloads
+            .iter()
+            .any(|payload| payload.get("sentiment") == Some(&json!("confused"))),
+        "the rejected payload must not be recorded as a validated result; stored={stored_payloads:?}"
     );
     Ok(())
 }

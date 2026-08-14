@@ -1923,7 +1923,7 @@ where
                         &request.scope,
                         &thread_id,
                         row,
-                        "unbound context seed",
+                        "prepared context seed",
                     )
                     .await;
                 }
@@ -1982,7 +1982,7 @@ where
                     .await?
                     .ok_or_else(|| {
                         SessionThreadError::Backend(
-                            "unbound context record missing after CAS conflict".to_string(),
+                            "prepared context record missing after CAS conflict".to_string(),
                         )
                     })?;
                 return crate::prepared_context::replay_prepared_context(

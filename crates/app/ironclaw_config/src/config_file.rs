@@ -1481,6 +1481,7 @@ worker_count = 3
 max_concurrent_runs_per_user = 2
 max_concurrent_trigger_runs = 5
 max_concurrent_conversation_runs = 4
+max_concurrent_unbound_runs = 6
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         let runner = cfg.runner.as_ref().expect("runner section present");
@@ -1490,6 +1491,7 @@ max_concurrent_conversation_runs = 4
         assert_eq!(runner.max_concurrent_runs_per_user, Some(2));
         assert_eq!(runner.max_concurrent_trigger_runs, Some(5));
         assert_eq!(runner.max_concurrent_conversation_runs, Some(4));
+        assert_eq!(runner.max_concurrent_unbound_runs, Some(6));
     }
 
     #[test]
@@ -1506,6 +1508,7 @@ worker_count = 8
 max_concurrent_runs_per_user = 1
 max_concurrent_trigger_runs = 10
 max_concurrent_conversation_runs = 5
+max_concurrent_unbound_runs = 2
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         let runner = cfg.runner.as_ref().expect("runner section present");
@@ -1515,6 +1518,7 @@ max_concurrent_conversation_runs = 5
         assert_eq!(runner.max_concurrent_runs_per_user, Some(1));
         assert_eq!(runner.max_concurrent_trigger_runs, Some(10));
         assert_eq!(runner.max_concurrent_conversation_runs, Some(5));
+        assert_eq!(runner.max_concurrent_unbound_runs, Some(2));
     }
 
     #[test]
