@@ -705,6 +705,7 @@ pub(crate) fn parse_v3(
                 vendor,
                 setup,
                 recipe: Some(recipe),
+                oauth_resource: None,
                 protected_resource_metadata_url: None,
             }
         })

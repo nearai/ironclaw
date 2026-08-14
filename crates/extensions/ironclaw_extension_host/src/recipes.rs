@@ -40,7 +40,7 @@ pub fn unified_vendor_recipes<'a>(
     let mut unified: BTreeMap<String, (String, ResolvedVendorAuthRecipe)> = BTreeMap::new();
     for manifest in manifests {
         let extension_id = manifest.id.as_str().to_string();
-        let resource = manifest.mcp.as_ref().map(|mcp| mcp.server.clone());
+        let mcp_resource = manifest.mcp.as_ref().map(|mcp| mcp.server.clone());
         for surface in &manifest.auth {
             let Some(recipe) = &surface.recipe else {
                 // v2 manifests synthesize auth surfaces without recipes; they
@@ -48,6 +48,11 @@ pub fn unified_vendor_recipes<'a>(
                 continue;
             };
             let vendor = surface.vendor.as_str().to_string();
+            let resource = surface
+                .oauth_resource
+                .as_ref()
+                .map(|resource| resource.as_str().to_string())
+                .or_else(|| mcp_resource.clone());
             match unified.get_mut(&vendor) {
                 None => {
                     unified.insert(
@@ -246,6 +251,7 @@ mod tests {
                 vendor: ironclaw_host_api::ids::VendorId::new(vendor).expect("vendor id"),
                 setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
                 recipe: Some(recipe),
+                oauth_resource: None,
                 protected_resource_metadata_url: None,
             }],
             host_apis: Vec::new(),
@@ -284,6 +290,41 @@ mod tests {
         assert_eq!(error.vendor, "vendorco");
         assert_eq!(error.first_extension, "mail-ext");
         assert_eq!(error.second_extension, "docs-ext");
+    }
+
+    #[test]
+    fn legacy_manifest_without_oauth_resource_falls_back_to_mcp_server() {
+        let mut manifest = manifest_with_recipe(
+            "mcp-ext",
+            "mcp-vendor",
+            oauth_recipe(&[], "https://auth.example/token"),
+        );
+        manifest.mcp = Some(ironclaw_extension_registry::ResolvedMcpDeclaration {
+            server: "https://mcp.example/mcp".to_string(),
+            namespace: "mcp-ext".to_string(),
+            max_tools: 16,
+            default_permission: ironclaw_host_api::capability::PermissionMode::Deny,
+            effects: Vec::new(),
+            credential_handles: Vec::new(),
+            dynamic_input_schemas: Default::default(),
+            registration_auth:
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                },
+        });
+        let legacy_wire = serde_json::to_value(&manifest).expect("legacy manifest serializes");
+        assert!(
+            legacy_wire["auth"][0].get("oauth_resource").is_none(),
+            "the compatibility fixture must exercise the pre-field wire shape"
+        );
+        let restored: ResolvedExtensionManifest =
+            serde_json::from_value(legacy_wire).expect("legacy manifest remains readable");
+
+        let recipes = unified_vendor_recipes([&restored]).expect("legacy recipe resolves");
+        assert_eq!(
+            recipes[0].token_exchange_resource.as_deref(),
+            Some("https://mcp.example/mcp")
+        );
     }
 
     #[test]

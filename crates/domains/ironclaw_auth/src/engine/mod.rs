@@ -87,8 +87,10 @@ pub use dcr::DCR_CLIENT_HANDLE_PREFIX;
 /// One vendor's recipe, resolved from active extensions or bundled manifests.
 ///
 /// `token_exchange_resource` is the RFC 8707 resource indicator sent with
-/// token requests — for hosted-MCP vendors this is the manifest's
-/// `[mcp].server` URL, i.e. still manifest data, never engine code.
+/// token requests. For hosted-MCP vendors it is the resource admitted from
+/// RFC 9728 metadata: normally the manifest's `[mcp].server` URL, with the
+/// bounded conventional `/mcp`-to-origin compatibility shape admitted by the
+/// auth policy. It remains manifest-derived data, never engine code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedVendorAuthRecipe {
     pub vendor: String,
