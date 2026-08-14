@@ -3759,8 +3759,7 @@ mod fire_claim_contract {
         repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), base_fire_slot))
             .await
             .expect("insert retention record");
-        let other_trigger_id =
-            TriggerId::parse("01J00000000000000000000036").expect("ulid");
+        let other_trigger_id = TriggerId::parse("01J00000000000000000000036").expect("ulid");
         repo.upsert_trigger(sample_record(
             other_trigger_id,
             tenant_id.clone(),
@@ -3888,8 +3887,7 @@ mod fire_claim_contract {
         let recovery_fire_slot = fire_slot;
         let recovery_run_id =
             TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f84").expect("valid run");
-        let mut recovery_record =
-            sample_record(trigger_id, tenant_id.clone(), recovery_fire_slot);
+        let mut recovery_record = sample_record(trigger_id, tenant_id.clone(), recovery_fire_slot);
         recovery_record.active_fire_slot = Some(recovery_fire_slot);
         recovery_record.active_run_ref = Some(recovery_run_id);
         repo.upsert_trigger(recovery_record)
