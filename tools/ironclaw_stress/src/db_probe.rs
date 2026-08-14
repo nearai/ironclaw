@@ -292,7 +292,7 @@ pub async fn begin(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
             install_libsql_write_counters(path, config.reset_stats())
                 .await
                 .map_err(|error| format!("libsql measurement setup failed: {error}"))?;
-            capture(config).await
+            retain_libsql_snapshot_or_cleanup(path, capture(config).await).await
         }
         DbProbeTarget::Postgres { url } => {
             let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
@@ -310,6 +310,26 @@ pub async fn begin(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
             drop(client);
             let _ = connection_handle.await;
             capture(config).await
+        }
+    }
+}
+
+async fn retain_libsql_snapshot_or_cleanup(
+    path: &std::path::Path,
+    capture_result: Result<DbProbeSnapshot, String>,
+) -> Result<DbProbeSnapshot, String> {
+    match capture_result {
+        Ok(snapshot) => Ok(snapshot),
+        Err(capture_error) => {
+            remove_libsql_write_counters(path)
+                .await
+                .map_err(|cleanup_error| {
+                    format!(
+                        "{capture_error}; libsql measurement cleanup after baseline failure also \
+                         failed: {cleanup_error}"
+                    )
+                })?;
+            Err(capture_error)
         }
     }
 }
@@ -1080,14 +1100,16 @@ fn i64_to_u64(value: i64) -> Option<u64> {
 fn delta(before: Option<u64>, after: Option<u64>) -> Option<i128> {
     Some(counter_delta(before?, after?))
 }
-
 fn counter_delta(before: u64, after: u64) -> i128 {
     i128::from(after) - i128::from(before)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, settlement_delay};
+    use super::{
+        DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, install_libsql_write_counters,
+        retain_libsql_snapshot_or_cleanup, settlement_delay,
+    };
 
     #[test]
     fn settled_capture_waits_only_for_postgres_stats() {
@@ -1103,5 +1125,63 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn failed_baseline_capture_removes_libsql_instrumentation() {
+        let path = std::env::temp_dir().join(format!(
+            "ironclaw-stress-baseline-failure-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("build local libSQL");
+        let connection = database.connect().expect("connect local libSQL");
+        connection
+            .execute_batch(
+                "CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY);\
+                 CREATE TABLE root_filesystem_events (id INTEGER PRIMARY KEY);",
+            )
+            .await
+            .expect("create measured tables");
+        drop(connection);
+        drop(database);
+
+        install_libsql_write_counters(&path, true)
+            .await
+            .expect("install measurement instrumentation");
+        let error = retain_libsql_snapshot_or_cleanup(
+            &path,
+            Err("forced baseline capture failure".to_string()),
+        )
+        .await
+        .expect_err("forced capture failure must propagate");
+        assert_eq!(error, "forced baseline capture failure");
+
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("reopen local libSQL");
+        let connection = database.connect().expect("reconnect local libSQL");
+        let remaining = connection
+            .query(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'ironclaw_stress_%'",
+                (),
+            )
+            .await
+            .expect("query instrumentation objects")
+            .next()
+            .await
+            .expect("read instrumentation count")
+            .expect("instrumentation count row")
+            .get::<i64>(0)
+            .expect("instrumentation count");
+        assert_eq!(remaining, 0);
+        drop(connection);
+        drop(database);
+        tokio::fs::remove_file(path)
+            .await
+            .expect("remove measurement database");
     }
 }
