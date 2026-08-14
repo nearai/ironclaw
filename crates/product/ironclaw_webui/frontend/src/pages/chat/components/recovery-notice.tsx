@@ -1,5 +1,8 @@
 
+import { useT } from "../../../lib/i18n";
+
 export function RecoveryNotice({ notice, onRecover }) {
+  const t = useT();
   return (
     <div className="mx-auto flex max-w-xl flex-wrap items-center justify-center gap-3 rounded-lg border border-copper/30 bg-copper/10 px-4 py-3 text-sm text-copper">
       <span>{notice.message}</span>
@@ -10,7 +13,7 @@ export function RecoveryNotice({ notice, onRecover }) {
           onClick={onRecover}
           className="rounded-md border border-copper/40 px-2.5 py-1 text-xs font-medium hover:bg-copper/10"
         >
-          Reload history
+          {t("chat.reloadHistory")}
         </button>
       )}
     </div>

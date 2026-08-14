@@ -532,6 +532,7 @@ pub(super) async fn build_backend_production(
     let trigger_create_hook = Arc::new(TriggerCreatorPairingHook {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         conversations: tokio::sync::OnceCell::new(),
+        execution_preflight: tokio::sync::OnceCell::new(),
     });
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
@@ -602,7 +603,7 @@ pub(super) async fn build_backend_production(
     );
     let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         Arc::clone(&trigger_repository),
-        trigger_create_hook,
+        Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
         trigger_active_run_lookup,
         process_backend,
     )?;
@@ -1384,6 +1385,7 @@ pub(super) async fn build_backend_production(
         processes,
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
+        trigger_create_hook,
         resource_governor: production_resource_governor,
         budget_gate_store,
         broadcast_budget_event_sink,

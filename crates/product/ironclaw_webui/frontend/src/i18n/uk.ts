@@ -113,6 +113,10 @@ registerPack("uk", {
   "chat.modeAutoReview": "Авторевʼю",
   "chat.runtimeLocal": "Працювати локально",
   "chat.statusWorking": "Працює",
+  "chat.processWorking": "Працює…",
+  "chat.workedFor": "Працював протягом {duration}",
+  "chat.reloadHistory": "Перезавантажити історію",
+  "chat.busyRejectedResend": "Це повідомлення не було надіслано, оскільки IronClaw був зайнятий. Надішліть його ще раз.",
   "chat.identityUser": "Ви",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Перейти до останнього",
@@ -206,6 +210,7 @@ registerPack("uk", {
   "authGate.oauthProviderFallback": "постачальник",
   "authGate.serviceUnavailable": "Сервіс недоступний",
   "authGate.popupBlocked": "Спливаюче вікно авторизації заблоковано.",
+  "authGate.popupClosed": "Вікно авторизації {provider} закрилося до завершення підключення. Відкрийте його знову вище, щоб повторити спробу.",
   "authGate.pillAuthorize": "Авторизуватися",
   "authGate.pillEnterToken": "Введіть маркер",
   "authGate.unsupportedChallenge": "Відкрийте налаштування, щоб завершити цей крок автентифікації.",
@@ -1001,6 +1006,19 @@ registerPack("uk", {
   // Admin — tabs
   "admin.tab.users": "Користувачі",
   "admin.tab.configuration": "Конфігурація",
+  "admin.configuration.loading": "Завантаження конфігурації",
+  "admin.configuration.loadFailed": "Не вдалося завантажити конфігурацію розширень.",
+  "admin.configuration.title": "Конфігурація розширень",
+  "admin.configuration.description": "Налаштуйте значення, що належать розгортанню та оголошені розширеннями. Збереження значень не встановлює, не підключає, не активує та не видаляє розширення.",
+  "admin.configuration.empty": "Жодне розширення не потребує конфігурації розгортання.",
+  "admin.configuration.statusConfigured": "Налаштовано",
+  "admin.configuration.statusRequired": "Потрібна конфігурація",
+  "admin.configuration.usedBy": "Використовується",
+  "admin.configuration.installed": "встановлено",
+  "admin.configuration.secretHint": "Налаштовано. Залиште поле порожнім, щоб зберегти записане значення.",
+  "admin.configuration.save": "Зберегти конфігурацію",
+  "admin.configuration.saved": "Конфігурацію збережено.",
+  "admin.configuration.saveFailed": "Не вдалося зберегти конфігурацію.",
 
   // Admin — dashboard
 

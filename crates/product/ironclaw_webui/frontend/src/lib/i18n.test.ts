@@ -155,6 +155,12 @@ test("non-English locale packs localize exposed workflow copy", () => {
       !technicalTerms.has(key) &&
       (key === "chat.downloadRunArtifact" ||
         key === "chat.downloadThreadArtifact" ||
+        key === "chat.processWorking" ||
+        key === "chat.workedFor" ||
+        key === "chat.reloadHistory" ||
+        key === "chat.busyRejectedResend" ||
+        key === "authGate.popupClosed" ||
+        key.startsWith("admin.configuration.") ||
         key.startsWith("pairing.web.") ||
         key === "extensions.tools" ||
         key === "tools.installed" ||

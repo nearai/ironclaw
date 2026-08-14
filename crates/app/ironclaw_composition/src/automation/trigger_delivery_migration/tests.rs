@@ -42,6 +42,7 @@ fn record_with_target(target: Option<&str>) -> TriggerRecord {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::once(fire_at, "UTC").expect("once schedule"),
         prompt: PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: target
             .map(|target| TriggerDeliveryTargetId::new(target).expect("target id")),
         state: TriggerState::Scheduled,
