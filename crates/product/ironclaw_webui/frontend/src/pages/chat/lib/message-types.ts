@@ -39,6 +39,7 @@ export type ChatMessage = {
   isOptimistic?: boolean;
   status?: string;
   error?: string;
+  errorKey?: string;
   toolCalls?: unknown[];
   [key: string]: unknown;
 };

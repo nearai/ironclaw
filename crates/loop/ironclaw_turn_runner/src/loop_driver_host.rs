@@ -282,8 +282,8 @@ fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -2229,8 +2229,9 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.capabilities.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.capabilities
+            .requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {

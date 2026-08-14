@@ -94,6 +94,7 @@ test("channelSurface and channelConnection extract the typed channel surface", (
 
   assert.equal(isWebGeneratedCodeConnection(connection), true);
   assert.equal(isWebGeneratedCodeConnection({ strategy: "oauth" }), false);
+  assert.equal(isWebGeneratedCodeConnection({ strategy: "device_link" }), false);
   assert.equal(isWebGeneratedCodeConnection({ strategy: "admin_managed_channels" }), false);
   assert.equal(isWebGeneratedCodeConnection(null), false);
 });

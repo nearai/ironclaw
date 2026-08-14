@@ -320,8 +320,8 @@ impl PromotionScopeKey {
 
 #[async_trait]
 impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -639,34 +639,10 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !is_bridge_capability_id(&request.capability_id) {
-            let target_capability_id = self
-                .tool_call_target_inputs
-                .lock()
-                .map_err(|e| {
-                    invalid_invocation(format!("tool_call target store lock is poisoned: {e}"))
-                })?
-                .get(request.input_ref.as_str())
-                .cloned();
+            let target_capability_id =
+                self.target_capability_id_for_input_ref(request.input_ref.as_str())?;
             let resolution = self.inner.invoke_capability(request).await?;
-            // Promote on a completed dispatch OR a gate/park (approval/auth/
-            // resource or parked work). A tool the model dispatched that paused for
-            // a user action is just as "earned" as a completed one, and it MUST
-            // stay visible across the Blocked/Suspended resume: otherwise the
-            // per-turn disclosed set resets, the tool drops off the model-visible
-            // surface, and the model's retry is hard-rejected by the visible-surface
-            // filter ("outside the model-visible capability view") — discarding the
-            // whole response and borking the run. A hard *failure* (a Done with a
-            // recoverable-failure verdict) still does NOT promote (the model may
-            // abandon it), so this does not drift toward advertising every
-            // discovered tool — only ones the model actually invoked. `parks()` is
-            // the gate+suspension predicate (the loop enum's old `is_suspension()`
-            // also lumped gates in).
-            if (matches!(&resolution, Resolution::Done(outcome) if outcome.verdict.is_success())
-                || resolution.parks())
-                && let Some(capability_id) = target_capability_id
-            {
-                self.promote_target(&capability_id)?;
-            }
+            self.promote_target_after_resolution(target_capability_id, &resolution)?;
             return Ok(resolution);
         }
         self.invoke_bridge(request).await
@@ -676,7 +652,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        // The executor clears this flag only for a planner-approved parallel
+        // The executor clears this flag only for a model-emitted parallel
         // batch. Preserve invocation order in the returned vector while
         // allowing the read-only bridge futures to overlap.
         if !request.stop_on_first_suspension {
@@ -695,27 +671,95 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             });
         }
 
+        // Preserve batch-specific behavior (for example coalesced subagent
+        // gates) when every invocation belongs to the inner port.
+        if request
+            .invocations
+            .iter()
+            .all(|invocation| !is_bridge_capability_id(&invocation.capability_id))
+        {
+            return self.invoke_inner_batch_preserving_promotions(request).await;
+        }
+
         let mut resolutions = Vec::with_capacity(request.invocations.len());
-        let mut stopped_on_suspension = false;
         for invocation in request.invocations {
             let resolution = self.invoke_capability(invocation).await?;
-            // H1: the batch stops on the first invocation that *parks* — a
-            // re-entrant gate as well as a suspension.
             let parks = resolution.parks();
             resolutions.push(resolution);
-            if request.stop_on_first_suspension && parks {
-                stopped_on_suspension = true;
-                break;
+            if parks {
+                return Ok(ResolutionBatch {
+                    resolutions,
+                    stopped_on_suspension: true,
+                });
             }
         }
         Ok(ResolutionBatch {
             resolutions,
-            stopped_on_suspension,
+            stopped_on_suspension: false,
         })
     }
 }
 
 impl ToolDisclosureCapabilityPort {
+    fn target_capability_id_for_input_ref(
+        &self,
+        input_ref: &str,
+    ) -> Result<Option<CapabilityId>, AgentLoopHostError> {
+        self.tool_call_target_inputs
+            .lock()
+            .map_err(|e| {
+                invalid_invocation(format!("tool_call target store lock is poisoned: {e}"))
+            })
+            .map(|targets| targets.get(input_ref).cloned())
+    }
+
+    fn promote_target_after_resolution(
+        &self,
+        target_capability_id: Option<CapabilityId>,
+        resolution: &Resolution,
+    ) -> Result<(), AgentLoopHostError> {
+        // Promote on a completed dispatch OR a gate/park (approval/auth/
+        // resource or parked work). A tool the model dispatched that paused for
+        // a user action is just as "earned" as a completed one, and it MUST
+        // stay visible across the Blocked/Suspended resume: otherwise the
+        // per-turn disclosed set resets, the tool drops off the model-visible
+        // surface, and the model's retry is hard-rejected by the visible-surface
+        // filter ("outside the model-visible capability view") — discarding the
+        // whole response and borking the run. A hard *failure* (a Done with a
+        // recoverable-failure verdict) still does NOT promote (the model may
+        // abandon it), so this does not drift toward advertising every
+        // discovered tool — only ones the model actually invoked. `parks()` is
+        // the gate+suspension predicate (the loop enum's old `is_suspension()`
+        // also lumped gates in).
+        if (matches!(resolution, Resolution::Done(outcome) if outcome.verdict.is_success())
+            || resolution.parks())
+            && let Some(capability_id) = target_capability_id
+        {
+            self.promote_target(&capability_id)?;
+        }
+        Ok(())
+    }
+
+    async fn invoke_inner_batch_preserving_promotions(
+        &self,
+        request: LoopRequestBatch,
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let target_capability_ids = request
+            .invocations
+            .iter()
+            .map(|invocation| {
+                self.target_capability_id_for_input_ref(invocation.input_ref.as_str())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let batch = self.inner.invoke_capability_batch(request).await?;
+        for (resolution, target_capability_id) in
+            batch.resolutions.iter().zip(target_capability_ids)
+        {
+            self.promote_target_after_resolution(target_capability_id, resolution)?;
+        }
+        Ok(batch)
+    }
+
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
@@ -1646,7 +1690,7 @@ mod tests {
         result_meta::FailureKind,
     };
     use ironclaw_loop_contracts::{
-        CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
+        CapabilityDescriptorView, InMemoryRunProfileResolver, ResolvedRunProfile,
         RunProfileResolutionRequest, RunProfileResolver,
     };
     use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
@@ -1708,7 +1752,6 @@ mod tests {
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description,
                         description_trust: definition.description_trust,
-                        concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters,
                     })
                     .collect(),
@@ -1827,7 +1870,6 @@ mod tests {
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description.clone(),
                         description_trust: definition.description_trust,
-                        concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters.clone(),
                     })
                     .collect(),
@@ -2037,6 +2079,70 @@ mod tests {
         barrier: Arc<tokio::sync::Barrier>,
     }
 
+    #[derive(Default)]
+    struct BatchOnlyPort {
+        batches: Mutex<Vec<LoopRequestBatch>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for BatchOnlyPort {
+        fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+            true
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            Ok(VisibleCapabilitySurface {
+                version: CapabilitySurfaceVersion::new("surface:ordered-disclosure")
+                    .expect("surface version"),
+                descriptors: Vec::new(),
+                callable_capability_ids: None,
+            })
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "ordered test port must be entered through its batch contract",
+            ))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
+            let resolutions = request
+                .invocations
+                .iter()
+                .map(|invocation| {
+                    resolution::completed(
+                        LoopResultRef::new(format!(
+                            "result:{}",
+                            invocation.capability_id.as_str().replace('.', "-")
+                        ))
+                        .expect("valid result ref"),
+                        "ordered target completed".to_string(),
+                        CapabilityProgress::MadeProgress,
+                        false,
+                        0,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            self.batches.lock().expect("batches lock").push(request);
+            Ok(ResolutionBatch {
+                resolutions,
+                stopped_on_suspension: false,
+            })
+        }
+    }
+
     #[async_trait]
     impl LoopCapabilityResultWriter for BarrierWriter {
         async fn write_capability_result(
@@ -2122,6 +2228,46 @@ mod tests {
 
         assert_eq!(batch.resolutions.len(), 2);
         assert!(!batch.stopped_on_suspension);
+    }
+
+    #[tokio::test]
+    async fn ordered_non_bridge_batch_reaches_inner_batch_contract() {
+        let inner = Arc::new(BatchOnlyPort::default());
+        let port = disclosure_port(
+            inner.clone() as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let surface_version =
+            CapabilitySurfaceVersion::new("surface:ordered-disclosure").expect("surface version");
+        let request = |capability_id: &str| LoopRequest {
+            activity_id: Default::default(),
+            surface_version: surface_version.clone(),
+            capability_id: CapabilityId::new(capability_id).expect("capability id"),
+            input_ref: input_ref(format!("input:{capability_id}")),
+            approval_resume: None,
+            auth_resume: None,
+        };
+
+        let batch = port
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![request("fixture.first"), request("fixture.second")],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect("ordered batch reaches inner batch contract");
+
+        assert_eq!(batch.resolutions.len(), 2);
+        let batches = inner.batches.lock().expect("batches lock");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0]
+                .invocations
+                .iter()
+                .map(|invocation| invocation.capability_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fixture.first", "fixture.second"]
+        );
     }
 
     #[async_trait]
@@ -2211,45 +2357,12 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .expect("visible surface");
-        let hint_of = |name: &str| {
-            surface
-                .descriptors
-                .iter()
-                .find(|descriptor| descriptor.safe_name == name)
-                .unwrap_or_else(|| panic!("{name} descriptor on the deferred surface"))
-                .concurrency_hint
-        };
-        assert_eq!(
-            hint_of(TOOL_SEARCH_NAME),
-            ConcurrencyHint::SafeForParallel,
-            "tool_search is a side-effect-free catalog lookup"
-        );
-        assert_eq!(
-            hint_of(TOOL_DESCRIBE_NAME),
-            ConcurrencyHint::SafeForParallel,
-            "tool_describe is a side-effect-free schema lookup"
-        );
-        assert_eq!(
-            hint_of(TOOL_CALL_NAME),
-            ConcurrencyHint::Exclusive,
-            "an unresolved tool_call can target an arbitrary capability"
-        );
         assert!(
             !surface
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.safe_name == "hidden_tool"),
             "deferred tool should not be model-visible before discovery"
-        );
-        assert_eq!(
-            surface
-                .descriptors
-                .iter()
-                .find(|descriptor| descriptor.safe_name == "read_file")
-                .expect("read_file descriptor")
-                .concurrency_hint,
-            ConcurrencyHint::SafeForParallel,
-            "visible surface must preserve inner descriptor metadata"
         );
         let advertised = port.tool_definitions().expect("tool definitions");
         for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {

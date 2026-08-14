@@ -1210,6 +1210,21 @@ pub(super) async fn build_backend_production(
             .collect();
         reserved_capability_ids.extend(ironclaw_loop_host::bridge_capability_ids());
         let generic_installation_store = extension_management.installation_store_handle();
+        // Linked-account custody rides the auth domain's credential service:
+        // the material store forwards encrypted bytes to it (never a second
+        // custody path), and the resolver factory selects through the same
+        // credential-account selection every runtime injection uses.
+        let linked_sessions = ironclaw_extension_host::LinkedSessionStore::new(Arc::new(
+            ironclaw_extension_host::CredentialServiceLinkedSessionMaterial::new(
+                product_auth_services.credential_account_service(),
+            ),
+        ));
+        let linked_accounts: Arc<dyn ironclaw_extension_host::LinkedAccountResolution> = Arc::new(
+            ironclaw_extension_host::CredentialLinkedAccountResolution::new(
+                product_auth_services.runtime_credential_account_selection_service(),
+                Arc::clone(&linked_sessions),
+            ),
+        );
         let backend_extension_host =
             build_backend_extension_host(BackendExtensionHostAssemblyInput {
                 binder: services.extension_lane_tool_binder(),
@@ -1227,10 +1242,40 @@ pub(super) async fn build_backend_production(
                 filesystem: Arc::clone(&stores.filesystem),
                 outbound_state: Arc::clone(&outbound_stores.outbound_state)
                     as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+                linked_sessions: Some(Arc::clone(&linked_sessions)),
+                linked_accounts: Some(linked_accounts),
             })
             .await?;
         let pairing_installation_store = Arc::clone(&backend_extension_host.installation_store);
         extension_management.attach_generic_host(Arc::clone(&backend_extension_host.generic_host));
+        // The device-link engine rides the generic host's published snapshot,
+        // so it can only exist now — fill the auth bundle's deferred slots:
+        // the flow driver the product-auth routes dispatch to, and the revoker
+        // lifecycle cleanup logs devices out through (ordered before unbind).
+        let device_link_engine = Arc::new(
+            ironclaw_extension_host::SnapshotDeviceLinkDriver::new(
+                backend_extension_host.generic_host.snapshot_watch(),
+                Arc::clone(&linked_sessions),
+                ironclaw_extension_host::DeviceLinkLimits::default(),
+                product_auth_services.credential_account_service(),
+                Arc::clone(&channel_identity_store),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("device-link limits are invalid: {error}"),
+            })?,
+        );
+        let device_link_recipes = super::auth_engine_assembly::compose_recipe_resolver(
+            &first_party_bundles,
+            Arc::clone(&backend_extension_host.installation_store),
+        )?;
+        product_auth_services.attach_device_link(
+            Arc::new(ironclaw_auth::DeviceLinkFlowDriver::new(
+                Arc::clone(&device_link_engine) as Arc<dyn ironclaw_auth::DeviceLinkDriver>,
+                product_auth_services.flow_manager(),
+                device_link_recipes,
+            )),
+            device_link_engine as Arc<dyn ironclaw_auth::LinkedDeviceRevoker>,
+        );
         services.set_extension_tool_resolver(backend_extension_host.resolver);
         let channel_pairing_registry_built =
             build_backend_channel_pairing(BackendChannelPairingAssemblyInput {

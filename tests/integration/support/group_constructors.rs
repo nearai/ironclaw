@@ -106,6 +106,19 @@ impl RebornIntegrationGroup {
         Self::builder().extension_runtime_acme().await
     }
 
+    /// Extension-lifecycle group extended with the bundled Telegram package's
+    /// **linked-account** surfaces: the real shipped manifest (channel +
+    /// device-link auth + fifteen `standard_op` tools), bound through the same
+    /// native-factory seam the binary uses, with the vendor half scripted.
+    /// Credential resolution follows each run owner so a cross-actor scenario
+    /// resolves the *caller's* linked account, never the first binder's.
+    pub async fn device_link_linked_account() -> HarnessResult<(
+        Self,
+        super::super::harness::profiles::device_link::LinkedFixtureHandles,
+    )> {
+        Self::builder().device_link_linked_account().await
+    }
+
     /// Acme runtime group extended for the §5.4 delivery proofs: the bundled
     /// telegram package's native channel factory is assembled and the
     /// recording network egress answers vendor-shaped Slack/Telegram bodies,
@@ -514,11 +527,62 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
+    }
+
+    /// Build the linked-account (device-link) group. See
+    /// [`RebornIntegrationGroup::device_link_linked_account`].
+    ///
+    /// Assembled exactly like [`Self::extension_lifecycle_multiuser`] — the
+    /// same base, the same real channel-connection slot fill a channel
+    /// extension's removal needs, and run-owner-scoped capability dispatch so
+    /// each actor resolves its own credential account — with the linked-account
+    /// profile in place of the plain lifecycle one.
+    pub async fn device_link_linked_account(
+        mut self,
+    ) -> HarnessResult<(
+        RebornIntegrationGroup,
+        super::super::harness::profiles::device_link::LinkedFixtureHandles,
+    )> {
+        let base = self.build_base().await?;
+        let actor_user = base.canonical_actor_user()?;
+        let (profile, handles) =
+            super::super::harness::profiles::device_link::device_link_tools_profile_for_user(
+                actor_user.as_str(),
+            )?;
+        let host_runtime = build_group_capability_with_base(profile, &base)
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("device-link harness is missing its RebornServices bundle")?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        Ok((self.into_group(base, capability).await?, handles))
     }
 
     /// Build the invented-vendor fixture group. See
@@ -546,6 +610,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -576,6 +644,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -610,6 +682,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -640,6 +716,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));

@@ -196,6 +196,10 @@ def real_owner_metadata() -> dict:
             "ironclaw_slack_extension",
             "crates/extensions/packages/slack/Cargo.toml",
         ),
+        package(
+            "ironclaw_architecture_tests",
+            "crates/app/ironclaw_architecture_tests/Cargo.toml",
+        ),
         # Not an asset owner: the crate `DOCKER_RUNTIME_CONFIG_OWNERS` routes
         # the shipped container configs to, through the same real manifest
         # paths, so that table is exercised against a real package directory
@@ -1115,12 +1119,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertNotEqual(paired["crate_buckets"], [])
 
         # And an unknown `.github/` sibling still refuses.
-        for path in (".github/dependabot.yml", ".github/labeler.yml"):
-            with self.subTest(path=path):
-                with self.assertRaisesRegex(
-                    ValueError, "unclassified pull-request path"
-                ):
-                    self.plan("pull_request", [path])
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [".github/labeler.yml"])
+
+    def test_dependabot_config_routes_to_linked_device_supply_chain_test(self) -> None:
+        """The config is an asserted input of the linked-device pin test."""
+        plan = self.plan_real_owners([".github/dependabot.yml"])
+
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["affected_packages"], ["ironclaw_architecture_tests"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["ironclaw_architecture_tests"],
+                    "exact_targets": [
+                        {
+                            "package": "ironclaw_architecture_tests",
+                            "kind": "test",
+                            "name": "reborn_linked_device_supply_chain_pin",
+                        }
+                    ],
+                }
+            ],
+        )
 
     def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root files another workflow owns outright.

@@ -18,7 +18,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDeniedReasonKind, CapabilityInputRef,
-    CapabilityProgress, CapabilityResumeToken, ConcurrencyHint, LoopRunContext, resolution,
+    CapabilityProgress, CapabilityResumeToken, LoopRunContext, resolution,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
@@ -59,7 +59,6 @@ pub(super) fn outbound_delivery_capabilities(
                 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
                 OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
                 OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION,
-                ConcurrencyHint::SafeForParallel,
                 outbound_delivery_targets_list_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetsListHandler {

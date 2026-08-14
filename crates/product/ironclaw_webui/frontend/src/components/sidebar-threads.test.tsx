@@ -44,7 +44,7 @@ vi.mock("../lib/thread-state", () => ({
   useThreadStates: () => new Map(),
 }));
 
-function createReactStub() {
+function createReactStub(stateUpdates = []) {
   return {
     useCallback: (fn) => fn,
     useEffect: () => {},
@@ -53,6 +53,7 @@ function createReactStub() {
       let value = typeof initial === "function" ? initial() : initial;
       return [value, (next) => {
         value = typeof next === "function" ? next(value) : next;
+        stateUpdates.push(value);
       }];
     },
   };
@@ -101,12 +102,17 @@ function findNodeByType(root, type) {
 }
 
 function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
+  const stateUpdates = [];
   function ConfirmDialog(dialogProps) {
     return { type: "confirm-dialog", props: dialogProps };
   }
   const context = {
     ConfirmDialog,
-    React: createReactStub(),
+    React: createReactStub(stateUpdates),
+    SearchField: (searchFieldProps) => ({
+      type: "search-field",
+      props: searchFieldProps,
+    }),
     NavLink: "NavLink",
     Icon: "Icon",
     MarqueeText: ({ children, className }) => ({
@@ -161,7 +167,7 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
       ...props,
     }),
   );
-  return { context, rendered };
+  return { context, rendered, stateUpdates };
 }
 
 function clickEvent() {
@@ -295,6 +301,20 @@ test("incomplete sidebar search invites loading older conversations", async () =
     "common.noChatsMatch",
   );
   assert.equal(emptySearchMessageKey("older topic", 1, true), null);
+});
+
+test("SidebarThreads supplies the controlled SearchField contract", () => {
+  const { rendered, stateUpdates } = renderInteractiveSidebarThreads();
+  const searchField = findNodeByType(rendered, "search-field");
+
+  assert.equal(searchField.props.value, "");
+  assert.equal(searchField.props.placeholder, "common.searchChats");
+  assert.equal(searchField.props["aria-label"], "common.searchChats");
+  assert.equal(searchField.props.clearLabel, "settings.clearSearch");
+
+  searchField.props.onChange("older topic");
+  searchField.props.onClear();
+  assert.deepEqual(stateUpdates.slice(-2), ["older topic", ""]);
 });
 
 test("SidebarThreads disables the load-more action while a page is loading", async () => {

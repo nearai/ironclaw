@@ -29,7 +29,7 @@ use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
     append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
+    capability_is_visible, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, gate_tool_result_summary,
     model_visible_capability_failure_observation, pending_approval_resume_candidate,
     pending_auth_resume_candidate, pending_external_tool_resume_candidate,

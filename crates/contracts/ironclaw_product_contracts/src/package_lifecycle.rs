@@ -233,6 +233,7 @@ pub enum ChannelConnectStrategy {
     InboundProofCode,
     AdminManagedChannels,
     WebGeneratedCode,
+    DeviceLink,
     QrCode,
     #[serde(rename = "oauth")]
     OAuth,
@@ -248,6 +249,7 @@ impl ChannelConnectStrategy {
             Self::InboundProofCode => "inbound_proof_code",
             Self::AdminManagedChannels => "admin_managed_channels",
             Self::WebGeneratedCode => "web_generated_code",
+            Self::DeviceLink => "device_link",
             Self::QrCode => "qr_code",
             Self::OAuth => "oauth",
         }
@@ -405,6 +407,16 @@ pub enum LifecycleExtensionCredentialSetup {
         scopes: Vec<String>,
     },
     Pairing,
+    /// The user authorizes a long-lived session on the vendor's own client and
+    /// the host takes custody of the resulting session material
+    /// (`ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink`).
+    ///
+    /// A separate variant rather than a fold onto `ManualToken` because the
+    /// connect affordance differs in kind: there is nothing for the user to
+    /// paste, and the flow is a multi-step card the web app has to drive. A
+    /// caller that renders a paste field here asks for a secret that does not
+    /// exist.
+    DeviceLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,6 +559,7 @@ mod tests {
             ChannelConnectStrategy::InboundProofCode,
             ChannelConnectStrategy::AdminManagedChannels,
             ChannelConnectStrategy::WebGeneratedCode,
+            ChannelConnectStrategy::DeviceLink,
             ChannelConnectStrategy::QrCode,
             ChannelConnectStrategy::OAuth,
         ] {

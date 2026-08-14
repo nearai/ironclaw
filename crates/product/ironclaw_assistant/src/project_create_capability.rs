@@ -11,7 +11,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityProgress,
-    ConcurrencyHint, resolution,
+    resolution,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
@@ -37,7 +37,6 @@ pub fn project_create_capability(
             PROJECT_CREATE_CAPABILITY_ID,
             PROJECT_CREATE_PROVIDER_TOOL_NAME,
             PROJECT_CREATE_DESCRIPTION,
-            ConcurrencyHint::Exclusive,
             project_create_input_schema(),
         )?,
         Arc::new(ProjectCreateHandler {

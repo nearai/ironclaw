@@ -183,6 +183,9 @@ where
             pkce_verifier_hash: request.pkce_verifier_hash,
             authorization_code_hash: None,
             error: None,
+            // A fresh flow has produced no step: a multi-step method installs
+            // its first frame through `advance_flow_step` from revision 0.
+            step_state: None,
             continuation_emitted_at: None,
             created_at: now,
             updated_at: now,
@@ -644,6 +647,95 @@ where
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
+    }
+
+    /// Durable step advance under the record's own compare-and-swap.
+    ///
+    /// Two layers of ordering, and both are needed. The per-flow lock keeps a
+    /// concurrent advance from interleaving read and write inside one process;
+    /// the *revision* check is what makes a duplicated advance safe across
+    /// processes and across a restart, where no lock exists. A lost revision
+    /// check returns `Ok(applied = false)` with the winner's record — the
+    /// caller has already made its vendor call, and a non-idempotent
+    /// transition must not run twice.
+    async fn advance_flow_step(
+        &self,
+        scope: &crate::AuthProductScope,
+        input: crate::AuthFlowStepAdvanceInput,
+    ) -> Result<crate::AuthFlowStepAdvance, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
+        let now = Utc::now();
+        let (mut record, version) = self
+            .read_flow(scope, input.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if is_terminal_status(record.status) {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        let current_revision = record.step_revision();
+        if current_revision != input.expected_revision {
+            return Ok(crate::AuthFlowStepAdvance {
+                record,
+                applied: false,
+            });
+        }
+
+        let previous = record.step_state;
+        record.status = input.status;
+        record.challenge = Some(input.challenge);
+        record.error = input.error;
+        if let Some(account_id) = input.credential_account_id {
+            record.credential_account_id = Some(account_id);
+        }
+        // A flow deadline only ever moves later; the cap is the caller's.
+        if let Some(deadline) = input.flow_expires_at
+            && deadline > record.expires_at
+        {
+            record.expires_at = deadline;
+        }
+        record.step_state = Some(crate::AuthFlowStepState {
+            index: previous.map_or(1, |state| state.index.saturating_add(1)),
+            kind: input.step_kind,
+            revision: current_revision.saturating_add(1),
+            step_expires_at: input.step_expires_at,
+            last_polled_at: input
+                .polled_at
+                .or_else(|| previous.and_then(|state| state.last_polled_at)),
+            poll_attempts: previous
+                .map_or(0, |state| state.poll_attempts)
+                .saturating_add(u32::from(input.polled_at.is_some())),
+        });
+        record.updated_at = now;
+        match self
+            .write_flow(scope, &record, CasExpectation::Version(version))
+            .await
+        {
+            Ok(_) => Ok(crate::AuthFlowStepAdvance {
+                record,
+                applied: true,
+            }),
+            // The storage CAS lost to a writer that slipped between our read
+            // and our write — across processes, where the per-flow lock does
+            // not reach. Same answer as losing the revision check, and for the
+            // same reason: report what is stored now, never re-run the vendor
+            // transition. Re-reading is what makes the returned record the
+            // winner's rather than our own optimistic copy.
+            Err(AuthProductError::BackendConflict) => {
+                let (current, _) = self
+                    .read_flow(scope, input.flow_id)
+                    .await?
+                    .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+                Ok(crate::AuthFlowStepAdvance {
+                    record: current,
+                    applied: false,
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 

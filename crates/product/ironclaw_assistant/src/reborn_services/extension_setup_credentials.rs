@@ -222,6 +222,7 @@ fn setup_projection(
             }
         }
         LifecycleExtensionCredentialSetup::Pairing => RebornExtensionCredentialSetup::Pairing,
+        LifecycleExtensionCredentialSetup::DeviceLink => RebornExtensionCredentialSetup::DeviceLink,
     }
 }
 

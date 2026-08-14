@@ -33,7 +33,7 @@ use std::sync::Arc;
 use ironclaw_auth::ChannelConnectionService;
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
 use ironclaw_host_api::{
-    ids::{AgentId, InvocationId, TenantId, UserId},
+    ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
@@ -64,6 +64,9 @@ pub struct ChannelConnectionTestConfig {
     /// Agent stamped on the bundle's read-side callers (parity with the
     /// WebUI caller shape; the service keys connections by tenant + user).
     pub agent_id: String,
+    /// Project stamped on test callers. Credential cleanup matches the full
+    /// owner `(tenant, user, agent, project)`, exactly like production.
+    pub project_id: Option<String>,
 }
 
 /// Handles for driving the generic channel connection state machine in
@@ -72,8 +75,10 @@ pub struct ChannelConnectionTestConfig {
 pub struct ChannelConnectionTestBundle {
     tenant_id: TenantId,
     agent_id: AgentId,
+    project_id: Option<ProjectId>,
     service: Arc<dyn ChannelConnectionService>,
     identity_binding: ChannelIdentityBindingConfig,
+    identity_store: Arc<ironclaw_extension_host::FilesystemChannelIdentityStore>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     /// The (tenant, user) scope the LIVE identity store was composed with —
     /// the restart-survival reopen probe reconstructs a fresh store under the
@@ -97,6 +102,11 @@ pub fn build_channel_connection_for_test(
 ) -> Result<ChannelConnectionTestBundle, String> {
     let tenant_id = TenantId::new(config.tenant_id).map_err(|error| error.to_string())?;
     let agent_id = AgentId::new(config.agent_id).map_err(|error| error.to_string())?;
+    let project_id = config
+        .project_id
+        .map(ProjectId::new)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let identity_store = runtime.channel_identity_store.clone();
     let installation_store = runtime.extension_management.installation_store_handle();
 
@@ -167,8 +177,10 @@ pub fn build_channel_connection_for_test(
     Ok(ChannelConnectionTestBundle {
         tenant_id,
         agent_id,
+        project_id,
         service,
         identity_binding,
+        identity_store: Arc::clone(&identity_store),
         identity_lookup: identity_store,
         identity_store_tenant_id,
         identity_store_user_id,
@@ -176,6 +188,52 @@ pub fn build_channel_connection_for_test(
 }
 
 impl ChannelConnectionTestBundle {
+    /// Persist the channel identity produced by a successful device-link
+    /// completion, through the same vendor-blind binder the production driver
+    /// calls. The scripted device-link group drives the entire handshake; an
+    /// ingress-focused group uses this seam when its real vendor adapter would
+    /// otherwise open a live MTProto socket.
+    pub async fn connect_device_link_provider_user(
+        &self,
+        extension_id: &str,
+        provider: &str,
+        external_actor_id: &str,
+        user_id: &UserId,
+    ) -> Result<(), String> {
+        let extension_id = ironclaw_host_api::ids::ExtensionId::new(extension_id)
+            .map_err(|error| error.to_string())?;
+        let installation_store = self
+            .identity_binding
+            .installation_store
+            .as_ref()
+            .ok_or("channel installation store is unavailable")?;
+        let installation = installation_store
+            .list_installations()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|installation| installation.extension_id() == &extension_id)
+            .ok_or("channel installation is unavailable")?;
+        let manifest = installation_store
+            .get_manifest(&extension_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("channel manifest is unavailable")?;
+        ironclaw_extension_host::DeviceLinkChannelIdentityBinder::new(Arc::clone(
+            &self.identity_store,
+        ))
+        .begin(
+            manifest.resolved(),
+            installation.installation_id().as_str(),
+            provider,
+            external_actor_id,
+            user_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     /// Connect `user_id`'s personal vendor account, mirroring the successful
     /// OAuth callback's identity-binding write: the proven
     /// [`OAuthProviderIdentity`] is validated against the extension's
@@ -232,6 +290,30 @@ impl ChannelConnectionTestBundle {
         Arc::clone(&self.service)
     }
 
+    /// Disconnect one caller through the exact service extension removal and
+    /// the extensions page use. This drives credential/device revocation,
+    /// delivery-target cleanup, then identity deletion in production order.
+    pub async fn disconnect_channel(
+        &self,
+        extension_id: &str,
+        user_id: &UserId,
+    ) -> Result<(), String> {
+        let extension_id = ironclaw_host_api::ids::ExtensionId::new(extension_id)
+            .map_err(|error| error.to_string())?;
+        self.service
+            .disconnect_channel_for_caller(
+                ProductSurfaceCaller::new(
+                    self.tenant_id.clone(),
+                    user_id.clone(),
+                    Some(self.agent_id.clone()),
+                    self.project_id.clone(),
+                ),
+                &extension_id,
+            )
+            .await
+            .map_err(|error| format!("{:?}", error.code))
+    }
+
     /// Surface (a) of the extensions page: what `list_extensions` merges via
     /// [`ChannelConnectionService::caller_channel_connections`]
     /// (`ironclaw_assistant/src/reborn_services/extensions.rs`).
@@ -250,7 +332,7 @@ impl ChannelConnectionTestBundle {
                 self.tenant_id.clone(),
                 user_id.clone(),
                 Some(self.agent_id.clone()),
-                None,
+                self.project_id.clone(),
             ))
             .await
             .map_err(|error| format!("{:?}", error.code))?;
@@ -266,9 +348,8 @@ impl ChannelConnectionTestBundle {
     /// Durable-state evidence: whether ANY identity binding for `provider`
     /// is persisted for `user_id`, across all installations
     /// (prefix-unscoped, unlike [`Self::caller_channel_connected`]). The
-    /// generic disconnect DELETES binding records (the retired per-vendor
-    /// lane tombstoned them instead), so record absence is the "binding
-    /// gone" evidence on this architecture.
+    /// generic disconnect tombstones binding records, so the active lookup
+    /// returning false is the "binding gone" evidence on this architecture.
     pub async fn has_any_active_identity_binding(
         &self,
         provider: &str,

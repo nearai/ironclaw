@@ -341,7 +341,8 @@ async fn hot_capability_catalog_fails_closed_when_bounded_backend_returns_too_ma
 
 /// `standard_op` binding (standardized messaging framework, task 4): a v3
 /// manifest tool bound to `send_message` carries host-synthesized
-/// `standard:messaging/send_message.{input,output}.v1` refs (task 2/3) —
+/// `standard:messaging/send_message.input.v1` + `.output.v2` refs (task 2/3;
+/// the output graduated to `.v2` for the `sent_unverified` evidence branch) —
 /// `publish_hot_capability_catalog` must resolve both from the compiled-in
 /// registry and never touch the filesystem/package root.
 #[tokio::test]
@@ -2521,7 +2522,7 @@ prompt_doc_ref = "prompts/echo/say.md"
 
 /// v3 manifest with one `[[tools]]` entry bound to the `send_message`
 /// standard op: no declared schema refs (the host synthesizes
-/// `standard:messaging/send_message.{input,output}.v1`), matching the
+/// `standard:messaging/send_message.input.v1` and `.output.v2`), matching the
 /// canonical `<extension>.<op_name>` id shape and the `external_write` effect
 /// the write-op rule requires.
 const SLACK_STANDARD_OP_MANIFEST: &str = r#"

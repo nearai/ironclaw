@@ -24,6 +24,7 @@
 
 mod attachment_transfer;
 mod channel;
+mod linked;
 mod payload;
 mod preference_targets;
 mod render;
@@ -31,6 +32,12 @@ mod render;
 pub use channel::{
     TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_BOT_USERNAME_CONFIG, TELEGRAM_WEBHOOK_SECRET_HANDLE,
     TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
+};
+pub use linked::{
+    MAX_ITEMS_PER_PAGE, MAX_MESSAGE_TEXT_BYTES, MAX_PAGES_PER_CALL, MAX_PEER_CACHE_ENTRIES,
+    MAX_PENDING_LINKS, MAX_POOLED_SESSIONS, MAX_RESULT_BYTES, MtprotoAppIdentity, PENDING_LINK_TTL,
+    SESSION_IDLE_TIMEOUT, SessionPool, TELEGRAM_API_HASH_HANDLE, TELEGRAM_API_ID_CONFIG,
+    TOOL_CALL_TIMEOUT, TelegramDeviceLinkAdapter, TelegramLinkedToolAdapter,
 };
 pub use payload::{
     GroupTriggerPolicy, PayloadParseError, TELEGRAM_API_HOST, TELEGRAM_FILE_API_HOST,

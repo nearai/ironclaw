@@ -328,16 +328,29 @@ fn onboarding_from_auth_recipes(
     manifest: &ironclaw_extension_registry::ResolvedExtensionManifest,
 ) -> Option<LifecycleExtensionOnboarding> {
     manifest.auth.iter().find_map(|surface| {
-        let (display_name, instructions, setup_url) = match surface.recipe.as_ref()? {
+        // `next_step` differs per method because the *action* differs. Both
+        // other methods end with the user handing over a value; a device link
+        // never does — the user authorizes a session on the vendor's own
+        // client — so reusing the "add the credential" sentence would name a
+        // step that does not exist.
+        let (display_name, instructions, setup_url, next_step) = match surface.recipe.as_ref()? {
             VendorAuthRecipe::ApiKey(recipe) => (
                 &recipe.display_name,
                 recipe.instructions.as_ref(),
                 recipe.setup_url.as_ref(),
+                CredentialNextStep::Provide,
             ),
             VendorAuthRecipe::Oauth2Code(recipe) => (
                 &recipe.display_name,
                 recipe.instructions.as_ref(),
                 recipe.setup_url.as_ref(),
+                CredentialNextStep::Provide,
+            ),
+            VendorAuthRecipe::DeviceLink(recipe) => (
+                &recipe.display_name,
+                recipe.instructions.as_ref(),
+                recipe.setup_url.as_ref(),
+                CredentialNextStep::LinkDevice,
             ),
         };
         let instructions = instructions?;
@@ -345,11 +358,32 @@ fn onboarding_from_auth_recipes(
             instructions: instructions.clone(),
             credential_instructions: Some(instructions.clone()),
             setup_url: setup_url.map(|url| url.as_str().to_string()),
-            credential_next_step: Some(format!(
-                "Add the {display_name} credential to finish activating this extension."
-            )),
+            credential_next_step: Some(next_step.sentence(display_name)),
         })
     })
+}
+
+/// Which closing sentence the onboarding card ends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialNextStep {
+    /// The user hands over a value they already hold (`api_key`) or obtains one
+    /// through a browser redirect (`oauth2_code`).
+    Provide,
+    /// The user authorizes this host as a device on the vendor's own client.
+    LinkDevice,
+}
+
+impl CredentialNextStep {
+    fn sentence(self, display_name: &str) -> String {
+        match self {
+            Self::Provide => {
+                format!("Add the {display_name} credential to finish activating this extension.")
+            }
+            Self::LinkDevice => format!(
+                "Open the web app and link your {display_name} account to finish activating this extension."
+            ),
+        }
+    }
 }
 
 fn manifest_declared_asset_paths(

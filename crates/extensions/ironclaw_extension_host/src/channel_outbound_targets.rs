@@ -37,6 +37,7 @@ use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
+use ironclaw_host_api::user_identity::RebornUserIdentityLookup;
 use ironclaw_outbound::OutboundError;
 use ironclaw_turns::ReplyTargetBindingRef;
 
@@ -83,6 +84,7 @@ pub struct GenericChannelOutboundTargetDeps {
     pub assembly: Arc<GenericChannelHostAssembly>,
     pub channel_config: Arc<ChannelConfigService>,
     pub dm_targets: Arc<FilesystemChannelDmTargetStore>,
+    pub identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     pub identity: ChannelOutboundTargetIdentity,
 }
 
@@ -98,6 +100,11 @@ struct ChannelTargetContext {
     display_name: String,
     installation_id: AdapterInstallationId,
     codec: Arc<dyn PreferenceTargetCodec>,
+    /// The manifest-declared connection authority. A retained DM record is
+    /// offered only while this exact external actor remains bound to the
+    /// caller in the strategy's identity namespace.
+    identity_provider: Option<String>,
+    identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     /// The `*_team_id` connection-scoping claim value — the space every
     /// encoded conversation binds under. `None` until configured.
     space_id: Option<String>,
@@ -175,6 +182,17 @@ impl GenericChannelOutboundTargetProvider {
             display_name: active.resolved.name.clone(),
             installation_id,
             codec,
+            identity_provider: channel.connection.as_ref().and_then(|connection| {
+                (connection.strategy
+                    != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::AdminManagedChannels)
+                    .then(|| connection.provider.as_str().to_string())
+            }),
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
+                channel
+                    .connection
+                    .as_ref()
+                    .map(|connection| connection.strategy),
+            ),
             space_id,
         }))
     }
@@ -265,7 +283,8 @@ impl GenericChannelOutboundTargetProvider {
         context: &ChannelTargetContext,
         caller: &OutboundDeliveryTargetScope,
     ) -> Result<Option<ChannelDmTargetRecord>, OutboundError> {
-        self.deps
+        let record = self
+            .deps
             .dm_targets
             .load(&context.extension_id, &caller.user_id)
             .await
@@ -277,7 +296,34 @@ impl GenericChannelOutboundTargetProvider {
                     "channel DM-target store unavailable while resolving outbound targets"
                 );
                 OutboundError::Backend
-            })
+            })?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let Some(provider) = context.identity_provider.as_deref() else {
+            return Ok(Some(record));
+        };
+        let provider_user_id = context
+            .identity_keyspace
+            .provider_user_id(&context.installation_id, &record.external_actor_id);
+        let bound_user = self
+            .deps
+            .identity_lookup
+            .resolve_user_identity(provider, &provider_user_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_outbound_targets",
+                    extension_id = %context.extension_id,
+                    %error,
+                    "channel identity unavailable while validating outbound target"
+                );
+                OutboundError::Backend
+            })?;
+        if bound_user.as_ref() == Some(&caller.user_id) {
+            return Ok(Some(record));
+        }
+        Ok(None)
     }
 
     fn caller_in_scope(&self, caller: &OutboundDeliveryTargetScope) -> bool {
