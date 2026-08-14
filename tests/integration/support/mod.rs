@@ -2,6 +2,7 @@ pub mod assertions;
 pub mod builder;
 pub mod capability_backend;
 pub mod comm_context;
+pub mod db_write_measurement;
 pub mod config;
 pub mod doubles;
 pub mod extension_surface;
