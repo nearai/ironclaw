@@ -243,7 +243,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
 | A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::linked_telegram_actor_turns_attribute_to_the_linking_user_and_unlink_revokes_admission` (anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
-| The model sees channel setup guidance but not UI-only chrome | `channel_connection_projection.rs` |
+| The model sees Telegram's channel and linked tools without the retired proof-code setup recipe | `channel_connection_projection.rs` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |
 
 **Durability, storage & restart**

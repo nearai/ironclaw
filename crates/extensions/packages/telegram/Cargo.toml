@@ -108,6 +108,7 @@ grammers-tl-types = { version = "=0.10.0", default-features = false, features = 
 # The device-link flow receives login codes and account passwords as
 # `SecretString`; reading one is a single greppable `expose_secret()`.
 secrecy = "0.10"
+static_assertions = "1"
 # The session blob carries 256-byte MTProto auth keys through an intermediate
 # base64 string on decode; that buffer is wiped rather than left in the heap.
 zeroize = "1"

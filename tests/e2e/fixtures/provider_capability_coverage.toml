@@ -147,6 +147,33 @@ tested = [
 live_only = []
 unsupported = []
 
+# Telegram's linked-device tools speak MTProto through the user's own account.
+# The real adapter is covered by crate conformance, production-wired group
+# scenarios, and gated live QA, but it has no resettable provider emulator from
+# which this deterministic inventory can obtain request/readback evidence.
+[[waivers]]
+capabilities = [
+  "telegram.add_reaction",
+  "telegram.delete_message",
+  "telegram.edit_message",
+  "telegram.get_conversation_history",
+  "telegram.get_conversation_info",
+  "telegram.get_message",
+  "telegram.get_user_info",
+  "telegram.list_conversations",
+  "telegram.list_members",
+  "telegram.open_dm",
+  "telegram.remove_reaction",
+  "telegram.resolve_user",
+  "telegram.search_messages",
+  "telegram.send_message",
+  "telegram.whoami",
+]
+owner = "Telegram linked-device maintainers"
+reason = "MTProto has no resettable deterministic provider world; production wiring and vendor behavior are covered separately by group scenarios and gated live QA"
+issue = "tests/CLAUDE.md section 7"
+review_condition = "Remove when a resettable MTProto provider world can assert exact requests, outcomes, and readback"
+
 [[integration_evidence]]
 capability = "github.handle_webhook"
 outcome_class = "success"

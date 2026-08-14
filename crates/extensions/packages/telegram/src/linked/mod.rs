@@ -28,6 +28,8 @@
 
 use std::time::Duration;
 
+use static_assertions::const_assert;
+
 #[cfg(test)]
 mod conformance;
 pub(crate) mod login;
@@ -150,28 +152,28 @@ pub const MAX_PAGES_PER_CALL: usize = 10;
 // A zero bound is not a bound — it is a pool that never pools, a registry that
 // never registers, and a peer cache that evicts the self-user. Checked at
 // compile time rather than in a test, so it holds in every build.
-const _: () = assert!(MAX_POOLED_SESSIONS > 0);
-const _: () = assert!(MAX_PENDING_LINKS > 0);
-const _: () = assert!(MAX_PEER_CACHE_ENTRIES > 0);
-const _: () = assert!(MAX_RESULT_BYTES > 0);
-const _: () = assert!(MAX_MESSAGE_TEXT_BYTES > 0);
-const _: () = assert!(MAX_ITEMS_PER_PAGE > 0);
-const _: () = assert!(MAX_PAGES_PER_CALL > 0);
+const_assert!(MAX_POOLED_SESSIONS > 0);
+const_assert!(MAX_PENDING_LINKS > 0);
+const_assert!(MAX_PEER_CACHE_ENTRIES > 0);
+const_assert!(MAX_RESULT_BYTES > 0);
+const_assert!(MAX_MESSAGE_TEXT_BYTES > 0);
+const_assert!(MAX_ITEMS_PER_PAGE > 0);
+const_assert!(MAX_PAGES_PER_CALL > 0);
 
 // The three content bounds are a set, not three independent numbers, and the
 // ordering below is what makes each of them do work. Without it one of them is
 // silently dead.
 //
 // One message must not be able to spend the whole result budget…
-const _: () = assert!(MAX_MESSAGE_TEXT_BYTES < MAX_RESULT_BYTES);
+const_assert!(MAX_MESSAGE_TEXT_BYTES < MAX_RESULT_BYTES);
 // …and a full page of maximum-length messages must exceed the byte ceiling,
 // because otherwise the item cap already implies it and `bound_result_bytes`
 // never runs — an unreachable clamp is one nobody notices breaking.
-const _: () = assert!(MAX_ITEMS_PER_PAGE * MAX_MESSAGE_TEXT_BYTES > MAX_RESULT_BYTES);
+const_assert!(MAX_ITEMS_PER_PAGE * MAX_MESSAGE_TEXT_BYTES > MAX_RESULT_BYTES);
 // The walk ceiling is a multiplier over the page size, so at 1 a page of
 // filtered rows (a chat of nothing but join notices) returns empty rather than
 // looking past them.
-const _: () = assert!(MAX_PAGES_PER_CALL > 1);
+const_assert!(MAX_PAGES_PER_CALL > 1);
 
 #[cfg(test)]
 mod tests {

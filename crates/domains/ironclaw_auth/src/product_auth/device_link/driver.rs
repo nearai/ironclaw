@@ -37,6 +37,7 @@ use ironclaw_extension_contracts::device_link::{
 };
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
 use ironclaw_host_api::ids::ExtensionId;
+use static_assertions::const_assert;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
@@ -71,14 +72,12 @@ pub const DEVICE_LINK_POLL_INTERVAL_MILLIS: u64 = 3_000;
 /// loop from doing so indefinitely.
 pub const DEVICE_LINK_MAX_POLL_ATTEMPTS: u32 = 1_200;
 
-/// The clock ordering the design states as an invariant, enforced at compile
-/// time rather than by a test: three clocks that disagree is a bug class, and
-/// a build error is a cheaper place to find it than a lapsed link.
-const _: () = {
-    assert!(DEVICE_LINK_FLOW_MAX_TTL_SECONDS >= DEVICE_LINK_FLOW_TTL_SECONDS);
-    assert!(DEVICE_LINK_FLOW_TTL_SECONDS >= DEVICE_LINK_STEP_TTL_SECONDS);
-    assert!(DEVICE_LINK_STEP_TTL_SECONDS > 0);
-};
+// The clock ordering the design states as an invariant, enforced at compile
+// time rather than by a test: three clocks that disagree is a bug class, and
+// a build error is a cheaper place to find it than a lapsed link.
+const_assert!(DEVICE_LINK_FLOW_MAX_TTL_SECONDS >= DEVICE_LINK_FLOW_TTL_SECONDS);
+const_assert!(DEVICE_LINK_FLOW_TTL_SECONDS >= DEVICE_LINK_STEP_TTL_SECONDS);
+const_assert!(DEVICE_LINK_STEP_TTL_SECONDS > 0);
 
 /// Start (or resume) a device link.
 #[derive(Debug, Clone, PartialEq, Eq)]
