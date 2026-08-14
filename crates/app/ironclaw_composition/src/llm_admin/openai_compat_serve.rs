@@ -245,7 +245,12 @@ impl OpenAiCompatPreparedTurnGateway {
         };
         let outcome = self
             .service
-            .wait_for_completion(request.public_id.as_str(), *submitted_run_id, poll_interval)
+            .wait_for_completion(
+                request.public_id.as_str(),
+                request.actor_scope.user_id(),
+                *submitted_run_id,
+                poll_interval,
+            )
             .await
             .map_err(map_prepared_turn_error)?;
         let mut projection = OpenAiChatCompletionProjection::text(outcome.text);

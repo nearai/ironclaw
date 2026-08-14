@@ -606,3 +606,151 @@ async fn unbound_accept_and_submit_replay_idempotently() -> HarnessResult<()> {
     );
     Ok(())
 }
+
+/// Step-1a owner threading (owner-nonnull proposal): the PRODUCT unbound lane
+/// (`UnboundTurnService`) names its authenticated caller as the thread OWNER.
+/// The minted thread lives under the caller's owner scope — not the tenant
+/// `__system__` slot — read-back resolves with the caller identity, a foreign
+/// caller's run-state read is rejected, and the thread STILL never surfaces
+/// in the caller's conversation listing (hidden by the prepared-context
+/// stamp, not by ownerlessness).
+#[tokio::test(flavor = "multi_thread")]
+async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
+    use ironclaw_assistant::{UnboundTurnService, UnboundTurnSubmission};
+
+    let group = RebornIntegrationGroup::builtin_tools().await?;
+    let harness = group.thread("conv-unbound-owner-anchor").build().await?;
+    let thread_service = harness.thread_service_for_test()?;
+    let coordinator = harness.turn_coordinator_for_test();
+
+    let caller = UserId::new(CALLER)?;
+    let service = UnboundTurnService::new(
+        thread_service.clone(),
+        coordinator.clone(),
+        TenantId::new(TENANT)?,
+        AgentId::new(AGENT)?,
+        Some(ProjectId::new(PROJECT)?),
+    );
+
+    // The service now mints ExplicitUser-owned turn scopes; the scripted
+    // reply must be registered under that exact scope.
+    let public_id = "unbound-owner-thread";
+    let thread_id = ironclaw_host_api::ids::ThreadId::new(public_id)?;
+    let script_scope = TurnScope::new_with_owner(
+        TenantId::new(TENANT)?,
+        Some(AgentId::new(AGENT)?),
+        Some(ProjectId::new(PROJECT)?),
+        thread_id.clone(),
+        Some(caller.clone()),
+    );
+    group
+        .register_scope_script_for_test(
+            script_scope.clone(),
+            "unbound-owner",
+            vec![RebornScriptedReply::text("Sentiment: positive.")],
+        )
+        .await?;
+
+    let ack = service
+        .accept_and_submit(UnboundTurnSubmission {
+            actor_user_id: caller.clone(),
+            public_id: public_id.to_string(),
+            system_prompt: "You are a background extraction task.".to_string(),
+            messages: vec![AgentMessage {
+                role: AgentMessageRole::User,
+                content: vec![ContentPart::text(
+                    "Classify the sentiment of: the release went great",
+                )],
+            }],
+            tools: Vec::new(),
+            output: OutputContract::AssistantMessage,
+            requested_model: None,
+            idempotency_key: "unbound-owner-accept".to_string(),
+        })
+        .await?;
+    let ironclaw_product_contracts::inbound::ProductInboundAck::Accepted {
+        submitted_run_id, ..
+    } = ack
+    else {
+        return Err("accept_and_submit must return Accepted".into());
+    };
+
+    // Read-back resolves under the caller identity and completes.
+    let outcome = service
+        .wait_for_completion(
+            public_id,
+            &caller,
+            submitted_run_id,
+            Duration::from_millis(50),
+        )
+        .await?;
+    assert_eq!(outcome.text, "Sentiment: positive.");
+
+    // The thread's rows live under the caller's OWNER scope, not the tenant
+    // system slot: owner-scoped history sees the seeded rows; the ownerless
+    // scope sees nothing.
+    let owner_scope = ThreadScope {
+        owner_user_id: Some(caller.clone()),
+        ..ownerless_thread_scope()?
+    };
+    let owned_history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    assert!(
+        !owned_history.messages.is_empty(),
+        "the unbound thread must be stored under the caller's owner scope"
+    );
+    let ownerless_history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ownerless_thread_scope()?,
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    assert!(
+        ownerless_history
+            .map(|history| history.messages.is_empty())
+            .unwrap_or(true),
+        "no unbound rows may land in the tenant __system__ slot"
+    );
+
+    // Cross-user isolation is now ENFORCED, not just structural: a foreign
+    // caller's run-state read under its own owner scope is rejected.
+    let foreign_scope = TurnScope::new_with_owner(
+        TenantId::new(TENANT)?,
+        Some(AgentId::new(AGENT)?),
+        Some(ProjectId::new(PROJECT)?),
+        thread_id.clone(),
+        Some(UserId::new("other-user")?),
+    );
+    assert!(
+        coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: foreign_scope,
+                run_id: submitted_run_id,
+            })
+            .await
+            .is_err(),
+        "a foreign owner scope must not read an unbound run's state"
+    );
+
+    // Owner is set, but the thread still never surfaces in the caller's
+    // conversation listing — hiding comes from the prepared-context stamp.
+    let listed = thread_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: owner_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await?;
+    assert!(
+        listed
+            .threads
+            .iter()
+            .all(|thread| thread.thread_id != thread_id),
+        "an owned unbound thread must still be hidden from the listing"
+    );
+    Ok(())
+}

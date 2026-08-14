@@ -3,7 +3,7 @@
 //! read-back that product surfaces (OpenAI-compat chat completions today)
 //! delegate to. One service serves both halves of the lane so the accept axes
 //! and the read-back axes can never drift: `accept_and_submit` seeds the
-//! caller-authored context onto an ownerless unbound thread (public id ==
+//! caller-authored context onto a caller-owned unbound thread (public id ==
 //! thread id) and submits the unbound turn; `wait_for_completion` resolves the
 //! terminal outcome from run state plus the unbound thread's rows.
 //!
@@ -18,7 +18,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::prepared_context::{
     OutputContract, PreparedTurnDeclarations, STRUCTURED_RESULT_CAPABILITY_ID,
 };
-use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus, TurnThreadOwner};
+use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind,
@@ -98,7 +98,11 @@ pub struct UnboundTurnSubmission {
 
 /// Prepared-context door + unbound-run resolver over the SAME thread service
 /// and coordinator the runtime's conversation path uses, scoped to the
-/// deployment's default agent/project axes with the ownerless unbound owner.
+/// deployment's default agent/project axes with the authenticated caller as
+/// the thread owner. The owner keeps unbound threads sharded per-user (never
+/// the tenant `__system__` slot) and lets the run-state scope check reject
+/// cross-user reads; hiding from conversation listings comes from the
+/// prepared-context stamp, not from ownerlessness.
 pub struct UnboundTurnService {
     thread_service: Arc<dyn SessionThreadService>,
     coordinator: Arc<dyn TurnCoordinator>,
@@ -124,25 +128,24 @@ impl UnboundTurnService {
         }
     }
 
-    fn thread_scope(&self) -> ThreadScope {
+    fn thread_scope(&self, owner: &UserId) -> ThreadScope {
         ThreadScope {
             tenant_id: self.tenant_id.clone(),
             agent_id: self.agent_id.clone(),
             project_id: self.project_id.clone(),
-            owner_user_id: None,
+            owner_user_id: Some(owner.clone()),
             mission_id: None,
         }
     }
 
-    fn turn_scope(&self, thread_id: &ThreadId) -> TurnScope {
-        let mut scope = TurnScope::new(
+    fn turn_scope(&self, thread_id: &ThreadId, owner: &UserId) -> TurnScope {
+        TurnScope::new_with_owner(
             self.tenant_id.clone(),
             Some(self.agent_id.clone()),
             self.project_id.clone(),
             thread_id.clone(),
-        );
-        scope.thread_owner = TurnThreadOwner::Ownerless;
-        scope
+            Some(owner.clone()),
+        )
     }
 
     /// Accept the prepared context through the shared door and submit the
@@ -159,7 +162,7 @@ impl UnboundTurnService {
         let accepted = self
             .thread_service
             .accept_prepared_context(PreparedContextRequest {
-                scope: self.thread_scope(),
+                scope: self.thread_scope(&submission.actor_user_id),
                 actor_id: submission.actor_user_id.as_str().to_string(),
                 system_prompt: submission.system_prompt,
                 messages: submission.messages,
@@ -183,7 +186,7 @@ impl UnboundTurnService {
         let response = self
             .coordinator
             .submit_turn(SubmitTurnRequest {
-                scope: self.turn_scope(&thread_id),
+                scope: self.turn_scope(&thread_id, &submission.actor_user_id),
                 actor: TurnActor::new(submission.actor_user_id),
                 accepted_message_ref: accepted.accepted_message_ref,
                 requested_run_profile: None,
@@ -227,13 +230,14 @@ impl UnboundTurnService {
     pub async fn wait_for_completion(
         &self,
         public_id: &str,
+        actor_user_id: &UserId,
         run_id: TurnRunId,
         poll_interval: Duration,
     ) -> Result<UnboundTurnOutcome, UnboundTurnError> {
         let thread_id = ThreadId::new(public_id.to_string())
             .map_err(|error| UnboundTurnError::internal(format!("invalid thread id: {error}")))?;
-        let turn_scope = self.turn_scope(&thread_id);
-        let thread_scope = self.thread_scope();
+        let turn_scope = self.turn_scope(&thread_id, actor_user_id);
+        let thread_scope = self.thread_scope(actor_user_id);
         loop {
             let state = self
                 .coordinator

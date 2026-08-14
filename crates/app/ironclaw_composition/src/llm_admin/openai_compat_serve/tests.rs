@@ -1309,7 +1309,7 @@ fn test_unbound_thread_scope(suffix: &str) -> ironclaw_threads::ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
         agent_id: AgentId::new(format!("agent-{suffix}")).expect("agent"),
         project_id: None,
-        owner_user_id: None,
+        owner_user_id: Some(UserId::new(format!("user-{suffix}")).expect("user")),
         mission_id: None,
     }
 }
@@ -1318,14 +1318,13 @@ fn test_unbound_turn_scope(
     suffix: &str,
     thread_id: &ThreadId,
 ) -> ironclaw_host_api::turn::TurnScope {
-    let mut scope = ironclaw_host_api::turn::TurnScope::new(
+    ironclaw_host_api::turn::TurnScope::new_with_owner(
         TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
         Some(AgentId::new(format!("agent-{suffix}")).expect("agent")),
         None,
         thread_id.clone(),
-    );
-    scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::Ownerless;
-    scope
+        Some(UserId::new(format!("user-{suffix}")).expect("user")),
+    )
 }
 
 struct RecordingSubmitCoordinator {
@@ -1464,10 +1463,14 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_unboundly() {
         .expect("one unbound submission recorded");
     let submission = &submission;
     assert_eq!(submission.scope.thread_id.as_str(), "chatcmpl-prep-1");
-    assert!(matches!(
-        submission.scope.thread_owner,
-        ironclaw_host_api::turn::TurnThreadOwner::Ownerless
-    ));
+    assert_eq!(
+        submission
+            .scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("user-prep"),
+        "the unbound submission must name the authenticated caller as thread owner"
+    );
     assert!(submission.requested_run_profile.is_none());
     assert_eq!(submission.requested_model.as_deref(), Some("gpt-reborn"));
 
