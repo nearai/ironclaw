@@ -4,7 +4,7 @@ use ironclaw_event_log::{EventStreamKey, ReadScope};
 use ironclaw_processes::ProcessJournalKind;
 use ironclaw_stress::db_probe::{
     DbProbeConfig, DbProbeError, DbProbeSummary, DbProbeTarget, DbWriteMeasurement, StatsScope,
-    begin, capture_settled, finish, summarize_measurement,
+    begin, capture_settled, finish, postgres_relation_write_totals, summarize_measurement,
 };
 use ironclaw_turns::{TurnRunId, process_projection::process_id_from_turn_run_id};
 use serde::Serialize;
@@ -77,6 +77,12 @@ impl CanonicalDbWriteMeasurementReport {
     }
 
     pub fn assert_nonzero_root_filesystem_families(&self) -> HarnessResult<()> {
+        let postgres_writes = match self.backend {
+            MeasuredStorageBackend::Libsql => None,
+            MeasuredStorageBackend::Postgres => Some(postgres_relation_write_totals(
+                &self.summary.delta.postgres_table_writes,
+            )),
+        };
         for table in REQUIRED_ROOT_FILESYSTEM_FAMILIES {
             let writes = match self.backend {
                 MeasuredStorageBackend::Libsql => self
@@ -86,18 +92,9 @@ impl CanonicalDbWriteMeasurementReport {
                     .iter()
                     .find(|row| row.table == table)
                     .map(|row| row.inserts + row.updates + row.deletes),
-                MeasuredStorageBackend::Postgres => self
-                    .summary
-                    .delta
-                    .postgres_table_writes
-                    .iter()
-                    .find(|row| {
-                        row.table
-                            .rsplit_once('.')
-                            .map_or(row.table.as_str(), |(_, relation)| relation)
-                            == table
-                    })
-                    .map(|row| row.inserts + row.updates + row.deletes),
+                MeasuredStorageBackend::Postgres => postgres_writes
+                    .as_ref()
+                    .and_then(|writes| writes.get(table).copied()),
             }
             .unwrap_or_default();
             if writes <= 0 {
