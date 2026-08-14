@@ -22,11 +22,13 @@ before anything durable commits. It never decides durability itself.
   with the process supervisor; `turn_scheduler.rs` is an agent-turn
   *projection* over the generic supervisor (#6696), not a scheduler of its
   own.
-- `HarnessRoutingTurnRunExecutor` (`harness_turn_run_executor.rs`) — a
-  default-off ACP adapter that diverts only explicitly configured run profiles
-  to an externally placed agent and otherwise delegates to
-  `RebornTurnRunExecutor`. `agent_placement.rs` keeps host-process and Docker
-  policy outside the ACP conversation executor.
+- `ProfileRoutingTurnRunExecutor` (`profile_routing_turn_run_executor.rs`) —
+  neutral per-profile selection between replaceable `TurnRunExecutor`
+  implementations, with `RebornTurnRunExecutor` as the default.
+- `HarnessTurnRunExecutor` (`harness_turn_run_executor.rs`) — an ACP-only
+  external-agent executor that is unaware of routing and other loop
+  implementations. `agent_placement.rs` keeps host-process and Docker policy
+  outside the ACP conversation executor.
 - `DriverRegistry` + the two production drivers: `PlannedDriver` (adapts
   `ironclaw_agent_loop`) and `text_loop_driver.rs` (smallest supported
   behavior). Fallback between them is an explicit profile/readiness decision,

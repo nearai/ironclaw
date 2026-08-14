@@ -29,7 +29,6 @@ use tracing::debug;
 
 use crate::{
     agent_placement::{AgentLineSink, AgentLineStream, AgentPlacement},
-    turn_run_executor::RebornTurnRunExecutor,
     turn_runner::HostFactory,
     turn_scheduler::{TurnRunExecutor, TurnRunExecutorError},
 };
@@ -45,27 +44,41 @@ pub struct HarnessTurnRunConfig {
     pub placement: Arc<dyn AgentPlacement>,
 }
 
-/// Routes selected profiles to the ACP harness and delegates every other run
-/// to the existing executor unchanged.
-pub struct HarnessRoutingTurnRunExecutor {
-    fallback: Arc<RebornTurnRunExecutor>,
+pub struct HarnessExecutorConfig {
+    timeout: Duration,
+    max_update_bytes: usize,
+    placement: Arc<dyn AgentPlacement>,
+}
+
+impl HarnessTurnRunConfig {
+    pub fn into_routing_parts(self) -> (HashSet<String>, HarnessExecutorConfig) {
+        (
+            self.run_profile_ids,
+            HarnessExecutorConfig {
+                timeout: self.timeout,
+                max_update_bytes: self.max_update_bytes,
+                placement: self.placement,
+            },
+        )
+    }
+}
+
+/// ACP-only turn executor. Profile selection belongs to the neutral executor
+/// router, so this implementation contains no knowledge of other loops.
+pub struct HarnessTurnRunExecutor {
     host_factory: Arc<dyn HostFactory>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
-    config: HarnessTurnRunConfig,
+    config: HarnessExecutorConfig,
 }
 
-impl HarnessRoutingTurnRunExecutor {
+impl HarnessTurnRunExecutor {
     pub fn new(
-        fallback: Arc<RebornTurnRunExecutor>,
         host_factory: Arc<dyn HostFactory>,
         thread_service: Arc<dyn SessionThreadService>,
         thread_scope: ThreadScope,
-        config: HarnessTurnRunConfig,
+        config: HarnessExecutorConfig,
     ) -> Result<Self, String> {
-        if config.run_profile_ids.is_empty() {
-            return Err("ACP harness requires at least one routed run profile".to_string());
-        }
         if config.timeout.is_zero() {
             return Err("ACP harness timeout must be greater than zero".to_string());
         }
@@ -73,18 +86,11 @@ impl HarnessRoutingTurnRunExecutor {
             return Err("ACP harness update bound must be greater than zero".to_string());
         }
         Ok(Self {
-            fallback,
             host_factory,
             thread_service,
             thread_scope,
             config,
         })
-    }
-
-    fn routes(&self, claimed: &ClaimedTurnRun) -> bool {
-        self.config
-            .run_profile_ids
-            .contains(claimed.resolved_run_profile.profile_id.as_str())
     }
 
     async fn execute_harness(&self, claimed: ClaimedTurnRun) -> Result<(), TurnRunExecutorError> {
@@ -281,19 +287,13 @@ impl HarnessRoutingTurnRunExecutor {
 }
 
 #[async_trait]
-impl TurnRunExecutor for HarnessRoutingTurnRunExecutor {
+impl TurnRunExecutor for HarnessTurnRunExecutor {
     async fn execute_claimed_run(
         &self,
         claimed: ClaimedTurnRun,
-        process_transitions: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
+        _process_transitions: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     ) -> Result<(), TurnRunExecutorError> {
-        if self.routes(&claimed) {
-            self.execute_harness(claimed).await
-        } else {
-            self.fallback
-                .execute_claimed_run(claimed, process_transitions)
-                .await
-        }
+        self.execute_harness(claimed).await
     }
 }
 

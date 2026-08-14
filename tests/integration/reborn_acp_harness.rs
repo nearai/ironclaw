@@ -24,7 +24,7 @@ const IMAGE: &str = "ironclaw-acp-fake:latest";
 const PROFILE: &str = "reborn-planned-default";
 
 #[tokio::test]
-async fn unselected_profile_keeps_the_canonical_executor() {
+async fn profile_router_keeps_unselected_profiles_on_the_canonical_executor() {
     let workspace_root = tempfile::tempdir().expect("workspace root");
     let config = HarnessTurnRunConfig {
         run_profile_ids: HashSet::from(["not-selected".to_string()]),

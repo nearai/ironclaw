@@ -36,7 +36,7 @@ use ironclaw_turns::{
 use crate::{
     app_loop_family::build_loop_family_registry_with_overrides,
     driver_registry::{DriverRegistry, DriverRegistryError},
-    harness_turn_run_executor::{HarnessRoutingTurnRunExecutor, HarnessTurnRunConfig},
+    harness_turn_run_executor::{HarnessTurnRunConfig, HarnessTurnRunExecutor},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
         apply_capability_surface_policy, capability_resolve_error_to_agent_host_error,
@@ -47,6 +47,7 @@ use crate::{
         register_default_planned_driver, register_default_text_only_driver,
         register_subagent_planned_driver,
     },
+    profile_routing_turn_run_executor::ProfileRoutingTurnRunExecutor,
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
         prompt_material::GateBackedSubagentPromptMaterialSource,
@@ -946,18 +947,23 @@ where
     if let Some(recorder) = after_turn_memory_recorder {
         executor = executor.with_after_turn_memory_recorder(recorder);
     }
-    let executor = Arc::new(executor);
+    let executor: Arc<dyn crate::turn_scheduler::TurnRunExecutor> = Arc::new(executor);
     let executor: Arc<dyn crate::turn_scheduler::TurnRunExecutor> =
         if let Some(harness) = parts.harness {
-            Arc::new(
-                HarnessRoutingTurnRunExecutor::new(
-                    Arc::clone(&executor),
+            let (run_profile_ids, harness_config) = harness.into_routing_parts();
+            let harness_executor: Arc<dyn crate::turn_scheduler::TurnRunExecutor> = Arc::new(
+                HarnessTurnRunExecutor::new(
                     host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
                     Arc::clone(&parts.thread_service),
                     parts.thread_scope.clone(),
-                    harness,
+                    harness_config,
                 )
                 .map_err(DefaultPlannedRuntimeBuildError::Harness)?,
+            );
+            Arc::new(
+                ProfileRoutingTurnRunExecutor::new(Arc::clone(&executor))
+                    .with_routes(run_profile_ids, harness_executor)
+                    .map_err(DefaultPlannedRuntimeBuildError::Harness)?,
             )
         } else {
             executor

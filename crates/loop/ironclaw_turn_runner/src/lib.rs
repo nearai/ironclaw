@@ -43,6 +43,7 @@ mod model_failure_mapping;
 pub mod planned_driver;
 pub mod planned_driver_factory;
 pub mod production_readiness;
+pub mod profile_routing_turn_run_executor;
 pub mod runtime;
 pub mod steering_reconcile;
 pub mod subagent;

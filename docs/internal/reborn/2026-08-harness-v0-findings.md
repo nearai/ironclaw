@@ -16,6 +16,10 @@ the maintained package replaces that implementation.
 
 ## Implementation observations
 
+- Run-profile selection is owned by a neutral executor router whose default is
+  the canonical Rust executor. The ACP executor implements `TurnRunExecutor`
+  directly and has no fallback or knowledge of other loop implementations, so
+  another executor can be registered without changing the harness.
 - ACP gives Ironclaw a small, typed integration surface: initialize, session
   new/load, prompt, updates, and permission requests. Keeping the protocol at
   this boundary avoided translating Claude Code internals into Ironclaw tools.
