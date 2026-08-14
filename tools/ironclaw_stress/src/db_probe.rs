@@ -19,7 +19,6 @@ const MEASUREMENT_TABLES: &[&str] = &[
     "trigger_records",
     "trigger_run_history",
 ];
-const DEFAULT_MEASUREMENT_SCHEMA: &str = "public";
 
 // PostgreSQL normally flushes cumulative table statistics at most once per second.
 const POSTGRES_STATS_SETTLE_DURATION: Duration = Duration::from_millis(1_100);
@@ -212,6 +211,8 @@ pub struct DbProbeSnapshot {
     pub postgres_statement_calls_by_table: Vec<PostgresTableStatementCalls>,
     #[serde(default)]
     pub postgres_statement_calls_total: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uninstrumented_tables: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -538,12 +539,6 @@ struct InvalidLibSqlCounter {
     source: std::num::ParseIntError,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("libSQL measurement tables are missing: {tables}")]
-struct MissingLibSqlMeasurementTables {
-    tables: String,
-}
-
 #[doc(hidden)]
 pub async fn try_capture_libsql(
     path: PathBuf,
@@ -568,6 +563,27 @@ pub async fn try_capture_libsql(
             ..DbProbeSnapshot::default()
         });
     }
+    let mut table_writes = BTreeMap::new();
+    let mut uninstrumented_tables = Vec::new();
+    for table in MEASUREMENT_TABLES {
+        let mut present = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [*table],
+            )
+            .await?;
+        if present.next().await?.is_some() {
+            table_writes.insert(
+                (*table).to_string(),
+                LibSqlTableWrites {
+                    table: (*table).to_string(),
+                    ..LibSqlTableWrites::default()
+                },
+            );
+        } else {
+            uninstrumented_tables.push((*table).to_string());
+        }
+    }
     let mut rows = connection
         .query(
             "SELECT table_name, operation, CAST(row_count AS TEXT) \
@@ -576,18 +592,6 @@ pub async fn try_capture_libsql(
             (),
         )
         .await?;
-    let mut table_writes = MEASUREMENT_TABLES
-        .iter()
-        .map(|table| {
-            (
-                (*table).to_string(),
-                LibSqlTableWrites {
-                    table: (*table).to_string(),
-                    ..LibSqlTableWrites::default()
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
     while let Some(row) = rows.next().await? {
         let table: String = row.get(0)?;
         let operation: String = row.get(1)?;
@@ -615,6 +619,7 @@ pub async fn try_capture_libsql(
         libsql_wal_bytes: Some(wal_bytes),
         libsql_shm_bytes: Some(shm_bytes),
         libsql_table_writes: table_writes.into_values().collect(),
+        uninstrumented_tables,
         ..DbProbeSnapshot::default()
     })
 }
@@ -626,23 +631,6 @@ pub async fn install_libsql_write_counters(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = libsql::Builder::new_local(path).build().await?;
     let connection = db.connect()?;
-    let mut missing_tables = Vec::new();
-    for table in MEASUREMENT_TABLES {
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [*table],
-            )
-            .await?;
-        if rows.next().await?.is_none() {
-            missing_tables.push(*table);
-        }
-    }
-    if !missing_tables.is_empty() {
-        return Err(Box::new(MissingLibSqlMeasurementTables {
-            tables: missing_tables.join(", "),
-        }));
-    }
 
     connection
         .execute_batch(
@@ -660,6 +648,15 @@ pub async fn install_libsql_write_counters(
             .await?;
     }
     for table in MEASUREMENT_TABLES {
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [*table],
+            )
+            .await?;
+        if rows.next().await?.is_none() {
+            continue;
+        }
         for (suffix, timing, operation) in [
             ("ai", "AFTER INSERT", "insert"),
             ("au", "AFTER UPDATE", "update"),
@@ -897,23 +894,13 @@ async fn capture_postgres_write_stats(
             &[&table_names],
         )
         .await?;
-    let mut table_writes = MEASUREMENT_TABLES
-        .iter()
-        .map(|table| {
-            let qualified_table = format!("{DEFAULT_MEASUREMENT_SCHEMA}.{table}");
-            (
-                qualified_table.clone(),
-                PostgresTableWrites {
-                    table: qualified_table,
-                    ..PostgresTableWrites::default()
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut table_writes = BTreeMap::new();
+    let mut present_relations = BTreeSet::new();
     for row in table_rows {
         let schema: String = row.try_get(0)?;
         let relation: String = row.try_get(1)?;
         let table = format!("{schema}.{relation}");
+        present_relations.insert(relation.clone());
         table_writes.insert(
             table.clone(),
             PostgresTableWrites {
@@ -924,6 +911,11 @@ async fn capture_postgres_write_stats(
             },
         );
     }
+    snapshot.uninstrumented_tables = MEASUREMENT_TABLES
+        .iter()
+        .filter(|table| !present_relations.contains(**table))
+        .map(|table| (*table).to_string())
+        .collect();
     snapshot.postgres_table_writes = table_writes.into_values().collect();
 
     let statement_rows = client

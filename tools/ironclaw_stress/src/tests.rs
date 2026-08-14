@@ -1633,7 +1633,7 @@ async fn libsql_probe_rejects_negative_and_overflow_counters() {
 }
 
 #[tokio::test]
-async fn libsql_measurement_rejects_missing_tables() {
+async fn libsql_measurement_reports_missing_tables() {
     let path = std::env::temp_dir().join(format!(
         "ironclaw-stress-missing-measurement-table-{}.db",
         uuid::Uuid::new_v4().simple()
@@ -1650,15 +1650,22 @@ async fn libsql_measurement_rejects_missing_tables() {
     drop(connection);
     drop(database);
 
-    let error = begin_db_probe(&DbProbeConfig::libsql(&path, true))
+    let config = DbProbeConfig::libsql(&path, true);
+    let snapshot = begin_db_probe(&config)
         .await
-        .expect_err("missing measurement tables must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("libSQL measurement tables are missing")
+        .expect("missing tables remain explicitly reportable");
+    assert_eq!(
+        snapshot.libsql_table_writes[0].table,
+        "root_filesystem_entries"
     );
-    assert!(error.to_string().contains("root_filesystem_events"));
+    assert!(
+        snapshot
+            .uninstrumented_tables
+            .contains(&"root_filesystem_events".to_string())
+    );
+    finish_db_probe(&config)
+        .await
+        .expect("remove write counters");
     crate::cleanup_generated_libsql_path(&path).await;
 }
 

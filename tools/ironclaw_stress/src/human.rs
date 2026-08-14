@@ -528,6 +528,13 @@ fn push_db_probe_table(output: &mut String, db_probe: &DbProbeSummary) {
             measurement.stats_scope.as_str().to_string(),
         );
         push_metric(output, "stats_reset", measurement.reset_stats.to_string());
+        if !db_probe.after.uninstrumented_tables.is_empty() {
+            push_metric(
+                output,
+                "uninstrumented_tables",
+                db_probe.after.uninstrumented_tables.join(","),
+            );
+        }
         if !db_probe.delta.libsql_table_writes.is_empty() {
             push_libsql_table_write_table(output, db_probe);
         }
