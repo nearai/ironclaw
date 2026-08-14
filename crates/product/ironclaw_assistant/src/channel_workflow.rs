@@ -50,6 +50,7 @@ use ironclaw_product_contracts::channel_workflow::{
     ChannelRunDeliveryObserver, ChannelWorkflowFactory, ChannelWorkflowGraph,
     ChannelWorkflowRequest, ChannelWorkflowStorageRoots,
 };
+use ironclaw_product_contracts::operator_llm::LlmConfigService;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
@@ -130,6 +131,9 @@ pub struct RebornChannelWorkflowServices {
     /// Enqueues a message arriving on a busy thread as steering input for the
     /// active run instead of rejecting it.
     pub input_enqueue: Arc<dyn HostInputEnqueuePort>,
+    /// Resolves explicit hints and caller-scoped saved model preferences for
+    /// ordinary channel turns through the same policy used by model commands.
+    pub llm_config: Option<Arc<dyn LlmConfigService>>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub identity: ChannelWorkflowIdentity,
@@ -387,15 +391,17 @@ impl ChannelWorkflowFactory for RebornChannelWorkflowFactory {
             resolver,
         )) as Arc<dyn ProductBindingResolver>;
 
-        let inbound = Arc::new(
-            DefaultInboundTurnService::new(
-                Arc::clone(&binding),
-                Arc::clone(&self.services.thread_service),
-                Arc::clone(&self.services.turn_coordinator),
-                Arc::clone(&self.services.input_enqueue),
-            )
-            .with_inbound_attachments(Arc::clone(&self.services.inbound_attachments)),
-        );
+        let mut inbound = DefaultInboundTurnService::new(
+            Arc::clone(&binding),
+            Arc::clone(&self.services.thread_service),
+            Arc::clone(&self.services.turn_coordinator),
+            Arc::clone(&self.services.input_enqueue),
+        )
+        .with_inbound_attachments(Arc::clone(&self.services.inbound_attachments));
+        if let Some(llm_config) = &self.services.llm_config {
+            inbound = inbound.with_llm_config_service(Arc::clone(llm_config));
+        }
+        let inbound = Arc::new(inbound);
         let mut workflow = DefaultProductSurface::new(
             inbound,
             Arc::clone(&workflow_state.ledger),

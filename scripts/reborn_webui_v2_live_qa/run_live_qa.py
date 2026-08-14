@@ -203,6 +203,16 @@ DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+# The composer's message POST rides the session channel ingress route since
+# the channel normalization split (#7477):
+# `/api/webchat/v2/channels/<extension>/messages`. The older thread-scoped
+# route is still accepted so one harness spans binaries on either side of
+# that split — the same migration the stress client made in #7568. QA 10
+# went 0/10 (submission-identity capture timing out on a healthy, streaming
+# turn) when this predicate only knew the retired route.
+SUBMISSION_MESSAGE_ROUTE_RE = re.compile(
+    r"/api/webchat/v2/(?:threads|channels)/[^/]+/messages$"
+)
 # Live QA is model- and network-nondeterministic: the same commit can pass then
 # flake red hours later. Retry a transient (assertion/behavioral) case failure up
 # to this many total attempts before recording a red. Default 2 = one retry;
@@ -1859,8 +1869,7 @@ async def _live_chat_case(
             request = response.request  # type: ignore[attr-defined]
             if request.method != "POST":
                 return False
-            if not re.search(
-                r"/api/webchat/v2/threads/[^/]+/messages$",
+            if not SUBMISSION_MESSAGE_ROUTE_RE.search(
                 str(response.url),  # type: ignore[attr-defined]
             ):
                 return False

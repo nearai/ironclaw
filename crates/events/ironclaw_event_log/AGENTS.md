@@ -8,9 +8,9 @@ and the one-way pipeline rule: [`../AGENTS.md`](../AGENTS.md).
 
 - Read `README.md` for what the crate is; read `Cargo.toml` for actual
   dependencies and feature shape.
-- Contract docs that outrank intuition: `docs/reborn/contracts/events.md`,
-  `docs/reborn/contracts/events-projections.md`,
-  `docs/reborn/contracts/kernel-boundary.md`.
+- Contract docs that outrank intuition: `docs/internal/reborn/contracts/events.md`,
+  `docs/internal/reborn/contracts/events-projections.md`,
+  `docs/internal/reborn/contracts/kernel-boundary.md`.
 - If the contract and code disagree, stop and treat the task as a
   contract-change request instead of silently changing ownership.
 

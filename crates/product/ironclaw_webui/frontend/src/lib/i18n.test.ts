@@ -177,6 +177,37 @@ test("non-English locale packs localize exposed workflow copy", () => {
   }
 });
 
+test("non-English locale packs localize model-selection settings", () => {
+  const english = loadLocalePack("en");
+  const keys = [
+    "llm.modelPreference",
+    "llm.modelPreferenceDesc",
+    "llm.policyTitle",
+    "llm.policyDesc",
+    "llm.policyAllowedModels",
+    "llm.policyWorkspaceDefault",
+    "llm.policyModelPlaceholder",
+    "llm.policyAddModel",
+    "llm.policyEnabled",
+    "llm.policyDisabled",
+    "llm.policyNoActiveProvider",
+    "llm.policyInvalidModel",
+    "llm.policyTooManyModels",
+    "llm.policySelectModels",
+    "llm.followWorkspaceDefault",
+    "llm.unavailableModel",
+    "llm.selectionUnavailable",
+    "llm.preferenceSaving",
+  ];
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    for (const key of keys) {
+      assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
+    }
+  }
+});
+
 test("ensurePack: unknown locale resolves null (no loader, not registered)", async () => {
   const { ensurePack } = loadI18n();
   assert.equal(await ensurePack("zz-unknown"), null);

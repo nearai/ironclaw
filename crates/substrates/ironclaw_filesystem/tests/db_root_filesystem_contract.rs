@@ -1398,6 +1398,181 @@ async fn libsql_ordered_index_declaration_never_backfills_existing_rows() {
     );
 }
 
+/// Shared cross-backend body for `Filter::FtsRanked` (#7185).
+///
+/// The scenario is conversational recall: a fact is stored as one sentence and
+/// asked for in differently-worded question that shares only SOME of its
+/// content words. `Filter::Fts` requires every content term, so it finds
+/// nothing — the assertion this test opens with, which is what made memory
+/// recall fail in practice. `Filter::FtsRanked` matches on any term and orders
+/// by relevance, so the sentence sharing three query terms comes back ahead of
+/// the one sharing a single term, and the unrelated record stays out.
+///
+/// The AND-semantics assertion is load-bearing: without it a ranked-OR test
+/// would also pass under the old behavior and prove nothing.
+async fn ranked_fts_contract<F: RootFilesystem>(filesystem: &F, base: &str) {
+    let content = IndexKey::new("content").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let root = VirtualPath::new(base.to_string()).unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("ranked_fts_content_v1").unwrap(),
+        vec![content.clone()],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&root, &spec).await.unwrap();
+
+    for (leaf, body) in [
+        (
+            "a",
+            "Sarah prefers the standup meeting scheduled early on Thursday mornings",
+        ),
+        ("b", "Sarah keeps a spare umbrella at her desk"),
+        ("c", "Deployment runbook for the staging cluster"),
+    ] {
+        filesystem
+            .put(
+                &VirtualPath::new(format!("{base}/{leaf}")).unwrap(),
+                Entry::record(kind.clone(), &serde_json::json!({}))
+                    .unwrap()
+                    .with_indexed(content.clone(), IndexValue::Text(body.into())),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Content terms: sarah, like, standup, scheduled. Record `a` carries three
+    // of them but not `like`, so every-term matching returns nothing.
+    let question = "when does Sarah like her standup scheduled";
+
+    let and_results = filesystem
+        .query(
+            &root,
+            &Filter::Fts {
+                key: content.clone(),
+                query: question.into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        and_results.is_empty(),
+        "Filter::Fts requires every content term, so a paraphrased question must miss; got {:?}",
+        and_results
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let ranked = filesystem
+        .query(
+            &root,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: question.into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    let ranked_paths: Vec<&str> = ranked.iter().map(|entry| entry.path.as_str()).collect();
+    assert_eq!(
+        ranked_paths,
+        vec![format!("{base}/a").as_str(), format!("{base}/b").as_str()],
+        "ranked OR must return both partial matches, most relevant first, and exclude the \
+         unrelated record"
+    );
+
+    // `limit` truncates after ranking, so the top-1 request keeps the best hit.
+    let top_one = filesystem
+        .query(
+            &root,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: question.into(),
+                limit: 1,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        top_one.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        vec![format!("{base}/a").as_str()]
+    );
+
+    // A query with no content terms matches nothing rather than everything.
+    let stop_words_only = filesystem
+        .query(
+            &root,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: "and the of to".into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert!(stop_words_only.is_empty());
+
+    // ...and it stays "nothing" on a prefix where no FTS index was ever
+    // declared. Every case above declares the index first, so this is the one
+    // combination that can expose an ordering difference INSIDE a backend:
+    // libSQL resolves the FTS table before reading the query, PostgreSQL reads
+    // the query and never consults an index. The answer to "does a query with
+    // no content terms match anything" does not depend on an index, so it must
+    // not depend on which backend is bound.
+    let undeclared = VirtualPath::new(format!("{base}-undeclared")).unwrap();
+    let stop_words_only_undeclared = filesystem
+        .query(
+            &undeclared,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: "and the of to".into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await;
+    assert!(
+        matches!(&stop_words_only_undeclared, Ok(entries) if entries.is_empty()),
+        "a content-term-free ranked query must be an empty result on every backend even where no \
+         FTS index is declared, got {stop_words_only_undeclared:?}"
+    );
+
+    // Nesting a ranking filter inside a compound would discard the ordering.
+    let nested = filesystem
+        .query(
+            &root,
+            &Filter::And(vec![Filter::FtsRanked {
+                key: content,
+                query: question.into(),
+                limit: 10,
+            }]),
+            Page::default(),
+        )
+        .await;
+    assert!(
+        matches!(nested, Err(FilesystemError::Unsupported { .. })),
+        "nested FtsRanked must be Unsupported on every backend, got {nested:?}"
+    );
+}
+
+#[tokio::test]
+async fn libsql_ranked_fts_finds_paraphrased_recall_in_relevance_order() {
+    let filesystem = libsql_root().await;
+    ranked_fts_contract(&*filesystem, "/memory/ranked-fts").await;
+}
+
+#[tokio::test]
+async fn in_memory_ranked_fts_finds_paraphrased_recall_in_relevance_order() {
+    let filesystem = ironclaw_filesystem::InMemoryBackend::new();
+    ranked_fts_contract(&filesystem, "/memory/ranked-fts").await;
+}
+
 /// Shared cross-backend body: an ordered-index spec declared on an ancestor
 /// prefix serves queries at child paths, and those queries stay scoped to the
 /// queried child subtree.
@@ -2567,6 +2742,14 @@ mod postgres_tests {
             return;
         };
         super::ancestor_declared_ordered_index_contract(&fs, &prefix).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_ranked_fts_finds_paraphrased_recall_in_relevance_order() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        super::ranked_fts_contract(&fs, &prefix).await;
     }
 
     #[tokio::test]

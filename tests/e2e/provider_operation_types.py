@@ -21,6 +21,15 @@ ProviderService = Literal["google", "github", "slack"]
 # failures belong to the reusable fault profiles, not here.
 OutcomeClass = Literal["success", "empty"]
 
+# The terminal capability status the case expects on the timeline. Almost
+# every case completes; the exception is a single-item read whose canonical
+# output REQUIRES the item (e.g. get_message), where "no result" has no empty
+# success shape by contract — its `empty` outcome class is the typed,
+# model-visible miss (a `failed` preview naming the standard taxonomy code),
+# which is exactly the no-results-vs-call-failed distinction the class exists
+# to prove.
+ExpectedCapabilityStatus = Literal["completed", "failed"]
+
 
 @dataclass(frozen=True)
 class ProviderOperationCase:
@@ -33,6 +42,12 @@ class ProviderOperationCase:
     assert_baseline: BaselineAssertion
     assert_outcome: OutcomeAssertion
     outcome_class: OutcomeClass = "success"
+    expected_status: ExpectedCapabilityStatus = "completed"
+    # Required whenever expected_status == "failed": the substring the failed
+    # tool result must carry, forwarded to the mock-LLM trace replayer as
+    # `expected_failed_tool_result_contains` (the replayer otherwise treats
+    # ANY failed capability result as a replay error).
+    expected_failed_tool_result_contains: str | None = None
     expected_request_count: int = 1
     setup_provider_proxy: ProviderProxySetup | None = None
     expect_provider_forward: bool = True

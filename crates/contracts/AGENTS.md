@@ -140,8 +140,8 @@ All gates live in `crates/app/ironclaw_architecture_tests` (run:
 
 ## Sources
 
-- Design record: [`docs/reborn/target-architecture/families/contracts.md`](../../docs/reborn/target-architecture/families/contracts.md);
+- Design record: [`docs/internal/reborn/target-architecture/families/contracts.md`](../../docs/internal/reborn/target-architecture/families/contracts.md);
   PROPOSAL §6.1 (per-crate as-built inventories), §8 (dependency model).
-- Conventions this file follows: [`docs/reborn/guidance-conventions.md`](../../docs/reborn/guidance-conventions.md).
+- Conventions this file follows: [`docs/internal/reborn/guidance-conventions.md`](../../docs/internal/reborn/guidance-conventions.md).
 - Moving a crate between families is not a rename — the family word never
   enters the crate name (PROPOSAL §5.1).

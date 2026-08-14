@@ -752,6 +752,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
     ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::operator_llm::{
+    LlmConfigService, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
+};
 use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
@@ -929,6 +932,109 @@ impl HostManagedModelGateway for RecordingGateway {
             self.reply.clone(),
         ))
     }
+}
+
+#[tokio::test]
+async fn standalone_cli_send_uses_saved_user_model_preference() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let standalone_root = root.path().join("standalone");
+    std::fs::create_dir_all(&standalone_root).expect("standalone root");
+    std::fs::write(
+        standalone_root.join(crate::factory::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        format!(
+            "{}\n",
+            ironclaw_secrets::keychain::generate_master_key_hex()
+        ),
+    )
+    .expect("seed standalone secrets master key");
+    let config_home_dir = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home_dir).expect("config home dir");
+    let home = RebornHome::resolve_from_env_parts(
+        Some(config_home_dir.as_os_str().to_os_string()),
+        None,
+        None,
+    )
+    .expect("valid reborn home");
+    std::fs::write(
+        home.config_file_path(),
+        "[llm.default]\nprovider_id = \"ollama\"\nmodel = \"workspace-default\"\n",
+    )
+    .expect("write config.toml");
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let gateway = Arc::new(RecordingGateway {
+        reply: "preferred model reply".to_string(),
+        requests: Arc::clone(&requests),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input("runtime-cli-model-owner", standalone_root)
+            .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_boot_config(RebornBootConfig::new(home, RebornProfile::Standalone))
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-cli-model-tenant".to_string(),
+        agent_id: "runtime-cli-model-agent".to_string(),
+        source_binding_id: "runtime-cli-model-source".to_string(),
+        reply_target_binding_id: "runtime-cli-model-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new("runtime-cli-model-tenant").expect("tenant"),
+        UserId::new("runtime-cli-model-owner").expect("user"),
+        Some(AgentId::new("runtime-cli-model-agent").expect("agent")),
+        None,
+    );
+    let llm_config = runtime
+        .llm_config_service
+        .as_ref()
+        .expect("boot config wires model selection");
+    llm_config
+        .set_user_model_policy(
+            caller.clone().with_operator_config(true),
+            SetUserModelPolicyRequest {
+                workspace_default: "workspace-default".to_string(),
+                allowed_models: vec![
+                    "workspace-default".to_string(),
+                    "preferred-model".to_string(),
+                ],
+            },
+        )
+        .await
+        .expect("model policy is stored");
+    llm_config
+        .set_user_model_preference(
+            caller,
+            SetUserModelPreferenceRequest {
+                model: Some("preferred-model".to_string()),
+            },
+        )
+        .await
+        .expect("model preference is stored");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .send_user_message(&conversation, "use my saved model")
+        .await
+        .expect("CLI message sends");
+
+    {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1, "one model call should be made");
+        let request = &requests[0];
+        let route = request
+            .resolved_model_route
+            .as_ref()
+            .expect("saved preference should reach the model gateway");
+        assert!(route.is_advisory());
+        assert_eq!(route.model_id(), "preferred-model");
+    }
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[async_trait]

@@ -81,6 +81,6 @@ cargo test -p ironclaw_architecture_tests   # sandbox-core scan + egress scan + 
 Working rules and safety rules: [`AGENTS.md`](./AGENTS.md) (canonical —
 gate-pinned wording). Family boundary:
 [`crates/lanes/AGENTS.md`](../AGENTS.md), including why `wit/` living here is
-load-bearing. Contracts: `docs/reborn/contracts/wasm.md`,
-`docs/reborn/contracts/runtime-workflows.md`,
-`docs/reborn/contracts/network.md`. Design record: PROPOSAL §6.6.1.
+load-bearing. Contracts: `docs/internal/reborn/contracts/wasm.md`,
+`docs/internal/reborn/contracts/runtime-workflows.md`,
+`docs/internal/reborn/contracts/network.md`. Design record: PROPOSAL §6.6.1.

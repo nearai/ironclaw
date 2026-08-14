@@ -109,7 +109,7 @@
 **Files:**
 - Modify: `crates/extensions/packages/slack/manifest.toml`
 - Modify: `crates/extensions/packages/telegram/manifest.toml`
-- Modify: `docs/reborn/contracts/conversation-binding.md`
+- Modify: `docs/internal/reborn/contracts/conversation-binding.md`
 - Modify: `docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md`
 
 **Interfaces:**

@@ -163,7 +163,7 @@ git commit -m "feat(libsql): add shared read and writer runtime"
 - Modify: `crates/ironclaw_filesystem/src/libsql.rs`
 - Delete: `crates/ironclaw_filesystem/src/libsql_pool.rs`
 - Test: `crates/ironclaw_filesystem/src/libsql.rs`
-- Modify: `docs/reborn/contracts/filesystem.md`
+- Modify: `docs/internal/reborn/contracts/filesystem.md`
 
 **Interfaces:**
 - Consumes: `Arc<LibSqlRuntime>`, `LibSqlRuntime::read`, and `LibSqlRuntime::write`
@@ -258,7 +258,7 @@ Expected: all pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/ironclaw_filesystem docs/reborn/contracts/filesystem.md
+git add crates/ironclaw_filesystem docs/internal/reborn/contracts/filesystem.md
 git commit -m "refactor(filesystem): use shared libsql writer lane"
 ```
 
@@ -275,8 +275,8 @@ git commit -m "refactor(filesystem): use shared libsql writer lane"
 - Modify: `crates/ironclaw_composition/Cargo.toml`
 - Modify: `crates/ironclaw_composition/src/factory.rs`
 - Test: `crates/ironclaw_composition/src/factory.rs`
-- Modify: `docs/reborn/contracts/triggers.md`
-- Modify: `docs/reborn/contracts/events.md`
+- Modify: `docs/internal/reborn/contracts/triggers.md`
+- Modify: `docs/internal/reborn/contracts/events.md`
 
 **Interfaces:**
 - Consumes: `Arc<LibSqlRuntime>`
@@ -379,7 +379,7 @@ Expected: all pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/ironclaw_triggers crates/ironclaw_event_store crates/ironclaw_composition docs/reborn/contracts/triggers.md docs/reborn/contracts/events.md
+git add crates/ironclaw_triggers crates/ironclaw_event_store crates/ironclaw_composition docs/internal/reborn/contracts/triggers.md docs/internal/reborn/contracts/events.md
 git commit -m "fix(composition): share one libsql runtime"
 ```
 
@@ -392,7 +392,7 @@ git commit -m "fix(composition): share one libsql runtime"
 - Modify: `crates/ironclaw_turns/src/turn_state_row_store/row_store/write_behind.rs`
 - Modify: `crates/ironclaw_turns/src/turn_state_row_store/row_store.rs`
 - Modify: `crates/ironclaw_turns/tests/row_store_crash_consistency.rs`
-- Modify: `docs/reborn/contracts/turn-persistence.md`
+- Modify: `docs/internal/reborn/contracts/turn-persistence.md`
 
 **Interfaces:**
 - Consumes: `FilesystemError::BackendBusy`
@@ -498,7 +498,7 @@ closed with no later durable gap; the full crash-consistency suite passes.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/ironclaw_turns docs/reborn/contracts/turn-persistence.md
+git add crates/ironclaw_turns docs/internal/reborn/contracts/turn-persistence.md
 git commit -m "fix(turns): recover journal after transient backend contention"
 ```
 
@@ -578,7 +578,7 @@ only the required lockfile update.
 - [ ] **Step 5: Commit any verification-only fixes**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/ironclaw_libsql_runtime crates/ironclaw_filesystem crates/ironclaw_triggers crates/ironclaw_event_store crates/ironclaw_composition crates/ironclaw_turns crates/ironclaw_architecture_tests docs/reborn/contracts
+git add Cargo.toml Cargo.lock crates/ironclaw_libsql_runtime crates/ironclaw_filesystem crates/ironclaw_triggers crates/ironclaw_event_store crates/ironclaw_composition crates/ironclaw_turns crates/ironclaw_architecture_tests docs/internal/reborn/contracts
 git commit -m "test(libsql): complete writer recovery coverage"
 ```
 

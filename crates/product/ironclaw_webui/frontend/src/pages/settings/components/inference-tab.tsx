@@ -7,8 +7,11 @@ import { ProviderManagement } from "./provider-management";
 import { SettingsGroup } from "./settings-field";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { useLlmProviders } from "../hooks/useLlmProviders";
+import { UserModelPreferenceSelector } from "./user-model-preference-selector";
+import { ModelSelectionPolicyEditor } from "./model-selection-policy-editor";
 
 export function InferenceTab({
+  isAdmin = false,
   settings,
   gatewayStatus,
   onSave,
@@ -21,10 +24,12 @@ export function InferenceTab({
   // same query the provider list below renders from) rather than the empty
   // settings/gatewayStatus stubs, which left the Model field showing "—".
   // Shares the `["llm-providers"]` react-query cache, so no extra fetch.
-  const { activeProviderId, selectedModel, providers, hasActiveProvider } = useLlmProviders({
+  const providerState = useLlmProviders({
     settings,
     gatewayStatus,
+    enabled: isAdmin,
   });
+  const { activeProviderId, selectedModel, providers, hasActiveProvider } = providerState;
   if (isLoading) {
     return (<SettingsSkeleton />);
   }
@@ -59,13 +64,17 @@ export function InferenceTab({
     "near",
   ]);
 
-  if (!showProviderSummary && !showProviderManagement && sections.length === 0) {
+  if (isAdmin && !showProviderSummary && !showProviderManagement && sections.length === 0) {
     return (<SettingsSearchEmpty query={searchQuery} />);
   }
 
   return (
     <div className="space-y-5">
-      {showProviderSummary &&
+      {isAdmin && <ModelSelectionPolicyEditor providerState={providerState} />}
+
+      <UserModelPreferenceSelector />
+
+      {isAdmin && showProviderSummary &&
       (
       <Card padding="none" className="p-4 sm:p-5">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("inference.provider")}</h3>
@@ -89,7 +98,7 @@ export function InferenceTab({
       </Card>
       )}
 
-      {showProviderManagement &&
+      {isAdmin && showProviderManagement &&
       (
         <ProviderManagement
           settings={settings}
@@ -98,7 +107,7 @@ export function InferenceTab({
         />
       )}
 
-      {sections.map(
+      {isAdmin && sections.map(
         (section) =>
           (
             <SettingsGroup

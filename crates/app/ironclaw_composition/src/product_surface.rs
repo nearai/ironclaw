@@ -31,6 +31,7 @@ use ironclaw_product_contracts::surface::{
 
 use ironclaw_triggers::TriggerRepository;
 
+use crate::model_gateway_assembly::RebornLlmReloadParts;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
@@ -43,9 +44,11 @@ use ironclaw_assistant::{
     RebornOutboundPreferencesService, notification_channels_set_operator_tool_info,
     outbound_delivery_synthetic_provider,
 };
+use ironclaw_config::RebornBootConfig;
 use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
 use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
 use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
@@ -307,23 +310,39 @@ pub(crate) fn build_product_surface_with_channel_connection(
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn LlmConfigService>> {
-    let boot = runtime.webui_boot_config()?;
-    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
-        runtime.secret_store(),
-    ));
+    runtime
+        .llm_config_service
+        .clone()
+        .map(|service| service as _)
+}
+
+pub(crate) fn compose_llm_config_service(
+    boot: Option<&RebornBootConfig>,
+    keys: ironclaw_operator::LlmKeyStore,
+    scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    llm_reload: Option<&RebornLlmReloadParts>,
+) -> Option<Arc<ironclaw_operator::RebornLlmConfigService>> {
+    let boot = boot?;
     let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
-        Arc::clone(&runtime.scoped_filesystem),
+        Arc::clone(&scoped_filesystem),
     ));
-    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys)
-        .with_model_policy_store(model_policy_store);
-    if let Some(reload) = runtime.webui_llm_reload_trigger() {
-        llm_config = llm_config.with_reload_trigger(reload);
-    }
-    if let Some(session) = runtime.webui_llm_session() {
-        llm_config = llm_config.with_nearai_session(session);
-    }
-    if let Some(states) = runtime.webui_nearai_login_states() {
-        llm_config = llm_config.with_nearai_login_states(states);
+    let user_model_preference_store = Arc::new(
+        ironclaw_operator::FilesystemUserModelPreferenceStore::new(scoped_filesystem),
+    );
+    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys.clone())
+        .with_model_policy_store(model_policy_store)
+        .with_user_model_preference_store(user_model_preference_store);
+    if let Some(parts) = llm_reload {
+        let reload = Arc::new(ironclaw_operator::RebornLlmReloadAdapter::new(
+            boot.clone(),
+            Arc::clone(&parts.reload_handle),
+            Arc::clone(&parts.session),
+            keys.clone(),
+        ));
+        llm_config = llm_config
+            .with_reload_trigger(reload)
+            .with_nearai_session(Arc::clone(&parts.session))
+            .with_nearai_login_states(Arc::clone(&parts.nearai_login_states));
     }
     Some(Arc::new(llm_config))
 }

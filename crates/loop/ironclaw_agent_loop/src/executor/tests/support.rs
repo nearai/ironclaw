@@ -600,6 +600,7 @@ impl ContextStrategy for NoInlineContextStrategy {
 
 pub(super) struct StopAfterObservedTurns {
     turns_completed: u32,
+    kind: StopKind,
 }
 
 #[async_trait]
@@ -621,9 +622,7 @@ impl StopConditionStrategy for StopAfterObservedTurns {
         _just_completed: &TurnSummary,
     ) -> StopOutcome {
         if state.stop_state.turns_completed >= self.turns_completed {
-            StopOutcome::Stop {
-                kind: StopKind::GracefulStop,
-            }
+            StopOutcome::Stop { kind: self.kind }
         } else {
             StopOutcome::Continue {}
         }
@@ -1448,8 +1447,17 @@ pub(super) fn family_with_compaction_strategy(strategy: DefaultCompactionStrateg
 }
 
 pub(super) fn family_with_stop_after_observed_turns(turns_completed: u32) -> LoopFamily {
-    let planner = DefaultPlanner::compose_default()
-        .with_stop(Arc::new(StopAfterObservedTurns { turns_completed }));
+    family_with_stop_kind_after_observed_turns(turns_completed, StopKind::GracefulStop)
+}
+
+pub(super) fn family_with_stop_kind_after_observed_turns(
+    turns_completed: u32,
+    kind: StopKind,
+) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_stop(Arc::new(StopAfterObservedTurns {
+        turns_completed,
+        kind,
+    }));
     let id = LoopFamilyId::new("executor-stop-test").expect("valid test family id");
     let version = ComponentIdentity::from_static("executor-stop-test", ComponentDigest([6; 32]));
     LoopFamily::new(id, version, Arc::new(planner))

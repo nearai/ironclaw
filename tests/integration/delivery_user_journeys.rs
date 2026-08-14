@@ -248,6 +248,9 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
                 "mpim:read",
                 "users:read",
                 "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
             ],
         )
         .await

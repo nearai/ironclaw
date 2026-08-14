@@ -126,6 +126,13 @@ impl ChannelIngress for TelegramChannelAdapter {
                     pending_attachments,
                 } = *parsed;
                 let message = complete_message(message, pending_attachments, egress).await?;
+                if message.text.trim().is_empty() && message.attachments.is_empty() {
+                    // Nothing usable survived (e.g. a sticker-only update whose
+                    // transfer failed permanently, or an update type we carry
+                    // no content for): acknowledge instead of starting an
+                    // empty turn.
+                    return Ok(InboundOutcome::Ignore);
+                }
                 Ok(InboundOutcome::Messages(vec![message]))
             }
             TelegramInboundEvent::BatchFragment(parsed) => {
@@ -135,6 +142,9 @@ impl ChannelIngress for TelegramChannelAdapter {
                 } = *parsed;
                 fragment.message =
                     complete_message(fragment.message, pending_attachments, egress).await?;
+                // A degraded-to-empty fragment still ships: the batch key and
+                // order slot must survive so sibling fragments settle into one
+                // coherent message.
                 Ok(InboundOutcome::BatchFragment(Box::new(fragment)))
             }
         }
@@ -147,8 +157,37 @@ async fn complete_message(
     egress: &dyn RestrictedEgress,
 ) -> Result<NormalizedInboundMessage, ChannelError> {
     for pending in pending_attachments {
-        let fetched = crate::attachment_transfer::fetch_attachment(&pending, egress).await?;
-        message.attachments.push(pending.complete(fetched)?);
+        // A retryable transfer failure keeps failing the whole request so
+        // ingress answers 503 and vendor redelivery can succeed later with the
+        // full content. Every deterministic failure degrades to "message
+        // without this attachment" instead: failing the update would make
+        // Telegram redeliver a payload that can never improve, wedging the
+        // chat's in-order queue behind it.
+        let external_file_id = pending.descriptor.external_file_id.clone();
+        match crate::attachment_transfer::fetch_attachment(&pending, egress).await {
+            Ok(fetched) => match pending.complete(fetched) {
+                Ok(attachment) => message.attachments.push(attachment),
+                Err(error) => {
+                    tracing::debug!(
+                        %external_file_id,
+                        %error,
+                        "dropping telegram attachment whose fetched bytes failed completion"
+                    );
+                }
+            },
+            Err(
+                error @ ChannelError::AttachmentTransfer {
+                    retryable: true, ..
+                },
+            ) => return Err(error),
+            Err(error) => {
+                tracing::debug!(
+                    %external_file_id,
+                    %error,
+                    "dropping telegram attachment after a non-retryable transfer failure"
+                );
+            }
+        }
     }
     Ok(message)
 }

@@ -66,9 +66,27 @@ fn slack_error_requires_reauth(code: &str) -> bool {
 fn slack_error_to_standard_code(code: &str) -> &'static str {
     match code {
         "channel_not_found" => "messaging.unknown_conversation",
+        // `thread_not_found` is Slack's answer when a ts anchors no thread —
+        // for the ops that address one message, that is the message ref not
+        // resolving, not a conversation problem.
+        "message_not_found" | "thread_not_found" => "messaging.unknown_message",
         "user_not_found" => "messaging.unknown_user",
         "not_in_channel" => "messaging.not_a_member",
-        "missing_scope" | "not_allowed_token_type" => "messaging.permission_denied",
+        // `cant_delete_message` is Slack's "not yours to delete" — an
+        // authorization answer about someone else's message, distinct from
+        // `cant_update_message`, which Slack also returns for its own edit
+        // window and therefore maps to `edit_not_allowed` below.
+        "missing_scope" | "not_allowed_token_type" | "cant_delete_message" => {
+            "messaging.permission_denied"
+        }
+        // The recipient exists and is reachable in principle, but Slack will
+        // not open free-form messaging to them.
+        "cannot_dm_bot" | "user_disabled" | "user_not_visible" => "messaging.cannot_message_user",
+        // `invalid_name` is Slack rejecting an emoji token it cannot render
+        // (unknown short name, or a unicode character where a name belongs).
+        "invalid_name" | "invalid_name_specials" | "no_item_specified" => {
+            "messaging.unsupported_content"
+        }
         "msg_too_long" => "messaging.message_too_long",
         // W16 (pre-merge amendment wave, verified defect): `no_text` means
         // Slack rejected the message body's CONTENT (empty after
@@ -103,6 +121,7 @@ fn slack_error_to_standard_code(code: &str) -> &'static str {
 fn standard_messaging_error_kind(standard_code: &str) -> &'static str {
     match standard_code {
         "messaging.unknown_conversation"
+        | "messaging.unknown_message"
         | "messaging.unknown_user"
         | "messaging.message_too_long"
         | "messaging.unsupported_content" => "input",
@@ -136,6 +155,17 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The pagination cursor of a Slack list-shaped response. Slack signals
+/// "no more pages" with an EMPTY `response_metadata.next_cursor`, so an
+/// empty cursor becomes `None` here — every paging operation shares this
+/// one reading of that contract.
+fn next_cursor_from_response(parsed: &serde_json::Value) -> Option<String> {
+    parsed["response_metadata"]["next_cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| cursor.to_string())
 }
 
 /// One Slack API failure, before taxonomy mapping. Kept distinct from the
@@ -368,10 +398,13 @@ fn raw_user_info(user_id: &str) -> Result<serde_json::Value, String> {
     slack_api_call("GET", &url, None)
 }
 
-/// Slack's display-name fallback chain: `display_name` -> `real_name` -> the
-/// raw username, first non-empty value wins.
-fn display_name_fallback_from_user_info(parsed: &serde_json::Value) -> Option<String> {
-    let profile = &parsed["user"]["profile"];
+/// Slack's display-name fallback chain over one USER object: `display_name`
+/// -> `real_name` -> the raw username, first non-empty value wins. Shared by
+/// `users.info` (which nests the user under a `user` key) and `users.list`
+/// (whose `members` entries are bare user objects), so the two can never
+/// disagree about what a person is called.
+fn display_name_fallback_from_user(user: &serde_json::Value) -> Option<String> {
+    let profile = &user["profile"];
     profile["display_name"]
         .as_str()
         .filter(|name| !name.is_empty())
@@ -380,12 +413,13 @@ fn display_name_fallback_from_user_info(parsed: &serde_json::Value) -> Option<St
                 .as_str()
                 .filter(|name| !name.is_empty())
         })
-        .or_else(|| {
-            parsed["user"]["name"]
-                .as_str()
-                .filter(|name| !name.is_empty())
-        })
+        .or_else(|| user["name"].as_str().filter(|name| !name.is_empty()))
         .map(|name| name.to_string())
+}
+
+/// [`display_name_fallback_from_user`] against a `users.info` response.
+fn display_name_fallback_from_user_info(parsed: &serde_json::Value) -> Option<String> {
+    display_name_fallback_from_user(&parsed["user"])
 }
 
 /// Resolve Slack user IDs to human-readable names via `users.info`, one
@@ -665,11 +699,7 @@ pub fn list_conversations(
         }
     }
 
-    // Slack signals "no more pages" with an empty next_cursor.
-    let next_cursor = parsed["response_metadata"]["next_cursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| cursor.to_string());
+    let next_cursor = next_cursor_from_response(&parsed);
 
     Ok(ListConversationsResult {
         conversations,
@@ -787,11 +817,7 @@ fn enriched_history_result(
     let mut messages = history_messages_from_response(conversation, parsed);
     enrich_messages(&mut messages);
 
-    // Slack signals "no more pages" with an empty next_cursor.
-    let next_cursor = parsed["response_metadata"]["next_cursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| cursor.to_string());
+    let next_cursor = next_cursor_from_response(parsed);
 
     ConversationHistoryResult {
         messages,
@@ -1057,7 +1083,7 @@ pub fn send_message(
     conversation: &str,
     text: &str,
     thread: Option<&str>,
-    reply_to: Option<&ReplyToRef>,
+    reply_to: Option<&MessageRefInput>,
 ) -> Result<SendMessageResult, String> {
     let effective_thread_ts =
         thread.or_else(|| reply_to.map(|reply_to| reply_to.message_id.as_str()));
@@ -1091,4 +1117,815 @@ pub fn send_message(
             message_id: reply_to.message_id.clone(),
         }),
     })
+}
+
+/// Echo an input `message_ref` back as evidence. Used where Slack confirms an
+/// operation with `ok: true` but does not restate the address it acted on.
+fn echo_message_ref(message_ref: &MessageRefInput) -> MessageRef {
+    MessageRef {
+        conversation: message_ref.conversation.clone(),
+        message_id: message_ref.message_id.clone(),
+    }
+}
+
+/// The `{"channel": …, "ts": …}` body every message-addressing write shares.
+fn message_ref_payload(message_ref: &MessageRefInput) -> serde_json::Value {
+    serde_json::json!({
+        "channel": message_ref.conversation,
+        "ts": message_ref.message_id,
+    })
+}
+
+/// Edit one of your own messages (`chat.update`).
+///
+/// Slack replaces the entire body — there is no partial edit — and rejects an
+/// edit of anyone else's message, or one past the workspace's edit window,
+/// with `cant_update_message` (`messaging.edit_not_allowed`).
+///
+/// Like `send_message`, a response missing `ts` is a vendor anomaly rather
+/// than an edit: it returns `messaging.vendor_error` and never a
+/// `message_ref` with an empty `message_id`.
+pub fn edit_message(
+    message_ref: &MessageRefInput,
+    text: &str,
+) -> Result<EditMessageResult, String> {
+    let mut payload = message_ref_payload(message_ref);
+    payload["text"] = serde_json::Value::String(text.to_string());
+    let payload = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+
+    let parsed = slack_api_call("POST", "chat.update", Some(&payload))?;
+
+    let Some(message_id) = parsed["ts"].as_str().filter(|ts| !ts.is_empty()) else {
+        return Err(structured_taxonomy_error("missing_ts_in_response"));
+    };
+    let conversation = parsed["channel"]
+        .as_str()
+        .filter(|conversation| !conversation.is_empty())
+        .unwrap_or(message_ref.conversation.as_str());
+
+    Ok(EditMessageResult {
+        message_ref: MessageRef {
+            conversation: conversation.to_string(),
+            message_id: message_id.to_string(),
+        },
+    })
+}
+
+/// Delete one of your own messages (`chat.delete`).
+///
+/// `ok: true` IS the evidence here — Slack confirms the removal rather than
+/// restating the message — so the returned ref falls back to the input
+/// address when the response omits it. `deleted` is always `true`: a delete
+/// that did not happen has already returned an error above.
+pub fn delete_message(message_ref: &MessageRefInput) -> Result<DeleteMessageResult, String> {
+    let payload =
+        serde_json::to_string(&message_ref_payload(message_ref)).map_err(|e| e.to_string())?;
+
+    let parsed = slack_api_call("POST", "chat.delete", Some(&payload))?;
+
+    let message_id = parsed["ts"]
+        .as_str()
+        .filter(|ts| !ts.is_empty())
+        .unwrap_or(message_ref.message_id.as_str());
+    let conversation = parsed["channel"]
+        .as_str()
+        .filter(|conversation| !conversation.is_empty())
+        .unwrap_or(message_ref.conversation.as_str());
+
+    Ok(DeleteMessageResult {
+        deleted: true,
+        message_ref: MessageRef {
+            conversation: conversation.to_string(),
+            message_id: message_id.to_string(),
+        },
+    })
+}
+
+/// Normalize a caller-supplied emoji token to the bare Slack short name.
+///
+/// Slack's reaction endpoints take `thumbsup`, never `:thumbsup:`, and reject
+/// unicode characters outright — so the wrapping colons the model is likely
+/// to write are stripped rather than passed through to a guaranteed
+/// `invalid_name`. Anything else is left alone for Slack to judge.
+fn normalize_emoji(emoji: &str) -> String {
+    emoji.trim().trim_matches(':').trim().to_string()
+}
+
+/// `reactions.add`/`reactions.remove` share this body shape.
+fn reaction_payload(message_ref: &MessageRefInput, name: &str) -> Result<String, String> {
+    serde_json::to_string(&serde_json::json!({
+        "channel": message_ref.conversation,
+        "timestamp": message_ref.message_id,
+        "name": name,
+    }))
+    .map_err(|e| e.to_string())
+}
+
+/// Slack's "you already reacted with this" code — `reactions.add`'s
+/// end-state-already-holds answer.
+const ALREADY_REACTED: &str = "already_reacted";
+/// Slack's "that reaction is not there" code — `reactions.remove`'s.
+const NO_REACTION: &str = "no_reaction";
+
+/// Collapse a reaction write's outcome, treating ONE vendor code as success:
+/// the code that means the requested end state already holds.
+///
+/// Slack returns `already_reacted`/`no_reaction` only for a message it
+/// resolved and a reaction it can see, so the caller's intent is satisfied
+/// either way. Reporting that as an error would push the model into retrying
+/// a call that cannot change anything. Every other failure still maps through
+/// the closed taxonomy — including the OTHER family's idempotent code, which
+/// is a genuine vendor error on the wrong endpoint.
+fn reaction_write_outcome(
+    result: Result<serde_json::Value, RawSlackFailure>,
+    end_state_code: &str,
+) -> Result<(), String> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(RawSlackFailure::Vendor(code)) if code == end_state_code => Ok(()),
+        Err(failure) => Err(structured_error_for(failure)),
+    }
+}
+
+/// Add an emoji reaction to a message, as the connected account.
+pub fn add_reaction(
+    message_ref: &MessageRefInput,
+    emoji: &str,
+) -> Result<AddReactionResult, String> {
+    let name = normalize_emoji(emoji);
+    if name.is_empty() {
+        return Err(structured_error("messaging.unsupported_content", "input"));
+    }
+    let payload = reaction_payload(message_ref, &name)?;
+
+    reaction_write_outcome(
+        slack_api_call_raw("POST", "reactions.add", Some(&payload)),
+        ALREADY_REACTED,
+    )?;
+
+    Ok(AddReactionResult {
+        message_ref: echo_message_ref(message_ref),
+        emoji: name,
+    })
+}
+
+/// Remove one named reaction.
+fn remove_one_reaction(message_ref: &MessageRefInput, name: &str) -> Result<(), String> {
+    let payload = reaction_payload(message_ref, name)?;
+    reaction_write_outcome(
+        slack_api_call_raw("POST", "reactions.remove", Some(&payload)),
+        NO_REACTION,
+    )
+}
+
+/// The emoji names the CONNECTED account has reacted with on one message
+/// (`reactions.get`, `reactions:read`).
+///
+/// The identity is load-bearing rather than decorative here — without it
+/// there is no way to tell the connected account's reactions from anyone
+/// else's — so unlike the best-effort identity marking on reads, an
+/// `auth.test` failure fails the call instead of degrading it. Removing
+/// someone else's reaction is the failure this guards against.
+fn own_reaction_names(message_ref: &MessageRefInput) -> Result<Vec<String>, String> {
+    let (current_user_id, _team_id) = auth_test()?;
+    // `full=true` is load-bearing: without it Slack truncates each
+    // reaction's `users` array on popular messages, and a truncated list
+    // that omits the connected account would make the ownership filter
+    // below silently skip a reaction that IS ours — a false "all removed"
+    // success.
+    let url = format!(
+        "reactions.get?channel={}&timestamp={}&full=true",
+        url_encode(&message_ref.conversation),
+        url_encode(&message_ref.message_id)
+    );
+    let parsed = slack_api_call("GET", &url, None)?;
+    Ok(own_reaction_names_from_response(&parsed, &current_user_id))
+}
+
+/// The decision half of [`own_reaction_names`], over an already-parsed
+/// `reactions.get` response: which emoji names did THIS user react with.
+///
+/// Split out from the request so it can be tested — an inverted or absent
+/// filter here removes other people's reactions, which is the one outcome
+/// this operation must never produce, and no schema or taxonomy check
+/// downstream would notice.
+fn own_reaction_names_from_response(
+    parsed: &serde_json::Value,
+    current_user_id: &str,
+) -> Vec<String> {
+    let Some(reactions) = parsed["message"]["reactions"].as_array() else {
+        return Vec::new();
+    };
+    reactions
+        .iter()
+        .filter(|reaction| {
+            // A reaction with no `users` array tells us nothing about
+            // authorship, so it is NOT ours — absence of evidence is not
+            // evidence of ownership.
+            reaction["users"].as_array().is_some_and(|users| {
+                users
+                    .iter()
+                    .any(|user| user.as_str() == Some(current_user_id))
+            })
+        })
+        .filter_map(|reaction| {
+            reaction["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string())
+        })
+        .collect()
+}
+
+/// Remove a reaction from a message, as the connected account.
+///
+/// With `emoji`, one named reaction is removed and echoed back. Without it,
+/// the canonical contract asks for "the connected account's own reaction(s)"
+/// — Slack's endpoint cannot express that, so this reads the message's
+/// reactions first and removes each one the connected account added. That
+/// variant names no single emoji on the way out, which is exactly the case
+/// the canonical output schema leaves `emoji` optional for.
+pub fn remove_reaction(
+    message_ref: &MessageRefInput,
+    emoji: Option<&str>,
+) -> Result<RemoveReactionResult, String> {
+    match emoji {
+        Some(emoji) => {
+            let name = normalize_emoji(emoji);
+            if name.is_empty() {
+                return Err(structured_error("messaging.unsupported_content", "input"));
+            }
+            remove_one_reaction(message_ref, &name)?;
+            Ok(RemoveReactionResult {
+                message_ref: echo_message_ref(message_ref),
+                emoji: Some(name),
+            })
+        }
+        None => {
+            for name in own_reaction_names(message_ref)? {
+                remove_one_reaction(message_ref, &name)?;
+            }
+            Ok(RemoveReactionResult {
+                message_ref: echo_message_ref(message_ref),
+                emoji: None,
+            })
+        }
+    }
+}
+
+/// Open, or fetch the already-open, DM with one person
+/// (`conversations.open`, `im:write`).
+///
+/// Slack returns the existing DM when one is already open, so this is safe to
+/// call repeatedly and never creates a duplicate conversation.
+pub fn open_dm(user_ref: &str) -> Result<OpenDmResult, String> {
+    // Slack's `users` field takes a comma-separated LIST: two ids would
+    // silently open a multi-person group DM while every contract layer
+    // promises the 1:1 DM with one person. Requiring a single well-formed
+    // user id here (commas and lowercase both fail the check) keeps that
+    // promise instead of delegating it to the model's good behavior.
+    if !is_slack_user_id(user_ref) {
+        return Err(structured_error("messaging.unknown_user", "input"));
+    }
+    let payload = serde_json::to_string(&serde_json::json!({ "users": user_ref }))
+        .map_err(|e| e.to_string())?;
+
+    let parsed = slack_api_call("POST", "conversations.open", Some(&payload))?;
+
+    let conversation = parsed["channel"]["id"]
+        .as_str()
+        .filter(|conversation| !conversation.is_empty())
+        .ok_or_else(|| structured_taxonomy_error("open_dm_missing_conversation"))?;
+
+    Ok(OpenDmResult {
+        conversation: conversation.to_string(),
+    })
+}
+
+/// Find the message whose `ts` matches EXACTLY inside a history/replies
+/// response. Exactness is the whole point: `conversations.history`'s `latest`
+/// is a range bound, so a ts that no longer exists would otherwise hand back
+/// whichever message sits just before it as though it were the one asked for.
+fn exact_message(
+    conversation: &str,
+    target_ts: &str,
+    parsed: &serde_json::Value,
+) -> Option<Message> {
+    parsed["messages"]
+        .as_array()?
+        .iter()
+        .find(|value| value["ts"].as_str() == Some(target_ts))
+        .and_then(|value| history_message_from_value(conversation, value))
+}
+
+/// Fetch one message by reference.
+///
+/// Slack has no single-message endpoint. `conversations.history` addresses the
+/// conversation timeline, but a threaded REPLY is not on that timeline, so a
+/// miss falls back to `conversations.replies`, which returns the whole thread
+/// a ts belongs to. Only an exact ts match is ever returned; anything else is
+/// `messaging.unknown_message` rather than a neighbouring message.
+pub fn get_message(message_ref: &MessageRefInput) -> Result<GetMessageResult, String> {
+    let conversation = message_ref.conversation.as_str();
+    let target_ts = message_ref.message_id.as_str();
+
+    let history_url = format!(
+        "conversations.history?channel={}&latest={}&inclusive=true&limit=1",
+        url_encode(conversation),
+        url_encode(target_ts)
+    );
+    let parsed = slack_api_call("GET", &history_url, None)?;
+    let mut found = exact_message(conversation, target_ts, &parsed);
+
+    if found.is_none() {
+        // Slack rejects a ts that anchors no thread with `thread_not_found`;
+        // that is this ref not resolving, which the taxonomy already calls
+        // `unknown_message` — fall through to the shared miss below rather
+        // than surfacing it as a distinct failure.
+        //
+        // `oldest=latest=ts&inclusive=true` pinches the range to exactly the
+        // target timestamp, so the page holds the target (plus at most the
+        // quirk where Slack prepends the thread parent to a first page) no
+        // matter how deep in the thread it sits and regardless of the
+        // endpoint's sort order — where a bare `limit=N` page starts at one
+        // end of the thread and misses anything past N. `limit=5` is quirk
+        // headroom, not a scan.
+        let replies_url = format!(
+            "conversations.replies?channel={}&ts={}&oldest={}&latest={}&inclusive=true&limit=5",
+            url_encode(conversation),
+            url_encode(target_ts),
+            url_encode(target_ts),
+            url_encode(target_ts)
+        );
+        match slack_api_call_raw("GET", &replies_url, None) {
+            Ok(parsed) => found = exact_message(conversation, target_ts, &parsed),
+            Err(RawSlackFailure::Vendor(code)) if code == "thread_not_found" => {}
+            Err(failure) => return Err(structured_error_for(failure)),
+        }
+    }
+
+    let Some(message) = found else {
+        return Err(structured_error("messaging.unknown_message", "input"));
+    };
+
+    let mut messages = vec![message];
+    enrich_messages(&mut messages);
+    let Some(message) = messages.pop() else {
+        return Err(structured_taxonomy_error(
+            "message_enrichment_dropped_message",
+        ));
+    };
+
+    Ok(GetMessageResult { message })
+}
+
+/// The largest `users.list` page one `resolve_user` call scans, and the
+/// default when the caller names no `limit` (Slack's recommended page size).
+///
+/// The requested page size and the match cap are deliberately the SAME
+/// number: Slack cursors resume at page granularity only, so a call that
+/// stopped collecting matches mid-page would return a `next_cursor` that
+/// skips the rest of that page — matches the caller can never reach. Scanning
+/// exactly `limit` entries per call keeps every cursor loss-free.
+const RESOLVE_USER_SCAN_PAGE: u32 = 200;
+
+/// One `users.list` member as a canonical person, when it is an eligible
+/// human AND `needle` (already lowercased) matches its display name, real
+/// name, or handle.
+///
+/// The matching half of [`resolve_user`], split from the request so the
+/// eligibility rules and the case-insensitive comparison are testable — this
+/// is the only thing standing between the model and a directory scan that
+/// returns deactivated accounts or bots as people to message.
+fn matching_person_from_member(member: &serde_json::Value, needle: &str) -> Option<Author> {
+    if member["deleted"].as_bool().unwrap_or(false) || member["is_bot"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let user_ref = member["id"].as_str().filter(|id| !id.is_empty())?;
+    let display_name = display_name_fallback_from_user(member);
+    let matched = [
+        display_name.as_deref(),
+        member["profile"]["real_name"].as_str(),
+        member["name"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| candidate.to_lowercase().contains(needle));
+
+    matched.then(|| Author {
+        user_ref: user_ref.to_string(),
+        display_name,
+    })
+}
+
+/// The member ids in a `conversations.members` response, dropping empties so
+/// a blank entry never becomes a `user_ref` the canonical schema rejects for
+/// `minLength: 1`.
+fn member_ids_from_response(parsed: &serde_json::Value) -> Vec<String> {
+    parsed["members"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|member| member.as_str())
+                .filter(|member| !member.is_empty())
+                .map(|member| member.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Search the workspace directory for people.
+///
+/// Slack has no server-side people search for user tokens
+/// (`users.lookupByEmail` needs `users:read.email`, which this extension does
+/// not request), so one call scans a single `users.list` page and filters it
+/// locally against display name, real name, and handle. `next_cursor` walks
+/// the directory onward, so a caller that has not found their person yet
+/// keeps paging. Deactivated accounts and bots are skipped.
+///
+/// The scanned page IS `limit` entries long (see [`RESOLVE_USER_SCAN_PAGE`]):
+/// every entry fetched is scanned before the cursor is reported, so
+/// `next_cursor` never points past a match this call withheld.
+pub fn resolve_user(
+    query: &str,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<ResolveUserResult, String> {
+    let limit = limit
+        .unwrap_or(RESOLVE_USER_SCAN_PAGE)
+        .clamp(1, RESOLVE_USER_SCAN_PAGE);
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Err(structured_error("messaging.unsupported_content", "input"));
+    }
+
+    let mut url = format!("users.list?limit={limit}");
+    if let Some(cursor) = cursor {
+        url.push_str(&format!("&cursor={}", url_encode(cursor)));
+    }
+    let parsed = slack_api_call("GET", &url, None)?;
+
+    let mut matches = Vec::new();
+    for member in parsed["members"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        // With page == limit this cap can only trigger if Slack overshoots
+        // the requested page size; it preserves the "at most `limit`
+        // matches" contract without ever stopping mid-scan on a well-formed
+        // page.
+        if matches.len() >= limit as usize {
+            break;
+        }
+        if let Some(person) = matching_person_from_member(member, &needle) {
+            matches.push(person);
+        }
+    }
+
+    let next_cursor = next_cursor_from_response(&parsed);
+
+    Ok(ResolveUserResult {
+        matches,
+        next_cursor,
+    })
+}
+
+/// List the members of a channel, group DM, or DM
+/// (`conversations.members`).
+///
+/// Display names are resolved best-effort under the shared
+/// [`MAX_USER_NAME_LOOKUPS`] budget: members past it keep their raw id rather
+/// than failing the read, the same degraded shape every other read uses.
+pub fn list_members(
+    conversation: &str,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<ListMembersResult, String> {
+    // Slack rejects limit=1000; 999 is the real maximum.
+    let limit = limit.unwrap_or(100).clamp(1, 999);
+    let mut url = format!(
+        "conversations.members?channel={}&limit={}",
+        url_encode(conversation),
+        limit
+    );
+    if let Some(cursor) = cursor {
+        url.push_str(&format!("&cursor={}", url_encode(cursor)));
+    }
+
+    let parsed = slack_api_call("GET", &url, None)?;
+
+    let member_ids = member_ids_from_response(&parsed);
+
+    let names = resolve_user_display_names(
+        member_ids
+            .iter()
+            .filter(|member| is_slack_user_id(member))
+            .cloned(),
+    );
+    let members = member_ids
+        .into_iter()
+        .map(|user_ref| Author {
+            display_name: names.get(&user_ref).cloned(),
+            user_ref,
+        })
+        .collect();
+
+    let next_cursor = next_cursor_from_response(&parsed);
+
+    Ok(ListMembersResult {
+        members,
+        next_cursor,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only pure mapping helpers are exercised here: everything else in this
+    /// module reaches the host HTTP import, which does not exist on the test
+    /// target.
+    #[test]
+    fn emoji_tokens_lose_their_wrapping_colons() {
+        // What the model is most likely to write, and what Slack requires.
+        assert_eq!(normalize_emoji(":thumbsup:"), "thumbsup");
+        assert_eq!(normalize_emoji("thumbsup"), "thumbsup");
+        assert_eq!(normalize_emoji("  :tada:  "), "tada");
+        // Slack's own skin-tone and compound names survive untouched.
+        assert_eq!(normalize_emoji(":+1::skin-tone-2:"), "+1::skin-tone-2");
+        // Degenerate input normalizes to empty, which both reaction ops turn
+        // into `messaging.unsupported_content` rather than calling Slack.
+        assert_eq!(normalize_emoji(":::"), "");
+        assert_eq!(normalize_emoji("   "), "");
+    }
+
+    /// A message-addressing write sends Slack's own field names (`channel`,
+    /// `ts`), never the canonical ones — the canonical vocabulary stops at
+    /// this module's boundary.
+    #[test]
+    fn message_ref_payload_uses_slack_field_names() {
+        let payload = message_ref_payload(&MessageRefInput {
+            conversation: "C1".to_string(),
+            message_id: "1751970001.000100".to_string(),
+        });
+        assert_eq!(
+            payload,
+            serde_json::json!({ "channel": "C1", "ts": "1751970001.000100" })
+        );
+    }
+
+    /// Reactions address the message with `timestamp`, NOT `ts` — Slack's one
+    /// inconsistency between the chat.* and reactions.* families, and a silent
+    /// `invalid_arguments` if it drifts.
+    #[test]
+    fn reaction_payload_addresses_the_message_with_timestamp() {
+        let payload = reaction_payload(
+            &MessageRefInput {
+                conversation: "C1".to_string(),
+                message_id: "1751970001.000100".to_string(),
+            },
+            "thumbsup",
+        )
+        .expect("payload serializes");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).expect("payload parses"),
+            serde_json::json!({
+                "channel": "C1",
+                "timestamp": "1751970001.000100",
+                "name": "thumbsup"
+            })
+        );
+    }
+
+    /// The vendor->canonical error map is the contract the model sees. These
+    /// pin the codes the new operations introduce, including the two that
+    /// deliberately do NOT collapse together: Slack returns
+    /// `cant_update_message` for its own edit window (edit_not_allowed) and
+    /// `cant_delete_message` for someone else's message (permission_denied).
+    #[test]
+    fn new_vendor_errors_map_onto_the_closed_taxonomy() {
+        for (slack_code, expected) in [
+            ("message_not_found", "messaging.unknown_message"),
+            ("thread_not_found", "messaging.unknown_message"),
+            ("cant_delete_message", "messaging.permission_denied"),
+            ("cant_update_message", "messaging.edit_not_allowed"),
+            ("cannot_dm_bot", "messaging.cannot_message_user"),
+            ("user_disabled", "messaging.cannot_message_user"),
+            ("invalid_name", "messaging.unsupported_content"),
+            ("user_not_found", "messaging.unknown_user"),
+            // Unmapped vendor codes still fall to the catch-all, never a raw
+            // or invented code.
+            ("some_new_slack_error", "messaging.vendor_error"),
+        ] {
+            assert_eq!(
+                slack_error_to_standard_code(slack_code),
+                expected,
+                "{slack_code}"
+            );
+        }
+    }
+
+    /// An unresolvable message ref must reach the model as retryable INPUT,
+    /// not as a terminal operation failure.
+    #[test]
+    fn unknown_message_is_an_input_class_failure() {
+        assert_eq!(
+            standard_messaging_error_kind("messaging.unknown_message"),
+            "input"
+        );
+        assert_eq!(
+            standard_messaging_error_kind("messaging.cannot_message_user"),
+            "operation_failed"
+        );
+    }
+
+    /// Credential problems are not taxonomy: they keep riding the
+    /// `AuthRequired` re-auth gate. A scope shortfall is deliberately NOT one
+    /// of them — re-running OAuth would request the same manifest scopes.
+    /// This is the behavior an account connected before the scope widening
+    /// hits on the three new write tools.
+    #[test]
+    fn a_missing_scope_is_a_denial_not_a_reauth() {
+        assert!(!slack_error_requires_reauth("missing_scope"));
+        assert_eq!(
+            slack_error_to_standard_code("missing_scope"),
+            "messaging.permission_denied"
+        );
+        assert!(slack_error_requires_reauth("token_revoked"));
+    }
+
+    /// The omit-emoji `remove_reaction` variant removes only what the
+    /// CONNECTED account reacted with. Removing someone else's reaction is
+    /// the one outcome the operation must never produce, and nothing
+    /// downstream would catch it — the output schema is satisfied either way.
+    #[test]
+    fn own_reactions_are_filtered_to_the_connected_account() {
+        let response = serde_json::json!({
+            "message": {
+                "reactions": [
+                    { "name": "thumbsup", "users": ["U_ME", "U_OTHER"] },
+                    { "name": "tada",     "users": ["U_OTHER"] },
+                    { "name": "eyes",     "users": ["U_ME"] }
+                ]
+            }
+        });
+        assert_eq!(
+            own_reaction_names_from_response(&response, "U_ME"),
+            vec!["thumbsup".to_string(), "eyes".to_string()],
+            "only reactions the connected account joined"
+        );
+        // A user who reacted with nothing removes nothing.
+        assert!(own_reaction_names_from_response(&response, "U_NOBODY").is_empty());
+    }
+
+    #[test]
+    fn reactions_without_evidence_of_authorship_are_never_ours() {
+        // No `users` array, an empty one, and a malformed entry: none of
+        // these say the connected account reacted, so none may be removed.
+        let response = serde_json::json!({
+            "message": {
+                "reactions": [
+                    { "name": "thumbsup" },
+                    { "name": "tada", "users": [] },
+                    { "name": "", "users": ["U_ME"] },
+                    { "name": "eyes", "users": ["U_ME"] }
+                ]
+            }
+        });
+        assert_eq!(
+            own_reaction_names_from_response(&response, "U_ME"),
+            vec!["eyes".to_string()]
+        );
+
+        // A message with no reactions at all, and a response missing the
+        // message entirely, both mean "nothing to remove" — not an error and
+        // not everything.
+        assert!(
+            own_reaction_names_from_response(&serde_json::json!({ "message": {} }), "U_ME")
+                .is_empty()
+        );
+        assert!(own_reaction_names_from_response(&serde_json::json!({}), "U_ME").is_empty());
+    }
+
+    /// `already_reacted`/`no_reaction` mean the requested end state holds, so
+    /// they are successes — but each belongs to ONE endpoint. The
+    /// cross-pairing assertions matter: they prove the codes are not a
+    /// blanket "reaction errors are fine" rule.
+    #[test]
+    fn reaction_writes_accept_only_their_own_end_state_code() {
+        let vendor = |code: &str| Err(RawSlackFailure::Vendor(code.to_string()));
+
+        assert!(reaction_write_outcome(Ok(serde_json::json!({})), ALREADY_REACTED).is_ok());
+        assert!(reaction_write_outcome(vendor(ALREADY_REACTED), ALREADY_REACTED).is_ok());
+        assert!(reaction_write_outcome(vendor(NO_REACTION), NO_REACTION).is_ok());
+
+        // The other family's code is a real error, not a free pass.
+        assert!(reaction_write_outcome(vendor(NO_REACTION), ALREADY_REACTED).is_err());
+        assert!(reaction_write_outcome(vendor(ALREADY_REACTED), NO_REACTION).is_err());
+
+        // Everything else still maps through the closed taxonomy.
+        let error = reaction_write_outcome(vendor("message_not_found"), ALREADY_REACTED)
+            .expect_err("an unresolvable message is a failure");
+        assert!(
+            error.contains("messaging.unknown_message"),
+            "expected the canonical code, got {error}"
+        );
+    }
+
+    /// `conversations.history`'s `latest` is a RANGE bound, so a timestamp
+    /// that no longer exists would otherwise hand back whichever message sits
+    /// just before it as though it were the one asked for.
+    #[test]
+    fn exact_message_requires_an_exact_timestamp_match() {
+        let response = serde_json::json!({
+            "messages": [
+                { "ts": "1751970000.000000", "user": "U1", "text": "the one before" }
+            ]
+        });
+        assert!(
+            exact_message("C1", "1751970001.000100", &response).is_none(),
+            "a near miss must not be returned as the requested message"
+        );
+
+        let response = serde_json::json!({
+            "messages": [
+                { "ts": "1751970000.000000", "user": "U1", "text": "the one before" },
+                { "ts": "1751970001.000100", "user": "U2", "text": "the one asked for" }
+            ]
+        });
+        let found = exact_message("C1", "1751970001.000100", &response)
+            .expect("the exact timestamp resolves");
+        assert_eq!(found.text, "the one asked for");
+        assert_eq!(found.message_ref.message_id, "1751970001.000100");
+        assert_eq!(found.message_ref.conversation, "C1");
+
+        assert!(exact_message("C1", "1751970001.000100", &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn directory_matching_is_case_insensitive_across_name_handle_and_real_name() {
+        let member = |extra: serde_json::Value| {
+            let mut base = serde_json::json!({
+                "id": "U1",
+                "name": "ahandle",
+                "profile": { "display_name": "Alice Example", "real_name": "Alice Q. Example" }
+            });
+            for (key, val) in extra.as_object().expect("object") {
+                base[key] = val.clone();
+            }
+            base
+        };
+        let none = serde_json::json!({});
+
+        for needle in [
+            "alice",
+            "ALICE".to_lowercase().as_str(),
+            "q. example",
+            "ahandle",
+        ] {
+            assert!(
+                matching_person_from_member(&member(none.clone()), needle).is_some(),
+                "{needle} should match"
+            );
+        }
+        assert!(matching_person_from_member(&member(none.clone()), "zzz").is_none());
+
+        // The match carries the resolved display name through.
+        let matched = matching_person_from_member(&member(none.clone()), "alice").expect("match");
+        assert_eq!(matched.user_ref, "U1");
+        assert_eq!(matched.display_name.as_deref(), Some("Alice Example"));
+    }
+
+    #[test]
+    fn directory_matching_skips_bots_deactivated_accounts_and_id_less_entries() {
+        let base = serde_json::json!({
+            "id": "U1",
+            "name": "alice",
+            "profile": { "display_name": "Alice" }
+        });
+
+        let mut bot = base.clone();
+        bot["is_bot"] = serde_json::json!(true);
+        assert!(matching_person_from_member(&bot, "alice").is_none());
+
+        let mut deleted = base.clone();
+        deleted["deleted"] = serde_json::json!(true);
+        assert!(matching_person_from_member(&deleted, "alice").is_none());
+
+        let mut id_less = base.clone();
+        id_less["id"] = serde_json::json!("");
+        assert!(matching_person_from_member(&id_less, "alice").is_none());
+
+        assert!(matching_person_from_member(&base, "alice").is_some());
+    }
+
+    #[test]
+    fn conversation_member_ids_drop_blanks_and_survive_an_absent_list() {
+        assert_eq!(
+            member_ids_from_response(&serde_json::json!({ "members": ["U1", "", "U2"] })),
+            vec!["U1".to_string(), "U2".to_string()]
+        );
+        assert!(member_ids_from_response(&serde_json::json!({})).is_empty());
+    }
 }

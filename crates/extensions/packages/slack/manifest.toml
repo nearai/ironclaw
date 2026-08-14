@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v3"
 id = "slack"
 name = "Slack"
 version = "0.1.0"
-description = "Slack: DM the assistant via the Slack Events API channel (workspace bot), and act as you via your own user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you."
+description = "Slack: DM the assistant via the Slack Events API channel (workspace bot), and act as you via your own user token (xoxp-): search and read all your messages, post, edit, delete, and react as you, open DMs, and look up people in your workspace."
 trust = "first_party_requested"
 
 [runtime]
@@ -31,12 +31,31 @@ fields = [
 # values for retired handles are inert; new saves fail closed as unknown
 # fields.
 
-# Least-privilege scopes: the read-only tools request only read scopes; only
-# send_message requests chat:write. The slack OAuth grant is the union of
-# these (the [auth.slack] recipe ceiling — a single account shared by all
-# tools), so a read-only user still grants chat:write while send_message is a
-# default tool. Reducing the grant for read-only users needs a write-opt-in /
+# Least-privilege scopes: the read-only tools request only read scopes; each
+# write tool adds exactly the scope its vendor call needs — chat:write
+# (send/edit/delete), reactions:read + reactions:write (the reaction pair),
+# im:write (open_dm). The slack OAuth grant is the union of these (the
+# [auth.slack] recipe ceiling — a single account shared by all tools), so a
+# read-only user still grants every write scope while the write tools are
+# default tools. Reducing the grant for read-only users needs a write-opt-in /
 # scope-upgrade re-consent flow — tracked separately.
+#
+# The union grew when the remaining eight core standard ops landed:
+# reactions:read, reactions:write, and im:write are the new members. An
+# account connected before that change holds a token without them, and the
+# HOST's credential staging — not Slack — is what answers those three tools:
+# runtime account selection requires the stored grant to carry each tool's
+# scopes (`runtime_selection_still_enforces_provider_scope_gate` in
+# ironclaw_auth), so the pre-widening account resolves to the AuthRequired
+# re-auth gate. Reconnecting through that gate requests THIS manifest's
+# widened union and updates the same account in place (OAuth binding
+# deliberately skips the scope gate), after which all sixteen tools work.
+# Slack's own missing_scope answer still exists for server-side drift on an
+# account that PASSED staging (a scope revoked after connect); the guest maps
+# that to messaging.permission_denied — a model-visible denial, not a re-auth
+# loop, because re-running OAuth would re-request exactly what the account
+# already claims to hold. Every pre-widening READ tool keeps working
+# untouched in the meantime.
 
 # ---- tool surfaces ---------------------------------------------------------
 
@@ -176,6 +195,151 @@ scopes = ["search:read", "channels:history", "groups:history", "im:history", "mp
 audience = { scheme = "https", host = "slack.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
+# The eight entries below complete Slack's coverage of the 16 core standard
+# messaging operations. They are appended rather than interleaved so the
+# v2-era eight keep their original positions, which the v2->v3 projection
+# parity gate compares positionally
+# (crates/app/ironclaw_composition/tests/first_party_manifest_v3_parity.rs).
+
+[[tools]]
+standard_op = "edit_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.edit_message"
+description = "Slack notes: text is Slack mrkdwn and replaces the whole message body — Slack has no partial edit. Only your own messages are editable, and a workspace may cap how long after posting. Requires the chat:write user scope."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/edit_message.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "delete_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.delete_message"
+description = "Slack notes: deletion is permanent and only your own messages can be deleted. Deleting a thread parent also removes its replies. Requires the chat:write user scope."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/delete_message.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "add_reaction"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.add_reaction"
+description = "Slack notes: emoji is a Slack short name without colons (`thumbsup`, not `:thumbsup:` — surrounding colons are stripped for you); unicode characters are not accepted. A reaction you have already added is reported as applied rather than as an error. Requires the reactions:write user scope."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/add_reaction.md"
+
+# reactions:write only — this tool calls reactions.add and nothing else. Its
+# sibling remove_reaction additionally reads (reactions.get) to find the
+# connected account's own reactions, so reactions:read belongs there alone.
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "reactions:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "remove_reaction"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.remove_reaction"
+description = "Slack notes: emoji is a Slack short name without colons (`thumbsup`, not `:thumbsup:`). Omit emoji to remove every reaction you personally added to the message — that variant reads the message's reactions first and needs the reactions:read user scope as well. Only your own reactions are ever removed. Requires the reactions:write user scope."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/remove_reaction.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "reactions:read", "reactions:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "open_dm"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.open_dm"
+description = "Slack notes: returns the existing DM when one is already open, so calling it twice is safe and never creates a duplicate. user_ref must be a real Slack user id (U…/W…) from a people operation — never a conversation id. Requires the im:write user scope."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/open_dm.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "im:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.get_message"
+description = "Slack notes: Slack has no single-message endpoint, so this reads the conversation at that exact timestamp and falls back to the thread when the message is a threaded reply; either way only an exact timestamp match is returned, never a neighbouring message. Raw Slack ids are for tool calls only — never include one in a reply."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/get_message.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "resolve_user"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.resolve_user"
+description = "Slack notes: Slack has no server-side people search, so this scans up to limit directory entries per call (default and max 200) and matches your query against display name, real name, and handle. Follow next_cursor to keep scanning when the person you want has not appeared yet. Deactivated accounts and bots are skipped."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/resolve_user.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "list_members"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "slack.list_members"
+description = "Slack notes: works on channels, group DMs, and DMs. Display names are resolved for a bounded prefix of the page; members past that budget come back as ids alone, so page with a smaller limit when you need every name."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+prompt_doc_ref = "prompts/slack/list_members.md"
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
 # ---- channel surface (at most one per extension) ---------------------------
 
 [channel]
@@ -305,7 +469,11 @@ authorization_endpoint = "https://slack.com/oauth/v2/authorize"
 token_endpoint = "https://slack.com/api/oauth.v2.access"
 scope_param = "user_scope"
 pkce = "s256"
-scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+# The union of every [[tools.credentials]] scope list above — one grant shared
+# by all tools. reactions:read/reactions:write/im:write joined it with the
+# reaction pair and open_dm; see the least-privilege note at the top of this
+# file for what that means for accounts connected before then.
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write", "reactions:read", "reactions:write", "im:write"]
 client_credentials = { client_id_handle = "slack_oauth_client_id", client_secret_handle = "slack_oauth_client_secret" }
 
 [auth.slack.token_response]

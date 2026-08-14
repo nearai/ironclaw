@@ -436,7 +436,7 @@ cargo run -q -p ironclaw --bin ironclaw -- onboard --force
 
 `--dry-run` reports what would be initialized without writing files.
 `--import-history` reserves the history-import step in the summary (not wired
-yet). See `docs/reborn/onboarding.md` for the full slice description and the
+yet). See `docs/internal/reborn/onboarding.md` for the full slice description and the
 completion-marker schema.
 
 ### `models list` / `models status` / `models set-provider`

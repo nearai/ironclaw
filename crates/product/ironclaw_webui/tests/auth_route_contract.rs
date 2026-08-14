@@ -13,7 +13,7 @@
 //!    without ever reaching the service.
 //! 3. `Bearer` prefix parsing is case-insensitive — parity with v1's
 //!    `auth.rs` extractor (documented as a KEEP in
-//!    `docs/reborn/security-parity/01-auth.md`).
+//!    `docs/internal/reborn/security-parity/01-auth.md`).
 //! 4. A session revoked directly through `SignedTokenSessionStore::revoke` stops
 //!    authenticating, isolated from the OAuth round-trip.
 //! 5. An expired session is rejected at the route layer (the

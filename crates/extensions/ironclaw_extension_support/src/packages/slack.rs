@@ -60,27 +60,40 @@ fn assets() -> Vec<super::PackageAsset> {
         };
     }
 
-    // All 8 [[tools]] entries are standard_op-bound (standardized messaging
-    // framework): the host resolves their input/output schemas from the
-    // compiled-in `ironclaw_host_api::messaging` registry via the
-    // synthesized `standard:messaging/<op>.v1` refs, never from a package
-    // asset — so no `schemas/slack/*.json` embed exists or is needed. Each
-    // entry keeps a package-owned prompt doc (`prompt_doc_ref`), still read
-    // from the materialized package root at surface publish. Pinned
-    // catalog-wide by `bundled_first_party_manifest_asset_refs_are_packaged`
-    // in `ironclaw_extension_host::available_extensions` (that function's
+    // All 16 [[tools]] entries are standard_op-bound (standardized messaging
+    // framework) — Slack binds every core operation: the host resolves their
+    // input/output schemas from the compiled-in
+    // `ironclaw_host_api::messaging` registry via the synthesized
+    // `standard:messaging/<op>.v1` refs, never from a package asset — so no
+    // `schemas/slack/*.json` embed exists or is needed. Each entry keeps a
+    // package-owned prompt doc (`prompt_doc_ref`), still read from the
+    // materialized package root at surface publish. Pinned catalog-wide by
+    // `bundled_first_party_manifest_asset_refs_are_packaged` in
+    // `ironclaw_extension_host::available_extensions` (that function's
     // `validate_bundled_package_assets` is the production-critical sibling
-    // of the same check).
+    // of the same check) — a manifest entry whose addendum is missing from
+    // this list fails there, at install time.
     vec![
         bytes_asset("manifest.toml", MANIFEST.as_bytes()),
+        // Reads.
         slack_prompt_asset!("search_messages"),
         slack_prompt_asset!("list_conversations"),
         slack_prompt_asset!("get_conversation_info"),
         slack_prompt_asset!("get_conversation_history"),
         slack_prompt_asset!("get_thread_replies"),
+        slack_prompt_asset!("get_message"),
+        // People.
         slack_prompt_asset!("get_user_info"),
+        slack_prompt_asset!("resolve_user"),
+        slack_prompt_asset!("list_members"),
         slack_prompt_asset!("whoami"),
+        // Writes.
         slack_prompt_asset!("send_message"),
+        slack_prompt_asset!("edit_message"),
+        slack_prompt_asset!("delete_message"),
+        slack_prompt_asset!("add_reaction"),
+        slack_prompt_asset!("remove_reaction"),
+        slack_prompt_asset!("open_dm"),
         bytes_asset("wasm/slack_user_tool.wasm", WASM),
     ]
 }

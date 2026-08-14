@@ -109,7 +109,7 @@
 **Files:**
 - Modify: `crates/ironclaw_auth/src/credential.rs`
 - Modify: `crates/ironclaw_auth/src/cleanup.rs`
-- Modify: `docs/reborn/contracts/auth-product.md`
+- Modify: `docs/internal/reborn/contracts/auth-product.md`
 - Modify: crate guidance/API docs affected by continuation semantics
 - Test: `crates/ironclaw_auth/tests/auth_product_contract/`
 

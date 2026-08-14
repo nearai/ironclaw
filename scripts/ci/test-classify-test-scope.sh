@@ -398,7 +398,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn docs only" \
-  "docs/reborn/harness/e2e.md" \
+  "docs/internal/reborn/harness/e2e.md" \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false

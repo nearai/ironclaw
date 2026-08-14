@@ -94,10 +94,11 @@ use ironclaw_product_contracts::notification_setup::{
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPolicyRequest,
-    UpsertLlmProviderRequest, UserModelCatalog,
+    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_llm::{
-    LLM_USER_MODEL_POLICY_SET_CAPABILITY, USER_MODEL_CATALOG_VIEW,
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY,
+    USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_product_contracts::package_lifecycle::{
@@ -4010,6 +4011,58 @@ async fn query_user_model_catalog(
     )
     .await?;
     serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
+}
+
+/// `GET /api/webchat/v2/llm/model-preference`
+pub async fn get_user_model_preference(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<UserModelPreference>, WebUiV2HttpError> {
+    Ok(Json(
+        query_user_model_preference(state.services(), caller).await?,
+    ))
+}
+
+async fn query_user_model_preference(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+) -> Result<UserModelPreference, ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
+}
+
+/// `PUT /api/webchat/v2/llm/model-preference`
+pub async fn set_user_model_preference(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<SetUserModelPreferenceRequest>,
+) -> Result<Json<UserModelPreference>, WebUiV2HttpError> {
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "user model preference",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    Ok(Json(
+        query_user_model_preference(state.services(), caller).await?,
+    ))
 }
 
 /// `PUT /api/webchat/v2/llm/model-policy`

@@ -95,7 +95,7 @@ require both operator caller authority and the operator configuration
 capability. Reads are tenant/user/thread/run scoped, SSE updates are resumable,
 and normal chat events never carry prompt bodies, tool arguments, or tool
 results. See
-[`docs/reborn/contracts/web-debug-inspector.md`](../../../docs/reborn/contracts/web-debug-inspector.md)
+[`docs/internal/reborn/contracts/web-debug-inspector.md`](../../../docs/internal/reborn/contracts/web-debug-inspector.md)
 for the bounds, security contract, and failure behavior.
 
 ## Tests
@@ -114,4 +114,4 @@ corepack/pnpm; `frontend/README.md` covers the JS/TS toolchain.
 Module spec (route table, streaming model, SSE caps, OAuth login security
 contract, charter map): `CONTRACT.md` — the spec is the tiebreaker · working
 rules: `AGENTS.md` · family rules: `crates/product/AGENTS.md` · design record:
-`docs/reborn/target-architecture/families/product.md` (§6.9.4).
+`docs/internal/reborn/target-architecture/families/product.md` (§6.9.4).

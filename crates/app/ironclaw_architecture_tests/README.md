@@ -58,5 +58,5 @@ cargo test -p ironclaw_architecture_tests --test reborn_composition_boundaries
 ## See also
 
 Working rules: `AGENTS.md` · family rules: `crates/app/AGENTS.md` · design
-record: `docs/reborn/target-architecture/families/app.md` (§6.10.4) + PROPOSAL
+record: `docs/internal/reborn/target-architecture/families/app.md` (§6.10.4) + PROPOSAL
 §11 (the enforcement additions).

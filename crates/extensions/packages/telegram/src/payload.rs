@@ -619,9 +619,19 @@ fn collect_attachments(
         )?);
     }
     if let Some(sticker) = message.sticker.as_ref() {
+        // Truthful MIME per the Bot API sticker format flags: static stickers
+        // are WEBP, animated stickers are gzipped Lottie (.tgs), video
+        // stickers are WEBM.
+        let mime_type = if sticker.is_video {
+            "video/webm"
+        } else if sticker.is_animated {
+            "application/x-tgsticker"
+        } else {
+            "image/webp"
+        };
         out.push(make_attachment(
             &sticker.file_id,
-            "image/webp",
+            mime_type,
             None,
             sticker.file_size,
             ProductAttachmentKind::Sticker,
@@ -782,6 +792,10 @@ struct TelegramSticker {
     file_id: String,
     #[serde(default)]
     file_size: Option<u64>,
+    #[serde(default)]
+    is_animated: bool,
+    #[serde(default)]
+    is_video: bool,
 }
 
 // keep clippy happy about read-only fields on edited_message / channel_post.
