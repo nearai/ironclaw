@@ -20,8 +20,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{
     ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, GetProcessSnapshotRequest,
-    JournalProcessExecutor, JournaledProcessSnapshot, ProcessExecutorFailure,
-    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
+    JournalProcessExecutor, JournaledProcessSnapshot, ProcessExecutorFailure, ProcessJournalCommit,
+    ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLifecycleStatus,
     ProcessStateTransitionRequest, ProcessSubmissionPort, ProcessSupervisor,
@@ -445,23 +445,24 @@ async fn run(args: Args, generated_path: Option<PathBuf>) -> Result<IdleScenario
                 .or(generated_path)
                 .ok_or_else(|| IdleError::Workload("libSQL path was not selected".to_string()))?;
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|error| IdleError::Workload(format!("create libSQL directory: {error}")))?;
+                tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                    IdleError::Workload(format!("create libSQL directory: {error}"))
+                })?;
             }
             let db = Arc::new(
                 libsql::Builder::new_local(&path)
                     .build()
                     .await
-                    .map_err(|error| IdleError::Workload(format!("open libSQL database: {error}")))?,
+                    .map_err(|error| {
+                        IdleError::Workload(format!("open libSQL database: {error}"))
+                    })?,
             );
-            let root = Arc::new(
-                ironclaw_filesystem::LibSqlRootFilesystem::new(db)
-                    .map_err(|error| IdleError::Workload(format!("create libSQL filesystem: {error}")))?,
-            );
-            root.run_migrations()
-                .await
-                .map_err(|error| IdleError::Workload(format!("migrate libSQL filesystem: {error}")))?;
+            let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db).map_err(
+                |error| IdleError::Workload(format!("create libSQL filesystem: {error}")),
+            )?);
+            root.run_migrations().await.map_err(|error| {
+                IdleError::Workload(format!("migrate libSQL filesystem: {error}"))
+            })?;
             run_with_root(
                 root,
                 Backend::Libsql,
@@ -481,9 +482,9 @@ async fn run(args: Args, generated_path: Option<PathBuf>) -> Result<IdleScenario
                 .build()
                 .map_err(|error| IdleError::Workload(format!("create Postgres pool: {error}")))?;
             let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(pool));
-            root.run_migrations()
-                .await
-                .map_err(|error| IdleError::Workload(format!("migrate Postgres filesystem: {error}")))?;
+            root.run_migrations().await.map_err(|error| {
+                IdleError::Workload(format!("migrate Postgres filesystem: {error}"))
+            })?;
             run_with_root(
                 root,
                 Backend::Postgres,
@@ -728,7 +729,11 @@ where
     tokio::time::timeout(lifecycle.terminal_timeout, async {
         loop {
             if active.scheduler_counts.claim_calls.load(Ordering::SeqCst) >= 2
-                && active.scheduler_counts.recovery_calls.load(Ordering::SeqCst) >= 1
+                && active
+                    .scheduler_counts
+                    .recovery_calls
+                    .load(Ordering::SeqCst)
+                    >= 1
                 && active.observer_counts.heartbeats.load(Ordering::SeqCst) >= 1
             {
                 return;
@@ -776,14 +781,9 @@ where
         .send(true)
         .map_err(|_| IdleError::Workload("release idle process executor".to_string()));
     let terminal_result = if release_result.is_ok() {
-        wait_for_terminal(
-            &active.store,
-            &active.scope,
-            active.process_id,
-            timeout,
-        )
-        .await
-        .map(|_| ())
+        wait_for_terminal(&active.store, &active.scope, active.process_id, timeout)
+            .await
+            .map(|_| ())
     } else {
         release_result
     };
@@ -891,23 +891,13 @@ fn add_database_write_families(
             .delta
             .libsql_table_writes
             .iter()
-            .map(|row| {
-                (
-                    row.table.clone(),
-                    row.inserts + row.updates + row.deletes,
-                )
-            })
+            .map(|row| (row.table.clone(), row.inserts + row.updates + row.deletes))
             .collect::<BTreeMap<_, _>>(),
         Backend::Postgres => measurement
             .delta
             .postgres_table_writes
             .iter()
-            .map(|row| {
-                (
-                    row.table.clone(),
-                    row.inserts + row.updates + row.deletes,
-                )
-            })
+            .map(|row| (row.table.clone(), row.inserts + row.updates + row.deletes))
             .collect::<BTreeMap<_, _>>(),
     };
     families.event_writes = tables.get("root_filesystem_events").copied();
@@ -1045,7 +1035,13 @@ mod tests {
         assert_eq!(report.write_families.recovery_writes, 0);
         assert!(report.write_families.observer_checkpoint_writes > 0);
         assert!(report.write_families.event_writes.unwrap_or_default() > 0);
-        assert!(report.write_families.process_store_writes.unwrap_or_default() > 0);
+        assert!(
+            report
+                .write_families
+                .process_store_writes
+                .unwrap_or_default()
+                > 0
+        );
         cleanup_libsql_files(&path).await;
     }
 
@@ -1080,6 +1076,12 @@ mod tests {
         assert!(report.write_families.recovery_sweep_calls > 0);
         assert!(report.write_families.observer_checkpoint_writes > 0);
         assert!(report.write_families.event_writes.unwrap_or_default() > 0);
-        assert!(report.write_families.process_store_writes.unwrap_or_default() > 0);
+        assert!(
+            report
+                .write_families
+                .process_store_writes
+                .unwrap_or_default()
+                > 0
+        );
     }
 }
