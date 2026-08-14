@@ -219,15 +219,19 @@ impl AgentMessageRole {
 }
 
 fn part_allowed(role: AgentMessageRole, part: &ContentPart) -> bool {
-    match (role, part) {
-        (_, ContentPart::Text { .. }) => true,
-        (AgentMessageRole::User | AgentMessageRole::Assistant, ContentPart::Image { .. })
-        | (AgentMessageRole::User | AgentMessageRole::Assistant, ContentPart::File { .. }) => true,
-        (AgentMessageRole::Assistant, ContentPart::ToolCall(_)) => true,
-        (AgentMessageRole::Assistant, ContentPart::Reasoning { .. }) => true,
-        (AgentMessageRole::Tool, ContentPart::ToolResult(_)) => true,
-        _ => false,
-    }
+    matches!(
+        (role, part),
+        (_, ContentPart::Text { .. })
+            | (
+                AgentMessageRole::User | AgentMessageRole::Assistant,
+                ContentPart::Image { .. } | ContentPart::File { .. },
+            )
+            | (
+                AgentMessageRole::Assistant,
+                ContentPart::ToolCall(_) | ContentPart::Reasoning { .. },
+            )
+            | (AgentMessageRole::Tool, ContentPart::ToolResult(_))
+    )
 }
 
 fn serialized_len(value: &serde_json::Value) -> usize {
