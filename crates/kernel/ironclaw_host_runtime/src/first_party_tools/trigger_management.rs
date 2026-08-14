@@ -452,37 +452,37 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    require_explicit_result_delivery(&input)?;
-    let input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
+    let parsed_input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
-    let schedule_kind = input.schedule.kind();
-    let schedule = input
+    require_explicit_result_delivery(&input)?;
+    let schedule_kind = parsed_input.schedule.kind();
+    let schedule = parsed_input
         .schedule
         .into_schedule()
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
-    input
+    parsed_input
         .execution_contract
         .validate()
         .map_err(trigger_record_error)?;
-    reject_forbidden_scheduled_capabilities(&input.execution_contract)?;
+    reject_forbidden_scheduled_capabilities(&parsed_input.execution_contract)?;
     create_hook
-        .validate_execution_policy(scope, &input.execution_contract.policy)
+        .validate_execution_policy(scope, &parsed_input.execution_contract.policy)
         .await
         .map_err(trigger_record_error)?;
-    let prompt = input.execution_contract.render_prompt();
+    let prompt = parsed_input.execution_contract.render_prompt();
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
         creator_user_id: scope.user_id.clone(),
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
-        name: input.name,
+        name: parsed_input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
         prompt,
-        execution_spec: Some(input.execution_contract),
+        execution_spec: Some(parsed_input.execution_contract),
         // Retired stored routing (spec §8): a routine delivers externally only
         // by calling `builtin.outbound_deliver` from its own prompt, so nothing
         // here ever seals a delivery route again. The field survives only to
