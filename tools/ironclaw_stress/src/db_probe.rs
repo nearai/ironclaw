@@ -19,6 +19,24 @@ const MEASUREMENT_TABLES: &[&str] = &[
     "trigger_records",
     "trigger_run_history",
 ];
+const DEFAULT_MEASUREMENT_SCHEMA: &str = "public";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StatsScope {
+    ExplicitResetCurrentDatabase,
+    #[default]
+    SnapshotDeltaCurrentDatabase,
+}
+
+impl StatsScope {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitResetCurrentDatabase => "explicit-reset-current-database",
+            Self::SnapshotDeltaCurrentDatabase => "snapshot-delta-current-database",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct DbProbeSummary {
@@ -39,7 +57,7 @@ pub(crate) struct DbWriteMeasurement {
     pub(crate) tool_calls_per_turn: usize,
     pub(crate) idle_observation_seconds: u64,
     pub(crate) reset_stats: bool,
-    pub(crate) stats_scope: String,
+    pub(crate) stats_scope: StatsScope,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -356,6 +374,22 @@ async fn ensure_pg_stat_statements(client: &Client, url: &str) -> Result<(), Str
 }
 
 async fn reset_measurement_stats(client: &Client, url: &str) -> Result<(), String> {
+    let extension_version: String = client
+        .query_one(
+            "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_stat_statements'",
+            &[],
+        )
+        .await
+        .map_err(|error| sanitize_postgres_error(url, error))?
+        .try_get(0)
+        .map_err(|error| sanitize_postgres_error(url, error))?;
+    if !pg_stat_statements_reset_supported(&extension_version) {
+        return Err(format!(
+            "--db-write-reset-stats requires pg_stat_statements 1.7 or newer for the scoped \
+             three-argument reset; found {extension_version}. Upgrade the extension or omit the \
+             flag to use non-destructive snapshot deltas"
+        ));
+    }
     client
         .query(
             "SELECT pg_stat_statements_reset(0::oid, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()), 0::bigint)",
@@ -395,34 +429,37 @@ async fn capture_postgres_write_stats(
     let table_names = MEASUREMENT_TABLES.to_vec();
     let table_rows = client
         .query(
-            "SELECT relname, n_tup_ins::bigint, n_tup_upd::bigint, n_tup_del::bigint \
+            "SELECT schemaname, relname, n_tup_ins::bigint, n_tup_upd::bigint, n_tup_del::bigint \
              FROM pg_stat_user_tables \
              WHERE relname = ANY($1::text[]) \
-             ORDER BY relname",
+             ORDER BY schemaname, relname",
             &[&table_names],
         )
         .await?;
     let mut table_writes = MEASUREMENT_TABLES
         .iter()
         .map(|table| {
+            let qualified_table = format!("{DEFAULT_MEASUREMENT_SCHEMA}.{table}");
             (
-                (*table).to_string(),
+                qualified_table.clone(),
                 PostgresTableWrites {
-                    table: (*table).to_string(),
+                    table: qualified_table,
                     ..PostgresTableWrites::default()
                 },
             )
         })
         .collect::<BTreeMap<_, _>>();
     for row in table_rows {
-        let table: String = row.get(0);
+        let schema: String = row.try_get(0)?;
+        let relation: String = row.try_get(1)?;
+        let table = format!("{schema}.{relation}");
         table_writes.insert(
             table.clone(),
             PostgresTableWrites {
                 table,
-                inserts: i64_to_u64(row.get(1)).unwrap_or(0),
-                updates: i64_to_u64(row.get(2)).unwrap_or(0),
-                deletes: i64_to_u64(row.get(3)).unwrap_or(0),
+                inserts: i64_to_u64(row.try_get(2)?).unwrap_or(0),
+                updates: i64_to_u64(row.try_get(3)?).unwrap_or(0),
+                deletes: i64_to_u64(row.try_get(4)?).unwrap_or(0),
             },
         );
     }
@@ -440,12 +477,17 @@ async fn capture_postgres_write_stats(
         .await?;
     let raw_statements = statement_rows
         .into_iter()
-        .filter_map(|row| {
-            let query_id = row.try_get::<_, i64>(0).ok()?;
-            let query = row.try_get::<_, String>(1).ok()?;
-            let calls = i64_to_u64(row.try_get::<_, i64>(2).ok()?)?;
-            Some((query_id, query, calls))
-        })
+        .map(
+            |row| -> Result<Option<(i64, String, u64)>, tokio_postgres::Error> {
+                let query_id = row.try_get::<_, i64>(0)?;
+                let query = row.try_get::<_, String>(1)?;
+                let calls = i64_to_u64(row.try_get::<_, i64>(2)?);
+                Ok(calls.map(|calls| (query_id, query, calls)))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
         .collect::<Vec<_>>();
     snapshot.postgres_statement_calls = aggregate_statement_calls(
         raw_statements
@@ -684,6 +726,23 @@ pub(crate) fn pg_stat_statements_unavailable(url: &str, detail: impl std::fmt::D
          to shared_preload_libraries, and restart PostgreSQL. target={}",
         redact_postgres_url(url)
     )
+}
+
+pub(crate) fn pg_stat_statements_reset_supported(version: &str) -> bool {
+    let mut components = version.split('.');
+    let Some(major) = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let Some(minor) = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    major > 1 || (major == 1 && minor >= 7)
 }
 
 pub(crate) fn sanitize_postgres_error(resolved_url: &str, error: impl std::fmt::Display) -> String {

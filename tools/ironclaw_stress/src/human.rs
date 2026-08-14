@@ -522,7 +522,11 @@ fn push_db_probe_table(output: &mut String, db_probe: &DbProbeSummary) {
             "idle_seconds",
             measurement.idle_observation_seconds.to_string(),
         );
-        push_metric(output, "stats_scope", measurement.stats_scope.clone());
+        push_metric(
+            output,
+            "stats_scope",
+            measurement.stats_scope.as_str().to_string(),
+        );
         push_metric(output, "stats_reset", measurement.reset_stats.to_string());
         push_postgres_table_write_table(output, db_probe);
         push_postgres_statement_table(output, db_probe);

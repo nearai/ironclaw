@@ -314,7 +314,15 @@ cargo run -p ironclaw_stress --release -- \
 
 The default uses non-destructive snapshots scoped to the current database.
 `pg_stat_statements` must be installed and loaded; the command fails with setup
-instructions when it is unavailable.
+instructions when it is unavailable. The optional statistics reset requires
+`pg_stat_statements` 1.7 or newer.
+
+For this preset, `--db-write-idle-seconds` defaults to 300. The tool waits that
+long after the turn and then captures an idle snapshot. Set it to 0 to skip the
+idle snapshot and report workload deltas only. Statement-to-table attribution
+matches bare table identifiers in normalized SQL, so it does not distinguish
+same-named tables in different schemas; per-table write counters are reported
+with schema-qualified names.
 
 `--db-write-reset-stats` is optional and destructive to shared statistics. It
 resets normalized statement counters for the current database and counters for

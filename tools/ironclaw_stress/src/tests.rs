@@ -363,6 +363,15 @@ fn large_context_preset_populates_workload_defaults() {
 
 #[test]
 fn db_write_measurement_preset_is_one_deterministic_tool_heavy_turn() {
+    let default_args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "postgres",
+        "--preset",
+        "db-write-measurement",
+    ]);
+    assert_eq!(default_args.db_write_idle_seconds, 300);
+
     let args = parse_test_args([
         "ironclaw_stress",
         "--backend",
@@ -381,6 +390,111 @@ fn db_write_measurement_preset_is_one_deterministic_tool_heavy_turn() {
     assert_eq!(args.tool_calls_per_turn, 10);
     assert_eq!(args.db_write_idle_seconds, 12);
     validate_args(&args).expect("measurement preset is valid");
+}
+
+#[test]
+fn db_write_measurement_rejects_unsupported_combinations() {
+    let cases = [
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--db-write-reset-stats",
+            ],
+            "--db-write-reset-stats requires --preset db-write-measurement",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "libsql",
+                "--preset",
+                "db-write-measurement",
+            ],
+            "requires --backend postgres",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--tool-calls-per-turn",
+                "4",
+            ],
+            "do not override its workload shape",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--repetitions",
+                "2",
+            ],
+            "cannot be combined with suite, ramp, sweep, or repeated runs",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--gate-blocked-every",
+                "1",
+            ],
+            "do not override its workload shape",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--db-write-idle-seconds",
+                "1",
+            ],
+            "--db-write-idle-seconds requires --preset db-write-measurement",
+        ),
+    ];
+
+    for (arguments, expected_error) in cases {
+        let matches = Args::command()
+            .try_get_matches_from(arguments)
+            .expect("parse unsupported measurement arguments");
+        let args = parse_args_from_matches(&matches).expect("build unsupported measurement args");
+        let error = validate_args(&args).expect_err("unsupported measurement args must fail");
+        assert!(
+            error.contains(expected_error),
+            "expected error containing {expected_error:?}, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn pg_stat_statements_reset_requires_version_1_7_or_newer() {
+    assert!(!db_probe::pg_stat_statements_reset_supported("1.6"));
+    assert!(db_probe::pg_stat_statements_reset_supported("1.7"));
+    assert!(db_probe::pg_stat_statements_reset_supported("1.11"));
+    assert!(!db_probe::pg_stat_statements_reset_supported("invalid"));
+}
+
+#[test]
+fn measurement_stats_scope_uses_stable_wire_values() {
+    assert_eq!(
+        serde_json::to_value(db_probe::StatsScope::ExplicitResetCurrentDatabase)
+            .expect("serialize explicit-reset scope"),
+        "explicit-reset-current-database"
+    );
+    assert_eq!(
+        serde_json::to_value(db_probe::StatsScope::SnapshotDeltaCurrentDatabase)
+            .expect("serialize snapshot-delta scope"),
+        "snapshot-delta-current-database"
+    );
 }
 
 #[test]
@@ -1262,7 +1376,7 @@ fn postgres_write_delta_aggregates_tables_queries_and_totals() {
             tool_calls_per_turn: 10,
             idle_observation_seconds: 0,
             reset_stats: false,
-            stats_scope: "snapshot-delta-current-database".to_string(),
+            stats_scope: db_probe::StatsScope::SnapshotDeltaCurrentDatabase,
         },
     );
 
@@ -1361,7 +1475,7 @@ fn human_summary_renders_postgres_write_and_idle_measurement() {
             tool_calls_per_turn: 10,
             idle_observation_seconds: 300,
             reset_stats: false,
-            stats_scope: "snapshot-delta-current-database".to_string(),
+            stats_scope: db_probe::StatsScope::SnapshotDeltaCurrentDatabase,
         },
     ));
 
@@ -1700,7 +1814,7 @@ fn test_args() -> Args {
         libsql_path: None,
         postgres_url: None,
         postgres_pool_size: 4,
-        db_write_idle_seconds: 300,
+        db_write_idle_seconds: 0,
         db_write_reset_stats: false,
         api_base_url: None,
         api_users_jsonl: None,

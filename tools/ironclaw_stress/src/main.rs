@@ -168,7 +168,7 @@ pub(crate) struct Args {
     pub(crate) postgres_pool_size: usize,
 
     /// Idle seconds captured after the single-turn DB write measurement.
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = 0)]
     pub(crate) db_write_idle_seconds: u64,
 
     /// Reset current-database pg_stat_statements and measured table counters before measurement.
@@ -1021,6 +1021,7 @@ fn apply_preset(args: &mut Args, matches: &ArgMatches) {
             set_default!(tool_calls_per_turn = 10);
             set_default!(tool_latency_ms = 0);
             set_default!(tool_failure_every = 0);
+            set_default!(db_write_idle_seconds = 300);
         }
         StressPreset::ModelTail => {
             set_default!(scenario = Scenario::MixedUserSession);
@@ -1121,6 +1122,11 @@ fn validate_args(args: &Args) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if args.db_write_idle_seconds != 0
+        && !matches!(args.preset, Some(StressPreset::DbWriteMeasurement))
+    {
+        return Err("--db-write-idle-seconds requires --preset db-write-measurement".to_string());
+    }
     if matches!(args.preset, Some(StressPreset::DbWriteMeasurement)) {
         if !matches!(args.backend, Backend::Postgres) {
             return Err("--preset db-write-measurement requires --backend postgres".to_string());
@@ -1134,6 +1140,7 @@ fn validate_args(args: &Args) -> Result<(), String> {
             || args.users != 1
             || args.active_thread_count != 1
             || args.tenants != 1
+            || args.gate_blocked_every != 0
             || args.tool_calls_per_turn != 10
             || args.tool_failure_every != 0
         {
@@ -2046,11 +2053,10 @@ async fn run_user_turn_in_process(
                 idle_observation_seconds: args.db_write_idle_seconds,
                 reset_stats: args.db_write_reset_stats,
                 stats_scope: if args.db_write_reset_stats {
-                    "explicit-reset-current-database"
+                    db_probe::StatsScope::ExplicitResetCurrentDatabase
                 } else {
-                    "snapshot-delta-current-database"
-                }
-                .to_string(),
+                    db_probe::StatsScope::SnapshotDeltaCurrentDatabase
+                },
             },
         )
     } else {
