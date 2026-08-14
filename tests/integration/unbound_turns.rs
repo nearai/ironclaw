@@ -366,6 +366,110 @@ async fn default_unbound_run_completes_on_a_plain_text_final() -> HarnessResult<
     Ok(())
 }
 
+/// Seeded tool history through the accept door: an assistant tool-call turn
+/// plus its tool result persist replay-faithfully — the round lands as a
+/// `ToolResultReference` row whose full outcome bytes are durable in the
+/// record store — and the run completes over that seeded context through the
+/// production context-load path.
+#[tokio::test(flavor = "multi_thread")]
+async fn unbound_run_over_seeded_tool_history_completes_and_persists_the_round() -> HarnessResult<()>
+{
+    use ironclaw_llm::agent_message::{ToolCallContent, ToolResultContent, ToolResultOutcome};
+
+    let group = RebornIntegrationGroup::builtin_tools().await?;
+    let harness = group.thread("conv-unbound-seeded-anchor").build().await?;
+    let thread_service = harness.thread_service_for_test()?;
+
+    let mut request = prepared_request(
+        "unbound-seeded-accept",
+        "Continue from the lookup above.",
+        PreparedTurnDeclarations::default(),
+    )?;
+    request.messages = vec![
+        AgentMessage {
+            role: AgentMessageRole::User,
+            content: vec![ContentPart::text("Look up the release status")],
+        },
+        AgentMessage {
+            role: AgentMessageRole::Assistant,
+            content: vec![ContentPart::ToolCall(ToolCallContent {
+                call_id: "call_seeded_1".to_string(),
+                capability: ironclaw_host_api::ids::CapabilityId::new("external_tool.lookup")?,
+                arguments: json!({"query": "release status"}),
+            })],
+        },
+        AgentMessage {
+            role: AgentMessageRole::Tool,
+            content: vec![ContentPart::ToolResult(ToolResultContent {
+                call_id: "call_seeded_1".to_string(),
+                outcome: ToolResultOutcome::Text {
+                    text: "the release is green".to_string(),
+                },
+                is_error: false,
+            })],
+        },
+        AgentMessage {
+            role: AgentMessageRole::User,
+            content: vec![ContentPart::text("Continue from the lookup above.")],
+        },
+    ];
+    let accepted = thread_service.accept_prepared_context(request).await?;
+
+    let scope = unbound_turn_scope(&accepted.thread_id)?;
+    group
+        .register_scope_script_for_test(
+            scope.clone(),
+            "unbound-seeded",
+            vec![RebornScriptedReply::text("The release is green; done.")],
+        )
+        .await?;
+    let coordinator = harness.turn_coordinator_for_test();
+    let SubmitTurnResponse::Accepted { run_id, .. } = coordinator
+        .submit_turn(submit_request(
+            scope.clone(),
+            accepted.accepted_message_ref.clone(),
+            "unbound-seeded-submit",
+        )?)
+        .await?;
+    let state = wait_for_terminal(&coordinator, &scope, run_id).await?;
+    assert_eq!(
+        state.status,
+        TurnStatus::Completed,
+        "failure={:?}",
+        state.failure
+    );
+
+    // Seam assertion: the seeded tool round is a ToolResultReference row and
+    // its FULL outcome bytes page back out of the durable record store.
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ownerless_thread_scope()?,
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await?;
+    let seeded_result_ref = history
+        .messages
+        .iter()
+        .find(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+        .and_then(|message| message.tool_result_ref.clone())
+        .ok_or("the seeded tool round must land as a ToolResultReference row")?;
+    let chunk = thread_service
+        .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+            scope: ownerless_thread_scope()?,
+            thread_id: accepted.thread_id.clone(),
+            result_ref: seeded_result_ref,
+            offset: 0,
+            max_bytes: ironclaw_threads::effective_tool_result_read_max_bytes(),
+        })
+        .await?
+        .ok_or("the seeded tool result record must be durable")?;
+    assert!(
+        String::from_utf8_lossy(&chunk.content).contains("the release is green"),
+        "the record store must hold the seeded outcome bytes in full"
+    );
+    Ok(())
+}
+
 /// Accept-door idempotency across the WHOLE lane: the same accept key returns
 /// the same thread with `idempotent_replay`, and the same submit key returns
 /// the same run instead of double-executing.

@@ -181,7 +181,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
-| An unbound prepared context accepts, submits reflessly, derives its profile from the journaled declarations, and completes (structured result with repair loop, plain final, idempotent replay, ownerless-listing exclusion) | `unbound_turns.rs` |
+| An unbound prepared context accepts, submits reflessly, derives its profile from the journaled declarations, and completes (structured result with repair loop, plain final, seeded tool history replayed through the production context build, idempotent replay, ownerless-listing exclusion) | `unbound_turns.rs` |
 
 **Tools**
 | Behavior | Evidence |

@@ -80,6 +80,40 @@ impl InboundIdempotencyKey {
     }
 }
 
+/// Shared mint for the two thread-creating doors (`ensure_thread` and
+/// `accept_prepared_context`): one construction site so the stored shape —
+/// timestamps, empty collections, first sequence — cannot drift between the
+/// conversation and prepared-context paths. Callers scope-check BEFORE
+/// minting; this only inserts-or-returns.
+fn mint_thread_locked<'a>(
+    threads: &'a mut HashMap<ThreadId, StoredThread>,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    created_by_actor_id: &str,
+    title: Option<String>,
+    metadata_json: Option<String>,
+    now: chrono::DateTime<Utc>,
+) -> &'a mut StoredThread {
+    threads
+        .entry(thread_id.clone())
+        .or_insert_with(|| StoredThread {
+            record: SessionThreadRecord {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                created_by_actor_id: created_by_actor_id.to_string(),
+                title,
+                metadata_json,
+                goal: None,
+                created_at: Some(now),
+                updated_at: Some(now),
+            },
+            messages: Vec::new(),
+            summary_artifacts: Vec::new(),
+            tool_result_records: HashMap::new(),
+            next_sequence: 1,
+        })
+}
+
 #[async_trait]
 impl SessionThreadService for InMemorySessionThreadService {
     async fn ensure_thread(
@@ -99,27 +133,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         }
 
         let now = Utc::now();
-        let record = SessionThreadRecord {
-            scope: request.scope,
-            thread_id: thread_id.clone(),
-            created_by_actor_id: request.created_by_actor_id,
-            title: request.title,
-            metadata_json: request.metadata_json,
-            goal: None,
-            created_at: Some(now),
-            updated_at: Some(now),
-        };
-        state.threads.insert(
-            thread_id,
-            StoredThread {
-                record: record.clone(),
-                messages: Vec::new(),
-                summary_artifacts: Vec::new(),
-                tool_result_records: HashMap::new(),
-                next_sequence: 1,
-            },
-        );
-        Ok(record)
+        Ok(mint_thread_locked(
+            &mut state.threads,
+            &request.scope,
+            &thread_id,
+            &request.created_by_actor_id,
+            request.title,
+            request.metadata_json,
+            now,
+        )
+        .record
+        .clone())
     }
 
     async fn accept_inbound_message(
@@ -270,25 +294,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         let accepted_message_ref =
             crate::prepared_context::accepted_prepared_message_ref(last_message_id)?;
 
-        let stored = state
-            .threads
-            .entry(thread_id.clone())
-            .or_insert_with(|| StoredThread {
-                record: SessionThreadRecord {
-                    scope: request.scope.clone(),
-                    thread_id: thread_id.clone(),
-                    created_by_actor_id: request.actor_id.clone(),
-                    title: request.title.clone(),
-                    metadata_json: Some(stamped_metadata.clone()),
-                    goal: None,
-                    created_at: Some(now),
-                    updated_at: Some(now),
-                },
-                messages: Vec::new(),
-                summary_artifacts: Vec::new(),
-                tool_result_records: HashMap::new(),
-                next_sequence: 1,
-            });
+        let stored = mint_thread_locked(
+            &mut state.threads,
+            &request.scope,
+            &thread_id,
+            &request.actor_id,
+            request.title.clone(),
+            Some(stamped_metadata.clone()),
+            now,
+        );
         for mut row in rows {
             row.sequence = stored.next_sequence;
             stored.next_sequence += 1;

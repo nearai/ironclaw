@@ -2483,6 +2483,13 @@ fn validate_provider_replay_identity(
             error,
         )
     })?;
+    // Seeded prepared-context envelopes carry the host-owned sentinel
+    // identity; route equality is not applicable to them (the match gate in
+    // `provider_replay_matches_identity` admits them on ANY route, and the
+    // accept door forces `signature: None` on seeded envelopes).
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return Ok(());
+    }
     if provider_call.provider_id != expected.provider_id
         || provider_call.provider_model_id != expected.provider_model_id
     {

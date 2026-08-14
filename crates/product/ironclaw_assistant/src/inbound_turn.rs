@@ -376,6 +376,12 @@ where
         self
     }
 
+    // Deliberate blind spot: `list_threads_for_scope` excludes
+    // prepared-context (unbound/subagent) threads, so their attachments —
+    // none exist today, the accept door seeds text and tool history only —
+    // would not be visible to this sweep. If prepared submissions ever gain
+    // attachment landing, reconcile them against the unbound scope
+    // explicitly rather than widening the listing.
     async fn reconcile_stale_attachment_batches(&self, thread_scope: &ThreadScope) {
         let Some(lander) = self.inbound_attachments.as_ref() else {
             return;
