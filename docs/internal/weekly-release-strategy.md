@@ -131,6 +131,16 @@ approvals, deployment timestamps, canary outcome, and rollback instructions.
 This provides the traceability needed to demonstrate that the production
 artifact was tested and independently authorized.
 
+Emergency releases are reserved for material production incidents. They keep the
+same approval chain as a regular release: the two required approvals and a
+documented rollback plan from `CONTRIBUTING.md` Track C, plus independent
+deployment approval, an incident record, relevant automated tests, explicit
+rollback readiness, immediate production validation, and retrospective review.
+Only the release owner may authorize a waiver, and the release record must
+document each approval, any waiver authority and its rationale, and rollback
+readiness evidence. Missing a preferred Wednesday scope does not qualify as an
+emergency.
+
 ## Docs publication
 
 The public Mintlify docs site deploys from the **`docs-live` branch**, not
@@ -186,13 +196,3 @@ unreleased `main` behavior (issue #7317). The moving parts:
   (`https://github.com/nearai/ironclaw/tree/ironclaw-vX.Y.Z/docs`); the
   public changelog page links this instead of the site carrying versioned
   page sets.
-
-Emergency releases are reserved for material production incidents. They keep the
-same approval chain as a regular release: the two required approvals and a
-documented rollback plan from `CONTRIBUTING.md` Track C, plus independent
-deployment approval, an incident record, relevant automated tests, explicit
-rollback readiness, immediate production validation, and retrospective review.
-Only the release owner may authorize a waiver, and the release record must
-document each approval, any waiver authority and its rationale, and rollback
-readiness evidence. Missing a preferred Wednesday scope does not qualify as an
-emergency.

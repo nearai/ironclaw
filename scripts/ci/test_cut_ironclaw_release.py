@@ -464,6 +464,28 @@ class StableChangelogGateTests(unittest.TestCase):
             ):
                 release.ensure_stable_changelog_entry(root, self.STABLE)
 
+    def test_main_gates_the_cut_before_any_tag_operation(self) -> None:
+        """The gate must run inside main(), against the candidate root, before
+        GitHubTags is even constructed — not only as a callable helper."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(root, '<Update description="v1.1.0">…</Update>\n')
+            argv = [
+                "cut_ironclaw_release.py",
+                "--version", self.STABLE,
+                "--commit-sha", "0" * 40,
+                "--candidate-root", str(root),
+                "--repository", "nearai/ironclaw",
+            ]
+            with mock.patch("sys.argv", argv), mock.patch.object(
+                release, "GitHubTags"
+            ) as tags:
+                with self.assertRaisesRegex(
+                    release.ReleaseTagError, "no entry for v1.2.0"
+                ):
+                    release.main()
+            tags.assert_not_called()
+
     def test_prerelease_cut_is_exempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             # No docs/ tree at all: an rc cut must not require one.

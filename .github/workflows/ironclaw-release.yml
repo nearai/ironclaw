@@ -369,15 +369,19 @@ jobs:
             echo "skipping docs-live repoint: ${GITHUB_REF_NAME} is not the newest stable tag (${newest})"
             exit 0
           fi
-          # PATCH force-moves the branch; POST bootstraps it on the first
-          # stable release. Ref updates raise ordinary push events, so the
-          # Mintlify App deploys from them like any push.
-          gh api --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/git/refs/heads/docs-live" \
-            -f "sha=${GITHUB_SHA}" -F "force=true" \
-          || gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f "ref=refs/heads/docs-live" -f "sha=${GITHUB_SHA}"
+          # POST bootstraps the branch only when it does not exist yet, so a
+          # real PATCH failure (e.g. branch protection blocking the forced
+          # update) fails the step with its own error. Ref updates raise
+          # ordinary push events, so the Mintlify App deploys from them.
+          if gh api --silent "repos/${GITHUB_REPOSITORY}/git/ref/heads/docs-live"; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/refs/heads/docs-live" \
+              -f "sha=${GITHUB_SHA}" -F "force=true"
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/heads/docs-live" -f "sha=${GITHUB_SHA}"
+          fi
 
   announce:
     needs:

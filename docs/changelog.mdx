@@ -11,6 +11,40 @@ documentation site describes the **latest stable release** — the docs
 for any older release are preserved in its git tag (for example
 [`ironclaw-v1.0.0` docs](https://github.com/nearai/ironclaw/tree/ironclaw-v1.0.0/docs)).
 
+<Update label="2026-08-13" description="v1.2.0">
+
+**Shared channels that just work.**
+
+- **Presence-based admission** — add the bot to a Slack channel or Telegram
+  group and it is served, with nothing to configure: the
+  `slack_allowed_channels` / `telegram_allowed_channels` allowlists and the
+  shared-subject settings are gone.
+- **Genuinely shared conversations** — a Slack thread or Telegram group/topic
+  is one continuous conversation every paired participant shares, and each
+  message still runs as the person who sent it: their identity, memory,
+  settings, and approval gates.
+- **Slack channel context** — pinging the bot at the top level of a channel
+  gives the run recent channel history; pinging inside a thread gives it that
+  thread. Context is fetched host-side and framed as untrusted quoted
+  content, never as instructions.
+- Unpaired users who ping the bot in a shared conversation get a connect
+  notice as a reply on their own message instead of silence.
+- Every parked approval or auth gate is announced individually, in the live
+  conversation and the background automation lane alike.
+- The runtime container image now ships `curl`, so orchestrator HTTP
+  healthchecks pass; Windows first-start filesystem publication and release
+  smoke runs are fixed.
+
+**Upgrading from 1.1.0:** the shared-channel allowlist and subject settings
+(`slack_allowed_channels`, `telegram_allowed_channels`,
+`slack_shared_subject_user_id`, `slack_subject_routes`) are removed —
+admission is presence-based. Previously stored shared-channel notification
+preferences fail closed; DM delivery targets are unchanged. A gate prompt
+delivered but not yet acknowledged when this version deploys re-announces
+once.
+
+</Update>
+
 <Update label="2026-08-06" description="v1.1.0">
 
 **Extension reach and legible failures.**

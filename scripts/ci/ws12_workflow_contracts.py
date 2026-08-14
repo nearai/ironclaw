@@ -1201,6 +1201,9 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
+            # A PR touching only the release workflow must reach fast-checks,
+            # or its REQUIRED_MARKERS are only enforced post-merge.
+            ".github/workflows/ironclaw-release.yml",
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
