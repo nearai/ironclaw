@@ -2,13 +2,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     path::PathBuf,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 
 use crate::redaction::redact_postgres_url;
-use crate::{Args, Backend};
 
 const MEASUREMENT_TABLES: &[&str] = &[
     "root_filesystem_entries",
@@ -21,16 +21,57 @@ const MEASUREMENT_TABLES: &[&str] = &[
 ];
 const DEFAULT_MEASUREMENT_SCHEMA: &str = "public";
 
+// PostgreSQL normally flushes cumulative table statistics at most once per second.
+const POSTGRES_STATS_SETTLE_DURATION: Duration = Duration::from_millis(1_100);
+
+/// Database backend measured by the probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbProbeTarget {
+    LibSql { path: PathBuf },
+    Postgres { url: String },
+}
+
+/// Backend-neutral configuration for one database-write measurement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbProbeConfig {
+    target: DbProbeTarget,
+    reset_stats: bool,
+}
+
+impl DbProbeConfig {
+    pub fn libsql(path: impl Into<PathBuf>, reset_stats: bool) -> Self {
+        Self {
+            target: DbProbeTarget::LibSql { path: path.into() },
+            reset_stats,
+        }
+    }
+
+    pub fn postgres(url: impl Into<String>, reset_stats: bool) -> Self {
+        Self {
+            target: DbProbeTarget::Postgres { url: url.into() },
+            reset_stats,
+        }
+    }
+
+    pub fn target(&self) -> &DbProbeTarget {
+        &self.target
+    }
+
+    pub fn reset_stats(&self) -> bool {
+        self.reset_stats
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum StatsScope {
+pub enum StatsScope {
     ExplicitResetCurrentDatabase,
     #[default]
     SnapshotDeltaCurrentDatabase,
 }
 
 impl StatsScope {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ExplicitResetCurrentDatabase => "explicit-reset-current-database",
             Self::SnapshotDeltaCurrentDatabase => "snapshot-delta-current-database",
@@ -39,70 +80,70 @@ impl StatsScope {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct DbProbeSummary {
-    pub(crate) before: DbProbeSnapshot,
-    pub(crate) after: DbProbeSnapshot,
-    pub(crate) delta: DbProbeDelta,
+pub struct DbProbeSummary {
+    pub before: DbProbeSnapshot,
+    pub after: DbProbeSnapshot,
+    pub delta: DbProbeDelta,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) idle_after: Option<DbProbeSnapshot>,
+    pub idle_after: Option<DbProbeSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) idle_delta: Option<DbProbeDelta>,
+    pub idle_delta: Option<DbProbeDelta>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) measurement: Option<DbWriteMeasurement>,
+    pub measurement: Option<DbWriteMeasurement>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct DbWriteMeasurement {
-    pub(crate) workload: String,
-    pub(crate) tool_calls_per_turn: usize,
-    pub(crate) idle_observation_seconds: u64,
-    pub(crate) reset_stats: bool,
-    pub(crate) stats_scope: StatsScope,
+pub struct DbWriteMeasurement {
+    pub workload: String,
+    pub tool_calls_per_turn: usize,
+    pub idle_observation_seconds: u64,
+    pub reset_stats: bool,
+    pub stats_scope: StatsScope,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct DbProbeSnapshot {
+pub struct DbProbeSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) libsql_file_bytes: Option<u64>,
+    pub libsql_file_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) libsql_wal_bytes: Option<u64>,
+    pub libsql_wal_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) libsql_shm_bytes: Option<u64>,
+    pub libsql_shm_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) libsql_table_writes: Vec<LibSqlTableWrites>,
+    pub libsql_table_writes: Vec<LibSqlTableWrites>,
     #[serde(default)]
-    pub(crate) libsql_table_writes_total: LibSqlWriteCounts,
+    pub libsql_table_writes_total: LibSqlWriteCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) postgres_database_size_bytes: Option<u64>,
+    pub postgres_database_size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) postgres_active_connections: Option<u64>,
+    pub postgres_active_connections: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) postgres_idle_connections: Option<u64>,
+    pub postgres_idle_connections: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) postgres_waiting_connections: Option<u64>,
+    pub postgres_waiting_connections: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) postgres_table_writes: Vec<PostgresTableWrites>,
+    pub postgres_table_writes: Vec<PostgresTableWrites>,
     #[serde(default)]
-    pub(crate) postgres_table_writes_total: PostgresWriteCounts,
+    pub postgres_table_writes_total: PostgresWriteCounts,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) postgres_statement_calls: Vec<PostgresStatementCalls>,
+    pub postgres_statement_calls: Vec<PostgresStatementCalls>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) postgres_statement_calls_by_table: Vec<PostgresTableStatementCalls>,
+    pub postgres_statement_calls_by_table: Vec<PostgresTableStatementCalls>,
     #[serde(default)]
-    pub(crate) postgres_statement_calls_total: u64,
+    pub postgres_statement_calls_total: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) error: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LibSqlWriteCounts {
-    pub(crate) inserts: u64,
-    pub(crate) updates: u64,
-    pub(crate) deletes: u64,
+pub struct LibSqlWriteCounts {
+    pub inserts: u64,
+    pub updates: u64,
+    pub deletes: u64,
 }
 
 impl LibSqlWriteCounts {
-    pub(crate) fn total(&self) -> u64 {
+    pub fn total(&self) -> u64 {
         self.inserts
             .saturating_add(self.updates)
             .saturating_add(self.deletes)
@@ -110,22 +151,22 @@ impl LibSqlWriteCounts {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LibSqlTableWrites {
-    pub(crate) table: String,
-    pub(crate) inserts: u64,
-    pub(crate) updates: u64,
-    pub(crate) deletes: u64,
+pub struct LibSqlTableWrites {
+    pub table: String,
+    pub inserts: u64,
+    pub updates: u64,
+    pub deletes: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresWriteCounts {
-    pub(crate) inserts: u64,
-    pub(crate) updates: u64,
-    pub(crate) deletes: u64,
+pub struct PostgresWriteCounts {
+    pub inserts: u64,
+    pub updates: u64,
+    pub deletes: u64,
 }
 
 impl PostgresWriteCounts {
-    pub(crate) fn total(&self) -> u64 {
+    pub fn total(&self) -> u64 {
         self.inserts
             .saturating_add(self.updates)
             .saturating_add(self.deletes)
@@ -133,182 +174,184 @@ impl PostgresWriteCounts {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresTableWrites {
-    pub(crate) table: String,
-    pub(crate) inserts: u64,
-    pub(crate) updates: u64,
-    pub(crate) deletes: u64,
+pub struct PostgresTableWrites {
+    pub table: String,
+    pub inserts: u64,
+    pub updates: u64,
+    pub deletes: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresStatementCalls {
-    pub(crate) query_id: String,
-    pub(crate) operation: String,
-    pub(crate) tables: Vec<String>,
-    pub(crate) calls: u64,
+pub struct PostgresStatementCalls {
+    pub query_id: String,
+    pub operation: String,
+    pub tables: Vec<String>,
+    pub calls: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresTableStatementCalls {
-    pub(crate) table: String,
-    pub(crate) calls: u64,
+pub struct PostgresTableStatementCalls {
+    pub table: String,
+    pub calls: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct DbProbeDelta {
+pub struct DbProbeDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) libsql_file_bytes: Option<i128>,
+    pub libsql_file_bytes: Option<i128>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) libsql_wal_bytes: Option<i128>,
+    pub libsql_wal_bytes: Option<i128>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) libsql_shm_bytes: Option<i128>,
+    pub libsql_shm_bytes: Option<i128>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) libsql_table_writes: Vec<LibSqlTableWriteDelta>,
+    pub libsql_table_writes: Vec<LibSqlTableWriteDelta>,
     #[serde(default)]
-    pub(crate) libsql_table_writes_total: LibSqlWriteDelta,
+    pub libsql_table_writes_total: LibSqlWriteDelta,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) postgres_database_size_bytes: Option<i128>,
+    pub postgres_database_size_bytes: Option<i128>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) postgres_table_writes: Vec<PostgresTableWriteDelta>,
+    pub postgres_table_writes: Vec<PostgresTableWriteDelta>,
     #[serde(default)]
-    pub(crate) postgres_table_writes_total: PostgresWriteDelta,
+    pub postgres_table_writes_total: PostgresWriteDelta,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) postgres_statement_calls: Vec<PostgresStatementCallDelta>,
+    pub postgres_statement_calls: Vec<PostgresStatementCallDelta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) postgres_statement_calls_by_table: Vec<PostgresTableStatementCallDelta>,
+    pub postgres_statement_calls_by_table: Vec<PostgresTableStatementCallDelta>,
     #[serde(default)]
-    pub(crate) postgres_statement_calls_total: i128,
+    pub postgres_statement_calls_total: i128,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LibSqlWriteDelta {
-    pub(crate) inserts: i128,
-    pub(crate) updates: i128,
-    pub(crate) deletes: i128,
+pub struct LibSqlWriteDelta {
+    pub inserts: i128,
+    pub updates: i128,
+    pub deletes: i128,
 }
 
 impl LibSqlWriteDelta {
-    pub(crate) fn total(&self) -> i128 {
+    pub fn total(&self) -> i128 {
         self.inserts + self.updates + self.deletes
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LibSqlTableWriteDelta {
-    pub(crate) table: String,
-    pub(crate) inserts: i128,
-    pub(crate) updates: i128,
-    pub(crate) deletes: i128,
+pub struct LibSqlTableWriteDelta {
+    pub table: String,
+    pub inserts: i128,
+    pub updates: i128,
+    pub deletes: i128,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresWriteDelta {
-    pub(crate) inserts: i128,
-    pub(crate) updates: i128,
-    pub(crate) deletes: i128,
+pub struct PostgresWriteDelta {
+    pub inserts: i128,
+    pub updates: i128,
+    pub deletes: i128,
 }
 
 impl PostgresWriteDelta {
-    pub(crate) fn total(&self) -> i128 {
+    pub fn total(&self) -> i128 {
         self.inserts + self.updates + self.deletes
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresTableWriteDelta {
-    pub(crate) table: String,
-    pub(crate) inserts: i128,
-    pub(crate) updates: i128,
-    pub(crate) deletes: i128,
+pub struct PostgresTableWriteDelta {
+    pub table: String,
+    pub inserts: i128,
+    pub updates: i128,
+    pub deletes: i128,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresStatementCallDelta {
-    pub(crate) query_id: String,
-    pub(crate) operation: String,
-    pub(crate) tables: Vec<String>,
-    pub(crate) calls: i128,
+pub struct PostgresStatementCallDelta {
+    pub query_id: String,
+    pub operation: String,
+    pub tables: Vec<String>,
+    pub calls: i128,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PostgresTableStatementCallDelta {
-    pub(crate) table: String,
-    pub(crate) calls: i128,
+pub struct PostgresTableStatementCallDelta {
+    pub table: String,
+    pub calls: i128,
 }
 
-pub(crate) async fn capture(args: &Args) -> DbProbeSnapshot {
-    match args.backend {
-        Backend::Libsql => capture_libsql(args).await,
-        Backend::Postgres => capture_postgres(args, false).await,
+#[doc(hidden)]
+pub async fn capture_unmeasured(config: &DbProbeConfig) -> DbProbeSnapshot {
+    match config.target() {
+        DbProbeTarget::LibSql { path } => capture_libsql(path).await,
+        DbProbeTarget::Postgres { url } => capture_postgres(url, false).await,
     }
 }
 
-pub(crate) async fn begin_measurement(args: &Args) -> Result<DbProbeSnapshot, String> {
-    match args.backend {
-        Backend::Libsql => {
-            let path = args
-                .libsql_path
-                .clone()
-                .unwrap_or_else(crate::default_libsql_path);
-            install_libsql_write_counters(&path, args.db_write_reset_stats)
+/// Installs or resets backend instrumentation and captures the starting counters.
+pub async fn begin(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
+    match config.target() {
+        DbProbeTarget::LibSql { path } => {
+            install_libsql_write_counters(path, config.reset_stats())
                 .await
                 .map_err(|error| format!("libsql measurement setup failed: {error}"))?;
-            capture_measurement(args).await
+            capture(config).await
         }
-        Backend::Postgres => {
-            let url = crate::resolve_postgres_url(args)?;
-            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        DbProbeTarget::Postgres { url } => {
+            let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
                 .await
-                .map_err(|error| sanitize_postgres_error(&url, error))?;
+                .map_err(|error| sanitize_postgres_error(url, error))?;
             let connection_handle = tokio::spawn(async move {
                 if let Err(error) = connection.await {
                     eprintln!("[ironclaw-stress] postgres probe connection error: {error}");
                 }
             });
-            ensure_pg_stat_statements(&client, &url).await?;
-            if args.db_write_reset_stats {
-                reset_measurement_stats(&client, &url).await?;
+            ensure_pg_stat_statements(&client, url).await?;
+            if config.reset_stats() {
+                reset_measurement_stats(&client, url).await?;
             }
             drop(client);
             let _ = connection_handle.await;
-            capture_measurement(args).await
+            capture(config).await
         }
     }
 }
 
-pub(crate) async fn capture_measurement(args: &Args) -> Result<DbProbeSnapshot, String> {
-    match args.backend {
-        Backend::Libsql => {
-            let path = args
-                .libsql_path
-                .clone()
-                .unwrap_or_else(crate::default_libsql_path);
-            try_capture_libsql(path)
-                .await
-                .map_err(|error| format!("libsql probe failed: {error}"))
-        }
-        Backend::Postgres => {
-            let url = crate::resolve_postgres_url(args)?;
-            try_capture_postgres(&url, true)
-                .await
-                .map_err(|error| sanitize_postgres_error(&url, error))
-        }
+/// Captures backend write counters for the configured target.
+pub async fn capture(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
+    match config.target() {
+        DbProbeTarget::LibSql { path } => try_capture_libsql(path.clone())
+            .await
+            .map_err(|error| format!("libsql probe failed: {error}")),
+        DbProbeTarget::Postgres { url } => try_capture_postgres(url, true)
+            .await
+            .map_err(|error| sanitize_postgres_error(url, error)),
     }
 }
-pub(crate) async fn finish_measurement(args: &Args) -> Result<(), String> {
-    if !matches!(args.backend, Backend::Libsql) {
-        return Ok(());
+
+/// Waits for PostgreSQL cumulative statistics to flush, then captures write counters.
+///
+/// libSQL counters are transactionally visible, so libSQL capture remains immediate.
+pub async fn capture_settled(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
+    if let Some(delay) = settlement_delay(config.target()) {
+        tokio::time::sleep(delay).await;
     }
-    let path = args
-        .libsql_path
-        .clone()
-        .unwrap_or_else(crate::default_libsql_path);
-    remove_libsql_write_counters(&path)
+    capture(config).await
+}
+
+fn settlement_delay(target: &DbProbeTarget) -> Option<Duration> {
+    matches!(target, DbProbeTarget::Postgres { .. }).then_some(POSTGRES_STATS_SETTLE_DURATION)
+}
+
+/// Removes temporary backend instrumentation installed by [`begin`].
+pub async fn finish(config: &DbProbeConfig) -> Result<(), String> {
+    let DbProbeTarget::LibSql { path } = config.target() else {
+        return Ok(());
+    };
+    remove_libsql_write_counters(path)
         .await
         .map_err(|error| format!("libsql measurement cleanup failed: {error}"))
 }
 
-pub(crate) fn summarize(before: DbProbeSnapshot, after: DbProbeSnapshot) -> DbProbeSummary {
+#[doc(hidden)]
+pub fn summarize(before: DbProbeSnapshot, after: DbProbeSnapshot) -> DbProbeSummary {
     let before = normalize_snapshot(before);
     let after = normalize_snapshot(after);
     let delta = snapshot_delta(&before, &after);
@@ -322,7 +365,8 @@ pub(crate) fn summarize(before: DbProbeSnapshot, after: DbProbeSnapshot) -> DbPr
     }
 }
 
-pub(crate) fn summarize_measurement(
+#[doc(hidden)]
+pub fn summarize_measurement(
     before: DbProbeSnapshot,
     after: DbProbeSnapshot,
     idle_after: Option<DbProbeSnapshot>,
@@ -345,12 +389,8 @@ pub(crate) fn summarize_measurement(
     }
 }
 
-async fn capture_libsql(args: &Args) -> DbProbeSnapshot {
-    let path = args
-        .libsql_path
-        .clone()
-        .unwrap_or_else(crate::default_libsql_path);
-    match try_capture_libsql(path).await {
+async fn capture_libsql(path: &std::path::Path) -> DbProbeSnapshot {
+    match try_capture_libsql(path.to_path_buf()).await {
         Ok(snapshot) => snapshot,
         Err(error) => DbProbeSnapshot {
             error: Some(format!("libsql probe failed: {error}")),
@@ -359,7 +399,8 @@ async fn capture_libsql(args: &Args) -> DbProbeSnapshot {
     }
 }
 
-pub(crate) async fn try_capture_libsql(
+#[doc(hidden)]
+pub async fn try_capture_libsql(
     path: PathBuf,
 ) -> Result<DbProbeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let file_bytes = file_size(&path).await?;
@@ -426,7 +467,8 @@ pub(crate) async fn try_capture_libsql(
     })
 }
 
-pub(crate) async fn install_libsql_write_counters(
+#[doc(hidden)]
+pub async fn install_libsql_write_counters(
     path: &std::path::Path,
     reset: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -514,21 +556,11 @@ async fn file_size(path: &std::path::Path) -> Result<u64, std::io::Error> {
     }
 }
 
-async fn capture_postgres(args: &Args, include_write_stats: bool) -> DbProbeSnapshot {
-    let url = match crate::resolve_postgres_url(args) {
-        Ok(url) => url,
-        Err(error) => {
-            return DbProbeSnapshot {
-                error: Some(format!("postgres probe failed: {error}")),
-                ..DbProbeSnapshot::default()
-            };
-        }
-    };
-
-    match try_capture_postgres(&url, include_write_stats).await {
+async fn capture_postgres(url: &str, include_write_stats: bool) -> DbProbeSnapshot {
+    match try_capture_postgres(url, include_write_stats).await {
         Ok(snapshot) => snapshot,
         Err(error) => DbProbeSnapshot {
-            error: Some(sanitize_postgres_error(&url, error)),
+            error: Some(sanitize_postgres_error(url, error)),
             ..DbProbeSnapshot::default()
         },
     }
@@ -717,7 +749,8 @@ async fn capture_postgres_write_stats(
     Ok(())
 }
 
-pub(crate) fn aggregate_statement_calls<'a>(
+#[doc(hidden)]
+pub fn aggregate_statement_calls<'a>(
     rows: impl IntoIterator<Item = (i64, &'a str, u64)>,
 ) -> Vec<PostgresStatementCalls> {
     let mut grouped = BTreeMap::<String, PostgresStatementCalls>::new();
@@ -1005,7 +1038,8 @@ fn statement_call_delta(
         .collect()
 }
 
-pub(crate) fn pg_stat_statements_unavailable(url: &str, detail: impl std::fmt::Display) -> String {
+#[doc(hidden)]
+pub fn pg_stat_statements_unavailable(url: &str, detail: impl std::fmt::Display) -> String {
     format!(
         "postgres DB write measurement requires a loaded pg_stat_statements extension: {detail}. \
          Run CREATE EXTENSION pg_stat_statements in the target database, add pg_stat_statements \
@@ -1014,7 +1048,8 @@ pub(crate) fn pg_stat_statements_unavailable(url: &str, detail: impl std::fmt::D
     )
 }
 
-pub(crate) fn pg_stat_statements_reset_supported(version: &str) -> bool {
+#[doc(hidden)]
+pub fn pg_stat_statements_reset_supported(version: &str) -> bool {
     let mut components = version.split('.');
     let Some(major) = components
         .next()
@@ -1031,7 +1066,8 @@ pub(crate) fn pg_stat_statements_reset_supported(version: &str) -> bool {
     major > 1 || (major == 1 && minor >= 7)
 }
 
-pub(crate) fn sanitize_postgres_error(resolved_url: &str, error: impl std::fmt::Display) -> String {
+#[doc(hidden)]
+pub fn sanitize_postgres_error(resolved_url: &str, error: impl std::fmt::Display) -> String {
     let mut message = format!("postgres probe failed: {error}");
     message = message.replace(resolved_url, &redact_postgres_url(resolved_url));
     message
@@ -1047,4 +1083,25 @@ fn delta(before: Option<u64>, after: Option<u64>) -> Option<i128> {
 
 fn counter_delta(before: u64, after: u64) -> i128 {
     i128::from(after) - i128::from(before)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, settlement_delay};
+
+    #[test]
+    fn settled_capture_waits_only_for_postgres_stats() {
+        assert_eq!(
+            settlement_delay(&DbProbeTarget::Postgres {
+                url: "postgresql://localhost/ironclaw".to_string(),
+            }),
+            Some(POSTGRES_STATS_SETTLE_DURATION)
+        );
+        assert_eq!(
+            settlement_delay(&DbProbeTarget::LibSql {
+                path: "measurement.db".into(),
+            }),
+            None
+        );
+    }
 }

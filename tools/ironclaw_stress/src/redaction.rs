@@ -1,10 +1,10 @@
 use std::path::Path;
 
-pub(crate) fn redact_libsql_path(_path: &Path) -> String {
+pub fn redact_libsql_path(_path: &Path) -> String {
     "libsql://<redacted-local-path>".to_string()
 }
 
-pub(crate) fn redact_postgres_url(url: &str) -> String {
+pub fn redact_postgres_url(url: &str) -> String {
     if let Some(redacted) = redact_postgres_uri(url, "postgres://") {
         return redacted;
     }

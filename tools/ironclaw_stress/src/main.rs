@@ -3,6 +3,7 @@ mod api_capacity;
 mod capture;
 mod child_io;
 mod compare;
+#[path = "db_probe_cli.rs"]
 mod db_probe;
 mod human;
 mod process_metrics;
