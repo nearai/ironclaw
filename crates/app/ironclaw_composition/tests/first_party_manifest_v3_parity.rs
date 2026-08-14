@@ -652,19 +652,29 @@ fn slack_v3_appends_the_remaining_standard_ops() {
             .find(|capability| capability.id.as_str() == *id)
             .expect("capability just enumerated");
 
-        // Host-canonical schemas on both directions: the output half is what
-        // makes a send that cannot produce a message_ref a failure instead of
-        // a silent pass-through.
+        // Host-canonical schemas on both directions: each operation pins the
+        // current output version declared by its contract. The output half is
+        // what makes a send that cannot produce provider evidence fail instead
+        // of silently passing through.
         assert_eq!(
             capability.input_schema_ref.as_str(),
             format!("standard:messaging/{}.input.v1", op.op_name())
+        );
+        let output_version = op
+            .contract()
+            .unwrap_or_else(|| panic!("{id}: bound to a reserved standard op"))
+            .output_schema_version;
+        let expected_output_ref = format!(
+            "standard:messaging/{}.output.{}",
+            op.op_name(),
+            output_version.as_str()
         );
         assert_eq!(
             capability
                 .output_schema_ref
                 .as_ref()
                 .map(|schema_ref| schema_ref.as_str()),
-            Some(format!("standard:messaging/{}.output.v1", op.op_name()).as_str())
+            Some(expected_output_ref.as_str())
         );
 
         // Write ops must declare external_write (spec §6 rule 4) — this is
