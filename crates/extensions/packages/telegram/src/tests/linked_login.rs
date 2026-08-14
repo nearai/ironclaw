@@ -251,3 +251,35 @@ fn a_flow_stops_accepting_input_after_a_bounded_number_of_attempts() {
         "exhausting attempts means start over, not give up forever"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Where the login code actually arrives
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_code_prompt_says_where_telegram_delivers_the_code() {
+    // QA, 2026-08-14: "it said it sent the code but i never got it." While an
+    // account has other live sessions, Telegram delivers login codes to those
+    // signed-in apps (a message from the "Telegram" service chat) and not as
+    // an SMS. A hint that only says "your other devices" sends people hunting
+    // for a text message that will never arrive.
+    match code_prompt() {
+        DeviceLinkStep::InputRequired {
+            hint: Some(hint), ..
+        } => {
+            assert!(
+                hint.contains("signed-in Telegram apps"),
+                "hint must say the code goes to existing sessions: {hint}"
+            );
+            assert!(
+                hint.contains("service chat"),
+                "hint must name the place to look: {hint}"
+            );
+            assert!(
+                hint.contains("not sent as an SMS"),
+                "hint must kill the SMS expectation: {hint}"
+            );
+        }
+        other => panic!("the code prompt must carry a delivery hint, got {other:?}"),
+    }
+}

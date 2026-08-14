@@ -69,7 +69,7 @@ use crate::linked::transport::{MtprotoConnection, TransportError, VendorOpKind};
 mod errors;
 mod pending;
 
-use errors::{custody_error, fatal_step, invocation_error, vendor_error};
+use errors::{custody_error, fatal_step, invocation_error, login_requires_password, vendor_error};
 use pending::{PendingLink, PendingLinks, PendingPhase, PendingState, abandon};
 
 /// First backoff after a failed export; doubles up to [`MAX_EXPORT_BACKOFF`].
@@ -212,8 +212,11 @@ impl TelegramDeviceLinkAdapter {
         };
         match link.connection.invoke(&request, VendorOpKind::Read).await {
             Ok(token) => self.apply_login_token(ctx, link, state, token).await,
-            // 2FA surfaces on the export call itself, not as a separate step.
-            Err(error) if error.rpc_name() == Some("SESSION_PASSWORD_NEEDED") => {
+            // For a same-datacenter account, 2FA surfaces on the export call
+            // itself. (An account on another datacenter surfaces it on the
+            // `ImportLoginToken` hop instead — handled in
+            // `apply_login_token`'s `MigrateTo` arm.)
+            Err(ref error) if login_requires_password(error) => {
                 let token = fetch_password_token(link).await?;
                 Ok(self.ask_for_password(state, token))
             }
@@ -253,7 +256,7 @@ impl TelegramDeviceLinkAdapter {
                         .await;
                 }
                 tl::enums::auth::LoginToken::MigrateTo(migrate) => {
-                    let imported = link
+                    let imported = match link
                         .connection
                         .invoke_in_dc(
                             migrate.dc_id,
@@ -263,7 +266,26 @@ impl TelegramDeviceLinkAdapter {
                             VendorOpKind::Read,
                         )
                         .await
-                        .map_err(vendor_error)?;
+                    {
+                        Ok(imported) => imported,
+                        // The scan was accepted on the migrated datacenter and
+                        // the account's second factor now gates the session:
+                        // this is the 2FA branch, not a failure (live repro:
+                        // QA 2026-08-14T14:49Z). Persist the datacenter move
+                        // first — the SRP exchange must run where the login is
+                        // pending, exactly as the success arm does before
+                        // `complete_raw`.
+                        Err(ref error) if login_requires_password(error) => {
+                            link.connection
+                                .session()
+                                .set_home_dc_id(migrate.dc_id)
+                                .await
+                                .map_err(custody_error)?;
+                            let token = fetch_password_token(link).await?;
+                            return Ok(self.ask_for_password(state, token));
+                        }
+                        Err(error) => return Err(vendor_error(error)),
+                    };
                     // Persist the move only after the import succeeded: a home
                     // DC pointing at a datacenter that never accepted us is a
                     // session that reconnects to the wrong place forever.
@@ -929,7 +951,11 @@ fn code_prompt() -> DeviceLinkStep {
     prompt(
         DeviceLinkInputKind::Code,
         "Login code",
-        Some("Telegram sent a code to your other signed-in devices."),
+        Some(
+            "Telegram delivered the code to your other signed-in Telegram apps — look for a \
+             message from \"Telegram\" (the service chat). While you have active sessions it \
+             is not sent as an SMS.",
+        ),
     )
 }
 

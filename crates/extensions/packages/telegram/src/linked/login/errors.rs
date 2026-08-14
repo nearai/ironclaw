@@ -58,6 +58,19 @@ pub(super) fn custody_error(error: SessionStoreError) -> DeviceLinkError {
     }
 }
 
+/// Whether a login-path RPC failure is the account's second-factor gate.
+///
+/// `SESSION_PASSWORD_NEEDED` is not a failure: Telegram has already accepted
+/// the login (a scanned code, a correct phone code) and the account's cloud
+/// password now gates the session. It can surface on `auth.exportLoginToken`
+/// for a same-datacenter account and on `auth.importLoginToken` after a
+/// `MigrateTo` hop, so every login call site must run this check before any
+/// disposition mapping — the table's catch-all would otherwise report the 2FA
+/// gate as "that value was not accepted" and strand a half-authorized device.
+pub(super) fn login_requires_password(error: &TransportError) -> bool {
+    error.rpc_name() == Some("SESSION_PASSWORD_NEEDED")
+}
+
 pub(super) fn vendor_error(error: TransportError) -> DeviceLinkError {
     match &error {
         TransportError::Rpc { code, name, .. } => {

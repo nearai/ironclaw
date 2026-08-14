@@ -115,3 +115,31 @@ impl LinkedSessionErrorForTest {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The second-factor gate is a step, never a failure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_second_factor_gate_is_never_classified_as_a_failure() {
+    // Live repro (QA, 2026-08-14T14:49Z): for an account whose login lives on
+    // another datacenter, 2FA surfaces as a 401 on `auth.importLoginToken` —
+    // after Telegram has already accepted the scan. The catch-all below the
+    // disposition table would report that as InvalidInput ("that value was
+    // not accepted") and strand a half-authorized device, so every call site
+    // that can receive it must recognize the password gate BEFORE any
+    // disposition mapping.
+    let gate = TransportError::Rpc {
+        code: 401,
+        name: "SESSION_PASSWORD_NEEDED".to_string(),
+        value: None,
+    };
+    assert!(
+        login_requires_password(&gate),
+        "SESSION_PASSWORD_NEEDED is the 2FA branch, not a vendor failure"
+    );
+    assert!(
+        !login_requires_password(&TransportError::Unavailable),
+        "a transport outage is not a password gate"
+    );
+}
