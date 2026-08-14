@@ -5,7 +5,7 @@ description: Generate or update the IronClaw architecture overview video using R
 
 # Architecture Video Generator
 
-Generates and maintains the animated architecture overview video in `docs/architecture-video/` using Remotion (React-based video framework).
+Generates and maintains the animated architecture overview video in `docs/internal/architecture-video/` using Remotion (React-based video framework).
 
 ## When to use
 
@@ -20,17 +20,17 @@ Generates and maintains the animated architecture overview video in `docs/archit
 
 Read these files to understand the current system architecture:
 
-- `CLAUDE.md` — top-level project structure, module specs, key traits, principles
+- `AGENTS.md` — top-level commands, invariants, tree map, module specs table
 - `crates/Architecture.md` — **the Reborn stack thesis and component map (the current architecture; lead the video with this)**
 - `crates/AGENTS.md` — the Reborn crate routing map
-- `crates/ironclaw_llm/CLAUDE.md` — canonical LLM provider architecture
-- `src/db/CLAUDE.md` — database dual-backend architecture
-- `src/tools/README.md` — v1 tool system architecture
-- `src/workspace/README.md` — v1 workspace/memory architecture
+- `crates/domains/ironclaw_llm/CONTRACT.md` — canonical LLM provider architecture
+- `crates/substrates/ironclaw_filesystem/CONTRACT.md` — storage fabric / dual-backend architecture
+- `crates/extensions/AGENTS.md` — the installable-package family: extension packages, tool surfaces, lifecycle host (successor of the v1 tool system)
+- `crates/domains/ironclaw_memory/README.md` — the memory contract and conformance seam (successor of the v1 workspace/memory system)
 
 ### 2. Read current video scenes
 
-Read `docs/architecture-video/src/IronClawArchitecture.tsx` to understand current scene order, durations, and transitions. Then read individual scenes in `docs/architecture-video/src/scenes/` to see what's already covered.
+Read `docs/internal/architecture-video/src/IronClawArchitecture.tsx` to understand current scene order, durations, and transitions. Then read individual scenes in `docs/internal/architecture-video/src/scenes/` to see what's already covered.
 
 ### 3. Identify gaps
 
@@ -43,7 +43,7 @@ Compare the architecture documentation with what the video covers. Look for:
 ## Video project structure
 
 ```
-docs/architecture-video/
+docs/internal/architecture-video/
 ├── package.json              # Remotion deps
 ├── remotion.config.ts        # Build config
 ├── src/
@@ -226,12 +226,12 @@ export const MyNewScene: React.FC = () => {
 
 After making changes:
 
-1. **Type check:** `cd docs/architecture-video && npx tsc --noEmit`
+1. **Type check:** `cd docs/internal/architecture-video && npx tsc --noEmit`
 2. **Spot check frames:** `npx remotion still IronClawArchitecture --scale=0.25 --frame=<N>`
    - At 30fps, frame N corresponds to time N/30 seconds
    - Check at least one frame per modified scene
 3. **Full render:** `./scripts/render-architecture-video.sh [output-path]`
-4. **Preview in browser:** `cd docs/architecture-video && npm run dev`
+4. **Preview in browser:** `cd docs/internal/architecture-video && npm run dev`
 
 ## Design guidelines
 

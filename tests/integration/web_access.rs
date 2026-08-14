@@ -90,15 +90,12 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
         .await
         .expect("capability dispatched through the real executor");
     harness
-        .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
-            "web_search_exa",
-        )
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_search_exa")
         .await
         .expect("outbound MCP tools/call carried the exa search tool name");
     harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "rust async runtimes",
         )
         .await
@@ -147,15 +144,12 @@ async fn web_search_empty_result_dispatches_through_scripted_exa_mcp() {
         .await
         .expect("initialize, initialized, and tools/call were observed");
     harness
-        .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
-            "web_search_exa",
-        )
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_search_exa")
         .await
         .expect("observed request names the provider operation");
     harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "provider-empty-search-sentinel",
         )
         .await
@@ -208,15 +202,12 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .await
         .expect("capability dispatched through the real executor");
     harness
-        .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
-            "web_fetch_exa",
-        )
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_fetch_exa")
         .await
         .expect("outbound MCP tools/call carried the exa fetch tool name");
     harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "https://example.com",
         )
         .await
@@ -260,14 +251,11 @@ async fn get_content_empty_result_dispatches_through_scripted_exa_mcp() {
         .await
         .expect("initialize, initialized, and tools/call were observed");
     harness
-        .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
-            "web_fetch_exa",
-        )
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_fetch_exa")
         .await
         .expect("observed request names the provider operation");
     harness
-        .assert_egress_body_contains_any(ironclaw_first_party_extensions::EXA_MCP_HOST, url)
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, url)
         .await
         .expect("observed request carries the exact destination");
 
@@ -405,7 +393,7 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
 
     let result = harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "a substring that never appears in any scripted leg",
         )
         .await;

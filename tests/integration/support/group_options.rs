@@ -1,8 +1,9 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
-//! `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
-//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! `with_narrowed_capability_surface_policy_for_bridged_test`,
+//! `budget_accounting`, `communication_context_provider`,
+//! `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -16,11 +17,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
 use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
-use ironclaw_loop_host::CapabilityAllowSet;
-use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
+use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::InMemoryTurnEventSink;
 
 use super::super::builder::StorageMode;
@@ -94,6 +94,12 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
+        self
+    }
+
     /// Force `ToolDisclosureMode::Off` into the group's ONE planned runtime
     /// config, regardless of `REBORN_TOOL_DISCLOSURE`. Used by the disclosure
     /// mode's negative-control test to pin Off-mode behavior explicitly:
@@ -109,23 +115,36 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// #5647 RED-pin seam: override the Bridged-mode `CapabilityAllowSet`
-    /// (default forces `All`) so a test can reproduce a narrowed profile atop
-    /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
+    /// #5647 RED-pin seam: override the Bridged-mode `CapabilitySurfacePolicy`
+    /// (default uses `CapabilitySurfacePolicy::allow_all()`) so a test can
+    /// reproduce a narrowed profile atop bridged deferral; requires
+    /// `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     /// Mirrors the production resolve-once wiring in
-    /// `crates/ironclaw_runner/src/runtime.rs`:
+    /// `crates/loop/ironclaw_turn_runner/src/runtime.rs`:
     /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
-    /// resolved allow-set between `ToolDisclosureCapabilityDecorator` and the
+    /// resolved policy between `ToolDisclosureCapabilityDecorator` and the
     /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
-    /// in `crates/ironclaw_runner/src/loop_driver_host.rs` calls
+    /// in `crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs` calls
     /// `build_text_only_host_with_capabilities`. The explicit
     /// `build_text_only_host_with_profiled_capabilities` form is for test
     /// construction.
-    pub fn with_narrowed_capability_allow_set_for_bridged_test(
-        mut self,
+    pub fn with_narrowed_capability_surface_policy_for_bridged_test(
+        self,
         ids: impl IntoIterator<Item = CapabilityId>,
     ) -> Self {
-        self.narrowed_bridged_allow_set = Some(CapabilityAllowSet::allowlist(ids));
+        self.with_capability_surface_policy_for_bridged_test(CapabilitySurfacePolicy::allow_only(
+            ids,
+        ))
+    }
+
+    /// Override every dimension of the Bridged-mode capability surface policy.
+    /// This is the full-policy counterpart to the capability-id-only helper
+    /// above and exercises the same production resolve-once wiring.
+    pub fn with_capability_surface_policy_for_bridged_test(
+        mut self,
+        policy: CapabilitySurfacePolicy,
+    ) -> Self {
+        self.narrowed_bridged_policy = Some(policy);
         self
     }
 
@@ -169,7 +188,7 @@ impl RebornIntegrationGroupBuilder {
     /// capability-port factory. Defaults `None`.
     pub fn with_raw_trajectory_observer(
         mut self,
-        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+        observer: Arc<dyn ironclaw_composition::RebornTrajectoryObserver>,
     ) -> Self {
         self.trajectory_observer = Some(observer);
         self

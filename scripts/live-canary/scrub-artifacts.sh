@@ -9,10 +9,39 @@ ARTIFACT_DIR="${1:-${RUN_DIR:-artifacts/live-canary}}"
 STRICT_ARTIFACT_SCRUB="${STRICT_ARTIFACT_SCRUB:-false}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
-FIRST_PARTY_EXTENSIONS_ROOT="${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT:-${REPO_ROOT}/crates/ironclaw_first_party_extensions/assets}"
 NEARAI_MANIFEST_TEMPLATE="${REPO_ROOT}/scripts/live-canary/fixtures/nearai-runtime-manifest.toml"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
-BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
+# Must equal BUNDLED_MARKER_OWNER in
+# crates/extensions/ironclaw_extension_host/src/bundled_skills.rs — the
+# runtime mint this scrubber verifies. The WS6/WS7 crate renames changed
+# the Rust side to "ironclaw_composition_bundled_skill" while this copy
+# kept the retired "reborn" spelling, so EVERY marker failed the owner
+# check and the bundled-skill pruning silently never engaged (the
+# test-side lockstep pin now guards the pair).
+BUNDLED_SKILL_OWNER="ironclaw_composition_bundled_skill"
+
+# The default first-party extensions root hops from the ironclaw_extension_support
+# crate (found by NAME through the shared inventory, scripts/ci/lib/crate_tree.py)
+# to its sibling `packages/` directory — the same anchor
+# scripts/build-wasm-extensions.sh uses — instead of a literal
+# `crates/extensions/packages` path, so the target-architecture family move
+# (PROPOSAL §5) cannot leave this pointed at a directory that no longer exists
+# (docs/internal/reborn/target-architecture/CHECKLIST.md WS10). The env override still
+# bypasses discovery entirely, unchanged.
+resolve_default_first_party_extensions_root() {
+  local support_dir
+  if ! support_dir=$("${REPO_ROOT}/scripts/ci/crate-dir.sh" ironclaw_extension_support "${REPO_ROOT}"); then
+    echo "scrub-artifacts: cannot resolve the ironclaw_extension_support crate, so the default first-party extensions root is unknown. Set LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT explicitly, or repoint this script if the crate moved." >&2
+    exit 1
+  fi
+  printf '%s/packages\n' "$(dirname "${support_dir}")"
+}
+
+if [[ -n "${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT:-}" ]]; then
+  FIRST_PARTY_EXTENSIONS_ROOT="${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT}"
+else
+  FIRST_PARTY_EXTENSIONS_ROOT="$(resolve_default_first_party_extensions_root)"
+fi
 
 if [[ ! -d "${ARTIFACT_DIR}" ]]; then
   echo "Artifact directory does not exist: ${ARTIFACT_DIR}" >&2
@@ -129,6 +158,81 @@ except (OSError, UnicodeError, ValueError):
 PY
 }
 
+is_source_identical_bundled_skill() {
+  local skill_dir="$1"
+  local skill_name
+  skill_name="$(basename "${skill_dir}")"
+
+  python3 - "${BUNDLED_SKILLS_ROOT}/${skill_name}" "${skill_dir}" \
+    "${BUNDLED_SKILL_MARKER}" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+trusted_dir = Path(sys.argv[1])
+staged_dir = Path(sys.argv[2])
+marker_name = sys.argv[3]
+
+
+def regular_files(root: Path) -> list[tuple[str, Path]]:
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("bundle root is not a real directory")
+    files: list[tuple[str, Path]] = []
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for directory in directories:
+            if (current_path / directory).is_symlink():
+                raise ValueError("bundle contains a symlinked directory")
+        for filename in filenames:
+            path = current_path / filename
+            relative = path.relative_to(root).as_posix()
+            if relative == marker_name:
+                raise ValueError("unexpected runtime marker in bundle")
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("bundle contains a non-regular file")
+            files.append((relative, path))
+    return sorted(files)
+
+
+def files_equal(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        while True:
+            left_chunk = left_file.read(1024 * 1024)
+            right_chunk = right_file.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+try:
+    trusted_files = regular_files(trusted_dir)
+    staged_files = regular_files(staged_dir)
+    if not trusted_files:
+        raise ValueError("trusted source is empty")
+    if [relative for relative, _ in trusted_files] != [relative for relative, _ in staged_files]:
+        raise ValueError(
+            "staged bundle file set differs from trusted source: "
+            f"trusted={[relative for relative, _ in trusted_files]} "
+            f"staged={[relative for relative, _ in staged_files]}"
+        )
+    for (relative, trusted_path), (_, staged_path) in zip(trusted_files, staged_files):
+        if not files_equal(trusted_path, staged_path):
+            raise ValueError(
+                f"staged bundle content differs from trusted source at {relative}"
+            )
+except (OSError, UnicodeError, ValueError) as error:
+    # The verdict reason feeds the step log via the caller's narration —
+    # file names and relative paths only, never file content.
+    print(f"scrub: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 is_verified_first_party_extension_manifest() {
   local manifest="$1"
   local extension_dir
@@ -150,9 +254,12 @@ is_verified_first_party_extension_manifest() {
 }
 
 # Reborn live QA copies each case's full home into the artifact staging tree.
-# In strict mode, remove only managed system-skill installations whose marker,
-# stable content hash, file set, and bytes all match the source-controlled
-# bundle. Unverified and operator-owned skills remain in scope for scanning.
+# In strict mode, remove managed system-skill installations that are provably
+# the source-controlled bundle: either the runtime ownership marker verifies
+# (marker + stable content hash + file set + bytes), or — for the
+# marker-less trees the backend-generic skill mount exports — the file set
+# and bytes are identical to the source bundle. Unverified, divergent, and
+# operator-owned skills remain in scope for scanning.
 if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" ]]; then
   while IFS= read -r -d '' marker; do
     skill_dir="$(dirname "${marker}")"
@@ -160,7 +267,10 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
       "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
       "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
         if is_verified_bundled_skill "${marker}" "${skill_dir}"; then
+          echo "scrub: pruned marker-verified bundled skill snapshot: ${skill_dir}"
           rm -rf -- "${skill_dir}"
+        else
+          echo "scrub: kept skill snapshot for scanning (marker failed verification): ${skill_dir}"
         fi
         ;;
     esac
@@ -168,6 +278,40 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     find "${ARTIFACT_DIR}" -type f \
       -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
       -print0
+  )
+
+  # Skill mounts moved onto one backend-generic tree (#7171), and the case
+  # homes exported into artifacts no longer carry the runtime ownership
+  # marker — the marker-keyed pruning above stopped engaging, and the
+  # long-committed placeholder text in `skills/local-test/SKILL.md`
+  # (`-e NEARAI_API_KEY=<your-key>` docker examples) started failing every
+  # strict lane. A marker-less skill snapshot whose file set and bytes are
+  # identical to the source-controlled bundle is repository content whether
+  # or not the runtime stamped it; prune those too. Anything divergent —
+  # operator-authored, truncated, or modified — stays in scope for scanning.
+  while IFS= read -r -d '' skill_dir; do
+    skill_dir="${skill_dir%/}"
+    case "${skill_dir}" in
+      "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
+      "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
+        if [[ -f "${skill_dir}/${BUNDLED_SKILL_MARKER}" ]]; then
+          # The marker-keyed verification above owns marker-carrying dirs;
+          # a marker that failed verification must stay in scanning scope.
+          continue
+        fi
+        if is_source_identical_bundled_skill "${skill_dir}"; then
+          echo "scrub: pruned source-identical bundled skill snapshot: ${skill_dir}"
+          rm -rf -- "${skill_dir}"
+        else
+          # The python verdict above printed the exact mismatch reason.
+          echo "scrub: kept skill snapshot for scanning (not source-identical): ${skill_dir}"
+        fi
+        ;;
+    esac
+  done < <(
+    find "${ARTIFACT_DIR}" -type d \
+      -path '*/reborn-home/*/local-dev/system/skills/*' \
+      -prune -print0
   )
 
   # Installed first-party extension manifests are also source-controlled
@@ -189,7 +333,12 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
 fi
 
 patterns=(
-  'bearer[[:space:]]+[A-Za-z0-9._~+/=-]+'
+  # 16+ token-alphabet chars only: model-visible tool descriptions say things
+  # like "bearer for a static API token or PAT sent as a Bearer token", and
+  # tool_search output lands in traces — prose after "bearer" must not trip
+  # the guardrail, while real bearer credentials (JWTs, xoxb-, ya29., ghp_…)
+  # are all far longer than any English word that can follow "bearer".
+  'bearer[[:space:]]+[A-Za-z0-9._~+/=-]{16,}'
   'api[_-]?key[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'access[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'refresh[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
@@ -217,7 +366,7 @@ trap 'rm -f "${tmp_matches}" "${tmp_files}"' EXIT
 
 redact_matches() {
   sed -E \
-    -e 's/(bearer[[:space:]]+)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]{16,}/\1<REDACTED>/Ig' \
     -e 's/gh[pousr]_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_TOKEN>/g' \
     -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_PAT>/g' \
     -e 's/ya29\.[A-Za-z0-9._-]{20,}/<REDACTED_GOOGLE_TOKEN>/g' \

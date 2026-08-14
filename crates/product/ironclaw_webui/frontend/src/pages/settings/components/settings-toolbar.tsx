@@ -1,0 +1,184 @@
+// @ts-nocheck
+import { Button } from "../../../design-system/button";
+import { Icon } from "../../../design-system/icons";
+import { SearchField } from "../../../design-system/search-field";
+import React from "react";
+import { useT } from "../../../lib/i18n";
+import { saveBlob } from "../../../lib/download";
+import { useFilePicker } from "../../../hooks/useFilePicker";
+import { NoSupportedSettingsImportError } from "../lib/settings-api";
+
+function downloadJson(filename, data) {
+  saveBlob(
+    new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+    filename,
+  );
+}
+
+function readJsonFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        resolve(JSON.parse(reader.result));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    reader.onerror = () =>
+      reject(reader.error || new Error("Unable to read file"));
+    reader.readAsText(file);
+  });
+}
+
+export function SettingsToolbar({
+  settingsExport,
+  onImport,
+  isImporting,
+  searchQuery,
+  onSearchChange,
+  onSearchClear,
+  onBack,
+  canGoBack,
+}) {
+  const t = useT();
+  const messageTimerRef = React.useRef(null);
+  const [message, setMessage] = React.useState(null);
+
+  const showMessage = React.useCallback((tone, text) => {
+    if (messageTimerRef.current) {
+      window.clearTimeout(messageTimerRef.current);
+    }
+    setMessage({ tone, text });
+    messageTimerRef.current = window.setTimeout(() => setMessage(null), 3500);
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      if (messageTimerRef.current) {
+        window.clearTimeout(messageTimerRef.current);
+      }
+    },
+    []
+  );
+
+  const handleExport = React.useCallback(() => {
+    if (!settingsExport) return;
+    downloadJson("ironclaw-settings.json", settingsExport);
+    showMessage("success", t("settings.exportSuccess"));
+  }, [settingsExport, showMessage, t]);
+
+  const handleImportFile = React.useCallback(
+    async (file) => {
+      try {
+        const payload = await readJsonFile(file);
+        if (
+          !payload ||
+          typeof payload !== "object" ||
+          !payload.settings ||
+          typeof payload.settings !== "object" ||
+          Array.isArray(payload.settings)
+        ) {
+          throw new Error(t("settings.importInvalid"));
+        }
+        await onImport(payload);
+        showMessage("success", t("settings.importSuccess"));
+      } catch (error) {
+        if (error instanceof NoSupportedSettingsImportError) {
+          showMessage("error", t("settings.importNoSupported"));
+          return;
+        }
+        showMessage(
+          "error",
+          t("settings.importFailed", { message: error.message })
+        );
+      }
+    },
+    [onImport, showMessage, t]
+  );
+  const handleImportSelection = React.useCallback(
+    ([file]) => handleImportFile(file),
+    [handleImportFile]
+  );
+  const [openFilePicker, importInputProps] = useFilePicker({
+    accept: ".json,application/json",
+    disabled: isImporting,
+    onSelect: handleImportSelection,
+  });
+
+  return (
+    <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+          {canGoBack &&
+          (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onBack}
+              className="w-fit gap-2"
+            >
+              <Icon name="chevron" className="h-3.5 w-3.5 rotate-90" />
+              {t("settings.back")}
+            </Button>
+          )}
+
+          <SearchField
+            value={searchQuery}
+            onChange={onSearchChange}
+            onClear={onSearchClear}
+            placeholder={t("settings.searchPlaceholder")}
+            aria-label={t("settings.searchPlaceholder")}
+            clearLabel={t("settings.clearSearch")}
+            className="flex-1"
+          />
+        </div>
+
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={handleExport}
+            disabled={!settingsExport || isImporting}
+            className="gap-2"
+          >
+            <Icon name="download" className="h-3.5 w-3.5" />
+            {t("settings.export")}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={openFilePicker}
+            disabled={isImporting}
+            className="gap-2"
+          >
+            <Icon name="upload" className="h-3.5 w-3.5" />
+            {isImporting ? t("settings.importing") : t("settings.import")}
+          </Button>
+          <input
+            {...importInputProps}
+          />
+        </div>
+      </div>
+
+      <div className="mt-2 min-w-0">
+        <div className="text-xs font-medium text-iron-400">{t("settings.manageJson")}</div>
+        {message &&
+        (
+          <div
+            role="status"
+            className={[
+              "mt-1 text-xs",
+              message.tone === "error" ? "text-red-200" : "text-mint",
+            ].join(" ")}
+          >
+            {message.text}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

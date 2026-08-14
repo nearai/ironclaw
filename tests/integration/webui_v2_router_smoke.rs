@@ -2,7 +2,7 @@
 //!
 //! First scenario crossing an enumerated `--test` binary into the WebChat v2
 //! route surface: the crate's own 5,801-line contract suite
-//! (`crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs`) never
+//! (`crates/product/ironclaw_webui/tests/webui_v2_handlers_contract.rs`) never
 //! runs under the coverage-lane invocation, which passes only the root-tree
 //! suite names.
 //!
@@ -30,11 +30,11 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
-use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product::{
-    CREATE_THREAD_COMMAND, ProductCreateThreadRequest, RebornCreateThreadResponse,
-    rejecting_product_surface_error,
+use ironclaw_assistant::{
+    CREATE_THREAD_COMMAND, RebornCreateThreadResponse, rejecting_product_surface_error,
 };
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_product_contracts::inbound_requests::ProductCreateThreadRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceInvokeRequest,
     ProductSurfaceInvokeResponse, ProductSurfaceQueryPage, ProductSurfaceQueryRequest,

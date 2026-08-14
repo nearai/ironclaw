@@ -21,7 +21,7 @@ activation:
     - "(?i)(waiting|blocked) on .+ (to|for)"
     - "(?i)follow up with .+ (about|on|regarding)"
     - "(?i)check (with|in with) .+ (about|on)"
-    - "(?i)(tell|ask) .+ to .+"
+    - "(?i)(tell|ask) .+ to (handle|own|take|follow up|do|finish|review|send|draft)"
   tags:
     - commitments
     - delegation

@@ -1,0 +1,439 @@
+// @ts-nocheck
+import assert from "node:assert/strict";
+import { test } from "vitest";
+import vm from "node:vm";
+
+import { componentProps, findComponent } from "../lib/vm-component-harness";
+import { sourceForVmTest } from "../test-support/vm-module-harness";
+
+const BASE_MS = Date.parse("2026-07-16T12:00:00Z");
+const LIVE_EXPIRES_AT = "2026-07-16T12:01:30Z"; // BASE + 90s
+const STALE_EXPIRES_AT = "2026-07-16T11:59:00Z"; // already expired at BASE
+
+// The panel now owns only the PAIRING LIFECYCLE — mint, poll, unpair — and
+// hands code/deep-link/expiry to the shared `LinkPayloadPanel`, which owns the
+// QR, the countdown, the copy affordance, and the renewal button (and is
+// covered by `link-payload-panel.test.ts`). These tests therefore assert the
+// lifecycle and the props crossing that seam, never a second QR/countdown
+// implementation.
+function pairingPanelSourceForTest() {
+  return sourceForVmTest(
+    "./pairing-web-code-panel.tsx",
+    ["PairingWebCodePanel"],
+    import.meta.url,
+  );
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function tForTest(key, params = {}) {
+  if (key === "pairing.web.expiresIn") return `Expires in ${params.time}`;
+  if (key === "pairing.web.qrAlt") return "Telegram pairing QR";
+  return key;
+}
+
+// React stub with full dependency-array comparison and cleanup support: the
+// panel's intervals are registered/cleared through effect cleanups, so the
+// harness must run them like React's commit phase does.
+function createPanelHarness({ pairingResponses = [], startResponses = [] } = {}) {
+  const state = { hookIndex: 0, values: {}, refs: {}, effects: {}, pendingEffects: [] };
+  const timers = { nextId: 1, active: new Map() };
+  const notifyCalls = [];
+  const invalidations = [];
+  const apiCalls = [];
+  let nowMs = BASE_MS;
+
+  const takeScripted = (queue, label) => {
+    if (queue.length === 0) throw new Error(`no scripted response left for ${label}`);
+    return queue.length > 1 ? queue.shift() : queue[0];
+  };
+
+  const context = {
+    Button: "button",
+    LinkPayloadPanel() {},
+    globalThis: {},
+    Date: { now: () => nowMs, parse: (value) => Date.parse(value) },
+    setInterval: (fn, ms) => {
+      const id = timers.nextId++;
+      timers.active.set(id, { fn, ms });
+      return id;
+    },
+    clearInterval: (id) => timers.active.delete(id),
+    React: {
+      useState: (initial) => {
+        const index = state.hookIndex++;
+        if (!(index in state.values)) {
+          state.values[index] = typeof initial === "function" ? initial() : initial;
+        }
+        return [
+          state.values[index],
+          (next) => {
+            state.values[index] =
+              typeof next === "function" ? next(state.values[index]) : next;
+          },
+        ];
+      },
+      useRef: (initial) => {
+        const index = state.hookIndex++;
+        if (!(index in state.refs)) {
+          state.refs[index] = { current: initial };
+        }
+        return state.refs[index];
+      },
+      useEffect: (effect, deps) => {
+        const index = state.hookIndex++;
+        const previous = state.effects[index];
+        const changed =
+          !previous ||
+          !deps ||
+          !previous.deps ||
+          deps.length !== previous.deps.length ||
+          deps.some((dep, position) => !Object.is(dep, previous.deps[position]));
+        if (changed) {
+          state.pendingEffects.push({ index, effect, deps: deps ? Array.from(deps) : deps });
+        }
+      },
+    },
+    useQueryClient: () => ({
+      invalidateQueries: (query) => invalidations.push(query.queryKey),
+    }),
+    useT: () => tForTest,
+    notifyChannelConnected: (payload) => {
+      notifyCalls.push(payload);
+      return Promise.resolve([]);
+    },
+    getExtensionPairingStatus: async () => {
+      apiCalls.push(["get"]);
+      return takeScripted(pairingResponses, "getExtensionPairingStatus");
+    },
+    mintExtensionPairingCode: async () => {
+      apiCalls.push(["start"]);
+      const value = takeScripted(startResponses, "mintExtensionPairingCode");
+      if (value && value.__reject) throw value.__reject;
+      return value;
+    },
+    unpairExtension: async () => {
+      apiCalls.push(["disconnect"]);
+    },
+    extensionPairingError: (error, fallback) => error?.payload?.error || error?.message || fallback,
+  };
+  vm.runInNewContext(pairingPanelSourceForTest(), context);
+
+  const render = (props = {}) => {
+    state.hookIndex = 0;
+    const rendered = context.globalThis.__testExports.PairingWebCodePanel({
+      extensionId: "telegram",
+      ...props,
+    });
+    const queue = state.pendingEffects.splice(0);
+    for (const { index, effect, deps } of queue) {
+      state.effects[index]?.cleanup?.();
+      const cleanup = effect();
+      state.effects[index] = { deps, cleanup: typeof cleanup === "function" ? cleanup : null };
+    }
+    return rendered;
+  };
+
+  const payloadPanelProps = (rendered) => {
+    const node = findComponent(rendered, context.LinkPayloadPanel);
+    return node ? componentProps(node, context.LinkPayloadPanel) : null;
+  };
+
+  return {
+    render,
+    payloadPanelProps,
+    fireTimers: (ms) =>
+      Promise.all(
+        Array.from(timers.active.values())
+          .filter((timer) => timer.ms === ms)
+          .map((timer) => timer.fn()),
+      ),
+    setNow: (value) => {
+      nowMs = value;
+    },
+    timers,
+    notifyCalls,
+    invalidations,
+    apiCalls,
+    context,
+  };
+}
+
+test("PairingWebCodePanel hands only manifest-backed code, link, and expiry to the shared payload panel", async () => {
+  const harness = createPanelHarness({
+    pairingResponses: [
+      {
+        connected: false,
+        pending: { code: "OLD-1", deep_link: "https://t.me/ironclaw_bot?start=OLD-1", expires_at: STALE_EXPIRES_AT },
+      },
+    ],
+    startResponses: [
+      {
+        code: "TG-PAIR-42",
+        deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-42",
+        expires_at: LIVE_EXPIRES_AT,
+      },
+    ],
+  });
+
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  const rendered = harness.render();
+
+  // Stale server code is not reused: a fresh one is minted.
+  assert.deepEqual(harness.apiCalls, [["get"], ["start"]]);
+  const props = harness.payloadPanelProps(rendered);
+  assert.ok(props, "the pairing panel renders through the shared payload panel");
+  assert.equal(props.code, "TG-PAIR-42");
+  assert.equal(props.payload, "https://t.me/ironclaw_bot?start=TG-PAIR-42");
+  assert.equal(props.expiresAtMs, Date.parse(LIVE_EXPIRES_AT));
+  // The e2e selectors are a published contract; the prefix keeps them.
+  assert.equal(props.idPrefix, "pairing");
+  assert.equal(props.labels.qrAlt, "Telegram pairing QR");
+  assert.equal(props.labels.expiresIn("1:30"), "Expires in 1:30");
+  assert.ok(
+    !JSON.stringify(rendered).includes("@ironclaw_bot"),
+    "the generic panel must not infer provider-specific identity from a URL",
+  );
+});
+
+test("PairingWebCodePanel renews through the shared payload panel and adopts the fresh code", async () => {
+  const harness = createPanelHarness({
+    pairingResponses: [
+      {
+        connected: false,
+        pending: {
+          code: "TG-PAIR-42",
+          deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-42",
+          expires_at: LIVE_EXPIRES_AT,
+        },
+      },
+    ],
+    startResponses: [
+      {
+        code: "TG-PAIR-99",
+        deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-99",
+        expires_at: "2026-07-16T12:05:00Z",
+      },
+    ],
+  });
+
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  const rendered = harness.render();
+
+  // Renewal is the ONE renew action, owned by the shared panel and driven by
+  // the callback this component hands it.
+  await harness.payloadPanelProps(rendered).onRenew();
+  harness.render();
+  await tick();
+  const renewedProps = harness.payloadPanelProps(harness.render());
+
+  assert.equal(renewedProps.code, "TG-PAIR-99");
+  assert.equal(renewedProps.payload, "https://t.me/ironclaw_bot?start=TG-PAIR-99");
+  assert.equal(renewedProps.expiresAtMs, Date.parse("2026-07-16T12:05:00Z"));
+});
+
+test("PairingWebCodePanel poll flip to connected broadcasts the connection and invalidates channel caches", async () => {
+  const harness = createPanelHarness({
+    pairingResponses: [
+      {
+        connected: false,
+        pending: {
+          code: "TG-PAIR-42",
+          deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-42",
+          expires_at: LIVE_EXPIRES_AT,
+        },
+      },
+      { connected: true, pending: null },
+    ],
+  });
+
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  harness.render();
+
+  // An unexpired server-side pending code is reused, never re-minted.
+  assert.ok(!harness.apiCalls.some((call) => call[0] === "start"));
+  assert.ok(harness.timers.active.size > 0, "the poll timer runs while unconnected");
+
+  await harness.fireTimers(2000);
+  const connectedView = harness.render();
+
+  const body = JSON.stringify(connectedView);
+  assert.ok(body.includes("pairing.web.paired"));
+  assert.ok(body.includes("✅"));
+  assert.equal(
+    harness.payloadPanelProps(connectedView),
+    null,
+    "the connected state renders no payload panel",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.notifyCalls)), [
+    { channel: "telegram", source: "pairing-web-code-panel" },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.invalidations)), [
+    ["extensions"],
+    ["connectable-channels"],
+  ]);
+  assert.equal(harness.timers.active.size, 0, "connected state stops polling");
+});
+
+test("PairingWebCodePanel disconnect DELETEs the pairing then mints a fresh code, without a connect broadcast", async () => {
+  const harness = createPanelHarness({
+    pairingResponses: [{ connected: true, pending: null }],
+    startResponses: [
+      {
+        code: "TG-PAIR-77",
+        deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-77",
+        expires_at: LIVE_EXPIRES_AT,
+      },
+    ],
+  });
+
+  harness.render();
+  await tick();
+  const connectedView = harness.render();
+  assert.ok(JSON.stringify(connectedView).includes("pairing.web.paired"));
+  // Mounting over an already-paired account is not a connection event.
+  assert.deepEqual(harness.notifyCalls, []);
+
+  await valuesAfter(connectedView, "onClick=")[0]();
+  harness.render();
+  await tick();
+  const repairView = harness.render();
+
+  assert.deepEqual(
+    harness.apiCalls.filter((call) => call[0] === "disconnect" || call[0] === "start"),
+    [["disconnect"], ["start"]],
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.invalidations)), [
+    ["extensions"],
+    ["connectable-channels"],
+  ]);
+  assert.deepEqual(harness.notifyCalls, [], "disconnect never broadcasts a connect event");
+  assert.equal(
+    harness.payloadPanelProps(repairView).code,
+    "TG-PAIR-77",
+    "a fresh code renders for re-pairing",
+  );
+});
+
+test("PairingWebCodePanel ignores an old pairing poll that resolves after disconnect", async () => {
+  let resolveStalePoll;
+  const stalePoll = new Promise((resolve) => {
+    resolveStalePoll = resolve;
+  });
+  const harness = createPanelHarness({
+    pairingResponses: [
+      {
+        connected: false,
+        pending: {
+          code: "TG-PAIR-42",
+          deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-42",
+          expires_at: LIVE_EXPIRES_AT,
+        },
+      },
+      { connected: true, pending: null },
+      stalePoll,
+    ],
+    startResponses: [
+      {
+        code: "TG-PAIR-88",
+        deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-88",
+        expires_at: LIVE_EXPIRES_AT,
+      },
+    ],
+  });
+
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  harness.render();
+
+  // Model overlapping interval callbacks: the first observes connection while
+  // the second remains in flight with a snapshot from the same pairing epoch.
+  const connectionPoll = harness.fireTimers(2000);
+  const oldInFlightPoll = harness.fireTimers(2000);
+  await connectionPoll;
+  const connectedView = harness.render();
+  assert.ok(JSON.stringify(connectedView).includes("pairing.web.paired"));
+
+  await valuesAfter(connectedView, "onClick=")[0]();
+  harness.render();
+  await tick();
+  let disconnectedView = harness.render();
+  assert.equal(harness.payloadPanelProps(disconnectedView).code, "TG-PAIR-88");
+
+  resolveStalePoll({ connected: true, pending: null });
+  await oldInFlightPoll;
+  disconnectedView = harness.render();
+
+  assert.ok(
+    !JSON.stringify(disconnectedView).includes("pairing.web.paired"),
+    "the pre-disconnect poll cannot restore the old connected state",
+  );
+  assert.equal(harness.payloadPanelProps(disconnectedView).code, "TG-PAIR-88");
+  assert.equal(
+    harness.notifyCalls.length,
+    1,
+    "the stale poll does not broadcast a second connection event",
+  );
+});
+
+test("PairingWebCodePanel reports a failed mint after a successful disconnect as a load error, not a failed disconnect", async () => {
+  const harness = createPanelHarness({
+    pairingResponses: [{ connected: true, pending: null }],
+    startResponses: [{ __reject: { payload: { error: "code mint exploded" } } }],
+  });
+
+  harness.render();
+  await tick();
+  const connectedView = harness.render();
+  assert.ok(JSON.stringify(connectedView).includes("pairing.web.paired"));
+
+  await valuesAfter(connectedView, "onClick=")[0]();
+  const view = harness.render();
+  const body = JSON.stringify(view);
+
+  // The DELETE succeeded: the account is disconnected, so the disconnect
+  // failure copy must not appear — the surfaced error is the mint failure.
+  assert.ok(!body.includes("pairing.web.paired"), "the account is disconnected");
+  assert.ok(body.includes("code mint exploded"), "the mint failure surfaces");
+  assert.ok(
+    !body.includes("pairing.web.disconnectFailed"),
+    "a mint failure is never reported as a failed disconnect",
+  );
+  assert.deepEqual(
+    harness.apiCalls.filter((call) => call[0] === "disconnect" || call[0] === "start"),
+    [["disconnect"], ["start"]],
+  );
+});
+
+function valuesAfter(rendered, fragment) {
+  const matches = [];
+  collectValuesAfter(rendered, fragment, matches);
+  return matches;
+}
+
+function collectValuesAfter(value, fragment, matches) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectValuesAfter(item, fragment, matches);
+    return;
+  }
+  if (!value || !Array.isArray(value.strings) || !Array.isArray(value.values)) {
+    return;
+  }
+  value.strings.forEach((part, index) => {
+    if (part.includes(fragment)) {
+      matches.push(value.values[index]);
+    }
+  });
+  value.values.forEach((item) => collectValuesAfter(item, fragment, matches));
+}

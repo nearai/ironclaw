@@ -8,7 +8,8 @@ use ironclaw_host_api::{
     mount::MountPermissions,
 };
 use ironclaw_host_runtime::{
-    JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    DOCUMENT_EDIT_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, JSON_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -31,9 +32,28 @@ fn file_tools_with_runtime_policy(
     })
 }
 
+/// [`file_tools_profile`] plus the document capabilities (#6898 item 3), for
+/// journeys that read a .docx/.xlsx/.pptx structurally, edit it into a new
+/// file, or render HTML to PDF. Auto-approve is on so the journey exercises the
+/// document path rather than gate mechanics.
+pub(crate) fn document_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = file_tools_profile()?;
+    profile
+        .capability_ids
+        .push(CapabilityId::new(DOCUMENT_EDIT_CAPABILITY_ID)?);
+    profile
+        .capability_ids
+        .push(CapabilityId::new(HTML_TO_PDF_CAPABILITY_ID)?);
+    Ok(profile)
+}
+
+pub(crate) async fn document_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    document_tools_profile()?.build().await
+}
+
 pub(crate) fn file_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
+        ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true))
 }
@@ -78,7 +98,7 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 /// through it. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
+        ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
@@ -87,7 +107,7 @@ pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<T
     // port (mirrors `project_create`'s `PROJECT_CREATE_CAPABILITY_ID`
     // opt-in pattern -- see `profiles/project.rs`).
     profile.capability_ids.push(CapabilityId::new(
-        ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
+        ironclaw_composition::test_support::RESULT_READ_CAPABILITY_ID,
     )?);
     // `builtin.json` (`parse`) is the minimal granted capability whose output
     // is a top-level JSON array, needed to drive the truncated-array

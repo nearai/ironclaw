@@ -8,7 +8,7 @@ use super::reborn_support::webui_mount::{
     get_json, mount_webui_v2_router, post_json, webui_caller_for,
 };
 use axum::http::StatusCode;
-use ironclaw_product::RebornServices;
+use ironclaw_assistant::RebornServices;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
-                    "prompt": "remind me once (webui automations rename check)",
+                    "execution_contract": super::support::trigger_execution_contract("remind me once (webui automations rename check)"),
                     "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
                 }),
             ),
@@ -47,7 +47,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .trigger_repository_for_test()
         .ok_or("triggers group harness missing a captured trigger repository")?;
     let service =
-        ironclaw_reborn_composition::test_support::standalone_automation_product_service_for_test(
+        ironclaw_composition::test_support::standalone_automation_product_service_for_test(
             trigger_repository,
             g.shared.process_system.lifecycle(),
         );

@@ -39,6 +39,7 @@ from journey_types import (
     ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
+    SlackChannelFixture,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 from provider_journey_google import require_single_google_account
@@ -109,39 +110,6 @@ _EXPECTED_COMPILED_PROVIDER_CALLS = {
         "google-sheets__get_spreadsheet",
         "google-sheets__read_values",
         "google-sheets__append_values",
-    ),
-    "qa_10a_slack_self_attribution": (
-        "slack__whoami",
-        "slack__get_conversation_history",
-    ),
-    "qa_10b_slack_ooo_status": (
-        "slack__whoami",
-        "slack__get_user_info",
-    ),
-    "qa_10c_slack_thread_replies": (
-        "slack__get_conversation_info",
-        "slack__get_conversation_history",
-        "slack__get_thread_replies",
-    ),
-    "qa_10d_slack_channel_membership": ("slack__list_conversations",),
-    "qa_10e_slack_error_honesty": ("slack__get_conversation_history",),
-    "qa_10f_slack_mention_encoding": (
-        "slack__get_conversation_info",
-        "slack__send_message",
-    ),
-    "qa_10g_slack_last_message_sent": ("slack__get_conversation_history",),
-    "qa_10g_slack_last_message_sent_global": (
-        "slack__whoami",
-        "slack__search_messages",
-    ),
-    "qa_10h_slack_email_hallucination_guard": (
-        "slack__list_conversations",
-        "slack__get_user_info",
-    ),
-    "qa_10i_slack_raw_entity_hygiene": (
-        "slack__get_conversation_info",
-        "slack__search_messages",
-        "slack__get_conversation_history",
     ),
 }
 
@@ -350,16 +318,32 @@ def test_provider_trace_compilation_keeps_recording_immutable(case):
 
 
 def test_provider_trace_compilation_declares_expected_failure():
-    case = next(
-        case
-        for case in PROVIDER_JOURNEY_CASES
-        if case.replay.expected_capability_failure is not None
+    facts = ProviderJourneyReplayFacts(
+        slack_channel=SlackChannelFixture.MISSING,
+        expected_capability_failure="channel_not_found",
     )
-    trace_path = ROOT / case.trace
+    recorded = {
+        "steps": [
+            {"response": {"type": "text", "text": "prompt"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "name": "slack__get_conversation_history",
+                            "arguments": {"conversation": "C_RECORDED"},
+                        }
+                    ],
+                }
+            },
+            {"response": {"type": "text", "text": "unable to read channel"}},
+        ]
+    }
     compiled = compile_provider_journey_trace(
-        load_recorded_trace(trace_path),
-        source=trace_path.name,
-        facts=case.replay,
+        recorded,
+        source="synthetic-canonical-slack-failure.json",
+        facts=facts,
         provider_tools=EMULATE_SUPPORTED_TOOLS,
         slack_state=_SEEDED_SLACK_STATE,
     )
@@ -367,7 +351,7 @@ def test_provider_trace_compilation_declares_expected_failure():
     assert MISSING_SLACK_CHANNEL_ID in json.dumps(compiled.trace)
     assert compiled.trace["steps"][-1]["request_hint"] == {
         "expected_failed_tool_result_contains": (
-            case.replay.expected_capability_failure
+            facts.expected_capability_failure
         )
     }
 
@@ -866,10 +850,14 @@ def _expected_forward_ids() -> list[str]:
 
 
 def test_provider_journey_runs_preserve_isolated_repeat_cases():
-    """The two isolation probes remain doubled while ordinary cases run once."""
+    """The one remaining isolation probe stays doubled; ordinary cases run once.
+
+    `qa_10f_slack_mention_encoding` was a second isolation probe until it was
+    quarantined for stale (pre-canonicalization) Slack argument names, so it no
+    longer appears in `PROVIDER_JOURNEY_CASES` at all.
+    """
     expected_repeat_cases = {
         "qa_5d_slack_strategy_doc_answer",
-        "qa_10f_slack_mention_encoding",
     }
     actual_repeat_cases = {
         case.case_id for case in PROVIDER_JOURNEY_CASES if case.repeat_after_reset
@@ -1085,9 +1073,9 @@ def test_external_delivery_variants_name_exact_caller_evidence():
     slack_destinations = {
         address.conversation_id for address in by_surface.get("slack", [])
     }
-    assert {"D-TRIGGER-DEFAULT", "C-TRIGGER-OVERRIDE"} <= slack_destinations, (
-        "Slack's existing DM and shared-channel caller proofs must remain "
-        "independently citable"
+    assert {"D-JOURNEY", "C777"} <= slack_destinations, (
+        "Slack's explicit-tool DM proof and shared-channel reply proof must "
+        "remain independently citable"
     )
 
 
@@ -1416,11 +1404,11 @@ def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
 # ---------------------------------------------------------------------------
 
 
-def test_every_production_provider_write_maps_to_a_resettable_world():
-    """No production write can run without a world that gets reset."""
+def test_every_deterministically_tested_provider_write_maps_to_a_resettable_world():
+    """No replayable provider write can run without a world that gets reset."""
     unreset = unreset_mutating_tools()
     assert not unreset, (
-        "these production tools declare `external_write` but belong to no "
+        "these deterministically tested tools declare `external_write` but belong to no "
         f"provider world the harness can reset: {sorted(unreset)}. A journey "
         "using one would mutate a world that nothing restores, and the next "
         "test would inherit the result. Add the world to _TOOL_WORLD_PREFIXES "
@@ -1444,7 +1432,7 @@ def test_provider_write_derivation_still_finds_the_tools_it_replaced():
     assert not missing, (
         f"the derivation stopped recognising known provider writes: {missing}. "
         "It reads the `external_write` effect from "
-        "crates/ironclaw_first_party_extensions/assets/*/manifest.toml -- check "
+        "crates/extensions/packages/*/manifest.toml -- check "
         "whether that key or the tool ids were renamed. Until this is fixed no "
         "journey resets its provider world."
     )

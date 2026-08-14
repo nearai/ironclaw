@@ -24,7 +24,7 @@
 //!   stale-binding carryover from before the removal.
 //!
 //! Uses the group's generic channel-connection bundle
-//! (`ironclaw_reborn_composition::test_support`), whose connect drives the
+//! (`ironclaw_composition::test_support`), whose connect drives the
 //! production OAuth-callback identity-binding hook
 //! (`bind_channel_identities_for_callback`) and whose service is late-bound
 //! into the same cleanup slot `extension_remove` dispatches to.
@@ -45,14 +45,15 @@
 //!   equivalent pin is that removal deletes the binding outright, so a fresh
 //!   reconnect succeeds with no stale-state conflict (`bind_user_identity`
 //!   would reject a binding held by a different user);
-//! - **bindings are deleted, not tombstoned**: `has_any_active_identity_binding`
-//!   reads record absence rather than tombstone state.
+//! - **bindings are logically deleted with a CAS tombstone**:
+//!   `has_any_active_identity_binding` ignores tombstones, while their retained
+//!   versions fence stale rollback receipts from deleting a later reconnect.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use ironclaw_auth::OAuthProviderIdentity;
+use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_host_api::ids::UserId;
-use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_secrets::SecretMaterial;
 use serde_json::json;
 
@@ -64,8 +65,10 @@ const SLACK_OAUTH_CLIENT_ID: &str = "slack-oauth-client";
 const SLACK_OAUTH_CLIENT_SECRET: &str = "slack-oauth-secret";
 
 /// Mirrors the slack manifest's `[[tools.credentials]]` scope union
-/// (`crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`):
-/// read scopes shared by every tool plus `chat:write` for `send_message`.
+/// (`crates/extensions/packages/slack/manifest.toml`):
+/// read scopes shared by every tool plus the write additions — `chat:write`
+/// (send/edit/delete), `reactions:read` + `reactions:write` (the reaction
+/// pair), and `im:write` (`open_dm`).
 const SLACK_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
@@ -78,6 +81,9 @@ const SLACK_SCOPES: &[&str] = &[
     "mpim:read",
     "users:read",
     "chat:write",
+    "reactions:read",
+    "reactions:write",
+    "im:write",
 ];
 
 /// The administrator-configuration connection-scoping claims this scenario configures
@@ -218,8 +224,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let slack = g
         .channel_connection()
         .ok_or("extension_lifecycle group must carry the channel-connection bundle")?;
-    // Direct-chat bindings resolve subject == actor, so this one identity is
-    // both the capability dispatch user and the authenticated actor removal
+    // A direct-chat run acts as the user who invoked it, so this one identity
+    // is both the capability dispatch user and the authenticated actor removal
     // cleanup disconnects.
     let actor = g.canonical_actor_user();
 
@@ -309,12 +315,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             RebornScriptedReply::text("searched slack"),
             RebornScriptedReply::tool_call(
                 "slack.send_message",
-                json!({"channel": "C-ITEST", "text": "hello after remove?"}),
+                json!({"conversation": "C-ITEST", "text": "hello after remove?"}),
             ),
             RebornScriptedReply::text("slack unavailable"),
             RebornScriptedReply::tool_call(
                 "slack.send_message",
-                json!({"channel": "C-ITEST", "text": "hello again"}),
+                json!({"conversation": "C-ITEST", "text": "hello again"}),
             ),
             RebornScriptedReply::text("sent slack message"),
         ])

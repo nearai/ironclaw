@@ -44,8 +44,8 @@ CANNED_RESPONSES = [
     # already-run writes).
     (
         re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
-        "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
-        "Both are ready to download.",
+        "Done — I saved [report.csv](/workspace/report.csv) and "
+        "[report.pdf](sandbox:/workspace/report.pdf). Both are ready to download.",
     ),
     (
         re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
@@ -300,7 +300,13 @@ TOOL_CALL_PATTERNS = [
         "builtin__trigger_create",
         lambda m: {
             "name": f"E2E rename original {m.group('label')}",
-            "prompt": f"E2E automation rename prompt {m.group('label')}",
+            "execution_contract": {
+                "version": 1,
+                "goal": f"E2E automation rename prompt {m.group('label')}",
+                "success_criteria": ["Complete the requested task"],
+                "output_instructions": "Return a concise result",
+                "no_result_text": "No result",
+            },
             "schedule": {
                 "kind": "once",
                 "at": "2999-06-02T00:00:00",

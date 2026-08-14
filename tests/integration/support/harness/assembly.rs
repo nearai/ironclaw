@@ -8,7 +8,7 @@ use super::super::{
     extension_surface::BUNDLED_EXTENSION_IDS, github as github_support, harness_web_access,
 };
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
     DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
@@ -55,7 +55,7 @@ pub(crate) fn default_capability_io_pair() -> (
     Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) {
-    let capability_io = Arc::new(ironclaw_reborn_composition::ProductLiveCapabilityIo::default());
+    let capability_io = Arc::new(ironclaw_composition::ProductLiveCapabilityIo::default());
     (capability_io.clone(), capability_io)
 }
 
@@ -90,6 +90,26 @@ pub(crate) fn standalone_host_runtime_with_registry_and_runtime_http_egress(
     egress: Arc<RecordingRuntimeHttpEgress>,
     process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let filesystem =
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?;
+    standalone_host_runtime_over_filesystem_with_registry_and_runtime_http_egress(
+        filesystem,
+        registry,
+        egress,
+        process_port,
+    )
+}
+
+/// Build the core first-party runtime over a caller-owned filesystem. The
+/// memory integration group uses this seam so tool dispatch and proactive
+/// retrieval share the exact production-shaped libSQL composite instead of
+/// silently writing to the core-builtins harness's separate in-memory mount.
+pub(crate) fn standalone_host_runtime_over_filesystem_with_registry_and_runtime_http_egress(
+    filesystem: Arc<CompositeRootFilesystem>,
+    registry: ExtensionRegistry,
+    egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
     // Mirror the production rule (`factory.rs`): the bound memory provider's
     // guarded tool handler is registered exactly when its package is in the
     // registry — `without_memory_package` (the Disabled-binding shape) gets
@@ -105,7 +125,7 @@ pub(crate) fn standalone_host_runtime_with_registry_and_runtime_http_egress(
     }
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),
-        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
+        filesystem,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -177,6 +197,16 @@ struct NoopTestTriggerCreateHook;
 
 #[async_trait::async_trait]
 impl TriggerCreateHook for NoopTestTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _policy: &ironclaw_host_api::execution_policy::TurnExecutionPolicy,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        // Never exercised (see the struct doc): only `builtin.trigger_list`
+        // is ever routed to this runtime.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(
         &self,
         _record: &ironclaw_triggers::TriggerRecord,
@@ -303,7 +333,7 @@ pub(crate) fn standalone_host_runtime_with_registry_and_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let filesystem =
         standalone_root_filesystem(storage_root, StandaloneRootMounts::github_assets())?;
-    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
+    let scoped_filesystem = ironclaw_composition::wrap_scoped(Arc::clone(&filesystem));
     let process_runtime: Arc<dyn ironclaw_processes::ProcessRuntimePort> = Arc::new(
         ironclaw_processes::ProcessJournalStore::new(Arc::clone(&scoped_filesystem)),
     );
@@ -393,7 +423,7 @@ pub(crate) fn standalone_host_runtime_with_real_egress_pipeline(
     registry.insert(builtin_first_party_package()?)?;
     let filesystem =
         standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?;
-    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
+    let scoped_filesystem = ironclaw_composition::wrap_scoped(Arc::clone(&filesystem));
 
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),

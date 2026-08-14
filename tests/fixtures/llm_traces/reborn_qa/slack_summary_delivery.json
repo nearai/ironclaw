@@ -1,0 +1,50 @@
+{
+  "model_name": "synthetic-slack-summary-delivery",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Here's our incident postmortem notes: the payments API returned elevated 500s for 12 minutes starting 14:02 UTC because of a bad connection-pool config in the latest deploy; a rollback at 14:14 UTC restored normal error rates. Summarize this in two sentences and send me the summary on Slack."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_summary_targets_list",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_summary_outbound_deliver",
+            "name": "builtin__outbound_deliver",
+            "arguments": {
+              "target_id": "slack:qa-trace-dm",
+              "content": "Payments API saw elevated 500s for 12 minutes starting 14:02 UTC from a bad connection-pool config in the latest deploy. A rollback at 14:14 UTC restored normal error rates. SLACK_SUMMARY_DELIVERY_CANARY"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Sent the two-sentence summary to your Slack DM. SLACK_SUMMARY_DELIVERY_CANARY",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

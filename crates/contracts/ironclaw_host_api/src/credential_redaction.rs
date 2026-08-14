@@ -1,0 +1,472 @@
+//! Shared credential-redaction primitives for the model-visible result
+//! vocabulary — the single definition used by both [`crate::safe_summary::SafeSummary`] (the
+//! bounded caption) and [`crate::model_result_preview::ModelResultPreview`] (the bounded tool-result
+//! CONTENT preview).
+//!
+//! Two independent scans:
+//!
+//! - **credential markers** — human-readable credential words (`secret`,
+//!   `password`, `bearer `, …) matched at a **word boundary**, not as a
+//!   substring. The substring form is the #6129 bug: `"Secretary of the
+//!   Treasury".contains("secret")` is true, so every legitimate tool result
+//!   mentioning "Secretary" got scrubbed to a stub and the model re-read it in
+//!   an amnesia loop. Markers that already begin/end with a non-alphanumeric
+//!   delimiter (`bearer `, `authorization:`) carry their own boundary and keep
+//!   matching exactly as before.
+//! - **secret-like tokens** — credential-shaped opaque tokens (`sk-…`, `ghp_…`,
+//!   `AKIA…`, …). Already word-split by its own tokenizer.
+//!
+//! Both are defense-in-depth: the redactor at the construction site scrubs
+//! first; these types refuse to hold anything that slipped through.
+
+/// Human-readable credential markers. Matched at a word boundary (see
+/// [`contains_credential_marker`]); the ones ending/starting in a non-alnum
+/// delimiter carry their own boundary.
+const CREDENTIAL_MARKERS: [&str; 9] = [
+    "access token",
+    "api key",
+    "api_key",
+    "apikey",
+    "authorization:",
+    "bearer ",
+    "password",
+    "passwd",
+    "secret",
+];
+
+/// True when `lower` (already lowercased) contains any credential marker as a
+/// standalone token rather than embedded in a larger alphanumeric word.
+pub(crate) fn contains_credential_marker(lower: &str) -> bool {
+    CREDENTIAL_MARKERS
+        .iter()
+        .any(|marker| contains_marker_at_word_boundary(lower, marker))
+}
+
+/// True if `marker` occurs in `haystack` (already lowercased) as a standalone
+/// token rather than embedded inside a larger alphanumeric word. Prevents
+/// false positives like the marker `secret` matching the ordinary word
+/// `secretary` ("Secretary of the Treasury"), which would otherwise scrub
+/// legitimate tool output. Markers that begin/end with a non-alphanumeric
+/// delimiter (e.g. `bearer `, `authorization:`) already carry their own
+/// boundary and keep matching exactly as before. Canonical copy of
+/// `ironclaw_threads::tool_result_reference::contains_marker_at_word_boundary`
+/// (verified there by `sensitive_markers_match_on_word_boundary_not_substring`).
+/// Boundary rule for ONE candidate match, extracted from
+/// [`contains_marker_at_word_boundary`] so the detector and the redactor cannot
+/// drift. A marker that already carries a non-alphanumeric delimiter on a side
+/// (`bearer `, `authorization:`) does not additionally require an alphanumeric
+/// boundary there — applying the check uniformly made `bearer ` fail to match in
+/// "presented as a Bearer header", so the detector refused text the redactor had
+/// left untouched.
+fn marker_match_at(haystack: &str, marker: &str, start: usize, end: usize) -> bool {
+    let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
+    let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
+    let before_ok = !starts_alnum
+        || haystack
+            .get(..start)
+            .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
+    let after_ok = !ends_alnum
+        || haystack
+            .get(end..)
+            .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
+    before_ok && after_ok
+}
+
+fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
+    if marker.is_empty() {
+        return false;
+    }
+    for (start, _) in haystack.match_indices(marker) {
+        if marker_match_at(haystack, marker, start, start + marker.len()) {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) const CREDENTIAL_REDACTION_PLACEHOLDER: &str = "[redacted]";
+
+/// Mask credential markers and credential-shaped tokens in `value`, preserving
+/// the surrounding content.
+///
+/// This is the redacting counterpart to [`contains_credential_marker`] /
+/// [`contains_secret_like_token`]: where those answer "should this be refused",
+/// this answers "what can safely be shown". A caller holding model-visible
+/// content should prefer masking the offending span over discarding the whole
+/// payload — dropping it loses legitimate output and, on the preview path, the
+/// continuation metadata that travels with it.
+///
+/// NOTE (revisit): the marker list is credential *vocabulary*, so a description
+/// that merely mentions "no API key required" is masked even though it contains
+/// no credential. `contains_unredacted_credential_value` already models the
+/// sharper "label followed by an actual value" rule; moving this to that
+/// predicate would stop masking harmless prose. Deliberately not changed here —
+/// masking is strictly better than today's wholesale refusal, and narrowing the
+/// rule is a separate decision about a shared credential boundary.
+pub(crate) fn redact_credential_text(value: &str) -> String {
+    let mut redacted = String::with_capacity(value.len());
+    let mut rest = value;
+    // Markers are matched case-insensitively at a word boundary, mirroring
+    // `contains_credential_marker`, so "Secretary" is left alone.
+    'outer: while !rest.is_empty() {
+        let lower = rest.to_ascii_lowercase();
+        let mut best: Option<(usize, usize)> = None;
+        for marker in CREDENTIAL_MARKERS {
+            let mut from = 0;
+            while let Some(found) = lower[from..].find(marker) {
+                let start = from + found;
+                let end = start + marker.len();
+                if marker_match_at(&lower, marker, start, end) {
+                    if best.is_none_or(|(best_start, _)| start < best_start) {
+                        best = Some((start, end));
+                    }
+                    break;
+                }
+                from = start + 1;
+            }
+        }
+        match best {
+            Some((start, end)) => {
+                redacted.push_str(&rest[..start]);
+                redacted.push_str(CREDENTIAL_REDACTION_PLACEHOLDER);
+                rest = &rest[end..];
+            }
+            None => {
+                redacted.push_str(rest);
+                break 'outer;
+            }
+        }
+    }
+    redact_secret_like_tokens(&redacted)
+}
+
+/// Replace whole tokens with a credential-shaped prefix (`sk-`, `ghp_`, `AKIA…`).
+fn redact_secret_like_tokens(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut token = String::new();
+    let flush = |out: &mut String, token: &mut String| {
+        if !token.is_empty() {
+            if has_secret_like_prefix(&token.to_ascii_lowercase()) {
+                out.push_str(CREDENTIAL_REDACTION_PLACEHOLDER);
+            } else {
+                out.push_str(token);
+            }
+            token.clear();
+        }
+    };
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+            token.push(character);
+        } else {
+            flush(&mut out, &mut token);
+            out.push(character);
+        }
+    }
+    flush(&mut out, &mut token);
+    out
+}
+
+/// True when any whitespace/punctuation-delimited token in `lower` (already
+/// lowercased) begins with a credential-shaped prefix (`sk-`, `ghp_`, `AKIA…`).
+pub(crate) fn contains_secret_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(has_secret_like_prefix)
+}
+
+/// True when diagnostic text contains a credential assignment with a value or
+/// URL userinfo. Credential vocabulary by itself remains valid diagnostic
+/// context (`password field is required`).
+pub(crate) fn contains_unredacted_credential_value(lower: &str) -> bool {
+    const LABELS: &[&str] = &[
+        "access token",
+        "access-token",
+        "access_token",
+        "api key",
+        "api-key",
+        "api_key",
+        "authorization",
+        "client secret",
+        "client-secret",
+        "client_secret",
+        "cookie",
+        "credential",
+        "password",
+        "passwd",
+        "private key",
+        "private-key",
+        "private_key",
+        "refresh token",
+        "refresh-token",
+        "refresh_token",
+        "secret",
+        "token",
+    ];
+
+    LABELS.iter().any(|label| {
+        lower.match_indices(label).any(|(start, _)| {
+            let end = start + label.len();
+            let before_ok = lower
+                .get(..start)
+                .is_none_or(|prefix| !prefix.ends_with(is_identifier_character));
+            let after_ok = lower
+                .get(end..)
+                .is_none_or(|suffix| !suffix.starts_with(is_identifier_character));
+            if !before_ok || !after_ok {
+                return false;
+            }
+            let suffix = lower[end..]
+                .trim_start()
+                .trim_start_matches(['"', '\'', '`'])
+                .trim_start();
+            let Some(value) = suffix
+                .strip_prefix('=')
+                .or_else(|| suffix.strip_prefix(':'))
+            else {
+                return false;
+            };
+            let value = value
+                .trim_start()
+                .trim_start_matches(['"', '\'', '`'])
+                .trim_start();
+            !value.is_empty() && !value.starts_with("[redacted]")
+        })
+    }) || contains_url_userinfo(lower)
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn contains_url_userinfo(value: &str) -> bool {
+    let mut remainder = value;
+    while let Some(scheme_end) = remainder.find("://") {
+        let authority_start = scheme_end + 3;
+        let authority_end = remainder[authority_start..]
+            .find(|character: char| {
+                matches!(character, '/' | '?' | '#') || character.is_whitespace()
+            })
+            .map_or(remainder.len(), |index| authority_start + index);
+        if remainder[authority_start..authority_end].contains('@') {
+            return true;
+        }
+        remainder = &remainder[authority_end..];
+    }
+    false
+}
+
+/// True when a credential-shaped prefix starts this token or any interior
+/// segment after a `-`/`_`/`.` separator. The tokenizer keeps those separators
+/// inside tokens so multi-part prefixes like `github_pat_` stay matchable — but
+/// that alone would let `memo_sk-abc123` hide a key behind a leading word, so
+/// every separator boundary is checked as a token start too. (Tokens are pure
+/// ASCII by construction: the split removes every non-ASCII-alphanumeric
+/// character except `-`/`_`/`.`, so byte indexing after a separator is
+/// char-boundary-safe.)
+fn has_secret_like_prefix(token: &str) -> bool {
+    if is_secret_like_token(token) {
+        return true;
+    }
+    token
+        .char_indices()
+        .filter(|(_, character)| matches!(character, '-' | '_' | '.'))
+        .any(|(index, _)| is_secret_like_token(&token[index + 1..]))
+}
+
+fn is_secret_like_token(token: &str) -> bool {
+    const SECRET_PREFIXES: [&str; 25] = [
+        "sk-",
+        "sk-ant-",
+        // Stripe's underscore forms. The hyphenated `sk-` above does not
+        // match them, and `has_secret_like_prefix` re-tests after every
+        // `-`/`_`/`.` separator, so these catch both `sk_live_…` and
+        // `memo_sk_live_…`.
+        "sk_live_",
+        "sk_test_",
+        "pk_live_",
+        "pk_test_",
+        "rk_live_",
+        "rk_test_",
+        "ghp_",
+        "github_pat_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "gcp-",
+        "ya29.",
+        "aiza",
+        // OAuth client secrets and workspace bot/user/app tokens. Added with
+        // `HostRemediation` (the host-authored remediation channel):
+        // remediation text names the corresponding configuration keys, so the
+        // VALUE shapes for those credentials must be detectable. Strengthening
+        // this shared detector also tightens
+        // `SafeSummary`/`ModelResultPreview`, which is the correct direction —
+        // the single definition never forks.
+        "gocspx-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "xoxs-",
+        "xoxe-",
+    ];
+
+    // A bare prefix is documentation, not credential material. Extension
+    // catalog descriptions legitimately name token families such as `xoxp-`;
+    // treating the prefix alone as a leaked value drops the entire structured
+    // tool result before the model can see it. Any non-empty suffix still fails
+    // closed, including short sentinel values used by tests.
+    (!SECRET_PREFIXES.contains(&token)
+        && SECRET_PREFIXES
+            .iter()
+            .any(|prefix| token.starts_with(prefix)))
+        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_remediation::HostRemediation;
+
+    #[test]
+    fn markers_match_on_word_boundary_not_substring() {
+        // The #6129 regression: `secret` must NOT trip on `Secretary`.
+        assert!(!contains_credential_marker("secretary of the treasury"));
+        assert!(!contains_credential_marker(
+            "the secretariat scheduled a meeting"
+        ));
+        // But a standalone `secret` (and delimiter-bounded markers) still trip.
+        assert!(contains_credential_marker("the secret is out"));
+        assert!(contains_credential_marker("client secret: xyz"));
+        assert!(contains_credential_marker("authorization: bearer x"));
+        assert!(contains_credential_marker("bearer abc"));
+        assert!(contains_credential_marker("the password is hunter2"));
+        // `passwordless` is a different word — not a standalone `password`.
+        assert!(!contains_credential_marker("passwordless login enabled"));
+    }
+
+    #[test]
+    fn marker_boundaries_and_redaction_skip_embedded_vocabulary() {
+        assert!(marker_match_at("secret", "secret", 0, 6));
+        assert!(!marker_match_at("xsecret", "secret", 1, 7));
+        assert!(!marker_match_at("secretary", "secret", 0, 6));
+        assert!(marker_match_at("bearer token", "bearer ", 0, 7));
+        assert!(marker_match_at(
+            "authorization: token",
+            "authorization:",
+            0,
+            14
+        ));
+        assert_eq!(
+            redact_credential_text("secretary then secret value"),
+            "secretary then [redacted] value"
+        );
+    }
+
+    #[test]
+    fn diagnostic_credential_guard_distinguishes_vocabulary_from_values() {
+        for safe in [
+            "password field is required",
+            "token bucket exhausted",
+            "secret sharing failed",
+            "credential setup is unavailable",
+            r#"{"password":"[REDACTED]"}"#,
+        ] {
+            assert!(
+                !contains_unredacted_credential_value(&safe.to_ascii_lowercase()),
+                "safe vocabulary was treated as a value: {safe}"
+            );
+        }
+        for unsafe_text in [
+            "password=hunter2",
+            r#"{"api_key":"opaque"}"#,
+            "https://user:pass@example.com/path",
+        ] {
+            assert!(
+                contains_unredacted_credential_value(&unsafe_text.to_ascii_lowercase()),
+                "credential value was not detected: {unsafe_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_like_tokens_are_detected_even_behind_a_leading_word() {
+        assert!(contains_secret_like_token("token sk-ant-abc123"));
+        assert!(contains_secret_like_token("ghp_0123456789abcdef"));
+        assert!(contains_secret_like_token("note memo_sk-abc123 saved"));
+        assert!(contains_secret_like_token("akia0123456789abcdef"));
+        // Added with the host-remediation channel: the credentials whose KEY
+        // names that channel is allowed to mention must have their VALUE
+        // shapes detected.
+        assert!(contains_secret_like_token("secret gocspx-abc123def456"));
+        assert!(contains_secret_like_token("xoxb-1234-5678-abcdefghij"));
+        assert!(contains_secret_like_token("xoxp-1234-5678-abcdefghij"));
+        assert!(
+            !contains_secret_like_token("supports xoxp- tokens"),
+            "a documented token-family prefix without a value is not a credential"
+        );
+        // Stripe's underscore forms — the hyphenated `sk-` prefix never
+        // matched these, so they used to pass the guard untouched.
+        assert!(contains_secret_like_token("sk_live_0123456789abcdef"));
+        assert!(contains_secret_like_token("sk_test_0123456789abcdef"));
+        assert!(contains_secret_like_token("key pk_live_0123456789abcdef"));
+        assert!(contains_secret_like_token("memo_sk_test_0123456789abcdef"));
+        // A hyphenated ordinary phrase must not false-positive.
+        assert!(!contains_secret_like_token("risk-based task-list check"));
+    }
+
+    /// Every prefix `is_secret_like_token` knows, driven as a table so a newly
+    /// added prefix without a literal here is an obvious omission rather than
+    /// a silent coverage hole. Each token is asserted on BOTH ends of the
+    /// contract: the detector sees it, and `HostRemediation::new` refuses to
+    /// carry it — the trusted host-authored channel must never ferry a
+    /// credential-shaped value.
+    ///
+    /// Literals are lowercase because `contains_secret_like_token` receives
+    /// pre-lowercased input (matching the `akia0123…` convention above).
+    #[test]
+    fn every_known_credential_prefix_is_detected_and_blocks_host_remediation() {
+        for token in [
+            "sk-0123456789abcdef",
+            "sk-ant-0123456789abcdef",
+            "sk_live_0123456789abcdef",
+            "sk_test_0123456789abcdef",
+            "pk_live_0123456789abcdef",
+            "pk_test_0123456789abcdef",
+            "rk_live_0123456789abcdef",
+            "rk_test_0123456789abcdef",
+            "ghp_0123456789abcdef",
+            "github_pat_0123456789abcdef",
+            "gho_0123456789abcdef",
+            "ghu_0123456789abcdef",
+            "ghs_0123456789abcdef",
+            "ghr_0123456789abcdef",
+            "glpat-0123456789abcdef",
+            "gcp-0123456789abcdef",
+            "ya29.0123456789abcdef",
+            "aiza0123456789abcdef",
+            "gocspx-0123456789abcdef",
+            "xoxb-1234-5678-abcdefghij",
+            "xoxp-1234-5678-abcdefghij",
+            "xoxa-1234-5678-abcdefghij",
+            "xoxr-1234-5678-abcdefghij",
+            "xoxs-1234-5678-abcdefghij",
+            "xoxe-1234-5678-abcdefghij",
+            "akia0123456789abcdef",
+            "asia0123456789abcdef",
+        ] {
+            assert!(
+                contains_secret_like_token(token),
+                "{token}: known credential prefix must be detected"
+            );
+            assert!(
+                HostRemediation::new(format!("the value is {token}")).is_err(),
+                "{token}: host-authored remediation must refuse a credential-shaped value"
+            );
+        }
+    }
+}

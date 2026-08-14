@@ -86,7 +86,7 @@
             "name": "builtin__trigger_create",
             "arguments": {
               "name": "Check Gmail for near.ai emails → ABC Sheet",
-              "prompt": "Check the Gmail inbox for any emails from a near.ai address (i.e. sender email ends with @near.ai). For each matching email found, append a new row to the Google Sheet called \"ABC\" with the following columns: Date/Time Received, Sender, Subject, and a short Snippet of the email body. Do not send any emails or modify the messages — read only. If no near.ai emails are found, do nothing.",
+              "execution_contract": {"version": 1, "goal": "Check the Gmail inbox for any emails from a near.ai address (i.e. sender email ends with @near.ai). For each matching email found, append a new row to the Google Sheet called \"ABC\" with the following columns: Date/Time Received, Sender, Subject, and a short Snippet of the email body. Do not send any emails or modify the messages — read only. If no near.ai emails are found, do nothing.", "success_criteria": ["Complete the requested task"], "output_instructions": "Return a concise result", "no_result_text": "No result"},
               "schedule": {
                 "kind": "cron",
                 "expression": "*/30 * * * *",

@@ -23,8 +23,8 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-mod scenario_delivery_target_fail_closed;
-mod scenario_external_source_trigger_captures_delivery;
+mod scenario_scheduled_final_output;
+mod scenario_trigger_create_has_no_delivery_target_field;
 mod scenario_trigger_persists_after_reopen;
 mod scenario_trigger_self_create_denied;
 mod scenario_triggered_chained_gate;
@@ -93,24 +93,66 @@ async fn triggers_group_e2e() {
         scenario_trigger_self_create_denied::run(&g).await,
     );
 
-    // Per-trigger delivery routing fails closed on a host with no outbound
-    // delivery target providers: routed create rejected, nothing persisted.
-    // Accept path is dispatch-tier + composition-tier (see scenario doc).
+    // Routines carry no stored delivery route: the model-visible create schema
+    // omits it, a create without it round-trips clean, and a stored-target-era
+    // record still reads back through the real tool surface. Independent of
+    // `verbs_lifecycle` (own trigger names/thread).
     report.record(
-        "delivery_target_fail_closed",
-        scenario_delivery_target_fail_closed::run(&g).await,
-    );
-
-    // A trigger created from an external product conversation must not be
-    // persisted with no route back to that conversation. The host owns the
-    // current sealed reply target; correctness cannot depend on the model
-    // remembering to list targets and copy an id into its arguments.
-    report.record(
-        "external_source_trigger_captures_delivery",
-        scenario_external_source_trigger_captures_delivery::run(&g).await,
+        "trigger_create_has_no_delivery_target_field",
+        scenario_trigger_create_has_no_delivery_target_field::run(&g).await,
     );
 
     report.assert_all_passed();
+}
+
+/// #7525: an unattended run that repeatedly asks the absent user a question
+/// consumes exactly the two existing nudges, then fails with retained
+/// transcript evidence instead of reporting false success.
+///
+/// This has its own test because `triggers_group_e2e` is already a large
+/// sequential async future; keeping the independent scenario separate avoids
+/// inflating that test's stack footprint.
+#[test]
+fn scheduled_final_output_group() {
+    run_async_test_with_stack(
+        "scheduled_final_output_group",
+        scheduled_final_output_group_inner,
+    );
+}
+
+async fn scheduled_final_output_group_inner() {
+    let g = RebornIntegrationGroup::triggers()
+        .await
+        .expect("group builds");
+    let mut report = ScenarioReport::new();
+
+    report.record(
+        "scheduled_final_output_validation",
+        scenario_scheduled_final_output::run(&g).await,
+    );
+
+    report.assert_all_passed();
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 /// Triggered-origin runs raise, park on, and resume from REAL approval gates,

@@ -25,10 +25,10 @@ The in-process harness (code in `tests/integration/support/`, spec in `tests/int
 
 Two tests lock the WebChat v2 surface from opposite sides — copy the pairing whenever policy is declared in one crate and enforced in another:
 
-- `crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
-- `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
+- `crates/product/ironclaw_webui/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
+- `crates/product/ironclaw_webui/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
 
-The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) lives in `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` — caller-level, not middleware unit tests.
+The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) lives in `crates/app/ironclaw_composition/tests/webui_v2_serve.rs` — caller-level, not middleware unit tests.
 
 ## 4. Helper-only coverage: the cautionary shape
 
@@ -38,8 +38,8 @@ When a predicate selects what goes out the wire, the test must construct the rea
 
 **BAD for PR-gated coverage**: `if docker_unavailable { return }` — the container security suite silently vanishes from CI and no gate notices. Existing Docker sandbox canaries still use soft skips; don't copy that pattern into new gate coverage.
 
-**GOOD**: make absence loud — feature-gate the test (`#![cfg(all(feature = "postgres", feature = "integration"))]`, which `scripts/check-boundaries.sh` enforces for root `tests/`), or require an explicit opt-out env var and *fail* when the dependency is missing without it. A skipped security test that doesn't announce itself is indistinguishable from coverage.
+**GOOD**: make absence loud — feature-gate the test (`#![cfg(all(feature = "postgres", feature = "integration"))]`), or require an explicit opt-out env var and *fail* when the dependency is missing without it. A skipped security test that doesn't announce itself is indistinguishable from coverage.
 
 ## 6. Naming your contract's tests
 
-`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.
+`docs/internal/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/domains/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.

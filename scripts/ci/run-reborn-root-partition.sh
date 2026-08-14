@@ -27,9 +27,11 @@ fi
 mapfile -t test_names < <(
   {
     find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print
-    if [ -f tests/support_unit_tests.rs ]; then
-      printf '%s\n' tests/support_unit_tests.rs
-    fi
+    for extra in tests/dockerfile_runtime_home.rs tests/support_unit_tests.rs; do
+      if [ -f "${extra}" ]; then
+        printf '%s\n' "${extra}"
+      fi
+    done
   } \
     | sed -E 's#^tests/##; s#\.rs$##' \
     | LC_ALL=C sort
@@ -50,7 +52,7 @@ for index in "${!test_names[@]}"; do
   test_name="${test_names[$index]}"
   echo "::group::cargo test --test ${test_name}"
   timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_reborn_integration_tests --test "${test_name}" -- --nocapture
+    cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
   echo "::endgroup::"
 done
 

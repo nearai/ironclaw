@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Args, ModelLatencyProfile, Scenario, StressPreset, StressSuite, compare, run_once, sweep,
+    Args, CliError, ModelLatencyProfile, Scenario, StressPreset, StressSuite, compare, run_once,
+    sweep,
 };
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -42,7 +43,7 @@ struct TopOperationGroup {
     p95_us: u128,
 }
 
-pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
+pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), CliError> {
     let suite = args
         .suite
         .ok_or_else(|| "suite mode is not enabled".to_string())?;
@@ -82,10 +83,19 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         );
         crate::trace::prepare_trace_outputs(&case_args).await?;
         let started = Instant::now();
-        let captured = run_once(&case_args, &run_id).await?;
+        let case_result = run_once(&case_args, &run_id).await;
+        // Measure the workload, not the teardown that follows it.
+        let duration_ms = started.elapsed().as_millis();
+        if let Some(path) = case_args
+            .libsql_path
+            .as_ref()
+            .filter(|path| Some(*path) != args.libsql_path.as_ref())
+        {
+            crate::cleanup_generated_libsql_path(path).await;
+        }
+        let captured = case_result?;
         let metrics = captured.metrics();
         let summary = captured.summary_value();
-        let duration_ms = started.elapsed().as_millis();
         let top_failure_bucket = top_failure_bucket(&summary);
         let top_operation_group = top_operation_group(&summary);
         let record = json!({
@@ -169,7 +179,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         .iter()
         .map(|result| (result.label.to_string(), result.metrics))
         .collect::<Vec<_>>();
-    sweep::enforce_thresholds(args, &threshold_inputs)
+    sweep::enforce_thresholds(args, &threshold_inputs).map_err(CliError::from)
 }
 
 pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
@@ -253,7 +263,7 @@ pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
     }
 }
 
-fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: &str) {
+pub(crate) fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: &str) {
     case_args.run_id = Some(run_id.to_string());
     case_args.suite = None;
     case_args.preset = case.preset;
@@ -276,6 +286,42 @@ fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: 
     case_args.compare_json = None;
     case_args.human_read = false;
     case_args.bottleneck_report = false;
+    // Every case gets its own database file. Sharing the parent's generated
+    // path let each case's runtime contend on the same SQLite file with the
+    // previous cases' still-running background pollers, drowning later cases
+    // (tool-*) in cross-runtime write-lock waits that no production deployment
+    // shape has — one libSQL file is owned by one process runtime.
+    //
+    // Only when the caller did not name a path. Overwriting an explicit
+    // `--libsql-path` would silently run the suite against temporary files
+    // instead of the database the operator selected; derive a per-case sibling
+    // of their path instead, which keeps the one-file-per-runtime property
+    // without discarding the choice.
+    if matches!(case_args.backend, crate::Backend::Libsql) && !case_args.scenario.is_api_capacity()
+    {
+        case_args.libsql_path = Some(match &base_args.libsql_path {
+            Some(explicit) => {
+                let mut per_case = explicit.clone();
+                let stem = explicit
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "ironclaw-stress".to_string());
+                let extension = explicit
+                    .extension()
+                    .map(|extension| format!(".{}", extension.to_string_lossy()))
+                    .unwrap_or_default();
+                // Keyed on the case label, not the scenario: several cases
+                // share a scenario (`tool-heavy`, `tool-wait`, and
+                // `tool-failure` are all `ToolSession`), so a scenario suffix
+                // hands them one file and reintroduces the cross-case lock
+                // contention this split exists to remove. Labels are internal
+                // constants, never user input.
+                per_case.set_file_name(format!("{stem}-{}{extension}", case.label));
+                per_case
+            }
+            None => crate::default_libsql_path(),
+        });
+    }
     case_args.prefill_threads = 0;
     case_args.prefill_turns_per_thread = 0;
 

@@ -36,19 +36,19 @@ fallback_feature_flags() {
 }
 
 case "${package}" in
-  ironclaw_product)
-    printf '%s\n' "--features test-support,host-auth-mint"
+  ironclaw_assistant)
+    printf '%s\n' "--features test-support"
     ;;
-  ironclaw_reborn_composition)
+  ironclaw_composition)
     # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider
     # so its factory + swap tests run here; the feature-off build stays covered
     # by every other CI lane (memory-mem0 is in no default set). Database
     # backends compile unconditionally now, so no libsql feature is selected.
     printf '%s\n' "--features test-support,memory-mem0"
     ;;
-  ironclaw_runner)
+  ironclaw_turn_runner)
     ;;
-  ironclaw_reborn_event_store)
+  ironclaw_event_store)
     ;;
   ironclaw_hooks)
     # The durable libSQL/Postgres backends + parity matrix folded into this
@@ -67,14 +67,13 @@ case "${package}" in
     # is gated behind `feature = "test-support"`.
     printf '%s\n' "--features test-support"
     ;;
-  ironclaw_reborn_openai_compat)
+  ironclaw_openai_compat)
     ;;
-  ironclaw_architecture | \
-  ironclaw_reborn_config | \
-  ironclaw_reborn_identity | \
-  ironclaw_reborn_traces | \
-  ironclaw_telegram_extension | \
-  ironclaw_telegram_v2_adapter)
+  ironclaw_architecture_tests | \
+  ironclaw_config | \
+  ironclaw_identity | \
+  ironclaw_trace_commons | \
+  ironclaw_telegram_extension)
     # Already on the allowlist with no feature flags; keep them flag-free now
     # that the default branch derives fallback features for closure crates.
     ;;

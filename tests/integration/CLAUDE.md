@@ -1,5 +1,10 @@
 # Reborn Integration Tests
 
+> **Adding, removing, renaming, or materially re-scoping a test here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+
 In-process tests that run a **whole Reborn turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real
@@ -72,10 +77,12 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
    façade removes.
 3. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
    gateway or stub internals.
-4. **Zero setup.** Must pass offline via a plain `cargo test --test reborn_<name>`
-   — no services, no API keys, no `integration` feature, no Docker, no special
-   linker. Hermetic env (keychain off, `TZ=UTC`, passthrough LLM config) is baked
-   into `build()`.
+4. **Zero setup by default.** Ordinary bins pass offline via a plain
+   `cargo test --test reborn_integration_<name>` — no services, API keys, Docker, or special
+   linker. The sole exception is `reborn_integration_sandbox_shell_turn`, a backend/runtime
+   integration test selected by a dedicated Docker CI lane; locally it skips
+   visibly unless Docker and the worker image are available, and CI sets
+   `IRONCLAW_REQUIRE_DOCKER_TESTS=1` so those prerequisites fail closed.
 5. **Minimal, inert edges.** The harness defaults every network/IO boundary to
    captured or inert — no real network, process, or channel. Wire only the
    boundaries your scenario actually crosses; a text-only turn needs no
@@ -110,7 +117,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   (`HarnessCapabilityRecorder`, `RecordedCapabilityResult`), and
   `harness/profiles/<domain>.rs` — one file per capability domain (`attachment`,
   `coding_read`, `core_builtin`, `extension`, `file`, `github`, `mock_mcp`,
-  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `skill`,
+  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `sandbox_shell`, `skill`,
   `trace_commons`, `trigger`, `web_access`) — each returning a `ToolsProfile` via
   a constructor like `profiles::file::file_tools_requiring_approval()` or
   `profiles::core_builtin::core_builtin_tools(CoreBuiltinOptions)`.
@@ -219,7 +226,7 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
 
@@ -249,7 +256,7 @@ needs a different scripted body, install keyed responses via
 - `ScriptedHttpResponse::for_url(url_substr, body)` — matches any request whose URL contains the substring; defaults to a `200` body.
 - `.with_method(method)` — narrow to a specific HTTP method (lowercase, e.g. `"post"`).
 - `.with_capability(capability_id)` — narrow to a specific capability id (e.g. `"builtin.http"`).
-- `.with_status(status)` — override the status of a `for_url` body response (e.g. `404`, `500`). Still a successful egress call — `builtin.http` surfaces it as a Completed tool result carrying that status. Panics if called on an `egress_error` response (mutually exclusive outcomes).
+- `.with_status(status)` — override the status of a `for_url` body response (e.g. `404`, `500`). 4xx/5xx responses classify as a model-visible `Failed` tool outcome (`operation_failed`) carrying the sanitized response as diagnostic context (see `docs/internal/reborn/contracts/host-runtime.md`); other statuses remain a Completed tool result carrying that status. Panics if called on an `egress_error` response (mutually exclusive outcomes).
 - `ScriptedHttpResponse::egress_error(url_substr, error)` — scripts a runtime egress failure (`Err(RuntimeHttpEgressError)` from `execute`) instead of a body, driving `builtin.http`'s error-mapping paths (e.g. `policy_denied` → `Denied`, `response_body_limit_exceeded` → `Failed{OutputTooLarge}`). Prefer the two named wrappers below so test bodies select the scenario by name instead of hand-building the nested error struct:
   - `ScriptedHttpResponse::network_error(url_substr, reason)` — a `RuntimeHttpEgressError::Network` with `reason` (e.g. `"policy_denied"` → `Denied`).
   - `ScriptedHttpResponse::response_error(url_substr, reason)` — a `RuntimeHttpEgressError::Response` with `reason` (e.g. `RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED` → `Failed{OutputTooLarge}`).
@@ -270,6 +277,12 @@ spawning any OS process.
 `HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
+
+**`.with_sandbox_shell_tools()`** — dedicated runtime-integration opt-in. It
+builds the explicit local-Docker sandbox profile through production composition
+and dispatches `builtin.shell` into the hardened Python worker. Only
+`reborn_sandbox_shell_turn.rs` selects it; the Docker availability gate remains
+owned by that test.
 
 ### MCP
 
@@ -344,7 +357,7 @@ scripted default id is not a vision pattern, so image parts are dropped for it.
 
 ### OAuth / product-auth
 
-Available from crate `ironclaw_reborn_composition::test_support`, gated on
+Available from crate `ironclaw_composition::test_support`, gated on
 `#[cfg(feature = "test-support")]`.
 
 **`ScriptedOAuthTokenEgress`** — `RuntimeHttpEgress` impl returning a fixed
@@ -395,14 +408,14 @@ On a harness built from a `live_approvals` group:
 
 - `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStorePort>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
-`ironclaw_reborn_composition::test_support` exposes:
+`ironclaw_composition::test_support` exposes:
 
 - `build_secret_store_for_test(root, scoped)` — returns the `Arc<ironclaw_secrets::SecretStore<F>>` that production standalone composition builds (via `factory::build_secret_store`); for store read-back in secrets tests.
 - `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
 `RebornRuntime` (returned by `build_runtime`, test-only methods defined in
-`crates/ironclaw_reborn_composition/src/runtime.rs` and
-`crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`crates/app/ironclaw_composition/src/runtime.rs` and
+`crates/app/ironclaw_composition/src/runtime/test_support.rs`) exposes:
 
 - `outbound_delivery_stores_for_test()` — the exact composition-owned outbound
   stores, including the reply-intent store shared by the built-in
@@ -528,7 +541,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 | `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
 | `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
-| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesService` (C-SYNTH) | enabled |
+| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`notification_channels_set` over an injected `FakeOutboundPreferencesService` (C-SYNTH) | enabled |
 
 ### Auth-gate resolution (C-JOURNEY)
 

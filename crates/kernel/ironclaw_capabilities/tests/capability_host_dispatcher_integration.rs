@@ -1,0 +1,522 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_approvals::*;
+use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_authorization::*;
+use ironclaw_capabilities::*;
+use ironclaw_capabilities::{
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
+};
+use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::{
+    Timestamp,
+    action::NetworkPolicy,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
+use ironclaw_processes::*;
+use ironclaw_resources::*;
+use serde_json::{Value, json};
+
+mod support;
+use support::*;
+
+#[tokio::test]
+async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() {
+    let (registry, dispatcher, governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"via":"runtime-dispatcher"}));
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let authorizer = GrantAuthorizer::new();
+    let host = capability_host(registry.as_ref(), &dispatcher, &authorizer)
+        .with_invocation_state(&run_state);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default().set_output_bytes(4_096);
+    let input = json!({"message":"authorized"});
+
+    let result = host
+        .invoke_json(context, capability_id(), estimate.clone(), input.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"via":"runtime-dispatcher"}));
+    let recorded = adapter.take_request();
+    assert_eq!(recorded.capability_id, capability_id());
+    assert_eq!(recorded.scope, scope);
+    assert_eq!(recorded.estimate, estimate);
+    assert_eq!(recorded.input, input);
+    assert_eq!(recorded.mounts, None);
+    assert_eq!(recorded.resource_reservation, None);
+    assert_eq!(
+        run_state
+            .get(&recorded.scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ProcessInvocationStatus::Completed
+    );
+    assert_eq!(
+        governor.reserved_for(&ResourceAccount::tenant(recorded.scope.tenant_id.clone())),
+        ResourceTally::default()
+    );
+    assert!(
+        governor
+            .usage_for(&ResourceAccount::tenant(recorded.scope.tenant_id.clone()))
+            .output_bytes
+            > 0
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+}
+
+#[tokio::test]
+async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
+    let (registry, dispatcher, _governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"approved":true}));
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
+    let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
+        .with_invocation_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default().set_output_bytes(1_024);
+    let input = json!({"message":"approved"});
+
+    let err = block_host
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert_eq!(adapter.request_count(), 0);
+    let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, ProcessInvocationStatus::BlockedApproval);
+    let approval_id = blocked.approval_request_id.unwrap();
+    let lease = approve_dispatch(&approval_requests, &leases, &scope, approval_id, None)
+        .await
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
+        .with_invocation_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let result = resume_host
+        .resume_json(
+            context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"approved":true}));
+    assert_eq!(adapter.request_count(), 1);
+    let recorded = adapter.take_request();
+    assert_eq!(recorded.scope, scope);
+    assert_eq!(recorded.estimate, estimate);
+    assert_eq!(recorded.input, input);
+    assert_eq!(
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ProcessInvocationStatus::Completed
+    );
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Consumed
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+
+    let second_err = resume_host
+        .resume_json(
+            context,
+            approval_id,
+            capability_id(),
+            ResourceEstimate::default().set_output_bytes(1_024),
+            json!({"message":"approved"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        second_err,
+        CapabilityInvocationError::ResumeNotBlocked {
+            status: ProcessInvocationStatus::Completed,
+            ..
+        }
+    ));
+    assert_eq!(adapter.request_count(), 0);
+}
+
+#[tokio::test]
+async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_or_lease_claim() {
+    let (registry, dispatcher, _governor, _events, adapter) =
+        runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
+    let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
+        .with_invocation_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message":"scoped"});
+
+    block_host
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let lease = approve_dispatch(&approval_requests, &leases, &scope, approval_id, None)
+        .await
+        .unwrap();
+    let wrong_context = context_for_user_with_invocation("other-user", invocation_id);
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
+        .with_invocation_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(
+            wrong_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate,
+            input,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::InvocationState(error)
+            if matches!(*error, ProcessInvocationError::UnknownInvocation { .. })
+    ));
+    assert_eq!(adapter.request_count(), 0);
+    assert!(
+        approval_requests
+            .get(&wrong_context.resource_scope, approval_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Cross-user *store visibility* isolation is now structural: the production
+    // `CapabilityLeaseStore` scopes each user to a distinct subtree via
+    // its per-invocation `MountView`, proven by
+    // `ironclaw_authorization`'s `filesystem_capability_lease_store_isolates_two_tenants_*`
+    // contract test. This integration fixture shares one non-per-user in-memory
+    // mount, so it can't reproduce that mount-level partition here — but the
+    // guarantee this test owns (a wrong-scope resume dispatches nothing and
+    // claims nothing) is asserted directly: `ProcessInvocationError::UnknownInvocation`
+    // above, zero adapter requests, and the original lease still `Active`
+    // (unclaimed) below.
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+    let original_run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        original_run.status,
+        ProcessInvocationStatus::BlockedApproval
+    );
+}
+
+#[tokio::test]
+async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
+    let (registry, dispatcher, _governor, _events, adapter) =
+        runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
+    let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
+        .with_invocation_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message":"expired lease"});
+
+    block_host
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let lease = approve_dispatch(
+        &approval_requests,
+        &leases,
+        &scope,
+        approval_id,
+        Some(Utc::now() - ChronoDuration::seconds(1)),
+    )
+    .await
+    .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
+        .with_invocation_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(context, approval_id, capability_id(), estimate, input)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ApprovalLeaseMissing { .. }
+    ));
+    assert_eq!(adapter.request_count(), 0);
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ApprovalLeaseMissing"));
+}
+
+#[derive(Clone)]
+struct RecordedRuntimeRequest {
+    capability_id: CapabilityId,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    mounts: Option<MountView>,
+    resource_reservation: Option<ResourceReservation>,
+    input: Value,
+}
+
+struct RecordingRuntimeAdapter {
+    output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
+    requests: Mutex<Vec<RecordedRuntimeRequest>>,
+}
+
+impl RecordingRuntimeAdapter {
+    fn new(output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
+        Self {
+            output,
+            governor,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_request(&self) -> RecordedRuntimeRequest {
+        self.requests.lock().unwrap().remove(0)
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        self.requests.lock().unwrap().push(RecordedRuntimeRequest {
+            capability_id: request.capability_id.clone(),
+            scope: request.scope.clone(),
+            estimate: request.estimate.clone(),
+            mounts: request.mounts.clone(),
+            resource_reservation: request.resource_reservation.clone(),
+            input: request.input.clone(),
+        });
+        let output = self.output.clone();
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64);
+        let reservation = match request.resource_reservation {
+            Some(reservation) => reservation,
+            None => self
+                .governor
+                .reserve(request.scope, request.estimate)
+                .map_err(|_| DispatchError::Wasm {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                    model_visible_cause: None,
+                })?,
+        };
+        let output_bytes = usage.output_bytes;
+        let receipt = self
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: None,
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            display_preview: None,
+            usage,
+            receipt,
+            output_bytes,
+        })
+    }
+}
+
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
+
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
+    }
+}
+
+fn runtime_dispatcher_stack(
+    output: Value,
+) -> (
+    Arc<ironclaw_extension_registry::ExtensionRegistry>,
+    RuntimeDispatcher<'static, InMemoryResourceGovernor>,
+    Arc<InMemoryResourceGovernor>,
+    InMemoryEventSink,
+    Arc<RecordingRuntimeAdapter>,
+) {
+    let registry = Arc::new(registry_with_echo_capability());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let events = InMemoryEventSink::new();
+    let adapter = Arc::new(RecordingRuntimeAdapter::new(output, Arc::clone(&governor)));
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: capability_id(),
+        resolved: ResolvedCapability {
+            provider: ExtensionId::new("echo").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor))
+        .with_event_sink_arc(Arc::new(events.clone()));
+    (registry, dispatcher, governor, events, adapter)
+}
+
+async fn approve_dispatch(
+    approval_requests: &ironclaw_approvals::ApprovalRequestStore<
+        ironclaw_filesystem::InMemoryBackend,
+    >,
+    leases: &CapabilityLeaseStore<InMemoryBackend>,
+    scope: &ResourceScope,
+    approval_id: ApprovalRequestId,
+    expires_at: Option<Timestamp>,
+) -> Result<CapabilityLease, ironclaw_approvals::ApprovalResolutionError> {
+    ApprovalResolver::new(approval_requests, leases)
+        .approve_dispatch(
+            scope,
+            approval_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+}
+
+fn context_for_user_with_invocation(user: &str, invocation_id: InvocationId) -> ExecutionContext {
+    let user_id = UserId::new(user).unwrap();
+    let resource_scope = ResourceScope::local_default(user_id.clone(), invocation_id).unwrap();
+    let mut context = ExecutionContext::local_default(
+        user_id,
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::Wasm,
+        TrustClass::UserTrusted,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .unwrap();
+    context.invocation_id = invocation_id;
+    context.tenant_id = resource_scope.tenant_id.clone();
+    context.user_id = resource_scope.user_id.clone();
+    context.agent_id = resource_scope.agent_id.clone();
+    context.project_id = resource_scope.project_id.clone();
+    context.mission_id = resource_scope.mission_id.clone();
+    context.thread_id = resource_scope.thread_id.clone();
+    context.resource_scope = resource_scope;
+    context.validate().unwrap();
+    context
+}
+
+fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind]) {
+    let actual = events
+        .events()
+        .into_iter()
+        .map(|event| event.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}

@@ -60,7 +60,7 @@ regression-check exemption rather than silently omitting coverage.
 Run the narrowest crate tests and clippy first. Add:
 
 ```bash
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_architecture_tests
 cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
 scripts/pre-commit-safety.sh
 ```
@@ -91,7 +91,7 @@ layers, name that scope or split the PR. Move-only changes state that behavior
 is unchanged, keep behavioral fixes separate, and record follow-up issues for
 problems discovered during the move. After moving or renaming code, search
 `.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`,
-`docs/reborn/contracts/`, and other Markdown references for stale paths.
+`docs/internal/reborn/contracts/`, and other Markdown references for stale paths.
 
 ## Removing a "redundant" layer un-masks behavior
 

@@ -1,17 +1,17 @@
 //! C-DENYEDGE (row 4): a scheduled-trigger fire must not be able to create (or
 //! remove/pause/resume) triggers of its own — int-tier twin of the
-//! `ironclaw_runner::runtime` unit coverage for issue #5505
+//! `ironclaw_turn_runner::runtime` unit coverage for issue #5505
 //! (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`, PR #5515).
 //!
 //! Drives a triggered-origin run (`submit_triggered_turn_scripted`) that scripts
-//! `builtin.trigger_create`. The host's `PerSurfaceCapabilityDenyDecorator`,
+//! `builtin.trigger_create`. The host's `resolved CapabilitySurfacePolicy`,
 //! keyed on the `scheduled_trigger` run profile's capability-surface id, strips
 //! trigger_create/remove/pause/resume from the model-visible surface
 //! (`trigger_list` stays visible).
 //!
 //! Traced, not assumed: denial happens at the model-gateway seam
-//! (`ironclaw_runner::model_gateway`'s `validate_provider_tool_call`, via
-//! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
+//! (`ironclaw_loop_host::model_gateway`'s `validate_provider_tool_call`, via
+//! `CapabilitySurfacePolicyFilter`), BEFORE a `CapabilityCallCandidate` is ever
 //! constructed — so `CapabilityStage` never runs and nothing is appended via
 //! `append_tool_result_reference` (confirmed empirically: persisted history is
 //! exactly `[User, Assistant]`, no `ToolResultReference`). The executor
@@ -39,7 +39,7 @@ use ironclaw_loop_contracts::{
     ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
     RunProfileResolver,
 };
-use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
+use ironclaw_turn_runner::planned_driver_factory::default_planned_run_profile_resolver;
 use ironclaw_turns::{GetRunStateRequest, RunProfileRequest, TurnOriginKind, TurnStatus};
 use serde_json::json;
 
@@ -60,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": INTERACTIVE_CONTROL_TRIGGER_NAME,
-                    "prompt": "remain scheduled",
+                    "execution_contract": super::support::trigger_execution_contract("remain scheduled"),
                     "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                 }),
             ),
@@ -88,7 +88,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "builtin.trigger_create",
                     json!({
                         "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-                        "prompt": "remind me again",
+                        "execution_contract": super::support::trigger_execution_contract("remind me again"),
                         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                     }),
                 ),
@@ -156,6 +156,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             &run_context,
             &Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
+            ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         )
         .await?;
     assert_capability_denied(
@@ -163,7 +164,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         "builtin.trigger_create",
         json!({
             "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-            "prompt": "remind me again",
+            "execution_contract": super::support::trigger_execution_contract("remind me again"),
             "schedule": {"kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC"},
         }),
     )

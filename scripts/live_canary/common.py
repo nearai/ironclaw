@@ -364,11 +364,9 @@ def build_gateway_env(
     # tool dispatches parked on an approval gate instead of
     # auto-approving and never reached `installed=true`.
     #
-    # REBORN_TOOL_DISCLOSURE / REBORN_COLLAPSE_REPEATED_FAILURES are the two
-    # default-off reborn context-management flags. They are forwarded only so a
-    # canary lane can exercise the flag-ON path by setting them at the job level;
-    # unset (the default) they never reach the gateway, so the canary's default
-    # run stays byte-identical to production.
+    # Default-off Reborn experiment flags are forwarded only so a canary lane
+    # can exercise the flag-ON path by setting them at the job level. Unset,
+    # they never reach the gateway, so the canary stays on production defaults.
     for var in (
         "ALLOW_LOCAL_TOOLS",
         "AGENT_AUTO_APPROVE_TOOLS",
@@ -640,7 +638,7 @@ base_url = "{mock_llm_url}/v1"
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
+            "RUST_LOG": "ironclaw=warn,ironclaw_turn_runner=warn",
             "RUST_BACKTRACE": "1",
         }
         if extra_gateway_env:
