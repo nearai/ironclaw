@@ -877,7 +877,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
-        execution_outcome: None,
+        execution_outcome: Some(crate::TurnExecutionOutcome::NothingToReport),
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
         product_context: None,
@@ -970,6 +970,13 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         })
         .await
         .expect("retried snapshot");
+    assert_eq!(
+        agent_turn_metadata_from_process_snapshot(&retried_snapshot)
+            .expect("retried agent-turn metadata")
+            .execution_outcome,
+        None,
+        "a retry must not inherit a terminal execution outcome from its source run"
+    );
     assert_eq!(
         retried_snapshot.checkpoint_kind,
         Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),

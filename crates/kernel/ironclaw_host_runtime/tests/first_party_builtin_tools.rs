@@ -1693,6 +1693,25 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             vec![("schedule.kind", DispatchInputIssueCode::TypeMismatch)],
         ),
         (
+            "non-string result delivery",
+            json!({
+                "name": "Bad result delivery",
+                "execution_contract": {
+                    "version": 1,
+                    "goal": "Run work",
+                    "success_criteria": ["Work completed"],
+                    "output_instructions": "Return the result",
+                    "no_result_text": "No change",
+                    "policy": { "result_delivery": 7 }
+                },
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![(
+                "execution_contract.policy.result_delivery",
+                DispatchInputIssueCode::TypeMismatch,
+            )],
+        ),
+        (
             "missing schedule timezone",
             json!({
                 "name": "Missing timezone",

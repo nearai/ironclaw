@@ -8,6 +8,7 @@ use ironclaw_host_api::turn::{LoopGateRef, LoopResultRef};
 use ironclaw_host_api::{
     decision::DenyReason,
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    execution_policy::NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
     ids::{ApprovalRequestId, CorrelationId},
     resolution::{
         Blocked, DependentRunResult, Outcome, Resolution, ResolutionBatch, Suspension, ToolVerdict,
@@ -40,7 +41,8 @@ use super::{
     capability_is_visible, capability_port_error_is_terminal, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, failed_exit, gate_tool_result_summary,
     honor_capability_retry_alteration, model_visible_capability_failure_observation,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
+    nothing_to_report_completed_exit, push_call_signature_once, push_completed_result,
+    sanitized_strategy_summary_or_fallback,
 };
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
@@ -202,6 +204,22 @@ fn resolution_stops_parallel_launch(resolution: &Resolution) -> bool {
 }
 
 impl CapabilityStage {
+    async fn complete_nothing_to_report(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+    ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+        let state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+            CancelCheck::Continue(state) => *state,
+            CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+        };
+        let checked = CheckpointStage
+            .write(ctx, state, CheckpointKind::Final)
+            .await?;
+        nothing_to_report_completed_exit(ctx.host, checked.state, checked.checkpoint_id)
+            .map(TurnCompletedStep::Exit)
+    }
+
     async fn invoke_batch(
         &self,
         ctx: StageContext<'_>,
@@ -299,6 +317,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         ctx: StageContext<'_>,
         input: CapabilityInput,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+        if input.calls.len() == 1
+            && input.calls[0].capability_id.as_str() == NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID
+        {
+            return self.complete_nothing_to_report(ctx, input.state).await;
+        }
         let mut state = input.state;
         let result_refs_start = state.result_refs.len();
         let mut capability_batch = CapabilityBatchTurnSummary::default();

@@ -522,6 +522,7 @@ impl AgentTurnProcessRuntime {
         metadata.source_binding_ref = request.source_binding_ref;
         metadata.reply_target_binding_ref = request.reply_target_binding_ref;
         metadata.model_usage = None;
+        metadata.execution_outcome = None;
         metadata.resume_disposition = None;
         let concurrency_class = process_concurrency_class(metadata.product_context.as_ref());
         let run_id = TurnRunId::new();

@@ -1,4 +1,3 @@
-use ironclaw_host_api::execution_policy::NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID;
 use ironclaw_loop_contracts::{
     AgentLoopDriverHost, LoopDriverNoteKind, LoopExit, LoopProgressEvent, ParentLoopOutput,
 };
@@ -198,28 +197,14 @@ impl DefaultExecutorPipeline {
                             "capabilities",
                             host.run_context(),
                             turn_iteration,
-                            async {
-                                if calls.len() == 1
-                                    && calls[0].capability_id.as_str()
-                                        == NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID
-                                {
-                                    return self
-                                        .exit
-                                        .complete_nothing_to_report(ctx, state)
-                                        .await
-                                        .map(TurnCompletedStep::Exit);
-                                }
-                                self.capabilities
-                                    .process(
-                                        ctx,
-                                        CapabilityInput {
-                                            state,
-                                            surface: prompt.surface,
-                                            calls,
-                                        },
-                                    )
-                                    .await
-                            },
+                            self.capabilities.process(
+                                ctx,
+                                CapabilityInput {
+                                    state,
+                                    surface: prompt.surface,
+                                    calls,
+                                },
+                            ),
                         )?,
                     };
 
