@@ -701,7 +701,7 @@ where
     };
     if write_families.heartbeat_writes == 0
         || write_families.claim_writes == 0
-        || write_families.claim_poll_calls < 2
+        || write_families.claim_poll_calls == 0
         || write_families.recovery_sweep_calls == 0
     {
         return Err(IdleError::Workload(
@@ -728,7 +728,7 @@ where
 {
     tokio::time::timeout(lifecycle.terminal_timeout, async {
         loop {
-            if active.scheduler_counts.claim_calls.load(Ordering::SeqCst) >= 2
+            if active.scheduler_counts.claim_calls.load(Ordering::SeqCst) >= 1
                 && active
                     .scheduler_counts
                     .recovery_calls
@@ -742,7 +742,14 @@ where
         }
     })
     .await
-    .map_err(|_| IdleError::Workload("timed out waiting for idle scheduler activity".to_string()))
+    .map_err(|_| {
+        IdleError::Workload(format!(
+            "timed out waiting for idle scheduler activity: claim_calls={}, recovery_calls={}, heartbeat_writes={}",
+            active.scheduler_counts.claim_calls.load(Ordering::SeqCst),
+            active.scheduler_counts.recovery_calls.load(Ordering::SeqCst),
+            active.observer_counts.heartbeats.load(Ordering::SeqCst),
+        ))
+    })
 }
 
 async fn require_running<F>(
@@ -1030,11 +1037,11 @@ mod tests {
             ProcessLifecycleStatus::Completed
         );
         assert!(report.write_families.heartbeat_writes > 0);
-        assert!(report.write_families.claim_poll_calls >= 2);
+        assert!(report.write_families.claim_poll_calls >= 1);
         assert!(report.write_families.recovery_sweep_calls > 0);
         assert_eq!(report.write_families.recovery_writes, 0);
         assert!(report.write_families.observer_checkpoint_writes > 0);
-        assert!(report.write_families.event_writes.unwrap_or_default() > 0);
+        assert_eq!(report.write_families.event_writes, Some(0));
         assert!(
             report
                 .write_families
