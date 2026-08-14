@@ -122,9 +122,9 @@ impl RecordingDeviceLinkDriver {
             account: Some(DeviceLinkLinkedAccount {
                 account_id: self.account_id,
                 label: CredentialAccountLabel::new("fixture-personal-account")
-                    .expect("fixture account label is valid"),
+                    .expect("fixture account label is valid"), // safety: fixed test-support fixture literal satisfies the validated label grammar
                 vendor_user_ref: DeviceLinkVendorUserRef::new("+15550000000")
-                    .expect("fixture vendor user ref is valid"),
+                    .expect("fixture vendor user ref is valid"), // safety: fixed test-support fixture literal is nonempty, bounded, and control-free
                 link_revision: 1,
             }),
         }
@@ -155,7 +155,7 @@ impl DeviceLinkDriver for RecordingDeviceLinkDriver {
         Ok(DeviceLinkStepOutcome {
             step: DeviceLinkStep::Display {
                 kind: DeviceLinkDisplayKind::QrCode,
-                payload: DeviceLinkPayload::new(payload).expect("fixture payload is valid"),
+                payload: DeviceLinkPayload::new(payload).expect("fixture payload is valid"), // safety: formatted fixture token is nonempty and bounded for every u32 counter value
                 expires_in: Duration::from_secs(30),
             },
             account: None,

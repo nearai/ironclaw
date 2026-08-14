@@ -60,7 +60,7 @@ const SEND_MESSAGE_ADDENDUM: &str = include_str!("../../prompts/telegram/send_me
 
 fn peer(id: i64) -> PeerRef {
     PeerRef {
-        id: PeerId::user(id).expect("user id in range"),
+        id: PeerId::user(id).expect("user id in range"), // safety: this cfg(test) helper is called only with small positive fixture ids
         auth: PeerAuth::from_hash(id * 7),
     }
 }
