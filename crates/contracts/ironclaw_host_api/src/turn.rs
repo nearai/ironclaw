@@ -1085,6 +1085,9 @@ pub struct ProductTurnContext {
     /// prompt context; `None` for every non-channel origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_context: Option<String>,
+    /// Host-sealed restrictions for unattended execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_policy: Option<crate::execution_policy::TurnExecutionPolicy>,
 }
 
 impl ProductTurnContext {
@@ -1112,6 +1115,7 @@ impl ProductTurnContext {
             source_channel,
             owner,
             channel_context: None,
+            execution_policy: None,
         }
     }
 

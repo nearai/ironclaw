@@ -325,6 +325,8 @@ pub enum SkillActivationSelectionError {
     VisibilityDataMissing,
     #[error("skill activation context budget exceeded")]
     ContextBudgetExceeded,
+    #[error("required skill activation blocked: {reason}")]
+    RequiredSkillUnavailable { reason: String },
     #[error("skill activation internal error")]
     Internal,
 }
@@ -340,6 +342,9 @@ impl SkillActivationSelectionError {
             Self::TrustDataMissing => HostSkillContextBuildError::TrustDataMissing,
             Self::VisibilityDataMissing => HostSkillContextBuildError::VisibilityDataMissing,
             Self::ContextBudgetExceeded => HostSkillContextBuildError::ContextBudgetExceeded,
+            Self::RequiredSkillUnavailable { reason } => {
+                HostSkillContextBuildError::RequiredSkillUnavailable { reason }
+            }
             Self::Internal => HostSkillContextBuildError::Internal,
         }
     }
@@ -665,6 +670,46 @@ where
         Ok(plan)
     }
 
+    /// Single source of truth for required-skill resolution. Creation-time
+    /// preflight (`validate_required_skills`) and run-time enforcement
+    /// (`selected_candidates`) must apply the same predicate: two copies can
+    /// drift, and drift means a trigger that passes creation then fails every
+    /// fire.
+    async fn resolve_required_skill_selection(
+        &self,
+        run_context: &LoopRunContext,
+        skill_names: &[String],
+    ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
+        let candidate_set = self
+            .load_named_activation_candidate_set(run_context, skill_names)
+            .await?;
+        let selection = select_named_skill_activations(
+            skill_names,
+            &candidate_set.candidates,
+            &self.config,
+            &candidate_set.satisfied_setup_markers,
+        )?;
+        if selection.activations.len() != skill_names.len() {
+            return Err(SkillActivationSelectionError::RequiredSkillUnavailable {
+                reason: selection.feedback.join("; "),
+            });
+        }
+        Ok(selection)
+    }
+
+    /// Resolves required skills through the same visibility, trust,
+    /// prerequisite, ambiguity, and context-budget checks used at execution,
+    /// without mutating the run's activation plan.
+    pub async fn validate_required_skills(
+        &self,
+        run_context: &LoopRunContext,
+        skill_names: &[String],
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.resolve_required_skill_selection(run_context, skill_names)
+            .await
+            .map(|_| ())
+    }
+
     pub fn clear_accepted_message(
         &self,
         scope: &TurnScope,
@@ -701,6 +746,38 @@ where
         message: &str,
         capture_plan: bool,
     ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
+        let required_names = run_context
+            .product_context
+            .as_ref()
+            .and_then(|context| context.execution_policy.as_ref())
+            .map(|policy| {
+                policy
+                    .required_skills
+                    .iter()
+                    .map(|skill| skill.as_str().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !required_names.is_empty() {
+            let selection = self
+                .resolve_required_skill_selection(run_context, &required_names)
+                .await?;
+            let plan =
+                self.merge_active_plan(run_context, activation_plan_for_candidates(selection))?;
+            if capture_plan {
+                self.plans_by_run
+                    .lock()
+                    .map_err(|_| SkillActivationSelectionError::Internal)?
+                    .insert(
+                        (run_context.scope.clone(), run_context.run_id),
+                        CapturedSkillActivationPlan {
+                            plan,
+                            run_context: run_context.clone(),
+                        },
+                    );
+            }
+            return self.active_plan_candidates(run_context).await;
+        }
         let (plan, candidates) = self
             .resolve_activation_plan_with_candidates(run_context, message)
             .await?;
@@ -1257,6 +1334,21 @@ where
             .take_message_for_run(&run_context.scope, accepted_message_ref)
             .map_err(SkillActivationSelectionError::into_context_error)?
         else {
+            let required_skills_pending = run_context
+                .product_context
+                .as_ref()
+                .and_then(|context| context.execution_policy.as_ref())
+                .is_some_and(|policy| !policy.required_skills.is_empty())
+                && self
+                    .active_plan(run_context)
+                    .map_err(SkillActivationSelectionError::into_context_error)?
+                    .is_none();
+            if required_skills_pending {
+                return self
+                    .selected_candidates(run_context, "", false)
+                    .await
+                    .map_err(SkillActivationSelectionError::into_context_error);
+            }
             return self
                 .active_plan_candidates(run_context)
                 .await
@@ -2553,7 +2645,11 @@ mod tests {
             .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
     }
     use crate::SkillFilePath;
-    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+    use ironclaw_host_api::{
+        execution_policy::{RequiredSkill, TurnExecutionPolicy},
+        ids::{AgentId, ProjectId, TenantId},
+        turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
+    };
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
@@ -2837,6 +2933,102 @@ mod tests {
         .with_actor(TurnActor::new(
             ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
         ))
+    }
+
+    async fn run_context_with_required_skill(name: &str) -> LoopRunContext {
+        let mut context = run_context().await;
+        let mut product_context = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
+            },
+        );
+        product_context.execution_policy = Some(TurnExecutionPolicy {
+            allowed_capability_ids: None,
+            required_skills: vec![RequiredSkill::new(name).unwrap()],
+        });
+        context.product_context = Some(product_context);
+        context
+    }
+
+    #[tokio::test]
+    async fn required_skill_is_loaded_before_the_first_model_context() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md("code-review", "Review code", &[], "REQUIRED_SENTINEL"),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context_with_required_skill("code-review").await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "review this change",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("required skill loads");
+
+        assert!(selected.iter().any(|candidate| {
+            candidate
+                .loaded_skill_md()
+                .is_some_and(|body| body.contains("REQUIRED_SENTINEL"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn required_skill_is_still_loaded_when_a_resumed_run_has_no_recorded_message() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md("code-review", "Review code", &[], "RESUME_SENTINEL"),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context_with_required_skill("code-review").await;
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("required skill loads without a recorded message");
+
+        assert!(selected.iter().any(|candidate| {
+            candidate
+                .loaded_skill_md()
+                .is_some_and(|body| body.contains("RESUME_SENTINEL"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn missing_required_skill_blocks_before_model_context() {
+        let source = Arc::new(StaticSkillBundleSource::new(Vec::new()));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context_with_required_skill("missing-skill").await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "run unattended",
+            )
+            .expect("record message");
+
+        let error = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect_err("missing required skill must block");
+
+        assert!(matches!(
+            error,
+            HostSkillContextBuildError::RequiredSkillUnavailable { .. }
+        ));
     }
 
     fn accepted_message_ref(context: &LoopRunContext) -> AcceptedMessageRef {

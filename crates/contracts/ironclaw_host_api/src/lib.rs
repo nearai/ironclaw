@@ -48,6 +48,7 @@ pub mod dispatch;
 pub mod dispatch_test_support;
 mod dotted_id;
 pub mod error;
+pub mod execution_policy;
 pub mod failure;
 pub mod gate_record;
 pub mod host_port;

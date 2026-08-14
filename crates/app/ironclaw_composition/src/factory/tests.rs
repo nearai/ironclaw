@@ -421,6 +421,7 @@ fn trigger_record_for_pairing_test() -> TriggerRecord {
         schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
             .expect("valid cron expression"),
         prompt: "pairing test prompt".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: ironclaw_triggers::TriggerState::Scheduled,
         next_run_at: chrono::Utc::now(),
@@ -512,6 +513,7 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
     let hook = TriggerCreatorPairingHook {
         scoped_filesystem: failing_trigger_conversation_filesystem(),
         conversations: tokio::sync::OnceCell::new(),
+        execution_preflight: tokio::sync::OnceCell::new(),
     };
     let record = trigger_record_for_pairing_test();
 

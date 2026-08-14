@@ -113,6 +113,10 @@ registerPack("ko", {
   "chat.modeAutoReview": "자동 리뷰",
   "chat.runtimeLocal": "로컬에서 작업",
   "chat.statusWorking": "작업 중",
+  "chat.processWorking": "작업 중…",
+  "chat.workedFor": "{duration} 동안 작업함",
+  "chat.reloadHistory": "기록 다시 불러오기",
+  "chat.busyRejectedResend": "IronClaw가 처리 중이어서 이 메시지가 전송되지 않았습니다. 다시 전송해 주세요.",
   "chat.identityUser": "나",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "최신 항목으로 이동",
@@ -206,6 +210,7 @@ registerPack("ko", {
   "authGate.oauthProviderFallback": "공급자",
   "authGate.serviceUnavailable": "서비스를 사용할 수 없습니다",
   "authGate.popupBlocked": "승인 팝업이 차단되었습니다.",
+  "authGate.popupClosed": "연결이 완료되기 전에 {provider} 승인 창이 닫혔습니다. 위에서 다시 열어 재시도하세요.",
   "authGate.pillAuthorize": "승인",
   "authGate.pillEnterToken": "토큰 입력",
   "authGate.unsupportedChallenge": "이 인증 단계를 완료하려면 설정을 엽니다.",
@@ -1001,6 +1006,19 @@ registerPack("ko", {
   // Admin — tabs
   "admin.tab.users": "사용자",
   "admin.tab.configuration": "구성",
+  "admin.configuration.loading": "구성 불러오는 중",
+  "admin.configuration.loadFailed": "확장 프로그램 구성을 불러올 수 없습니다.",
+  "admin.configuration.title": "확장 프로그램 구성",
+  "admin.configuration.description": "확장 프로그램이 선언한 배포 소유 값을 구성합니다. 값을 저장해도 확장 프로그램을 설치, 연결, 활성화 또는 제거하지 않습니다.",
+  "admin.configuration.empty": "배포 구성이 필요한 확장 프로그램이 없습니다.",
+  "admin.configuration.statusConfigured": "구성됨",
+  "admin.configuration.statusRequired": "구성 필요",
+  "admin.configuration.usedBy": "사용 중인 항목",
+  "admin.configuration.installed": "설치됨",
+  "admin.configuration.secretHint": "구성되었습니다. 저장된 값을 유지하려면 비워 두세요.",
+  "admin.configuration.save": "구성 저장",
+  "admin.configuration.saved": "구성이 저장되었습니다.",
+  "admin.configuration.saveFailed": "구성을 저장할 수 없습니다.",
 
   // Admin — dashboard
 

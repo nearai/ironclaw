@@ -19,6 +19,7 @@ mod skill_management;
 mod spawn_subagent;
 mod time;
 mod trace_commons;
+mod trigger_creation;
 mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};

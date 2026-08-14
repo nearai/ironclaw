@@ -1005,6 +1005,14 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             .resolve(run_context)
             .await
             .map_err(capability_resolve_error_to_agent_host_error)?;
+        if let Some(allowed) = run_context
+            .product_context
+            .as_ref()
+            .and_then(|context| context.execution_policy.as_ref())
+            .and_then(|execution_policy| execution_policy.allowed_capability_ids.as_ref())
+        {
+            policy = policy.narrow_to_capability_ids(allowed.iter().cloned());
+        }
         let mut denied = self.global_denied.clone();
         if run_context
             .resolved_run_profile
@@ -1110,9 +1118,11 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
         capability_surface::CapabilitySurfacePolicy,
-        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
+        execution_policy::TurnExecutionPolicy,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
         resolution::{Resolution, ResolutionBatch},
         runtime::RuntimeKind,
+        turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
@@ -1600,6 +1610,56 @@ mod tests {
             !policies[0].permits_capability_id(&denied_id),
             "the host-visible request must receive the final deny-subtracted policy"
         );
+    }
+
+    #[tokio::test]
+    async fn structured_trigger_allowlist_narrows_the_canonical_surface_policy() {
+        let policies = Arc::new(Mutex::new(Vec::new()));
+        let allowed = CapabilityId::new("demo.allowed").expect("allowed id");
+        let excluded = CapabilityId::new("demo.excluded").expect("excluded id");
+        let inner = Arc::new(InnerPort {
+            label: "inner",
+            log: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(RecordingSurfacePolicyFactory {
+                port: inner,
+                policies: Arc::clone(&policies),
+            }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied: Vec::new(),
+            scheduled_trigger_denied: Vec::new(),
+            tool_disclosure_profile_pins: HashMap::new(),
+        };
+        let mut context = test_run_context().await;
+        let mut product_context = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: UserId::new("user-runtime-test").expect("user id"),
+            },
+        );
+        product_context.execution_policy = Some(TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![allowed.clone()]),
+            required_skills: Vec::new(),
+        });
+        context.product_context = Some(product_context);
+
+        factory
+            .create_capability_port(&context)
+            .await
+            .expect("profiled capability port");
+
+        let policies = policies.lock().unwrap();
+        assert!(policies[0].permits_capability_id(&allowed));
+        assert!(!policies[0].permits_capability_id(&excluded));
     }
 
     // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────
