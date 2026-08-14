@@ -113,6 +113,10 @@ registerPack("ar", {
   "chat.modeAutoReview": "مراجعة تلقائية",
   "chat.runtimeLocal": "العمل محليًا",
   "chat.statusWorking": "جارٍ العمل",
+  "chat.processWorking": "جارٍ العمل…",
+  "chat.workedFor": "تم العمل لمدة {duration}",
+  "chat.reloadHistory": "إعادة تحميل السجل",
+  "chat.busyRejectedResend": "لم تُرسل هذه الرسالة لأن IronClaw كان مشغولاً. أعد إرسالها للمحاولة مرة أخرى.",
   "chat.identityUser": "أنت",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "انتقل إلى الأحدث",
@@ -206,6 +210,7 @@ registerPack("ar", {
   "authGate.oauthProviderFallback": "الموفر",
   "authGate.serviceUnavailable": "الخدمة غير متوفرة",
   "authGate.popupBlocked": "تم حظر النافذة المنبثقة للتفويض.",
+  "authGate.popupClosed": "أُغلقت نافذة تفويض {provider} قبل اكتمال الاتصال. أعد فتحها أعلاه للمحاولة مرة أخرى.",
   "authGate.pillAuthorize": "التفويض",
   "authGate.pillEnterToken": "أدخل الرمز المميز",
   "authGate.unsupportedChallenge": "افتح الإعدادات لإكمال خطوة المصادقة هذه.",
@@ -1001,6 +1006,19 @@ registerPack("ar", {
   // Admin — tabs
   "admin.tab.users": "المستخدمون",
   "admin.tab.configuration": "الإعدادات",
+  "admin.configuration.loading": "جارٍ تحميل الإعدادات",
+  "admin.configuration.loadFailed": "تعذر تحميل إعدادات الامتدادات.",
+  "admin.configuration.title": "إعدادات الامتدادات",
+  "admin.configuration.description": "اضبط القيم المملوكة للنشر والتي تعلنها الامتدادات. لا يؤدي حفظ القيم إلى تثبيت امتداد أو توصيله أو تنشيطه أو إزالته.",
+  "admin.configuration.empty": "لا توجد امتدادات تتطلب إعدادات للنشر.",
+  "admin.configuration.statusConfigured": "تم الإعداد",
+  "admin.configuration.statusRequired": "الإعداد مطلوب",
+  "admin.configuration.usedBy": "مستخدم بواسطة",
+  "admin.configuration.installed": "مثبّت",
+  "admin.configuration.secretHint": "تم الإعداد. اترك الحقل فارغًا للاحتفاظ بالقيمة المخزنة.",
+  "admin.configuration.save": "حفظ الإعدادات",
+  "admin.configuration.saved": "تم حفظ الإعدادات.",
+  "admin.configuration.saveFailed": "تعذر حفظ الإعدادات.",
 
   // Admin — dashboard
 

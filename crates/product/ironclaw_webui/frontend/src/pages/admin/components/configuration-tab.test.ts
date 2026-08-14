@@ -4,6 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test } from "vitest";
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import "../../../i18n/en";
 import {
   ConfigurationGroup,
   buildConfigurationSaveMutation,
@@ -91,6 +92,7 @@ function createConfigurationGroupHarness(initialGroup, stateOverrides = {}) {
       Panel: "section",
       clientActionId: () => "configuration-test-action",
       useAdminConfiguration: () => {},
+      useT: () => (key) => `translated:${key}`,
     },
     import.meta.url,
   );
@@ -155,6 +157,46 @@ test("configuration save mutation carries the loaded revision and client idempot
   });
 });
 
+test.each([
+  [
+    { isLoading: true },
+    ["admin.configuration.loading"],
+  ],
+  [
+    { isLoading: false, error: new Error("fixture failure") },
+    ["admin.configuration.loadFailed"],
+  ],
+  [
+    { isLoading: false, error: null },
+    [
+      "nav.admin",
+      "admin.configuration.title",
+      "admin.configuration.description",
+      "admin.configuration.empty",
+    ],
+  ],
+])("admin configuration page translates route states", (query, expectedKeys) => {
+  const { AdminConfigurationTab: Component } = runVmModuleForTest(
+    "./configuration-tab.tsx",
+    ["AdminConfigurationTab"],
+    {
+      React: {},
+      Button: "button",
+      Input: "input",
+      Panel: "section",
+      clientActionId: () => "configuration-test-action",
+      useAdminConfiguration: () => ({ query, groups: [] }),
+      useT: () => (key) => `translated:${key}`,
+    },
+    import.meta.url,
+  );
+
+  const rendered = JSON.stringify(Component());
+  for (const expectedKey of expectedKeys) {
+    assert.match(rendered, new RegExp(`translated:${expectedKey.replaceAll(".", "\\.")}`));
+  }
+});
+
 test("configuration group renders generic operator fields and no lifecycle actions", () => {
   const html = renderToStaticMarkup(React.createElement(ConfigurationGroup, {
     group: {
@@ -211,6 +253,45 @@ test("configuration group renders generic operator fields and no lifecycle actio
   assert.doesNotMatch(html, />Install</);
   assert.doesNotMatch(html, />Remove</);
   assert.doesNotMatch(html, />Connect</);
+});
+
+test("configuration group routes host-owned copy through i18n", () => {
+  const harness = createConfigurationGroupHarness({
+    group_id: "fixture.shared",
+    display_name: "Fixture credentials",
+    complete: false,
+    used_by: [{ package_id: "fixture", display_name: "Fixture", installed: true }],
+    fields: [{
+      handle: "secret",
+      label: "Secret",
+      secret: true,
+      required: true,
+      provided: true,
+      value: null,
+    }],
+  });
+
+  assert.match(
+    JSON.stringify(harness.render()),
+    /translated:admin\.configuration\.statusRequired.*translated:admin\.configuration\.usedBy.*translated:admin\.configuration\.installed.*translated:admin\.configuration\.secretHint.*translated:admin\.configuration\.save/,
+  );
+});
+
+test("configuration group translates configured and failed-save states", () => {
+  const harness = createConfigurationGroupHarness({
+    group_id: "fixture.shared",
+    display_name: "Fixture credentials",
+    complete: true,
+    used_by: [],
+    fields: [],
+  }, {
+    savingGroupId: "fixture.shared",
+    saveError: new Error("sanitized fixture failure"),
+  });
+
+  const rendered = JSON.stringify(harness.render());
+  assert.match(rendered, /translated:admin\.configuration\.statusConfigured/);
+  assert.match(rendered, /translated:admin\.configuration\.saveFailed/);
 });
 
 test("configuration group keeps repeated secret pastes mounted and dirty across a manifest refetch", () => {
@@ -327,4 +408,5 @@ test("configuration group reseeds from the group returned by save, not the pre-s
   assert.equal(findInput(rendered, "text").props.value, "https://saved.example.test");
   // The secret stays blank after save — never the server-returned material.
   assert.equal(findInput(rendered, "password").props.value, "");
+  assert.match(JSON.stringify(rendered), /translated:admin\.configuration\.saved/);
 });

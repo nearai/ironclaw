@@ -113,6 +113,10 @@ registerPack("de", {
   "chat.modeAutoReview": "Auto-Review",
   "chat.runtimeLocal": "Lokal arbeiten",
   "chat.statusWorking": "Arbeitet",
+  "chat.processWorking": "Arbeitet…",
+  "chat.workedFor": "{duration} lang gearbeitet",
+  "chat.reloadHistory": "Verlauf neu laden",
+  "chat.busyRejectedResend": "Diese Nachricht wurde nicht gesendet, weil IronClaw beschäftigt war. Sende sie erneut, um es noch einmal zu versuchen.",
   "chat.identityUser": "Du",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Zum Neuesten springen",
@@ -206,6 +210,7 @@ registerPack("de", {
   "authGate.oauthProviderFallback": "beim Anbieter",
   "authGate.serviceUnavailable": "Dienst nicht verfügbar",
   "authGate.popupBlocked": "Das Autorisierungs-Popup wurde blockiert.",
+  "authGate.popupClosed": "Das Autorisierungsfenster von {provider} wurde geschlossen, bevor die Verbindung abgeschlossen war. Öffne es oben erneut, um es noch einmal zu versuchen.",
   "authGate.pillAuthorize": "Autorisieren",
   "authGate.pillEnterToken": "Token eingeben",
   "authGate.unsupportedChallenge": "Einstellungen öffnen, um diesen Authentifizierungsschritt abzuschließen.",
@@ -1001,6 +1006,19 @@ registerPack("de", {
   // Admin — tabs
   "admin.tab.users": "Benutzer",
   "admin.tab.configuration": "Konfiguration",
+  "admin.configuration.loading": "Konfiguration wird geladen",
+  "admin.configuration.loadFailed": "Die Erweiterungskonfiguration konnte nicht geladen werden.",
+  "admin.configuration.title": "Erweiterungskonfiguration",
+  "admin.configuration.description": "Konfiguriere bereitstellungseigene Werte, die von Erweiterungen deklariert wurden. Das Speichern installiert, verbindet, aktiviert oder entfernt keine Erweiterung.",
+  "admin.configuration.empty": "Keine Erweiterung benötigt eine Bereitstellungskonfiguration.",
+  "admin.configuration.statusConfigured": "Konfiguriert",
+  "admin.configuration.statusRequired": "Konfiguration erforderlich",
+  "admin.configuration.usedBy": "Verwendet von",
+  "admin.configuration.installed": "installiert",
+  "admin.configuration.secretHint": "Konfiguriert. Leer lassen, um den gespeicherten Wert beizubehalten.",
+  "admin.configuration.save": "Konfiguration speichern",
+  "admin.configuration.saved": "Konfiguration gespeichert.",
+  "admin.configuration.saveFailed": "Die Konfiguration konnte nicht gespeichert werden.",
 
   // Admin — dashboard
 

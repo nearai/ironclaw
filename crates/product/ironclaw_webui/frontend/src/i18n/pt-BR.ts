@@ -113,6 +113,10 @@ registerPack("pt-BR", {
   "chat.modeAutoReview": "Revisao automatica",
   "chat.runtimeLocal": "Trabalhar localmente",
   "chat.statusWorking": "Trabalhando",
+  "chat.processWorking": "Trabalhando…",
+  "chat.workedFor": "Trabalhou por {duration}",
+  "chat.reloadHistory": "Recarregar histórico",
+  "chat.busyRejectedResend": "Esta mensagem não foi enviada porque o IronClaw estava ocupado. Reenvie-a para tentar novamente.",
   "chat.identityUser": "Você",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Ir para o mais recente",
@@ -206,6 +210,7 @@ registerPack("pt-BR", {
   "authGate.oauthProviderFallback": "o provedor",
   "authGate.serviceUnavailable": "Serviço indisponível",
   "authGate.popupBlocked": "O pop-up de autorização foi bloqueado.",
+  "authGate.popupClosed": "A janela de autorização do {provider} foi fechada antes da conclusão da conexão. Reabra-a acima para tentar novamente.",
   "authGate.pillAuthorize": "Autorizar",
   "authGate.pillEnterToken": "Insira o token",
   "authGate.unsupportedChallenge": "Abra as configurações para concluir esta etapa de autenticação.",
@@ -1001,6 +1006,19 @@ registerPack("pt-BR", {
   // Admin — tabs
   "admin.tab.users": "Usuários",
   "admin.tab.configuration": "Configuração",
+  "admin.configuration.loading": "Carregando configuração",
+  "admin.configuration.loadFailed": "Não foi possível carregar a configuração das extensões.",
+  "admin.configuration.title": "Configuração de extensões",
+  "admin.configuration.description": "Configure os valores pertencentes à implantação declarados pelas extensões. Salvá-los não instala, conecta, ativa nem remove uma extensão.",
+  "admin.configuration.empty": "Nenhuma extensão exige configuração da implantação.",
+  "admin.configuration.statusConfigured": "Configurado",
+  "admin.configuration.statusRequired": "Configuração necessária",
+  "admin.configuration.usedBy": "Usado por",
+  "admin.configuration.installed": "instalado",
+  "admin.configuration.secretHint": "Configurado. Deixe em branco para manter o valor armazenado.",
+  "admin.configuration.save": "Salvar configuração",
+  "admin.configuration.saved": "Configuração salva.",
+  "admin.configuration.saveFailed": "Não foi possível salvar a configuração.",
 
   // Admin — dashboard
 

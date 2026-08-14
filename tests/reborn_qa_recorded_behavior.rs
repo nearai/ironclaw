@@ -87,7 +87,8 @@ use std::{
 use chrono::Utc;
 use ironclaw_composition::{AssistantReply, RebornRuntime};
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
-use ironclaw_triggers::{TriggerRunStatus, TriggerState};
+use ironclaw_threads::{MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope};
+use ironclaw_triggers::{TriggerExecutionSpec, TriggerRunStatus, TriggerState};
 use ironclaw_turns::{GetRunStateRequest, TurnScope};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use parity_qa_support::qa_trace::{
@@ -465,10 +466,49 @@ fn assert_tool_argument_string_field_eq(trace: &LlmTrace, tool: &str, field: &st
 fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
     let trace = load_qa_trace(case.fixture);
     assert_tool_called_with(&trace, "builtin.trigger_create", &[cron_fragment]);
+    assert_structured_trigger_create(&trace);
     assert!(
         final_text_reply(&trace).is_some(),
         "routine phrase should end with a finalized assistant reply"
     );
+}
+
+fn assert_structured_trigger_create(trace: &LlmTrace) {
+    // Every recorded creation call must satisfy the versioned contract —
+    // substring checks on the first call would let a later legacy call or a
+    // malformed `execution_contract: null` slip through.
+    let creates = recorded_tool_calls(trace)
+        .into_iter()
+        .filter(|(name, _)| name == "builtin.trigger_create")
+        .map(|(_, arguments)| arguments)
+        .collect::<Vec<_>>();
+    assert!(!creates.is_empty(), "routine phrase must create a trigger");
+    for arguments in creates {
+        let parsed: serde_json::Value = serde_json::from_str(&arguments).unwrap_or_else(|error| {
+            panic!("trigger_create arguments must be a JSON object ({error}): {arguments}")
+        });
+        let object = parsed
+            .as_object()
+            .unwrap_or_else(|| panic!("trigger_create arguments must be an object: {arguments}"));
+        assert!(
+            !object.contains_key("prompt"),
+            "routine creation fixtures must not use the retired raw prompt field: {arguments}"
+        );
+        let contract = object.get("execution_contract").unwrap_or_else(|| {
+            panic!(
+                "routine creation fixtures must exercise the structured execution contract: {arguments}"
+            )
+        });
+        let spec: TriggerExecutionSpec =
+            serde_json::from_value(contract.clone()).unwrap_or_else(|error| {
+                panic!(
+                    "execution_contract must deserialize as the versioned TriggerExecutionSpec ({error}): {arguments}"
+                )
+            });
+        spec.validate().unwrap_or_else(|error| {
+            panic!("execution_contract must pass contract validation ({error}): {arguments}")
+        });
+    }
 }
 
 #[tokio::test]
@@ -479,6 +519,7 @@ async fn contract_routine_crm_inbox_creates_30_minute_trigger() {
 #[tokio::test]
 async fn contract_routine_bare_send_me_from_web_app_pins_no_delivery_step() {
     let trace = load_qa_trace(ROUTINE_BARE_SEND_ME_WEBUI.fixture);
+    assert_structured_trigger_create(&trace);
     // Web-app half of the source-channel default: results are already in the
     // run thread the user is looking at, so a bare "send me" writes NO
     // delivery step and the creation turn performs no delivery itself.
@@ -500,6 +541,7 @@ async fn contract_routine_bare_send_me_from_web_app_pins_no_delivery_step() {
 #[tokio::test]
 async fn contract_routine_multi_channel_delivery_pins_both_targets_in_prompt() {
     let trace = load_qa_trace(ROUTINE_MULTI_CHANNEL_DELIVERY.fixture);
+    assert_structured_trigger_create(&trace);
     // "to Slack and Telegram" resolves BOTH destinations while the user is
     // present and pins each in the routine's own prompt as an explicit
     // delivery step — one delivery call per channel at fire time.
@@ -1140,7 +1182,7 @@ fn append_fired_routine_reply(trace: &mut LlmTrace) {
         steps: vec![TraceStep {
             request_hint: None,
             response: TraceResponse::Text {
-                content: "qa fired routine ok".to_string(),
+                content: "qa fired routine ok.".to_string(),
                 input_tokens: 1,
                 output_tokens: 1,
             },
@@ -1262,6 +1304,10 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         }
     }
 
+    // Read the fired run's persisted reply while the runtime is still up; the
+    // assertion happens after the clearer fire-progress asserts below.
+    let fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+
     runtime.shutdown().await.expect("runtime shutdown");
 
     let captured_requests = gateway.requests();
@@ -1296,7 +1342,59 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         "replayed {} fired routine should record fire metadata; record: {settled:?}",
         case.fixture
     );
+    // A settled-Ok record alone does not prove the user-observable outcome:
+    // the fired run's own thread must hold the finalized assistant reply the
+    // scripted fire produced.
+    let fired_reply = fired_reply.unwrap_or_else(|| {
+        panic!(
+            "replayed {} fired routine should persist a finalized assistant reply in its run thread",
+            case.fixture
+        )
+    });
+    assert!(
+        fired_reply.contains("qa fired routine ok"),
+        "replayed {} fired routine reply must carry the scripted fire output; reply: {fired_reply:?}",
+        case.fixture
+    );
     gateway.assert_exhausted();
+}
+
+/// Reads the fired routine run's finalized assistant reply from its canonical
+/// run thread — the same `TriggerRunRecord.thread_id` path the WebUI
+/// Automations panel uses to open the run.
+async fn fired_routine_finalized_reply(
+    runtime: &RebornRuntime,
+    tenant_id: &TenantId,
+    trigger_id: ironclaw_triggers::TriggerId,
+) -> Option<String> {
+    let runs = runtime
+        .trigger_repository()
+        .list_trigger_run_history(tenant_id.clone(), trigger_id, 8)
+        .await
+        .ok()?;
+    let thread_id = runs.iter().find_map(|run| run.thread_id.clone())?;
+    let thread_service = runtime.standalone_thread_service_for_test()?;
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: tenant_id.clone(),
+                agent_id: AgentId::new("qa-trace-agent").ok()?,
+                project_id: None,
+                owner_user_id: Some(UserId::new("qa-trace-owner").ok()?),
+                mission_id: None,
+            },
+            thread_id,
+        })
+        .await
+        .ok()?;
+    history
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.kind == MessageKind::Assistant && message.status == MessageStatus::Finalized
+        })
+        .and_then(|message| message.content.clone())
 }
 
 // The runtime-replay lane previously ran on `routine_health_ping` /
