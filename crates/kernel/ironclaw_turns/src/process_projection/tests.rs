@@ -87,6 +87,7 @@ fn agent_turn_metadata(
         spawn_tree_descendant_cap: None,
         product_context: None,
         resume_disposition: None,
+        ownerless_thread: false,
     }
 }
 
@@ -849,6 +850,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         spawn_tree_descendant_cap: None,
         product_context: None,
         resume_disposition: None,
+        ownerless_thread: false,
     };
     store
         .submit_process(SubmitProcessRequest {
@@ -1212,6 +1214,52 @@ fn claimed_process_round_trips_to_turn_executor_view() {
     );
     assert_eq!(round_trip.subagent_depth, 4);
     assert_eq!(round_trip.spawn_tree_descendant_cap, Some(23));
+}
+
+/// The `__system__` owner slot holds BOTH ownerless (unbound) runs and
+/// actor-fallback runs with no explicit owner; the journaled
+/// `ownerless_thread` disposition marker is what keeps the round trip
+/// faithful in each direction (the sibling test above pins actor-fallback).
+#[test]
+fn ownerless_scope_round_trips_through_the_process_claim() {
+    let mut ownerless_scope = scope();
+    ownerless_scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::Ownerless;
+    let state = crate::TurnRunState {
+        scope: ownerless_scope.clone(),
+        actor: Some(TurnActor::new(UserId::new("user:process").expect("user"))),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
+            .expect("accepted"),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
+        resolved_model_route: None,
+        model_usage: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(12),
+        product_context: None,
+        resume_disposition: None,
+    };
+    let claimed = ClaimedTurnRun {
+        state: state.clone(),
+        resolved_run_profile: profile().resolved,
+        subagent_depth: 0,
+        spawn_tree_descendant_cap: None,
+        runner_id: TurnRunnerId::new(),
+        lease_token: crate::TurnLeaseToken::new(),
+    };
+    let round_trip = claimed_turn_run_from_process_claim(ClaimedProcess::from(&claimed))
+        .expect("claimed turn view");
+
+    assert_eq!(round_trip.state.scope, ownerless_scope);
+    assert_eq!(round_trip.state, state);
 }
 
 #[tokio::test]

@@ -81,6 +81,25 @@ pub struct LoopExecutionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
 
+    /// Wall-clock start of budget accounting for this run. `None` until the
+    /// budget stage's first pass arms it (initial state stays deterministic;
+    /// older checkpoints without the field re-arm from resume time). Read
+    /// against `ResourceBudgetPolicy::max_wall_clock_seconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Provider model calls dispatched this run (every attempt, including
+    /// recovery retries). Enforced by the budget stage against
+    /// `ResourceBudgetPolicy::max_model_calls`.
+    #[serde(default)]
+    pub model_calls_made: u32,
+
+    /// Capability invocations executed this run, summed per completed batch.
+    /// Enforced by the budget stage against
+    /// `ResourceBudgetPolicy::max_capability_invocations`.
+    #[serde(default)]
+    pub capability_invocations_made: u32,
+
     /// Count of tools-capable completion nudges issued this run (driver-specific
     /// nudge, gated by `SteeringPolicy.allow_driver_specific_nudges`). It
     /// re-enters the loop with the full tool surface so the model can finish the
@@ -347,6 +366,9 @@ impl LoopExecutionState {
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
             cumulative_model_usage: None,
+            run_started_at: None,
+            model_calls_made: 0,
+            capability_invocations_made: 0,
             completion_nudges_used: 0,
             completion_nudge_pending: false,
             pending_model_error_observation: None,
@@ -530,6 +552,7 @@ mod tests {
                 tier: ResourceBudgetTier::new("loop_state_test_tier").expect("valid"),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {

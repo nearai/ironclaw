@@ -70,6 +70,11 @@ pub struct ResourceBudgetPolicy {
     pub tier: ResourceBudgetTier,
     pub max_model_calls: u32,
     pub max_capability_invocations: u32,
+    /// Per-run wall-clock ceiling in seconds. `None` means no time limit.
+    /// Enforced by the loop executor's budget stage as a hard stop after a
+    /// final checkpoint; declared `TurnLimits` narrow it per run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_clock_seconds: Option<u32>,
 }
 
 impl ResourceBudgetPolicy {
@@ -85,6 +90,7 @@ impl ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
             max_model_calls: 32,
             max_capability_invocations: 64,
+            max_wall_clock_seconds: None,
         }
     }
 }

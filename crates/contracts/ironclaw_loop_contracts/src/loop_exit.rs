@@ -304,6 +304,16 @@ pub enum LoopFailureKind {
     /// of parking it with no surface to resolve on). The gate kind rides the
     /// sanitized failure detail.
     GateNotSupported,
+    /// The run exceeded its per-run wall-clock budget
+    /// (`ResourceBudgetPolicy::max_wall_clock_seconds`, narrowed by declared
+    /// `TurnLimits`). Hard stop after a final checkpoint.
+    WallClockLimit,
+    /// The run exhausted its model-call budget
+    /// (`ResourceBudgetPolicy::max_model_calls`).
+    ModelCallLimit,
+    /// The run exhausted its capability-invocation budget
+    /// (`ResourceBudgetPolicy::max_capability_invocations`).
+    CapabilityInvocationLimit,
 }
 
 impl LoopFailureKind {
@@ -323,6 +333,9 @@ impl LoopFailureKind {
             Self::PolicyDenied => "policy_denied",
             Self::CompactionUnavailable => "compaction_unavailable",
             Self::GateNotSupported => "gate_not_supported",
+            Self::WallClockLimit => "wall_clock_limit",
+            Self::ModelCallLimit => "model_call_limit",
+            Self::CapabilityInvocationLimit => "capability_invocation_limit",
         }
     }
 
@@ -431,6 +444,9 @@ mod tests {
             LoopFailureKind::PolicyDenied => "policy_denied",
             LoopFailureKind::CompactionUnavailable => "compaction_unavailable",
             LoopFailureKind::GateNotSupported => "gate_not_supported",
+            LoopFailureKind::WallClockLimit => "wall_clock_limit",
+            LoopFailureKind::ModelCallLimit => "model_call_limit",
+            LoopFailureKind::CapabilityInvocationLimit => "capability_invocation_limit",
         };
         for kind in [
             LoopFailureKind::ModelError,
@@ -447,6 +463,9 @@ mod tests {
             LoopFailureKind::PolicyDenied,
             LoopFailureKind::CompactionUnavailable,
             LoopFailureKind::GateNotSupported,
+            LoopFailureKind::WallClockLimit,
+            LoopFailureKind::ModelCallLimit,
+            LoopFailureKind::CapabilityInvocationLimit,
         ] {
             assert_eq!(kind.as_str(), expected(kind));
             assert_eq!(kind.to_sanitized_failure().category(), expected(kind));

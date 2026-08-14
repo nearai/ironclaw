@@ -489,6 +489,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let policy = ctx.planner.batch().policy(&state, &summaries);
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
+        // Budget accounting: every invocation that reaches dispatch counts,
+        // whatever its outcome.
+        state.capability_invocations_made = state
+            .capability_invocations_made
+            .saturating_add(visible_calls.len() as u32);
 
         CheckpointStage
             .emit_progress(

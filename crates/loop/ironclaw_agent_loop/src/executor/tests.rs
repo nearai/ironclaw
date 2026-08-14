@@ -375,6 +375,128 @@ async fn budget_stage_exits_at_iteration_limit() {
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
 }
 
+fn family_with_budget_strategy(
+    strategy: crate::strategies::DefaultBudgetStrategy,
+) -> crate::family::LoopFamily {
+    use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
+    let planner = crate::default_planner::DefaultPlanner::compose_default()
+        .with_budget(std::sync::Arc::new(strategy));
+    let id = LoopFamilyId::new("executor-budget-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static("executor-budget-test", ComponentDigest([6; 32]));
+    LoopFamily::new(id, version, std::sync::Arc::new(planner))
+}
+
+#[tokio::test]
+async fn budget_stage_hard_stops_on_wall_clock_limit_without_a_warning_turn() {
+    let host = MockHost::new(Vec::new());
+    let family = family_with_budget_strategy(crate::strategies::DefaultBudgetStrategy {
+        wall_clock_limit: Some(std::time::Duration::from_secs(60)),
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.run_started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+
+    let step = BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage");
+
+    match step {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(
+                failed.reason_kind,
+                ironclaw_loop_contracts::LoopFailureKind::WallClockLimit
+            );
+        }
+        other => panic!("an exhausted wall clock must hard-stop the run, got {other:?}"),
+    }
+    // Hard stop: final checkpoint only, no model-visible warning iteration.
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn budget_stage_rearms_wall_clock_accounting_on_checkpoints_without_a_start() {
+    let host = MockHost::new(Vec::new());
+    let family = family_with_budget_strategy(crate::strategies::DefaultBudgetStrategy {
+        wall_clock_limit: Some(std::time::Duration::from_secs(3600)),
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    // An older checkpoint predating wall-clock accounting deserializes with
+    // no start; the stage re-arms from resume time instead of failing.
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.run_started_at = None;
+
+    let step = BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage");
+
+    match step {
+        BudgetStep::Continue { state } => {
+            assert!(
+                state.run_started_at.is_some(),
+                "the stage must re-arm the start so the limit binds from resume"
+            );
+        }
+        other => panic!("a re-armed run must continue, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn budget_stage_hard_stops_when_call_budgets_are_exhausted() {
+    let host = MockHost::new(Vec::new());
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy::default());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.model_calls_made = policy.max_model_calls;
+    match BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage")
+    {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(
+                failed.reason_kind,
+                ironclaw_loop_contracts::LoopFailureKind::ModelCallLimit
+            );
+        }
+        other => panic!("an exhausted model-call budget must hard-stop, got {other:?}"),
+    }
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.capability_invocations_made = policy.max_capability_invocations;
+    match BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage")
+    {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(
+                failed.reason_kind,
+                ironclaw_loop_contracts::LoopFailureKind::CapabilityInvocationLimit
+            );
+        }
+        other => panic!("an exhausted capability budget must hard-stop, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn iteration_limit_gives_model_one_warning_turn_to_finish() {
     let host = MockHost::new(vec![reply_response_with_text(

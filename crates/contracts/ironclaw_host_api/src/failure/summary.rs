@@ -202,6 +202,18 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "compaction_unavailable" => {
             "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread."
         }
+        "gate_not_supported" => {
+            "The run stopped because it needed an approval, sign-in, or resource this run profile cannot surface. Run it from an interactive surface or adjust permissions first."
+        }
+        "wall_clock_limit" => {
+            "The run stopped because it reached its time limit. Retry with a narrower request or a higher time limit."
+        }
+        "model_call_limit" => {
+            "The run stopped because it used up its model-call budget. Retry with a narrower request or a higher budget."
+        }
+        "capability_invocation_limit" => {
+            "The run stopped because it used up its tool-call budget. Retry with a narrower request or a higher budget."
+        }
         "driver_protocol_violation" => {
             "The run produced an invalid result and stopped before replying. Retry the run, and contact support if it keeps happening."
         }
@@ -462,6 +474,10 @@ mod tests {
             "policy_denied",
             "compaction_unavailable",
             "driver_protocol_violation",
+            "gate_not_supported",
+            "wall_clock_limit",
+            "model_call_limit",
+            "capability_invocation_limit",
         ] {
             let summary = reborn_failure_summary_for_category(Some(category));
             assert_ne!(

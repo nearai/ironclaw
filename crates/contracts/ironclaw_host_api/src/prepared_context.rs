@@ -48,21 +48,27 @@ impl OutputContract {
 
 /// Per-run limits, narrowing-only against the resolved profile's ceilings.
 ///
-/// The two fields map onto the per-run seams the budget machinery has today
-/// (`ResourceBudgetPolicy::{max_model_calls, max_capability_invocations}`);
-/// wall-clock, spend, and output-token narrowing stay profile-level ceilings
-/// until those gain per-run seams (named follow-up in the design doc).
+/// The fields map onto the per-run budget seams
+/// (`ResourceBudgetPolicy::{max_model_calls, max_capability_invocations,
+/// max_wall_clock_seconds}`), all enforced by the loop executor's budget
+/// stage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_model_calls: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_capability_invocations: Option<u32>,
+    /// Per-run wall-clock ceiling in seconds. Narrows the profile ceiling;
+    /// a declared value can only shorten the run, never extend it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_clock_seconds: Option<u32>,
 }
 
 impl TurnLimits {
     pub fn is_unlimited(&self) -> bool {
-        self.max_model_calls.is_none() && self.max_capability_invocations.is_none()
+        self.max_model_calls.is_none()
+            && self.max_capability_invocations.is_none()
+            && self.max_wall_clock_seconds.is_none()
     }
 }
 
@@ -151,6 +157,7 @@ mod tests {
             limits: TurnLimits {
                 max_model_calls: Some(6),
                 max_capability_invocations: Some(12),
+                max_wall_clock_seconds: Some(120),
             },
         };
         let json = serde_json::to_value(&declarations).expect("serialize");

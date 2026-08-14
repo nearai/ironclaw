@@ -312,6 +312,9 @@ impl RunProfileDefinition {
                     .resource_budget_policy
                     .max_capability_invocations
                     .min(ResourceBudgetPolicy::MISSION_STANDARD_MAX_CAPABILITY_INVOCATIONS),
+                // The ceiling clamp bounds call counts; the profile's own
+                // wall-clock ceiling passes through unchanged.
+                max_wall_clock_seconds: self.resource_budget_policy.max_wall_clock_seconds,
             };
         }
 
@@ -403,6 +406,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             tier: ResourceBudgetTier::from_trusted_static("mission_high"),
             max_model_calls: 256,
             max_capability_invocations: 1024,
+            max_wall_clock_seconds: None,
         },
         personal_context_policy: PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints::locked(),

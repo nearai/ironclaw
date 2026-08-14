@@ -1294,12 +1294,38 @@ fn prepared_gateway(
     suffix: &str,
 ) -> OpenAiCompatPreparedTurnGateway {
     OpenAiCompatPreparedTurnGateway {
-        thread_service: threads,
-        coordinator,
+        service: Arc::new(ironclaw_assistant::UnboundPreparedTurnService::new(
+            threads,
+            coordinator,
+            TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
+            AgentId::new(format!("agent-{suffix}")).expect("agent"),
+            None,
+        )),
+    }
+}
+
+fn test_unbound_thread_scope(suffix: &str) -> ironclaw_threads::ThreadScope {
+    ironclaw_threads::ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
         agent_id: AgentId::new(format!("agent-{suffix}")).expect("agent"),
         project_id: None,
+        owner_user_id: None,
+        mission_id: None,
     }
+}
+
+fn test_unbound_turn_scope(
+    suffix: &str,
+    thread_id: &ThreadId,
+) -> ironclaw_host_api::turn::TurnScope {
+    let mut scope = ironclaw_host_api::turn::TurnScope::new(
+        TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
+        Some(AgentId::new(format!("agent-{suffix}")).expect("agent")),
+        None,
+        thread_id.clone(),
+    );
+    scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::Ownerless;
+    scope
 }
 
 struct RecordingSubmitCoordinator {
@@ -1420,7 +1446,7 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_reflessly() {
     // The seeded thread carries the full history shape: system + user +
     // tool-result reference + trailing user (the pure tool-call assistant
     // message seeds no row, matching the live transcript storage shape).
-    let gateway_scope = gateway.unbound_thread_scope();
+    let gateway_scope = test_unbound_thread_scope("prep");
     let history = threads
         .list_thread_history(ThreadHistoryRequest {
             scope: gateway_scope.clone(),
@@ -1487,7 +1513,7 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         .expect("accept");
 
     let run_id = TurnRunId::new();
-    let scope = gateway.unbound_thread_scope();
+    let scope = test_unbound_thread_scope("sres");
     let payload = "{\"sentiment\":\"positive\"}";
     threads
         .put_tool_result_record(ironclaw_threads::PutToolResultRecordRequest {
@@ -1528,7 +1554,7 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         .expect("tool row");
 
     let mut state = TurnRunState {
-        scope: gateway.unbound_turn_scope(&thread_id),
+        scope: test_unbound_turn_scope("sres", &thread_id),
         actor: Some(TurnActor::new(UserId::new("user-sres").expect("user"))),
         turn_id: ironclaw_host_api::turn::TurnId::new(),
         run_id,
@@ -1550,14 +1576,16 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         product_context: None,
         resume_disposition: None,
     };
-    state.scope = gateway.unbound_turn_scope(&thread_id);
+    state.scope = test_unbound_turn_scope("sres", &thread_id);
     let coordinator = Arc::new(StaticTurnCoordinator::new(state));
     let gateway = OpenAiCompatPreparedTurnGateway {
-        thread_service: threads,
-        coordinator,
-        tenant_id: TenantId::new("tenant-sres").expect("tenant"),
-        agent_id: AgentId::new("agent-sres").expect("agent"),
-        project_id: None,
+        service: Arc::new(ironclaw_assistant::UnboundPreparedTurnService::new(
+            threads,
+            coordinator,
+            TenantId::new("tenant-sres").expect("tenant"),
+            AgentId::new("agent-sres").expect("agent"),
+            None,
+        )),
     };
 
     let request = OpenAiChatCompletionProjectionRequest {
@@ -1577,7 +1605,7 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         },
         projection_read: ProjectionReadRequest {
             actor: TurnActor::new(UserId::new("user-sres").expect("user")),
-            scope: gateway.unbound_turn_scope(&thread_id),
+            scope: test_unbound_turn_scope("sres", &thread_id),
             after_cursor: None,
             limit: None,
         },

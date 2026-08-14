@@ -207,7 +207,13 @@ observed_date = "2026-08-08"
 # eviction + #7373 re-equalization) into the unified-channel branch: main
 # evicted the memory-save guidance while this branch added the channel
 # registration/capability assembly; the merged tree is measured, not summed.
-loc_ceiling = 41780
+# Re-measured 2026-08-13 on the unbound-turns surfaces branch (main merged):
+# the OpenAI-compat prepared-lane behavior was pushed into
+# `ironclaw_assistant::UnboundPreparedTurnService`; what remains here is the
+# charter-true glue — the OpenAI wire-DTO -> seed-vocabulary mapping, the
+# port adapter/error translation, and mount wiring — plus main's own growth
+# since the last calibration (main measured 41880 against the prior 41780).
+loc_ceiling = 42080
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to

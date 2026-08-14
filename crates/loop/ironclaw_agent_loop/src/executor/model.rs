@@ -107,6 +107,9 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let mut last_error_summary: Option<ModelErrorSummary> = None;
         let mut last_error_detail: Option<String> = None;
         for _ in 0..max_model_attempts {
+            // Budget accounting counts every dispatched provider attempt,
+            // including recovery retries.
+            state.model_calls_made = state.model_calls_made.saturating_add(1);
             let model_result = ctx.host.stream_model(request.clone()).await;
             match model_result {
                 Ok(response) => {

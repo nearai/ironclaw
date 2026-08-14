@@ -34,6 +34,12 @@ pub struct AgentTurnProcessMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub resume_disposition: Option<GateResumeDisposition>,
+    /// True when the run's thread owner is `Ownerless` (unbound runs). The
+    /// `__system__` owner slot alone cannot distinguish ownerless runs from
+    /// actor-fallback runs without an explicit owner, so the disposition is
+    /// journaled; absent (legacy rows) means actor-fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ownerless_thread: bool,
 }
 
 impl AgentTurnProcessMetadata {
@@ -49,6 +55,8 @@ impl AgentTurnProcessMetadata {
             subagent_depth: record.subagent_depth,
             product_context: record.product_context.clone(),
             resume_disposition: record.resume_disposition.clone(),
+            ownerless_thread: record.scope.thread_owner
+                == ironclaw_host_api::turn::TurnThreadOwner::Ownerless,
         }
     }
 }
@@ -85,6 +93,12 @@ pub struct AgentTurnProcessStateMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub resume_disposition: Option<GateResumeDisposition>,
+    /// True when the run's thread owner is `Ownerless` (unbound runs). The
+    /// `__system__` owner slot alone cannot distinguish ownerless runs from
+    /// actor-fallback runs without an explicit owner, so the disposition is
+    /// journaled; absent (legacy rows) means actor-fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ownerless_thread: bool,
 }
 
 impl AgentTurnProcessStateMetadata {
@@ -103,6 +117,8 @@ impl AgentTurnProcessStateMetadata {
             spawn_tree_descendant_cap: None,
             product_context: state.product_context.clone(),
             resume_disposition: state.resume_disposition.clone(),
+            ownerless_thread: state.scope.thread_owner
+                == ironclaw_host_api::turn::TurnThreadOwner::Ownerless,
         }
     }
 

@@ -4475,6 +4475,7 @@ fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContext
             limits: ironclaw_host_api::prepared_context::TurnLimits {
                 max_model_calls: Some(4),
                 max_capability_invocations: None,
+                max_wall_clock_seconds: None,
             },
         },
         idempotency_key: key.to_string(),

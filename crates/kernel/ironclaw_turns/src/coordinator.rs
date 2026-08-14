@@ -343,6 +343,14 @@ impl RunProfileResolver for DeclaredLimitsNarrowingResolver<'_> {
                 .max_capability_invocations
                 .min(cap);
         }
+        if let Some(cap) = self.limits.max_wall_clock_seconds {
+            resolved.resource_budget_policy.max_wall_clock_seconds = Some(
+                resolved
+                    .resource_budget_policy
+                    .max_wall_clock_seconds
+                    .map_or(cap, |ceiling| ceiling.min(cap)),
+            );
+        }
         Ok(resolved)
     }
 }
@@ -749,5 +757,72 @@ where
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         self.as_ref().submit_child_run(request).await
+    }
+}
+
+#[cfg(test)]
+mod declared_limits_tests {
+    use super::*;
+    use ironclaw_loop_contracts::{InMemoryRunProfileResolver, RunProfileResolutionRequest};
+
+    #[tokio::test]
+    async fn declared_limits_narrow_profile_ceilings_and_never_widen_them() {
+        let inner = InMemoryRunProfileResolver::default();
+        let baseline = inner
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("baseline profile");
+        let ceiling_calls = baseline.resource_budget_policy.max_model_calls;
+        let ceiling_invocations = baseline.resource_budget_policy.max_capability_invocations;
+        assert_eq!(
+            baseline.resource_budget_policy.max_wall_clock_seconds, None,
+            "the interactive profile declares no wall-clock ceiling"
+        );
+
+        // Narrowing: every declared limit below the ceiling binds; a
+        // wall-clock declaration binds even with no profile ceiling.
+        let resolver = DeclaredLimitsNarrowingResolver {
+            inner: &inner,
+            limits: TurnLimits {
+                max_model_calls: Some(ceiling_calls - 1),
+                max_capability_invocations: Some(ceiling_invocations + 1_000),
+                max_wall_clock_seconds: Some(60),
+            },
+        };
+        let narrowed = resolver
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("narrowed profile");
+        assert_eq!(
+            narrowed.resource_budget_policy.max_model_calls,
+            ceiling_calls - 1
+        );
+        assert_eq!(
+            narrowed.resource_budget_policy.max_capability_invocations, ceiling_invocations,
+            "a declared limit above the profile ceiling must not widen it"
+        );
+        assert_eq!(
+            narrowed.resource_budget_policy.max_wall_clock_seconds,
+            Some(60)
+        );
+
+        // A profile wall-clock ceiling is only ever shortened.
+        let resolver = DeclaredLimitsNarrowingResolver {
+            inner: &resolver,
+            limits: TurnLimits {
+                max_model_calls: None,
+                max_capability_invocations: None,
+                max_wall_clock_seconds: Some(3_600),
+            },
+        };
+        let twice_narrowed = resolver
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("twice-narrowed profile");
+        assert_eq!(
+            twice_narrowed.resource_budget_policy.max_wall_clock_seconds,
+            Some(60),
+            "a larger declared wall clock must not extend the narrowed ceiling"
+        );
     }
 }
