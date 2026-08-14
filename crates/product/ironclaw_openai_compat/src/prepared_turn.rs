@@ -78,21 +78,34 @@ pub(crate) fn parse_response_format(
     }
 }
 
-/// Does the request carry assistant tool-call / tool-result history?
-pub(crate) fn has_tool_history(messages: &[OpenAiChatMessage]) -> bool {
-    messages.iter().any(|message| {
-        matches!(message.role, OpenAiChatMessageRole::Tool)
-            || message
-                .tool_calls
-                .as_ref()
-                .is_some_and(|calls| !calls.is_empty())
-    })
+/// Does the request replay a transcript rather than open a fresh chat?
+/// Any assistant or tool row, or more than one user turn, means the caller
+/// owns the history — the stateless-replay shape the prepared lane seeds
+/// faithfully (the retired path flattened it into one JSON string).
+pub(crate) fn has_replayed_history(messages: &[OpenAiChatMessage]) -> bool {
+    let mut user_turns = 0usize;
+    for message in messages {
+        match message.role {
+            OpenAiChatMessageRole::Tool | OpenAiChatMessageRole::Assistant => return true,
+            OpenAiChatMessageRole::User => user_turns += 1,
+            OpenAiChatMessageRole::System | OpenAiChatMessageRole::Developer => {}
+        }
+        if message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        {
+            return true;
+        }
+    }
+    user_turns > 1
 }
 
 /// The prepared-lane decision for a NON-STREAMING request. The lane exists
 /// exactly where the conversation path mistreats the request's contract:
-/// a declared output schema, or tool history that would otherwise be
-/// flattened. Requests declaring live client tools stay on the conversation
+/// a declared output schema, or replayed history (assistant/tool rows or
+/// multiple user turns) that would otherwise be flattened into one JSON
+/// string. Requests declaring live client tools stay on the conversation
 /// lane (the external-tool park/resume flow lives there); combining client
 /// tools with a structured output contract is rejected loudly instead of
 /// half-honored.
@@ -123,7 +136,7 @@ pub(crate) fn prepared_lane_output(
     if let Some(output) = output {
         return Ok(Some(output));
     }
-    if has_tool_history(&request.messages) && !declares_tools {
+    if has_replayed_history(&request.messages) && !declares_tools {
         return Ok(Some(OutputContract::AssistantMessage));
     }
     Ok(None)
@@ -159,6 +172,12 @@ pub(crate) fn prepared_pre_validate(
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "messages".to_string(),
         )));
+    }
+    if messages.len() > crate::chat_workflow::MAX_CHAT_COMPLETION_MESSAGES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
+            "messages exceeds the {} message limit",
+            crate::chat_workflow::MAX_CHAT_COMPLETION_MESSAGES
+        ))));
     }
     for message in messages {
         if !text_shape_ok(message.content.as_ref()) {
@@ -274,6 +293,30 @@ mod tests {
             tool_call_id: Some("call_1".to_string()),
             tool_calls: None,
         });
+        assert!(matches!(
+            prepared_lane_output(&request).expect("lane"),
+            Some(OutputContract::AssistantMessage)
+        ));
+    }
+
+    #[test]
+    fn multi_turn_text_history_takes_the_prepared_lane() {
+        let mut request = base_request(vec![user_message("first question")]);
+        request.messages.push(OpenAiChatMessage {
+            role: OpenAiChatMessageRole::Assistant,
+            content: Some(json!("first answer")),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        request.messages.push(user_message("follow-up"));
+        assert!(matches!(
+            prepared_lane_output(&request).expect("lane"),
+            Some(OutputContract::AssistantMessage)
+        ));
+
+        // Two user turns with no assistant row is still replayed history.
+        let request = base_request(vec![user_message("part one"), user_message("part two")]);
         assert!(matches!(
             prepared_lane_output(&request).expect("lane"),
             Some(OutputContract::AssistantMessage)

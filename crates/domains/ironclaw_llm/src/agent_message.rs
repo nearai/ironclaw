@@ -204,8 +204,6 @@ pub enum AgentMessageError {
     MissingToolCallId { index: usize },
     #[error("provider tool name {name:?} is not a normalized capability id: {reason}")]
     InvalidCapability { name: String, reason: String },
-    #[error("terminal output must be a single assistant message: {reason}")]
-    InvalidTerminalOutput { reason: String },
 }
 
 impl AgentMessageRole {
@@ -383,37 +381,6 @@ fn validate_attachment(index: usize, attachment: &AttachmentRef) -> Result<(), A
         });
     }
     Ok(())
-}
-
-/// Terminal-output rules (design §4.3): assistant role; no `ToolCall` parts
-/// (no unresolved work); at least one `Text` or artifact part.
-pub fn validate_terminal_output_message(message: &AgentMessage) -> Result<(), AgentMessageError> {
-    if message.role != AgentMessageRole::Assistant {
-        return Err(AgentMessageError::InvalidTerminalOutput {
-            reason: format!("role must be assistant, got {}", message.role.as_str()),
-        });
-    }
-    if message
-        .content
-        .iter()
-        .any(|part| matches!(part, ContentPart::ToolCall(_)))
-    {
-        return Err(AgentMessageError::InvalidTerminalOutput {
-            reason: "terminal output may not carry unresolved tool calls".to_string(),
-        });
-    }
-    let has_substance = message.content.iter().any(|part| {
-        matches!(
-            part,
-            ContentPart::Text { .. } | ContentPart::Image { .. } | ContentPart::File { .. }
-        )
-    });
-    if !has_substance {
-        return Err(AgentMessageError::InvalidTerminalOutput {
-            reason: "terminal output needs at least one text or artifact part".to_string(),
-        });
-    }
-    validate_agent_messages(std::slice::from_ref(message))
 }
 
 fn attachment_pointer_line(attachment: &AttachmentRef) -> String {
@@ -814,41 +781,6 @@ mod tests {
         assert!(matches!(
             validate_agent_messages(std::slice::from_ref(&message)),
             Err(AgentMessageError::TextPartTooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn terminal_output_rules_are_enforced() {
-        validate_terminal_output_message(&AgentMessage {
-            role: AgentMessageRole::Assistant,
-            content: vec![ContentPart::text("final answer")],
-        })
-        .expect("plain assistant text is a valid terminal output");
-
-        assert!(matches!(
-            validate_terminal_output_message(&user_text("nope")),
-            Err(AgentMessageError::InvalidTerminalOutput { .. })
-        ));
-        assert!(matches!(
-            validate_terminal_output_message(&AgentMessage {
-                role: AgentMessageRole::Assistant,
-                content: vec![ContentPart::ToolCall(ToolCallContent {
-                    call_id: "c".into(),
-                    capability: capability("web.search"),
-                    arguments: serde_json::json!({}),
-                })],
-            }),
-            Err(AgentMessageError::InvalidTerminalOutput { .. })
-        ));
-        assert!(matches!(
-            validate_terminal_output_message(&AgentMessage {
-                role: AgentMessageRole::Assistant,
-                content: vec![ContentPart::Reasoning {
-                    reasoning: ReasoningDetails::from_text("only thoughts".to_string())
-                        .expect("non-empty reasoning"),
-                }],
-            }),
-            Err(AgentMessageError::InvalidTerminalOutput { .. })
         ));
     }
 

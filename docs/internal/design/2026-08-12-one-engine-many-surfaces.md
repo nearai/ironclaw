@@ -468,9 +468,37 @@ implementation (no dual-read shim needed — old rows rehydrate under
 ignore-unknown-keys, and product routing reads conversation state). Two
 questions stay open until someone schedules it: (a) where the origin/surface
 metadata the loop host consumes for origin-gated prompt assets ends up
-(binding *refs* are workflow-side; origin metadata is engine-relevant); (b)
+(binding *refs* are workflow-side; origin metadata is engine-relevant —
+`ProductTurnContext.adapter`/`source_channel` still ride the submit and
+persisted run state, so §2's "the engine never holds vendor identifiers"
+cell reads with this exemption until (a) is scheduled); (b)
 the shim's lifetime and its regression coverage. No behavior changes either
 way — this is hygiene, not architecture.
+
+**✎ Landed with the surfaces PR (#7634): OpenAI-compat over the door.** The
+adoption shipped as a lane split rather than a wholesale rewrite of the
+route crate:
+
+- Non-streaming requests with a declared output schema OR replayed history
+  (assistant/tool rows, or multiple user turns) go through
+  `accept_prepared_context` and an unbound run; the flatten hack
+  (`openai_compat.chat_messages.v1`) no longer serves them. The completion
+  reports the run's effective model and provider-reported usage from run
+  state.
+- Streaming stays on the conversation lane wholesale (its projection
+  subscription is conversation-scoped); `stream=true` with a JSON output
+  contract is rejected loudly rather than half-honored. Unbound-run
+  streaming arrives with phase 2's run-observation façade, not before.
+- Requests declaring live client tools stay on the conversation lane: chat
+  completions are a stateless protocol (the client re-sends tool outputs as
+  seeded history on its next request), so the catalog park/resume flow —
+  which the engine supports on unbound runs — has no caller on this
+  surface. `PreparedTurnDeclarations.tools` stays empty here by decision,
+  not omission; the follow-up request's tool history seeds through the same
+  door.
+- No OpenAI parameter maps onto `TurnLimits` (the `max_tokens` family is
+  accepted and unmapped): the shipped limit set is call/invocation/wall-
+  clock ceilings, and no output-token engine seam exists.
 
 ## 8. Related documents
 

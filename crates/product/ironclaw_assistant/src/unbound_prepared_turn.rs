@@ -55,6 +55,18 @@ pub enum UnboundPreparedTurnError {
     Internal,
 }
 
+/// Terminal outcome of an unbound prepared turn: the output text plus the
+/// run evidence a wire surface reports (the model that actually ran and the
+/// provider-reported usage).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnboundCompletionOutcome {
+    pub text: String,
+    /// From the run's resolved model route; `None` when no route evidence
+    /// was persisted (replay stubs).
+    pub effective_model: Option<String>,
+    pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
+}
+
 /// One prepared-turn submission in the engine vocabulary.
 #[derive(Debug, Clone)]
 pub struct UnboundPreparedTurnSubmission {
@@ -199,7 +211,7 @@ impl UnboundPreparedTurnService {
         public_id: &str,
         run_id: TurnRunId,
         poll_interval: Duration,
-    ) -> Result<String, UnboundPreparedTurnError> {
+    ) -> Result<UnboundCompletionOutcome, UnboundPreparedTurnError> {
         let thread_id =
             ThreadId::new(public_id.to_string()).map_err(|_| UnboundPreparedTurnError::Internal)?;
         let turn_scope = self.turn_scope(&thread_id);
@@ -215,9 +227,17 @@ impl UnboundPreparedTurnService {
                 .map_err(|_| UnboundPreparedTurnError::Unavailable)?;
             match state.status {
                 TurnStatus::Completed => {
-                    return self
+                    let text = self
                         .resolve_completed_output(&thread_scope, &thread_id, run_id)
-                        .await;
+                        .await?;
+                    return Ok(UnboundCompletionOutcome {
+                        text,
+                        effective_model: state
+                            .resolved_model_route
+                            .as_ref()
+                            .map(|route| route.model_id().to_string()),
+                        model_usage: state.model_usage,
+                    });
                 }
                 TurnStatus::Failed | TurnStatus::RecoveryRequired => {
                     return Err(UnboundPreparedTurnError::RunFailed {

@@ -35,6 +35,60 @@ contract:
   per-child binding refs, `mark_message_submitted` step, and await-edge ref
   plumbing were deleted in the same change.
 
+The follow-up surfaces PR (#7634) completed the switchover; the conformance
+audit against this draft recorded these further landed-vs-drafted deltas:
+
+- **Thread-id visibility (§4.2/§9)**: on OpenAI-compat the server-minted
+  public completion id doubles as the unbound thread id on the wire. Ids are
+  always server-generated; isolation rests on ownerless scoping plus the
+  caller-scoped ref store, not on keeping the id secret. The run id rides
+  the ack; the public id is the HTTP caller's handle.
+- **Seeded reasoning (§4.4)**: the accept door seeds reasoning as display
+  text on the provider envelope of a tool-call turn only (truncated to the
+  provider-metadata budget, `signature` forced `None`); reasoning on an
+  assistant message without a sibling tool call is rejected rather than
+  silently dropped. Opaque end-to-end reasoning round-trip stays a live
+  vocabulary seam, not a seeding capability.
+- **Artifact parts (§4.4)**: the ref-only vocabulary shipped as the existing
+  `ironclaw_common::AttachmentRef` (mirror-DTO ban); access goes through the
+  scoped filesystem under the run's thread resource scope. Unbound threads
+  are ownerless, so there is no per-user identity axis to re-authorize
+  against inside that scope.
+- **Result surface (§4.3)**: no `TurnRunResult`/`AgentOutput` DTO was
+  minted. The result surface is `SubmitTurnResponse` + `get_run_state`
+  (`TurnRunState` carries `model_usage` and `resolved_model_route`, which
+  product read-back reports as effective model + usage), with the output
+  interpreted against the journaled `OutputContract` product-side: the
+  validated structured payload read from the durable tool-result record, or
+  the finalized assistant text. The drafted terminal-shape validator had no
+  live seam (loop reply-finalization already guarantees the shape) and was
+  deleted rather than kept as dead vocabulary.
+- **Structured interception (§4.5)**: the host-owned synthetic result-tool
+  handler validates arguments against the journaled schema and durably
+  records the terminal output; `StructuredResultStopStrategy` completes the
+  run on that call's completed signature; reply admission's role is
+  rejecting plain-text finals with the repair hint; the model strategy
+  forces `tool_choice` onto the result tool on the repair retry after a
+  rejected text final (not proactively on every call).
+- **TurnLimits (§4.2/§9)**: the shipped narrowing set is
+  `max_model_calls`, `max_capability_invocations`, and
+  `max_wall_clock_seconds`, mapping onto `ResourceBudgetPolicy` and
+  enforced by the loop executor's budget stage as hard stops
+  (`model_call_limit` / `capability_invocation_limit` / `wall_clock_limit`
+  failure categories). A per-run USD accountant and a max-output-tokens
+  knob were not built — no engine seam exists for either; OpenAI-compat's
+  `max_tokens` family is accepted and deliberately unmapped.
+- **Gate posture (§4.6)**: the unbound surface is the deployment surface
+  minus a fixed deny list plus the declared selection; approval/auth-policy
+  driven hiding was not built. The guarantee is the typed
+  `gate_not_supported` abort (gate kind rides the sanitized failure
+  detail — a unit failure kind, not a payload variant), with only the
+  external-tool gate parking. The external-tool park/resume exemption is
+  engine-level today: no shipped surface can yet place client tools on an
+  unbound run (OpenAI-compat keeps declared-tools requests on the
+  conversation lane), so whole-path coverage lands with the first surface
+  that does.
+
 ## Summary
 
 Main already has an agent-execution service: `TurnCoordinator` — durable

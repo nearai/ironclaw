@@ -53,7 +53,7 @@ use uuid::Uuid;
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
+pub(crate) const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
 pub const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "chat_completion";
 
 fn openai_product_activity_id(surface: &str, operation_id: &str, public_id: &str) -> ActivityId {

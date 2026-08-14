@@ -387,7 +387,8 @@ pub use reborn_services::{
     set_notification_channels_for_model,
 };
 pub use unbound_prepared_turn::{
-    UnboundPreparedTurnError, UnboundPreparedTurnService, UnboundPreparedTurnSubmission,
+    UnboundCompletionOutcome, UnboundPreparedTurnError, UnboundPreparedTurnService,
+    UnboundPreparedTurnSubmission,
 };
 
 pub use product_surface_inbound::{

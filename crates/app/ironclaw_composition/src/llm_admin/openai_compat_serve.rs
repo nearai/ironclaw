@@ -243,12 +243,29 @@ impl OpenAiCompatPreparedTurnGateway {
         else {
             return Err(OpenAiCompatHttpError::internal());
         };
-        let text = self
+        let outcome = self
             .service
             .wait_for_completion(request.public_id.as_str(), *submitted_run_id, poll_interval)
             .await
             .map_err(map_prepared_turn_error)?;
-        Ok(OpenAiChatCompletionProjection::text(text))
+        let mut projection = OpenAiChatCompletionProjection::text(outcome.text);
+        // Run evidence: report the model that actually ran and the
+        // provider-reported usage (unbound-turns design §4.3).
+        projection.effective_model = outcome.effective_model;
+        projection.usage = outcome
+            .model_usage
+            .map(|usage| ironclaw_openai_compat::OpenAiUsage {
+                prompt_tokens: usage.input_tokens,
+                completion_tokens: usage.output_tokens,
+                total_tokens: usage.input_tokens.saturating_add(usage.output_tokens),
+                prompt_tokens_details: (usage.cache_read_input_tokens > 0).then_some(
+                    ironclaw_openai_compat::OpenAiPromptTokensDetails {
+                        cached_tokens: usage.cache_read_input_tokens,
+                    },
+                ),
+                cost: None,
+            });
+        Ok(projection)
     }
 }
 

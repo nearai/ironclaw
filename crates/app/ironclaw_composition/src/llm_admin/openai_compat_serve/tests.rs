@@ -1432,9 +1432,14 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_reflessly() {
         .expect("prepared submit");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
-    let submissions = coordinator.submissions.lock().expect("lock");
-    assert_eq!(submissions.len(), 1);
-    let submission = &submissions[0];
+    let submission = coordinator
+        .submissions
+        .lock()
+        .expect("lock")
+        .first()
+        .cloned()
+        .expect("one refless submission recorded");
+    let submission = &submission;
     assert_eq!(submission.scope.thread_id.as_str(), "chatcmpl-prep-1");
     assert!(matches!(
         submission.scope.thread_owner,
