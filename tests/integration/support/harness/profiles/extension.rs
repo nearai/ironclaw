@@ -808,7 +808,7 @@ struct AcmeFixtureEntrypoint {
 impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
@@ -822,10 +822,18 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
-            device_link: Some(
-                Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
-                    as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>,
-            ),
+            // Bound only when the installed manifest declares a device_link
+            // recipe: `check_binding` proves agreement per axis, and the
+            // stock acme-messenger manifest declares oauth2_code only — an
+            // unconditional adapter fails every acme bind with
+            // `UndeclaredDeviceLinkAdapter`, so activation never completes
+            // and install turns record no capability results.
+            device_link: ironclaw_extension_host::declared_device_link_recipe(&ctx.resolved)
+                .is_some()
+                .then(|| {
+                    Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                        as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>
+                }),
         })
     }
 }
