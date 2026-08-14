@@ -103,6 +103,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "no_progress_detected",
     "policy_denied",
     "compaction_unavailable",
+    "gate_not_supported",
     // Model recovery categories
     "model_transient",
     "model_context_overflow",
@@ -237,6 +238,7 @@ mod tests {
             ironclaw_loop_contracts::LoopFailureKind::NoProgressDetected,
             ironclaw_loop_contracts::LoopFailureKind::PolicyDenied,
             ironclaw_loop_contracts::LoopFailureKind::CompactionUnavailable,
+            ironclaw_loop_contracts::LoopFailureKind::GateNotSupported,
         ] {
             assert!(
                 ALL_RUN_FAILURE_CATEGORIES.contains(&kind.as_str()),

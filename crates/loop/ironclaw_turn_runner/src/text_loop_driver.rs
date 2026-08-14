@@ -275,6 +275,7 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
         LoopFailureKind::NoProgressDetected => "no_progress_detected",
         LoopFailureKind::PolicyDenied => "policy_denied",
+        LoopFailureKind::GateNotSupported => "gate_not_supported",
         // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
         // lands in `ironclaw_turns` ahead of this matcher being updated.
         _ => "driver_bug",

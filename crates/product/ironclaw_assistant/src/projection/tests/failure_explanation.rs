@@ -172,6 +172,10 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
             LoopFailureKind::CompactionUnavailable.as_str(),
             "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread.",
         ),
+        (
+            LoopFailureKind::GateNotSupported.as_str(),
+            "The run stopped because it needed an approval, sign-in, or resource this run profile cannot surface. Run it from an interactive surface or adjust permissions first.",
+        ),
     ];
 
     let source_values = loop_failure_kind_as_str_values_from_source();
