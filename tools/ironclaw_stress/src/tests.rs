@@ -1,11 +1,11 @@
 use super::*;
-use crate::db_probe::finish_measurement;
+use crate::db_probe::{begin_measurement, finish_measurement};
 use crate::redaction::redact_postgres_url;
 use ironclaw_stress::db_probe::{
     self as db_probe, DbProbeConfig, DbProbeDelta, DbProbeSnapshot, StatsScope,
     aggregate_statement_calls, begin as begin_db_probe, capture as capture_db_probe,
-    finish as finish_db_probe, install_libsql_write_counters, pg_stat_statements_unavailable,
-    sanitize_postgres_error, summarize_measurement, try_capture_libsql,
+    finish as finish_db_probe, pg_stat_statements_unavailable, sanitize_postgres_error,
+    summarize_measurement, try_capture_libsql,
 };
 
 #[test]
@@ -1465,6 +1465,21 @@ fn libsql_write_delta_aggregates_instrumented_table_rows() {
     assert_eq!(summary.delta.libsql_table_writes_total.total(), 8);
 }
 
+async fn create_libsql_measurement_tables(connection: &libsql::Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS root_filesystem_entries (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_events (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_ordered_index_rows (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_sequences (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS trigger_records (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS trigger_run_history (id INTEGER PRIMARY KEY);",
+        )
+        .await
+        .expect("create measurement tables");
+}
+
 #[tokio::test]
 async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
     let path = std::env::temp_dir().join(format!(
@@ -1483,12 +1498,16 @@ async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
         )
         .await
         .expect("create measured tables");
+    create_libsql_measurement_tables(&connection).await;
     drop(connection);
     drop(db);
 
-    install_libsql_write_counters(&path, true)
+    let mut args = test_args();
+    args.backend = Backend::Libsql;
+    args.libsql_path = Some(path.clone());
+    begin_measurement(&args)
         .await
-        .expect("install write counters");
+        .expect("begin write measurement");
     let db = libsql::Builder::new_local(&path)
         .build()
         .await
@@ -1530,9 +1549,6 @@ async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
         (entries.inserts, entries.updates, entries.deletes),
         (1, 1, 1)
     );
-    let mut args = test_args();
-    args.backend = Backend::Libsql;
-    args.libsql_path = Some(path.clone());
     finish_measurement(&args)
         .await
         .expect("remove write counters");
@@ -1578,6 +1594,7 @@ async fn libsql_probe_rejects_negative_and_overflow_counters() {
             .execute_batch("CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY);")
             .await
             .expect("create measured table");
+        create_libsql_measurement_tables(&connection).await;
         drop(connection);
         drop(database);
 
@@ -1613,6 +1630,36 @@ async fn libsql_probe_rejects_negative_and_overflow_counters() {
             .expect("remove write counters");
         crate::cleanup_generated_libsql_path(&path).await;
     }
+}
+
+#[tokio::test]
+async fn libsql_measurement_rejects_missing_tables() {
+    let path = std::env::temp_dir().join(format!(
+        "ironclaw-stress-missing-measurement-table-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let database = libsql::Builder::new_local(&path)
+        .build()
+        .await
+        .expect("build local libSQL");
+    let connection = database.connect().expect("connect local libSQL");
+    connection
+        .execute_batch("CREATE TABLE root_filesystem_entries (id INTEGER PRIMARY KEY);")
+        .await
+        .expect("create one measured table");
+    drop(connection);
+    drop(database);
+
+    let error = begin_db_probe(&DbProbeConfig::libsql(&path, true))
+        .await
+        .expect_err("missing measurement tables must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("libSQL measurement tables are missing")
+    );
+    assert!(error.to_string().contains("root_filesystem_events"));
+    crate::cleanup_generated_libsql_path(&path).await;
 }
 
 #[test]

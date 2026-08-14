@@ -538,6 +538,12 @@ struct InvalidLibSqlCounter {
     source: std::num::ParseIntError,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("libSQL measurement tables are missing: {tables}")]
+struct MissingLibSqlMeasurementTables {
+    tables: String,
+}
+
 #[doc(hidden)]
 pub async fn try_capture_libsql(
     path: PathBuf,
@@ -620,6 +626,24 @@ pub async fn install_libsql_write_counters(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = libsql::Builder::new_local(path).build().await?;
     let connection = db.connect()?;
+    let mut missing_tables = Vec::new();
+    for table in MEASUREMENT_TABLES {
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [*table],
+            )
+            .await?;
+        if rows.next().await?.is_none() {
+            missing_tables.push(*table);
+        }
+    }
+    if !missing_tables.is_empty() {
+        return Err(Box::new(MissingLibSqlMeasurementTables {
+            tables: missing_tables.join(", "),
+        }));
+    }
+
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS ironclaw_stress_write_counters (\
@@ -636,15 +660,6 @@ pub async fn install_libsql_write_counters(
             .await?;
     }
     for table in MEASUREMENT_TABLES {
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [*table],
-            )
-            .await?;
-        if rows.next().await?.is_none() {
-            continue;
-        }
         for (suffix, timing, operation) in [
             ("ai", "AFTER INSERT", "insert"),
             ("au", "AFTER UPDATE", "update"),
@@ -1281,7 +1296,7 @@ fn counter_delta(before: u64, after: u64) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, install_libsql_write_counters,
+        DbProbeConfig, DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, begin,
         retain_libsql_snapshot_or_cleanup, settlement_delay,
     };
 
@@ -1314,28 +1329,32 @@ mod tests {
         let connection = database.connect().expect("connect local libSQL");
         connection
             .execute_batch(
-                "CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY);\
-                 CREATE TABLE root_filesystem_events (id INTEGER PRIMARY KEY);",
+                "CREATE TABLE root_filesystem_entries (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE root_filesystem_events (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE root_filesystem_index_specs (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE root_filesystem_ordered_index_rows (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE root_filesystem_sequences (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE trigger_records (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE trigger_run_history (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE ironclaw_stress_write_counters (\
+                   table_name TEXT NOT NULL,\
+                   operation TEXT NOT NULL,\
+                   row_count INTEGER NOT NULL,\
+                   PRIMARY KEY (table_name, operation)\
+                 );\
+                 INSERT INTO ironclaw_stress_write_counters(table_name, operation, row_count)\
+                 VALUES ('root_filesystem_entries', 'insert', -1);",
             )
             .await
-            .expect("create measured tables");
+            .expect("create measured tables and invalid counter");
         drop(connection);
         drop(database);
 
-        install_libsql_write_counters(&path, true)
+        let config = DbProbeConfig::libsql(&path, false);
+        let error = begin(&config)
             .await
-            .expect("install measurement instrumentation");
-        let error = retain_libsql_snapshot_or_cleanup(
-            &path,
-            Err(DbProbeError::operation(
-                "libsql",
-                "capture",
-                "forced baseline capture failure",
-            )),
-        )
-        .await
-        .expect_err("forced capture failure must propagate");
-        assert_eq!(error.to_string(), "forced baseline capture failure");
+            .expect_err("invalid baseline counter must fail");
+        assert!(error.to_string().contains("invalid libSQL write counter"));
 
         let database = libsql::Builder::new_local(&path)
             .build()
