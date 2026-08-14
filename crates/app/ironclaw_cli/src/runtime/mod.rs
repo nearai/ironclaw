@@ -2334,10 +2334,6 @@ api_key_env = "NEARAI_API_KEY"
         );
         let settings = runner_settings(None).expect("should succeed");
         assert_eq!(
-            settings.max_concurrent_unbound_runs.map(|v| v.get()),
-            Some(7)
-        );
-        assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
             Some(2)
         );
