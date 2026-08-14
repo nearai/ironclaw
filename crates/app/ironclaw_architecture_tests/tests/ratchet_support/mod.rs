@@ -134,7 +134,7 @@ pub fn try_crate_directories(root: &Path) -> Result<Vec<String>, String> {
             "no {CRATES_ROOT}/ directory under {} — crate discovery cannot run. Every \
              path-keyed gate resolves its scope through this inventory; refusing rather \
              than scanning nothing is deliberate \
-             (docs/reborn/target-architecture/CHECKLIST.md WS10).",
+             (docs/internal/reborn/target-architecture/CHECKLIST.md WS10).",
             root.display()
         ));
     }
@@ -164,7 +164,7 @@ pub fn try_crate_directories(root: &Path) -> Result<Vec<String>, String> {
             "crate discovery found only {} crate director(ies) under {} (floor is {}). \
              Either the crate tree moved out from under this gate or the workspace root is \
              wrong. Failing closed: a gate that scans nothing must never report success \
-             (docs/reborn/target-architecture/CHECKLIST.md WS10).",
+             (docs/internal/reborn/target-architecture/CHECKLIST.md WS10).",
             directories.len(),
             crates_root.display(),
             MIN_CRATE_DIRECTORIES

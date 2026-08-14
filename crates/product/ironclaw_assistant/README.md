@@ -84,4 +84,4 @@ cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hol
 
 Working rules + charter map: `AGENTS.md` (gate-pinned) · family rules:
 `crates/product/AGENTS.md` · design record:
-`docs/reborn/target-architecture/families/product.md` (§6.9.1).
+`docs/internal/reborn/target-architecture/families/product.md` (§6.9.1).

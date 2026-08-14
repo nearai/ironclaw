@@ -1,7 +1,7 @@
 //! Concrete-name specificity gate for the unified extension runtime.
 // arch-exempt: large_file, unified extension specificity ratchet stays centralized, plan #6175
 //!
-//! Goal (docs/reborn/extension-runtime/overview.md §1): no generic crate
+//! Goal (docs/internal/reborn/extension-runtime/overview.md §1): no generic crate
 //! contains a concrete product name, vendor id, or vendor API host. The
 //! forbidden vocabulary is **derived from the bundled package inventory**
 //! (`crates/extensions/packages/` plus the test fixture
@@ -1089,7 +1089,7 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
     assert!(
         frontend.is_dir(),
         "WebUI frontend scan root {} does not exist; the SPA would go unscanned while this \
-         gate still reported success (docs/reborn/target-architecture/CHECKLIST.md WS10)",
+         gate still reported success (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)",
         frontend.display()
     );
     scan_dir(root, &frontend, terms, &mut hits);
@@ -1871,7 +1871,7 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
         !resolved_concrete.is_empty(),
         "no concrete extension package resolved to a manifest, so the registration guard \
          checked nothing. CONCRETE_EXTENSION_CRATES is {CONCRETE_EXTENSION_CRATES:?} \
-         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+         (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
     );
 
     let mut violations = Vec::new();

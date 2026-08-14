@@ -134,10 +134,10 @@ once in the generic transport with `aws-lc-rs`.
 
 ### Contract/doc corrections (dated)
 
-- `docs/reborn/contracts/communication-delivery-resolution.md` §5: "empty set
+- `docs/internal/reborn/contracts/communication-delivery-resolution.md` §5: "empty set
   means web app only" → empty set means **no external notification route**;
   the web app is selectable as the `web-push` catalog target.
-- `docs/reborn/extension-runtime/overview.md` §5.4 note: the no-pseudo-target
+- `docs/internal/reborn/extension-runtime/overview.md` §5.4 note: the no-pseudo-target
   statement stays true; add the web-push real-target clarification.
 - `FEATURE_PARITY.md` PWA/Web Push row.
 - New package README + family/crate table rows + target-tree doc for the two

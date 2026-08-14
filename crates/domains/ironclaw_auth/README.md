@@ -79,5 +79,5 @@ cargo test -p ironclaw_auth --test auth_product_contract
 - Working rules and the enforced sub-owner map: [`AGENTS.md`](./AGENTS.md)
   (canonical crate guidance).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
-- Contract doc: `docs/reborn/contracts/auth-product.md`; design record:
+- Contract doc: `docs/internal/reborn/contracts/auth-product.md`; design record:
   `families/domains.md`, PROPOSAL §6.4.8.

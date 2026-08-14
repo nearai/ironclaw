@@ -634,6 +634,30 @@ mod tests {
                 .grant(&CapabilityId::new("builtin.apply_patch").expect("capability id"))
                 .is_ok()
         );
+        for (capability, expected_effects) in [
+            (
+                "builtin.document_edit",
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
+            ),
+            (
+                "builtin.html_to_pdf",
+                vec![EffectKind::DispatchCapability, EffectKind::WriteFilesystem],
+            ),
+        ] {
+            let grant = policy
+                .grant(&CapabilityId::new(capability).expect("capability id"))
+                .expect("document output capability must be production-granted");
+            assert_eq!(grant.mounts, CapabilityMountProfile::Workspace);
+            assert_eq!(
+                grant.effects, expected_effects,
+                "{capability} effects must stay minimal"
+            );
+            assert_eq!(grant.network, CapabilityNetworkProfile::Default);
+        }
         assert!(
             policy
                 .grant(&CapabilityId::new("builtin.skill_install").expect("capability id"))

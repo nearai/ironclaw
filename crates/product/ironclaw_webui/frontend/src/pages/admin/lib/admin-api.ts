@@ -181,30 +181,3 @@ export async function replaceExtensionAdminConfiguration(
     },
   );
 }
-
-// --- Usage / analytics (out of scope for this port) --------------------------
-//
-// The usage dashboard is intentionally NOT part of this admin port. These
-// exports remain as inert empty stubs so the (now-unrouted) dashboard/usage
-// components still import cleanly; the corresponding sub-routes are dropped in
-// `app/routes.ts`, so they are never rendered.
-
-export function fetchUsageSummary() {
-  return Promise.resolve({
-    total_users: 0,
-    active_users: 0,
-    suspended_users: 0,
-    admin_users: 0,
-    total_jobs: 0,
-    llm_calls: 0,
-    total_cost_usd: 0,
-    active_jobs: 0,
-    uptime_seconds: 0,
-    recent_users: [],
-    todo: true,
-  });
-}
-
-export function fetchUsage(_period = "day", _userId) {
-  return Promise.resolve({ entries: [], todo: true });
-}

@@ -680,7 +680,7 @@ git commit -m "refactor(telegram): own revision and delivery runtime behavior"
 - Modify: `crates/ironclaw_channel_host/AGENTS.md`
 - Create/update: `crates/ironclaw_channel_delivery/AGENTS.md`
 - Modify: `crates/ironclaw_telegram_extension/AGENTS.md`
-- Modify: `docs/reborn/extension-runtime/overview.md`
+- Modify: `docs/internal/reborn/extension-runtime/overview.md`
 - Modify: `docs/internal/superpowers/specs/2026-07-17-pr-6159-architecture-simplification-design.md`
 - Modify: this plan.
 

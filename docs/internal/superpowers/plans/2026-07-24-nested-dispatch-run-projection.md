@@ -32,8 +32,8 @@
 - Test: `crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs`
 - Modify: `crates/ironclaw_composition/src/projection/tests.rs`
 - Test: `crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs`
-- Modify: `docs/reborn/contracts/events.md`
-- Modify: `docs/reborn/contracts/events-projections.md`
+- Modify: `docs/internal/reborn/contracts/events.md`
+- Modify: `docs/internal/reborn/contracts/events-projections.md`
 - Modify: `scripts/reborn-e2e-rust.sh`
 
 **Interfaces:**
@@ -140,9 +140,9 @@ Expected: PASS. The child capability remains failed, while only the completed pa
 
 - [ ] **Step 8: Update contracts**
 
-Update `docs/reborn/contracts/events.md` to state that dispatcher events for loop-origin capability calls carry the enclosing run as `parent_invocation_id`.
+Update `docs/internal/reborn/contracts/events.md` to state that dispatcher events for loop-origin capability calls carry the enclosing run as `parent_invocation_id`.
 
-Update `docs/reborn/contracts/events-projections.md` to state that parented dispatcher lifecycle events feed capability activity only and never create run-status rows. Name:
+Update `docs/internal/reborn/contracts/events-projections.md` to state that parented dispatcher lifecycle events feed capability activity only and never create run-status rows. Name:
 
 ```text
 crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs::runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status
@@ -196,8 +196,8 @@ git add \
   crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs \
   crates/ironclaw_composition/src/projection/tests.rs \
   crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs \
-  docs/reborn/contracts/events.md \
-  docs/reborn/contracts/events-projections.md \
+  docs/internal/reborn/contracts/events.md \
+  docs/internal/reborn/contracts/events-projections.md \
   docs/internal/superpowers/plans/2026-07-24-nested-dispatch-run-projection.md \
   scripts/reborn-e2e-rust.sh
 git commit -m "fix(reborn): keep tool failures out of run status"

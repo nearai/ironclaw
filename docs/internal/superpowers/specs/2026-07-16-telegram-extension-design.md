@@ -8,7 +8,7 @@
 > install/setup terminology where they describe user-visible behavior.
 
 - **Date:** 2026-07-16
-- **Status:** Superseded — see `docs/reborn/extension-runtime/overview.md`
+- **Status:** Superseded — see `docs/internal/reborn/extension-runtime/overview.md`
 - **Target:** Reborn stack on `main`, shippable before PR #6116 merges, portable onto #6116 with zero behavior change
 
 ## Summary
@@ -150,14 +150,14 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
 
 ## 8. Legacy retirement (Reborn scope)
 
-After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `docs/reborn/**`, `tests/integration/` + reborn-tier root tests, and the reborn live-QA/canary scripts — contains exactly **one** Telegram model: this one. Disposition of the existing Telegram-touching artifacts:
+After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `docs/internal/reborn/**`, `tests/integration/` + reborn-tier root tests, and the reborn live-QA/canary scripts — contains exactly **one** Telegram model: this one. Disposition of the existing Telegram-touching artifacts:
 
 **Rewritten as part of this feature:**
 
 | Artifact | Disposition |
 |---|---|
 | webui_v2 v1-pairing UI (`pages/extensions/lib/pairing-api.ts`, `pairing-section.tsx` + test, `chat/components/onboarding-pairing-card.tsx` + test, `useExtensions-pairing.test.ts`, telegram paths in `useChannelOnboarding.ts`) | Replaced by the WebGeneratedCode pairing panel + its tests. **Caveat (verify at planning):** these components may also serve v1-mounted webui_v2 flows (`test_reborn_webui_v2_legacy_extensions.py` suggests dual hosting). If a v1 consumer exists, the legacy components stay only for that consumer, clearly quarantined, and no reborn path routes to them; if reborn-only, they are deleted. |
-| `docs/reborn/extension-runtime/overview.md` | Current extension contract (single extension, admin setup, WebGeneratedCode pairing, DM-only). Per house pattern it names its test file + run command and is wired into `scripts/reborn-e2e-rust.sh`. |
+| `docs/internal/reborn/extension-runtime/overview.md` | Current extension contract (single extension, admin setup, WebGeneratedCode pairing, DM-only). Per house pattern it names its test file + run command and is wired into `scripts/reborn-e2e-rust.sh`. |
 | `tests/telegram_v2_default_off_integration.rs` | Replaced by a new-model gating test: the `telegram-v2-host-beta` feature/default posture, and the exclusivity guard still blocking v1 telegram activation when the reborn channel owns the bot. |
 | Telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` | Rewritten to the new model (pairing connect action, `WebGeneratedCode` strategy payloads). |
 | Stale `telegram` references in composition (`extension_host/extension_removal_cleanup.rs`, `extension_host/extension_lifecycle.rs`, `outbound/outbound_preferences.rs`, `root/communication_context.rs`, mention in `slack/slack_actor_identity.rs`) | Reconciled into the new `telegram/**` module — no orphaned pre-feature hooks left behind. |
@@ -217,7 +217,7 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 **Reused untouched:** `ironclaw_telegram_v2_adapter` (`ProductAdapter` impl), `NativeProductAdapterRunner` + `SharedSecretHeaderAuth`, `BlockedAuth` gate + `BlockedAuthResumeFanout`, `channel_connection_required` display path, `builtin.extension_*` tools, `SecretStore`, lifecycle port, conversation binding (`pair_external_actor`).
 
-**Reference files** (read before implementing): `slack_serve.rs`, `slack_host_beta/runtime_setup.rs`, `slack_setup.rs`, `slack_channel_routes/setup.rs`, `slack_actor_identity.rs`, `slack_personal_binding.rs`, `slack_connectable_channel.rs`, `slack_channel_connection.rs`, `slack_host_state.rs`, `conversation_binding.rs`, `blocked_auth_resume.rs`, `extension_lifecycle_capabilities.rs`, `ironclaw_wasm_product_adapters/src/{runner_immediate_ack,auth_verifier}.rs`, `serve.rs`/`serve_slack.rs`, `channels-tab.tsx`, `docs/reborn/extension-runtime/overview.md`, and `f8e7c72c3:crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`.
+**Reference files** (read before implementing): `slack_serve.rs`, `slack_host_beta/runtime_setup.rs`, `slack_setup.rs`, `slack_channel_routes/setup.rs`, `slack_actor_identity.rs`, `slack_personal_binding.rs`, `slack_connectable_channel.rs`, `slack_channel_connection.rs`, `slack_host_state.rs`, `conversation_binding.rs`, `blocked_auth_resume.rs`, `extension_lifecycle_capabilities.rs`, `ironclaw_wasm_product_adapters/src/{runner_immediate_ack,auth_verifier}.rs`, `serve.rs`/`serve_slack.rs`, `channels-tab.tsx`, `docs/internal/reborn/extension-runtime/overview.md`, and `f8e7c72c3:crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`.
 
 ## 12. Planning-time verifications (pin before building)
 

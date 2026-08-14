@@ -110,10 +110,10 @@ owns the concept.
 
 ## Sources
 
-`docs/reborn/target-architecture/families/app.md` · PROPOSAL §6.10.1–6.10.4,
+`docs/internal/reborn/target-architecture/families/app.md` · PROPOSAL §6.10.1–6.10.4,
 §8 · gates: `crates/app/ironclaw_architecture_tests/tests/`
 (`reborn_composition_boundaries.rs`, `reborn_dependency_boundaries.rs`,
 `reborn_crate_inventory.rs`) + `scripts/ci/check-composition-budget.sh` +
 `scripts/ci/check-target-tree.py` · module spec:
 `ironclaw_composition/CONTRACT.md` (root `AGENTS.md` Module Specs table) ·
-conventions: `docs/reborn/guidance-conventions.md`.
+conventions: `docs/internal/reborn/guidance-conventions.md`.

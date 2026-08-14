@@ -4,7 +4,7 @@ Everything under `crates/` is the IronClaw Reborn production stack: one Cargo
 workspace, ten family directories, no legacy tier. This file routes you to the
 right family in one hop. It deliberately holds no per-crate rules — family and
 crate documents own those (the convention is
-`docs/reborn/guidance-conventions.md`), and this map never restates them.
+`docs/internal/reborn/guidance-conventions.md`), and this map never restates them.
 
 Derived from the live tree on 2026-08-05 (`cargo metadata --no-deps`,
 `python3 scripts/ci/check-target-tree.py`). Re-derive any number here with
@@ -21,8 +21,8 @@ those commands before trusting it in a later month.
    crate has rules beyond orientation, and the module spec (`CONTRACT.md`)
    for crates in the root `AGENTS.md` Module Specs table. Code
    follows spec; spec is the tiebreaker.
-5. **Cross-crate behavior** — `docs/reborn/contracts/*.md` (source-of-truth
-   contracts) and `docs/reborn/target-architecture/` (the design record:
+5. **Cross-crate behavior** — `docs/internal/reborn/contracts/*.md` (source-of-truth
+   contracts) and `docs/internal/reborn/target-architecture/` (the design record:
    frozen `PROPOSAL.md` with dated amendments, `families/*.md` specs, live
    `CHECKLIST.md`).
 
@@ -48,7 +48,7 @@ Three sound alike, and the cut is the model: **domains** are what the system
 **lanes** are how an approved action *runs* (post-authorization mechanism).
 The long-form runtime narrative is `crates/Architecture.md`; the human
 inventory is `crates/README.md`; the design-record walkthrough is
-`docs/reborn/target-architecture/README.md`.
+`docs/internal/reborn/target-architecture/README.md`.
 
 ## The layer matrix — who may depend on whom
 
@@ -62,7 +62,7 @@ its own layer or below (dev-dependencies are outside the matrix):
 | Layer (low → high) | May depend on | Crates today |
 | --- | --- | --- |
 | `contracts` | contracts | 6 |
-| `substrates` | contracts, substrates | 28 |
+| `substrates` | contracts, substrates | 29 |
 | `runtimes` | + runtimes | 5 |
 | `kernel` | + kernel | 9 |
 | `loops` | + loops | 5 |
@@ -92,7 +92,7 @@ files carry their members' exact layers.
 
 ## Workspace facts
 
-**66 packages**: 64 under `crates/`, plus the root package
+**67 packages**: 65 under `crates/`, plus the root package
 `ironclaw_integration_tests` (the in-process Reborn integration suite,
 `tests/integration/`) and `tools/ironclaw_stress`. One documented exclusion:
 `tools/ironclaw_silk_decoder`, a standalone helper that is
@@ -100,7 +100,7 @@ workspace-`exclude`d. Zero crates sit flat under `crates/` and zero owned
 placement exceptions remain. The gate is
 `python3 scripts/ci/check-target-tree.py`, which compares the workspace
 against the documented tree (PROPOSAL §5); on 2026-08-05 it reports:
-`target tree: OK (66 workspace members against 66 documented packages, 1
+`target tree: OK (67 workspace members against 67 documented packages, 1
 documented exclusion(s), 0 owned exception(s))` (re-derived 2026-08-08 with the
 web-app channel's two crates).
 
@@ -166,13 +166,13 @@ worth naming here because they cross most families:
 | `crates/<family>/<crate>/README.md` | Crate orientation (one per crate) |
 | `crates/<family>/<crate>/AGENTS.md` | Crate working rules (only where needed) |
 | Crate `CONTRACT.md` | Module spec — the tiebreaker over code |
-| `docs/reborn/contracts/*.md` | Cross-crate behavior contracts |
-| `docs/reborn/target-architecture/` | Design record; guidance links it, never forks it |
+| `docs/internal/reborn/contracts/*.md` | Cross-crate behavior contracts |
+| `docs/internal/reborn/target-architecture/` | Design record; guidance links it, never forks it |
 | `openwiki/` | Generated prose wiki — never hand-edit |
 
 One canonical home per fact. Where two documents disagree, the code and its
 gates win, and both documents get a dated correction
-(`docs/reborn/guidance-conventions.md`). Some guidance files are pinned by
+(`docs/internal/reborn/guidance-conventions.md`). Some guidance files are pinned by
 tests or read by CI classifiers — before editing one, run
 `rg -l '<file>' crates/app/ironclaw_architecture_tests/tests scripts/ci` and
 the owning suite.

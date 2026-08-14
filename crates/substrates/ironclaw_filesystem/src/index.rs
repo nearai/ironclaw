@@ -300,6 +300,33 @@ pub enum Filter {
         key: IndexKey,
         query: String,
     },
+    /// Ranked full-text search on a text-valued indexed `key`. Requires the
+    /// index to be `IndexKind::Fts`, and `query` follows the same plain-text
+    /// contract as [`Filter::Fts`] (punctuation splits terms, English stop
+    /// words are dropped, `AND`/`OR`/`NOT` are never operators).
+    ///
+    /// The difference from [`Filter::Fts`] is the match rule and the ordering:
+    /// `Fts` requires EVERY content term and returns path-ordered results,
+    /// while `FtsRanked` matches a record carrying ANY content term and
+    /// returns them ordered by descending relevance (`bm25()` on libSQL,
+    /// `ts_rank` on PostgreSQL, and a term-coverage score in the in-memory
+    /// reference). Conversational retrieval needs the ranked-OR shape: a
+    /// paraphrased question shares only some content words with the stored
+    /// text, so requiring every term returns nothing.
+    ///
+    /// Like [`Filter::VectorNearest`] this is a top-k ranking operation:
+    /// `limit` truncates after ranking and overrides the caller's
+    /// [`Page::limit`](crate::Page::limit), and nesting it inside `And`/`Or`
+    /// would discard the ranking, so backends reject that with
+    /// [`FilesystemError::Unsupported`](crate::FilesystemError::Unsupported).
+    ///
+    /// A query with no content terms (empty, punctuation-only, or entirely
+    /// stop words) matches nothing on every backend.
+    FtsRanked {
+        key: IndexKey,
+        query: String,
+        limit: u32,
+    },
     /// Vector-similarity search on a vector-valued indexed `key`. Requires
     /// the index to be `IndexKind::Vector { dim }` with a matching `dim`.
     /// `embedding` is the query vector; results are ranked by descending
@@ -672,6 +699,7 @@ fn collect_equality_values<'a>(
         Filter::PrefixOn { .. }
         | Filter::Range { .. }
         | Filter::Fts { .. }
+        | Filter::FtsRanked { .. }
         | Filter::VectorNearest { .. }
         | Filter::Or(_) => false,
     }

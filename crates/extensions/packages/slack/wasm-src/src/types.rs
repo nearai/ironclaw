@@ -159,15 +159,98 @@ pub enum SlackUserAction {
         /// amendment W4) — distinct from `thread`. On Slack both map onto
         /// `thread_ts`; when both are supplied and disagree, `thread` wins.
         #[serde(default)]
-        reply_to: Option<ReplyToRef>,
+        reply_to: Option<MessageRefInput>,
+    },
+
+    /// Replace the text of one of your own messages (`chat.update`).
+    EditMessage {
+        /// The exact `message_ref` a prior send or read on this extension
+        /// returned — never invented, never borrowed from another extension.
+        message_ref: MessageRefInput,
+        /// Replacement body (Slack mrkdwn). Replaces the whole message;
+        /// Slack has no partial edit.
+        text: String,
+    },
+
+    /// Permanently delete one of your own messages (`chat.delete`).
+    DeleteMessage {
+        /// The exact `message_ref` a prior send or read returned.
+        message_ref: MessageRefInput,
+    },
+
+    /// Add an emoji reaction to a message as you (`reactions.add`).
+    AddReaction {
+        /// The exact `message_ref` a prior send or read returned.
+        message_ref: MessageRefInput,
+        /// Slack emoji short name without colons (`thumbsup`). Surrounding
+        /// colons are stripped; unicode characters are not accepted.
+        emoji: String,
+    },
+
+    /// Remove a reaction you added (`reactions.remove`).
+    RemoveReaction {
+        /// The exact `message_ref` a prior send or read returned.
+        message_ref: MessageRefInput,
+        /// Slack emoji short name without colons. Omit to remove every
+        /// reaction the connected account added to this message, which reads
+        /// the message's reactions first (`reactions:read`).
+        #[serde(default)]
+        emoji: Option<String>,
+    },
+
+    /// Open (or fetch the already-open) DM with a person
+    /// (`conversations.open`).
+    OpenDm {
+        /// Opaque Slack user id (`U…`/`W…`) from a people operation — never
+        /// derived from a conversation id.
+        user_ref: String,
+    },
+
+    /// Fetch one message by reference. Slack has no single-message endpoint;
+    /// see `api::get_message` for the history/thread lookup this maps onto.
+    GetMessage {
+        /// The exact `message_ref` a prior send or read returned.
+        message_ref: MessageRefInput,
+    },
+
+    /// Search the workspace directory for people by name or handle.
+    ResolveUser {
+        /// Text matched against display name, real name, and handle.
+        query: String,
+        /// Maximum matches to return AND the number of directory entries
+        /// scanned this call (default and max: 200, one full page) — the two
+        /// are the same number so `next_cursor` never skips a withheld match.
+        #[serde(default)]
+        limit: Option<u32>,
+        /// Opaque pagination cursor from a previous call's `next_cursor`.
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+
+    /// List the members of a channel, group DM, or DM
+    /// (`conversations.members`).
+    ListMembers {
+        /// Conversation ref (e.g. `C123...`).
+        conversation: String,
+        /// Maximum members to return (default: 100, max: 999).
+        #[serde(default)]
+        limit: Option<u32>,
+        /// Opaque pagination cursor from a previous call's `next_cursor`.
+        #[serde(default)]
+        cursor: Option<String>,
     },
 }
 
-/// The canonical `reply_to` input shape (a `message_ref`): the specific
-/// message being quoted or replied to. Distinct from `thread`, the
-/// thread/topic container to post into — see `SlackUserAction::SendMessage`.
+/// The canonical `message_ref` INPUT shape — the identity of one message, as
+/// returned by a prior send or read. Distinct from [`MessageRef`] only in
+/// direction: this one deserializes what the model supplies, that one
+/// serializes the evidence an operation returns.
+///
+/// `send_message`'s `reply_to` (the specific message being quoted) uses this
+/// same shape, which is why it is not named after any single operation — see
+/// `SlackUserAction::SendMessage` for how `reply_to` differs from `thread`.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReplyToRef {
+pub struct MessageRefInput {
     pub conversation: String,
     pub message_id: String,
 }
@@ -180,8 +263,12 @@ pub struct MessageRef {
     pub message_id: String,
 }
 
-/// The author of a message, per the standard messaging framework's shared
-/// `author` shape.
+/// The standard messaging framework's shared person shape
+/// (`{ user_ref, display_name? }`). Named for its first use — a message's
+/// author — but deliberately reused everywhere that object appears rather
+/// than mirrored per operation: a DM `counterpart`, a `list_members` member,
+/// and a `resolve_user` match are all byte-identical in the canonical
+/// schemas and evolve together, so they share one definition.
 #[derive(Debug, Serialize)]
 pub struct Author {
     pub user_ref: String,
@@ -322,4 +409,313 @@ pub struct WhoamiResult {
     pub user_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+}
+
+/// Result from edit_message: the same evidence shape a send returns, so the
+/// edited message stays addressable for delete/reaction follow-ups.
+#[derive(Debug, Serialize)]
+pub struct EditMessageResult {
+    pub message_ref: MessageRef,
+}
+
+/// Result from delete_message.
+#[derive(Debug, Serialize)]
+pub struct DeleteMessageResult {
+    /// Always `true`. The canonical schema pins `const: true` because "a
+    /// delete that did not happen surfaces as an error, never
+    /// `deleted: false`" — the single construction site in
+    /// `api::delete_message` is on the success path only, and
+    /// `delete_message_result_serializes_deleted_true` pins the wire value.
+    pub deleted: bool,
+    pub message_ref: MessageRef,
+}
+
+/// Result from add_reaction: echoes the address and the emoji actually
+/// applied (post-normalization), so a stripped `:colon:` form is visible.
+#[derive(Debug, Serialize)]
+pub struct AddReactionResult {
+    pub message_ref: MessageRef,
+    pub emoji: String,
+}
+
+/// Result from remove_reaction. `emoji` is echoed only when a single named
+/// reaction was removed; the omit-emoji variant removes every reaction the
+/// connected account added and therefore names none, which is exactly the
+/// case the canonical schema leaves optional.
+#[derive(Debug, Serialize)]
+pub struct RemoveReactionResult {
+    pub message_ref: MessageRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+/// Result from open_dm: the DM conversation ref, usable with send_message and
+/// every other conversation-scoped operation.
+#[derive(Debug, Serialize)]
+pub struct OpenDmResult {
+    pub conversation: String,
+}
+
+/// Result from get_message: one message in the shared canonical shape.
+#[derive(Debug, Serialize)]
+pub struct GetMessageResult {
+    pub message: Message,
+}
+
+/// Result from resolve_user. Matches use the shared person shape
+/// ([`Author`]).
+#[derive(Debug, Serialize)]
+pub struct ResolveUserResult {
+    pub matches: Vec<Author>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Result from list_members. Members use the shared person shape
+/// ([`Author`]).
+#[derive(Debug, Serialize)]
+pub struct ListMembersResult {
+    pub members: Vec<Author>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host validates every standard op's INPUT against the canonical
+    /// schema before dispatch, but serde is what actually binds the params to
+    /// a variant here — these pin that the two agree on what is required, so
+    /// a schema-valid call can never fail to deserialize (or vice versa).
+    fn action(json: &str) -> Result<SlackUserAction, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    const REF: &str = r#"{"conversation":"C1","message_id":"1751970001.000100"}"#;
+
+    #[test]
+    fn message_addressing_ops_require_a_full_message_ref() {
+        for op in [
+            "edit_message",
+            "delete_message",
+            "add_reaction",
+            "remove_reaction",
+            "get_message",
+        ] {
+            // `text`/`emoji` are supplied so only the ref is under test; the
+            // ops that ignore the extra key still deserialize.
+            let with_ref =
+                format!(r#"{{"action":"{op}","message_ref":{REF},"text":"x","emoji":"thumbsup"}}"#);
+            assert!(action(&with_ref).is_ok(), "{op} must accept a full ref");
+
+            let missing = format!(r#"{{"action":"{op}","text":"x","emoji":"thumbsup"}}"#);
+            assert!(action(&missing).is_err(), "{op} must reject a missing ref");
+
+            let partial = format!(
+                r#"{{"action":"{op}","message_ref":{{"conversation":"C1"}},"text":"x","emoji":"thumbsup"}}"#
+            );
+            assert!(
+                action(&partial).is_err(),
+                "{op} must reject a ref without message_id"
+            );
+        }
+    }
+
+    #[test]
+    fn reaction_ops_differ_on_whether_emoji_is_required() {
+        // add_reaction names the emoji it applies; remove_reaction may omit
+        // it to mean "every reaction I added" (canonical schema §4.1).
+        assert!(action(&format!(
+            r#"{{"action":"add_reaction","message_ref":{REF}}}"#
+        ))
+        .is_err());
+        assert!(action(&format!(
+            r#"{{"action":"add_reaction","message_ref":{REF},"emoji":"thumbsup"}}"#
+        ))
+        .is_ok());
+        assert!(action(&format!(
+            r#"{{"action":"remove_reaction","message_ref":{REF}}}"#
+        ))
+        .is_ok());
+        assert!(action(&format!(
+            r#"{{"action":"remove_reaction","message_ref":{REF},"emoji":"thumbsup"}}"#
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn discovery_ops_require_their_subject_and_default_their_paging() {
+        assert!(action(r#"{"action":"open_dm","user_ref":"U1"}"#).is_ok());
+        assert!(action(r#"{"action":"open_dm"}"#).is_err());
+
+        assert!(action(r#"{"action":"resolve_user","query":"alice"}"#).is_ok());
+        assert!(action(r#"{"action":"resolve_user"}"#).is_err());
+
+        assert!(action(r#"{"action":"list_members","conversation":"C1"}"#).is_ok());
+        assert!(action(r#"{"action":"list_members"}"#).is_err());
+    }
+
+    fn value<T: Serialize>(result: &T) -> serde_json::Value {
+        serde_json::to_value(result).expect("result serializes")
+    }
+
+    fn message_ref() -> MessageRef {
+        MessageRef {
+            conversation: "C1".to_string(),
+            message_id: "1751970001.000100".to_string(),
+        }
+    }
+
+    /// A delete that did not happen is an error, never `deleted: false` — the
+    /// canonical output schema pins `const: true`, so the wire value is
+    /// asserted rather than left to the single construction site.
+    #[test]
+    fn delete_message_result_serializes_deleted_true() {
+        assert_eq!(
+            value(&DeleteMessageResult {
+                deleted: true,
+                message_ref: message_ref(),
+            }),
+            serde_json::json!({
+                "deleted": true,
+                "message_ref": {
+                    "conversation": "C1",
+                    "message_id": "1751970001.000100"
+                }
+            })
+        );
+    }
+
+    /// Every write returns the address it acted on — "evidence out = address
+    /// in". These compare the WHOLE serialized object, so an extra key (which
+    /// the canonical schemas reject with `additionalProperties: false`) fails
+    /// here rather than post-dispatch as a model-visible InvalidOutput.
+    #[test]
+    fn write_results_carry_exactly_the_canonical_evidence_keys() {
+        let expected_ref = serde_json::json!({
+            "conversation": "C1",
+            "message_id": "1751970001.000100"
+        });
+
+        assert_eq!(
+            value(&EditMessageResult {
+                message_ref: message_ref()
+            }),
+            serde_json::json!({ "message_ref": expected_ref })
+        );
+        assert_eq!(
+            value(&AddReactionResult {
+                message_ref: message_ref(),
+                emoji: "thumbsup".to_string(),
+            }),
+            serde_json::json!({ "message_ref": expected_ref, "emoji": "thumbsup" })
+        );
+        assert_eq!(
+            value(&OpenDmResult {
+                conversation: "D1".to_string()
+            }),
+            serde_json::json!({ "conversation": "D1" })
+        );
+    }
+
+    /// `remove_reaction` echoes `emoji` only when a single named reaction was
+    /// removed; the omit-emoji variant removes whatever the account reacted
+    /// with and names none. An absent optional must be OMITTED, never `null`
+    /// — the canonical schemas type these as strings, so a null fails
+    /// validation.
+    #[test]
+    fn remove_reaction_result_omits_an_unnamed_emoji() {
+        assert_eq!(
+            value(&RemoveReactionResult {
+                message_ref: message_ref(),
+                emoji: Some("thumbsup".to_string()),
+            })["emoji"],
+            serde_json::json!("thumbsup")
+        );
+
+        let unnamed = value(&RemoveReactionResult {
+            message_ref: message_ref(),
+            emoji: None,
+        });
+        assert!(
+            unnamed.get("emoji").is_none(),
+            "an unnamed removal must omit emoji entirely, got {unnamed}"
+        );
+    }
+
+    /// `resolve_user` matches and `list_members` members are the same
+    /// canonical person object, and both page with an omitted-when-absent
+    /// `next_cursor`.
+    #[test]
+    fn people_results_share_the_person_shape_and_omit_an_absent_cursor() {
+        let people = || {
+            vec![
+                Author {
+                    user_ref: "U1".to_string(),
+                    display_name: Some("Alice".to_string()),
+                },
+                Author {
+                    user_ref: "U2".to_string(),
+                    display_name: None,
+                },
+            ]
+        };
+        let expected = serde_json::json!([
+            { "user_ref": "U1", "display_name": "Alice" },
+            { "user_ref": "U2" }
+        ]);
+
+        let resolved = value(&ResolveUserResult {
+            matches: people(),
+            next_cursor: None,
+        });
+        assert_eq!(resolved["matches"], expected);
+        assert!(resolved.get("next_cursor").is_none());
+
+        let listed = value(&ListMembersResult {
+            members: people(),
+            next_cursor: Some("dXNlcjpVMDYxTkZUVDI=".to_string()),
+        });
+        assert_eq!(listed["members"], expected);
+        assert_eq!(
+            listed["next_cursor"],
+            serde_json::json!("dXNlcjpVMDYxTkZUVDI=")
+        );
+    }
+
+    /// `get_message` wraps the shared message shape under a `message` key
+    /// (its canonical output is `{ message }`, not a bare message), and
+    /// `is_self` is always present — never omitted, never fabricated true.
+    #[test]
+    fn get_message_result_wraps_the_message_and_always_states_is_self() {
+        let serialized = value(&GetMessageResult {
+            message: Message {
+                message_ref: message_ref(),
+                author: Author {
+                    user_ref: "U1".to_string(),
+                    display_name: None,
+                },
+                text: "hello".to_string(),
+                timestamp: None,
+                is_self: false,
+                thread: None,
+                edited: None,
+            },
+        });
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "message": {
+                    "message_ref": {
+                        "conversation": "C1",
+                        "message_id": "1751970001.000100"
+                    },
+                    "author": { "user_ref": "U1" },
+                    "text": "hello",
+                    "is_self": false
+                }
+            })
+        );
+    }
 }

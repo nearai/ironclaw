@@ -581,6 +581,9 @@ async fn slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress(
                 "mpim:read",
                 "users:read",
                 "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
             ],
         )
         .await

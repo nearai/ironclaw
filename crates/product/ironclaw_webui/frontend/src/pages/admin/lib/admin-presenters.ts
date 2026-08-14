@@ -48,28 +48,11 @@ export function buildRoleOptions(t) {
   ];
 }
 
-export function formatTokenCount(n) {
-  if (n == null || n === 0) return "0";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
-  return String(n);
-}
-
 export function formatCost(v) {
   if (v == null) return "$0.00";
   const n = parseFloat(v);
   if (isNaN(n)) return "$0.00";
   return "$" + n.toFixed(2);
-}
-
-export function formatUptime(secs) {
-  if (!secs) return "0s";
-  const d = Math.floor(secs / 86400);
-  const h = Math.floor((secs % 86400) / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
 }
 
 export function formatRelativeTime(iso, t) {
@@ -154,44 +137,4 @@ export function filterUsers(users, { search = "", filter = "all" }) {
     );
   }
   return result;
-}
-
-export function aggregateUsageByUser(entries) {
-  const byUser = {};
-  for (const e of entries) {
-    if (!byUser[e.user_id]) {
-      byUser[e.user_id] = { user_id: e.user_id, calls: 0, input_tokens: 0, output_tokens: 0, cost: 0 };
-    }
-    byUser[e.user_id].calls += e.call_count || 0;
-    byUser[e.user_id].input_tokens += e.input_tokens || 0;
-    byUser[e.user_id].output_tokens += e.output_tokens || 0;
-    byUser[e.user_id].cost += parseFloat(e.total_cost) || 0;
-  }
-  return Object.values(byUser).sort((a, b) => b.cost - a.cost);
-}
-
-export function aggregateUsageByModel(entries) {
-  const byModel = {};
-  for (const e of entries) {
-    if (!byModel[e.model]) {
-      byModel[e.model] = { model: e.model, calls: 0, input_tokens: 0, output_tokens: 0, cost: 0 };
-    }
-    byModel[e.model].calls += e.call_count || 0;
-    byModel[e.model].input_tokens += e.input_tokens || 0;
-    byModel[e.model].output_tokens += e.output_tokens || 0;
-    byModel[e.model].cost += parseFloat(e.total_cost) || 0;
-  }
-  return Object.values(byModel).sort((a, b) => b.cost - a.cost);
-}
-
-export function totalUsage(rows) {
-  return rows.reduce(
-    (acc, r) => ({
-      calls: acc.calls + r.calls,
-      input_tokens: acc.input_tokens + r.input_tokens,
-      output_tokens: acc.output_tokens + r.output_tokens,
-      cost: acc.cost + r.cost,
-    }),
-    { calls: 0, input_tokens: 0, output_tokens: 0, cost: 0 }
-  );
 }
