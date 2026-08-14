@@ -1763,6 +1763,13 @@ pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
 
+/// Hermetic native factory for WebUI/lifecycle tests that install the bundled
+/// Telegram package outside the full capability-harness profile.
+pub(crate) fn telegram_fixture_factory() -> Arc<dyn ironclaw_extension_host::NativeExtensionFactory>
+{
+    Arc::new(TelegramFixtureFactory)
+}
+
 #[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for TelegramFixtureFactory {
     fn service(&self) -> &str {

@@ -90,6 +90,9 @@ pub fn can_merge_lifecycle_credential_setup(
         ) | (
             LifecycleExtensionCredentialSetup::OAuth { .. },
             LifecycleExtensionCredentialSetup::OAuth { .. },
+        ) | (
+            LifecycleExtensionCredentialSetup::DeviceLink,
+            LifecycleExtensionCredentialSetup::DeviceLink,
         )
     )
 }
@@ -128,6 +131,9 @@ fn can_merge_runtime_credential_setup(
         ) | (
             RuntimeCredentialAccountSetup::OAuth { .. },
             RuntimeCredentialAccountSetup::OAuth { .. },
+        ) | (
+            RuntimeCredentialAccountSetup::DeviceLink,
+            RuntimeCredentialAccountSetup::DeviceLink,
         )
     )
 }
