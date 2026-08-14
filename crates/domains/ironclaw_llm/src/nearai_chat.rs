@@ -4050,7 +4050,7 @@ data: [DONE]
             "a bare tool-name string is rejected by OpenAI-compatible chat servers"
         );
         assert_eq!(
-            serde_json::to_value(&build_chat_completion_request(
+            serde_json::to_value(build_chat_completion_request(
                 "gpt-4o".to_string(),
                 vec![ChatMessage::user("finish").into()],
                 vec![crate::provider::ToolDefinition {

@@ -6135,6 +6135,67 @@ fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::Prep
     }
 }
 
+/// Filesystem twin of the in-memory listing-exclusion pin, plus the cursor
+/// invariant that only matters here: the page cursor advances over the
+/// FETCHED index rows, so a page consisting entirely of hidden
+/// prepared-context threads still makes progress instead of stalling.
+#[tokio::test]
+async fn filesystem_list_threads_excludes_prepared_context_threads_and_cursor_advances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let mut listing_scope = None;
+    for index in 0..3 {
+        let request = filesystem_prepared_request("hidden-fs", &format!("hidden-fs-key-{index}"));
+        listing_scope.get_or_insert(request.scope.clone());
+        service
+            .accept_prepared_context(request)
+            .await
+            .expect("prepared-context accept succeeds");
+    }
+    let listing_scope = listing_scope.expect("at least one prepared request");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-fs-001").unwrap()),
+            created_by_actor_id: "actor-hidden-fs".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Walk the listing with a page size smaller than the hidden population:
+    // every page must either surface visible threads or advance the cursor.
+    let mut cursor = None;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..8 {
+        let view = service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: listing_scope.clone(),
+                limit: Some(2),
+                cursor: cursor.clone(),
+            })
+            .await
+            .unwrap();
+        seen.extend(
+            view.threads
+                .iter()
+                .map(|record| record.thread_id.as_str().to_string()),
+        );
+        match view.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        ["t-visible-fs-001"],
+        "only the conversation thread may surface; hidden pages must advance"
+    );
+}
+
 /// Filesystem twin of the in-memory accept-door pins: mint + seed + journal
 /// land durably, the accepted ref pins the last seeded row, and the
 /// journaled declarations read back.

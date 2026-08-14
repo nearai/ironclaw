@@ -178,6 +178,47 @@ pub(crate) fn accepted_prepared_message_ref(
     })
 }
 
+/// Metadata key stamped onto every thread the accept door mints, so
+/// owner-scoped listings can exclude prepared-context (unbound/subagent)
+/// threads without a schema change.
+pub const PREPARED_CONTEXT_METADATA_MARKER_KEY: &str = "prepared_context";
+
+/// Stamp the caller's metadata (if any) with the prepared-context marker.
+/// Non-object metadata is rejected — the marker must be able to coexist with
+/// whatever the caller stored (the subagent path keeps its
+/// crash-reconstruction fields here).
+pub(crate) fn stamped_metadata_json(
+    metadata_json: Option<&str>,
+) -> Result<String, SessionThreadError> {
+    let mut object = match metadata_json {
+        None => serde_json::Map::new(),
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return Err(invalid("metadata_json must be a JSON object")),
+        },
+    };
+    object.insert(
+        PREPARED_CONTEXT_METADATA_MARKER_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    Ok(serde_json::Value::Object(object).to_string())
+}
+
+/// Listing-side predicate: prepared-context threads are working state, not
+/// conversations, and stay out of owner-scoped listings. Matches the stamp
+/// on every door-minted thread plus the pre-marker subagent metadata shape
+/// (`"kind":"subagent"`) so pre-existing child threads hide too.
+pub fn record_is_prepared_context_hidden(record: &crate::SessionThreadRecord) -> bool {
+    record
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|value| {
+            value.get(PREPARED_CONTEXT_METADATA_MARKER_KEY) == Some(&serde_json::Value::Bool(true))
+                || value.get("kind").and_then(serde_json::Value::as_str) == Some("subagent")
+        })
+}
+
 fn invalid(reason: impl Into<String>) -> SessionThreadError {
     SessionThreadError::InvalidPreparedContext {
         reason: reason.into(),

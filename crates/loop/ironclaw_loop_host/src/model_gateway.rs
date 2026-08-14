@@ -459,11 +459,11 @@ where
         let result = complete_model_request(
             self.provider.as_ref(),
             completion,
-            request.tool_choice,
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -509,11 +509,11 @@ where
         let result = complete_model_request(
             self.provider.as_ref(),
             completion,
-            request.tool_choice,
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -563,11 +563,11 @@ where
         let result = complete_model_request(
             self.provider.as_ref(),
             completion,
-            request.tool_choice,
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -618,11 +618,11 @@ where
         let result = complete_model_request(
             self.provider.as_ref(),
             completion,
-            request.tool_choice,
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -795,11 +795,11 @@ where
         let result = complete_model_request(
             provider.as_ref(),
             completion,
-            request.tool_choice,
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -838,11 +838,11 @@ where
         let result = complete_model_request(
             provider.as_ref(),
             completion,
-            request.tool_choice,
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -885,11 +885,11 @@ where
         let result = complete_model_request(
             provider.as_ref(),
             completion,
-            request.tool_choice,
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -933,11 +933,11 @@ where
         let result = complete_model_request(
             provider.as_ref(),
             completion,
-            request.tool_choice,
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -1260,6 +1260,8 @@ impl ProviderReplayIdentity {
 struct ProviderRequestContext {
     replay_identity: ProviderReplayIdentity,
     next_fallback_index: Option<u32>,
+    /// Strategy-imposed provider tool-choice constraint for this call.
+    tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 impl ProviderRequestContext {
@@ -1267,7 +1269,16 @@ impl ProviderRequestContext {
         Self {
             replay_identity,
             next_fallback_index,
+            tool_choice: None,
         }
+    }
+
+    fn with_tool_choice(
+        mut self,
+        tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
+    ) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -1370,7 +1381,6 @@ impl CompletionStreamSink for ProviderStreamSink {
 async fn complete_model_request<P>(
     provider: &P,
     mut completion: CompletionRequest,
-    tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
     capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
@@ -1383,6 +1393,7 @@ where
     let ProviderRequestContext {
         replay_identity,
         next_fallback_index,
+        tool_choice,
     } = request_context;
     let redaction_started_at = Instant::now();
     let redaction_count = redact_completion_request(&mut completion);
@@ -2819,7 +2830,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             ProviderRequestContext::new(replay_identity, None),
             None,
         )
@@ -2950,15 +2960,14 @@ mod tests {
         complete_model_request(
             &provider,
             CompletionRequest::new(vec![ChatMessage::user("finish")]),
-            Some(
-                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
-                    capability_id: CapabilityId::new("builtin.structured_result").unwrap(),
-                },
-            ),
             Some(capabilities),
             None,
             None,
-            ProviderRequestContext::new(replay_identity, None),
+            ProviderRequestContext::new(replay_identity, None).with_tool_choice(Some(
+                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id: CapabilityId::new("builtin.structured_result").unwrap(),
+                },
+            )),
             None,
         )
         .await
@@ -2989,15 +2998,14 @@ mod tests {
         let error = complete_model_request(
             &provider,
             CompletionRequest::new(vec![ChatMessage::user("finish")]),
-            Some(
-                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
-                    capability_id: CapabilityId::new("builtin.other").unwrap(),
-                },
-            ),
             Some(capabilities),
             None,
             None,
-            ProviderRequestContext::new(replay_identity, None),
+            ProviderRequestContext::new(replay_identity, None).with_tool_choice(Some(
+                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id: CapabilityId::new("builtin.other").unwrap(),
+                },
+            )),
             None,
         )
         .await

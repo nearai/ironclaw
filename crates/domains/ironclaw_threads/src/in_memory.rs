@@ -233,6 +233,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         request: crate::PreparedContextRequest,
     ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
         crate::prepared_context::validate_prepared_context_request(&request)?;
+        let stamped_metadata =
+            crate::prepared_context::stamped_metadata_json(request.metadata_json.as_deref())?;
         let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
         let now = Utc::now();
         let seed = crate::prepared_context::prepared_seed(&request, &thread_id, now)?;
@@ -277,7 +279,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                     thread_id: thread_id.clone(),
                     created_by_actor_id: request.actor_id.clone(),
                     title: request.title.clone(),
-                    metadata_json: request.metadata_json.clone(),
+                    metadata_json: Some(stamped_metadata.clone()),
                     goal: None,
                     created_at: Some(now),
                     updated_at: Some(now),
@@ -1290,6 +1292,11 @@ impl SessionThreadService for InMemorySessionThreadService {
             .threads
             .values()
             .filter(|stored| stored.record.scope == request.scope)
+            // Prepared-context (unbound/subagent) threads are working state,
+            // not conversations: excluded from listings on every backend.
+            .filter(|stored| {
+                !crate::prepared_context::record_is_prepared_context_hidden(&stored.record)
+            })
             .map(|stored| {
                 let mut record = stored.record.clone();
                 if record.title.is_none()

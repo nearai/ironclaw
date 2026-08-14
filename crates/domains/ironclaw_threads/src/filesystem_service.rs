@@ -1877,6 +1877,8 @@ where
         request: crate::PreparedContextRequest,
     ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
         crate::prepared_context::validate_prepared_context_request(&request)?;
+        let stamped_metadata =
+            crate::prepared_context::stamped_metadata_json(request.metadata_json.as_deref())?;
         let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
         let now = Utc::now();
         let crate::prepared_context::PreparedSeed {
@@ -1891,7 +1893,7 @@ where
             thread_id: Some(thread_id.clone()),
             created_by_actor_id: request.actor_id.clone(),
             title: request.title.clone(),
-            metadata_json: request.metadata_json.clone(),
+            metadata_json: Some(stamped_metadata),
         })
         .await?;
 
@@ -3217,6 +3219,13 @@ where
         // we don't serialize N transcript probes inline.
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for index in &listed {
+            // Prepared-context (unbound/subagent) threads are working state,
+            // not conversations: excluded from listings on every backend. The
+            // cursor below advances over the FETCHED rows, so a page of
+            // hidden threads still makes progress.
+            if crate::prepared_context::record_is_prepared_context_hidden(&index.record) {
+                continue;
+            }
             let idx = page.len();
             let mut record = index.record.clone();
             if record.title.is_none() {
@@ -3286,12 +3295,14 @@ where
                 }
             }
         }
-        // The cursor is the last thread_id on this page; the next
-        // request resumes after it in the activity-sorted order. Only
-        // emit one when more records remain beyond this slice.
+        // The cursor is the last FETCHED index row (not the last returned
+        // record — hidden prepared-context rows still advance it); the next
+        // request resumes after it in the activity-sorted order. Only emit
+        // one when more records remain beyond this slice.
         let next_cursor = if has_more {
-            page.last()
-                .map(Self::encode_thread_index_cursor)
+            listed
+                .last()
+                .map(|index| Self::encode_thread_index_cursor(&index.record))
                 .transpose()?
         } else {
             None
