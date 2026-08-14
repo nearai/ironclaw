@@ -87,7 +87,7 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             // First pass arms the clock (initial state carries no timestamp
             // so it stays deterministic); older checkpoints without the
             // field re-arm from resume time instead of failing the run.
-            let started_at = *state.run_started_at.get_or_insert(now);
+            let started_at = state.budget_ledger.arm_wall_clock(now);
             if now.signed_duration_since(started_at).num_seconds() >= i64::from(limit_seconds) {
                 return self
                     .hard_budget_exit(ctx, state, LoopFailureKind::WallClockLimit)
@@ -95,13 +95,13 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             }
         }
 
-        if state.model_calls_made >= policy.max_model_calls {
+        if state.budget_ledger.model_calls_made() >= policy.max_model_calls {
             return self
                 .hard_budget_exit(ctx, state, LoopFailureKind::ModelCallLimit)
                 .await;
         }
 
-        if state.capability_invocations_made >= policy.max_capability_invocations {
+        if state.budget_ledger.capability_invocations_made() >= policy.max_capability_invocations {
             return self
                 .hard_budget_exit(ctx, state, LoopFailureKind::CapabilityInvocationLimit)
                 .await;
