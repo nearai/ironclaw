@@ -252,6 +252,67 @@ async fn unpair_external_actor_revokes_direct_conversation_bindings() {
 }
 
 #[tokio::test]
+async fn reassigning_external_actor_revokes_the_previous_users_direct_route() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-relinked");
+    let conversation = external_conversation("chat-relinked", None);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-before-relink",
+        ))
+        .await
+        .expect("first user's direct binding");
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("bob"),
+        )
+        .await;
+
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-after-relink-lookup",
+        ))
+        .await
+        .expect_err("reassigning an actor must revoke the previous user's direct route");
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            conversation,
+            "telegram-event-after-relink",
+        ))
+        .await
+        .expect("reassigned actor should create a fresh direct binding");
+    assert_eq!(rebound.actor.user_id, user("bob"));
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "the new owner must never inherit the previous user's thread"
+    );
+}
+
+#[tokio::test]
 async fn user_scoped_channel_unpair_revokes_every_owned_actor_and_direct_route() {
     let services = InMemoryConversationServices::default();
     let removed_actor = external_actor("slack-user-reconnected");

@@ -68,7 +68,7 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 | [`ironclaw_extension_manager`](./ironclaw_extension_manager) | The product face: lifecycle commands/capabilities, the lifecycle product service, admin/operator capability handlers, credential views, the extension hub | you change what a user or operator sees or does to manage extensions |
 | [`ironclaw_extension_support`](./ironclaw_extension_support) | Shared support for the bundled packages: the `PACKAGES` inventory and the native tool *executors* (gsuite, web-access, coding, skills) — not itself a package | you add native, non-WASM tool logic for a data-only package |
 | [`packages/slack`](./packages/slack) (`ironclaw_slack_extension`) | Protocol-only Slack channel capabilities: complete webhook ingress, message replies, and target-resolved delivery | Slack-shaped bytes only |
-| [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Protocol-only Telegram channel capabilities: complete webhook ingress, message replies, and target-resolved delivery | Telegram-shaped bytes only |
+| [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Telegram Bot API channel capabilities plus the linked-account MTProto device flow and 15 personal-account tools | Telegram-shaped bytes and linked-account provider behavior only |
 | [`packages/web-app`](./packages/web-app) (`ironclaw_web_app_extension`) | Delivery-only browser-push translator; authenticated-session ingress and stream replies are host-owned | Web Push-shaped bytes only |
 | [`packages/memory-native`](./packages/memory-native) (`ironclaw_memory_native`) | The default `[memory]` provider: filesystem-backed `MemoryService` implementation | the bundled memory backend's behavior |
 | [`packages/mem0`](./packages/mem0) (`ironclaw_memory_mem0`) | The alternative `[memory]` provider over an external mem0 REST service | the mem0 mapping or its hardened transport |
@@ -120,7 +120,7 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `nearai-mcp/` | `nearai` | `[mcp]` hosted server + 1 pinned tool | `nearai` (api_key) | mcp | data-only |
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
 | `slack/` | `slack` | 16 tools (all 16 core standard messaging ops) + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`) | `slack` | wasm (tools) + first-party channel capabilities | crate `ironclaw_slack_extension` + `wasm/` |
-| `telegram/` | `telegram` | channel only (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`; no tools/auth recipe, deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
+| `telegram/` | `telegram` | 15 linked-account tools + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`; device-link requirement on tools, deployment credentials via `[admin_configuration]`) | `telegram` (device_link) | first_party | crate `ironclaw_telegram_extension` |
 | `web-app/` | `web-app` | channel only (host-owned `authenticated_session` ingress + host-owned stream reply + push `[channel.delivery]`; package binds delivery only, VAPID auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_app_extension` |
 | `web-access/` | `web-access` | 2 tools | — | first_party | data-only (executor: `extension_support::web_access`) |
 
@@ -173,6 +173,7 @@ unless noted; each is named so you can run it alone.
 | `extension_support`'s `runtimes` demotion cannot silently widen its consumer set | `DowngradePin` in `crates/app/ironclaw_architecture_tests/tests/reborn_same_layer_edge_inventory.rs` |
 | Extension-vocabulary types live in contracts, not re-derived locally | `crates/app/ironclaw_architecture_tests/tests/reborn_extension_contract_location_scan.rs` |
 | Telegram keeps dependency-set parity with Slack | `crates/app/ironclaw_architecture_tests/tests/telegram_extension_gates.rs` |
+| The linked-device MTProto stack (`grammers-*`) stays exact-pinned by version **and** `.crate` checksum, keeps its resolved feature set frozen under both the default and `--all-features` resolution, never enables the socks5 `proxy` feature, and stays off the automated-bump path | `crates/app/ironclaw_architecture_tests/tests/reborn_linked_device_supply_chain_pin.rs` — a **security** gate, not dependency hygiene: that dependency runs in-process with full process authority and `=0.10.0` is the last release whose `update_config` discards server-pushed datacenter addresses, which is what makes the package's DC-address validation cover 100% of dials. Read the file's module docs before bumping anything |
 | Committed WASM artifacts match their `wasm-src/` source | `python3 scripts/ci/check-wasm-artifact-freshness.py` |
 | Adapter behavior conforms to the contract | `ironclaw_extension_contracts::test_support::conformance`, run by `cargo test -p ironclaw_slack_extension` / `-p ironclaw_telegram_extension` (`crates/extensions/packages/slack/tests/channel_conformance.rs` and the telegram twin) |
 

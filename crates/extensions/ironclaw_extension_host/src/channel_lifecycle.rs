@@ -50,6 +50,7 @@ pub fn channel_connection_requirement(
         ),
         RebornChannelConnectStrategy::InboundProofCode
         | RebornChannelConnectStrategy::WebGeneratedCode
+        | RebornChannelConnectStrategy::DeviceLink
         | RebornChannelConnectStrategy::QrCode
         | RebornChannelConnectStrategy::AdminManagedChannels => (
             format!("Open {display_name}'s app or bot, get the pairing code, and paste it here."),

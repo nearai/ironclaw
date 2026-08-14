@@ -186,9 +186,32 @@ mod tests {
             .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
             .unwrap_or_default();
         // `{"ok": true}` against send_message's output schema fails two
-        // independent keywords: `additionalProperties` (on "ok") and
-        // `required` (missing "message_ref") — both issues, and the
-        // issue-count marker, must survive in the panic message.
+        // independent keywords: `additionalProperties` (on "ok") and the
+        // evidence disjunction (neither `message_ref` nor `sent_unverified`
+        // is present) — both issues, and the issue-count marker, must survive
+        // in the panic message.
+        //
+        // The second issue reads as a `oneOf` violation rather than naming
+        // `message_ref`: `send_message` graduated to `.output.v2`, which
+        // states evidence as `oneOf` instead of a single `required`, and
+        // `jsonschema` reports the failing branch set, not the fields inside
+        // it. The rejection and the issue count are unchanged — only the
+        // wording is. Ops still on a single `required` (e.g. `edit_message`)
+        // keep naming the field, covered below.
+        assert!(message.contains("'ok' was unexpected"), "{message}");
+        assert!(message.contains("oneOf"), "{message}");
+        assert!(message.contains("2 issue(s)"), "{message}");
+
+        let edit = json!({ "ok": true });
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            assert_canonical_output(EditMessage, &edit)
+        }));
+        let payload = result.expect_err("expected a panic for a shape missing message_ref");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_default();
         assert!(message.contains("message_ref"), "{message}");
         assert!(message.contains("2 issue(s)"), "{message}");
     }

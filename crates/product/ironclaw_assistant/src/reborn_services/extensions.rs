@@ -544,7 +544,11 @@ fn channel_requires_personal_account(summary: &LifecycleExtensionSummary) -> boo
             .channel_connection
             .as_ref()
             .is_some_and(|connection| {
-                connection.strategy == crate::RebornChannelConnectStrategy::OAuth
+                matches!(
+                    connection.strategy,
+                    crate::RebornChannelConnectStrategy::OAuth
+                        | crate::RebornChannelConnectStrategy::DeviceLink
+                )
             })
 }
 
@@ -566,6 +570,7 @@ fn channel_requires_personal_binding(summary: &LifecycleExtensionSummary) -> boo
                 // an extension is not connected for them until they do.
                 crate::RebornChannelConnectStrategy::WebGeneratedCode
                 | crate::RebornChannelConnectStrategy::OAuth
+                | crate::RebornChannelConnectStrategy::DeviceLink
                 | crate::RebornChannelConnectStrategy::InboundProofCode
                 | crate::RebornChannelConnectStrategy::QrCode => true,
                 // Operator-configured for the whole tenant; there is no

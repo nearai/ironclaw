@@ -1230,23 +1230,29 @@ fn manifest_channel_account_setup_descriptors(
         .filter_map(|manifest| {
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
-            if connection.strategy
-                != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode
-            {
-                return None;
-            }
+            let (account_setup, connect_strategy) = match connection.strategy {
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                ),
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink,
+                    ironclaw_assistant::RebornChannelConnectStrategy::DeviceLink,
+                ),
+                _ => return None,
+            };
             Some(ExtensionAccountSetupDescriptor {
                 extension_id: manifest.id.clone(),
                 auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
                     provider: connection.provider.clone(),
-                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    setup: account_setup,
                     requester_extension: manifest.id.clone(),
                     provider_scopes: Vec::new(),
                 },
                 connection_requirement: ChannelConnectionRequirement {
                     channel: manifest.id.as_str().to_string(),
                     display_name: manifest.name.clone(),
-                    strategy: ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                    strategy: connect_strategy,
                     instructions: connection.instructions.clone(),
                     input_placeholder: connection.input_placeholder.clone(),
                     submit_label: connection.submit_label.clone(),

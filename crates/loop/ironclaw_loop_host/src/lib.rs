@@ -81,8 +81,7 @@ pub use capability_port::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
     DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
-    loop_driver_execution_extension_id,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfacePolicyFilter, CapabilitySurfaceVisibleFilter,
@@ -1304,7 +1303,7 @@ pub struct EmptyLoopCapabilityPort;
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }
 

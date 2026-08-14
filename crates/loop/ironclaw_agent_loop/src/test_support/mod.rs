@@ -25,7 +25,7 @@ use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, AssistantReply, CancellationPolicy, CapabilityCallCandidate,
     CapabilityDescriptorView, CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress,
     CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
-    ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
+    ConcurrencyClass, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
     LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
     LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest,
@@ -155,10 +155,7 @@ impl MockAgentLoopDriverHostBuilder {
         Self {
             run_context: test_run_context("agent-loop-test"),
             script: ScenarioScript::reply_only("ok"),
-            visible_capabilities: vec![capability_descriptor(
-                capability_id("demo.echo"),
-                ConcurrencyHint::SafeForParallel,
-            )],
+            visible_capabilities: vec![capability_descriptor(capability_id("demo.echo"))],
             prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
@@ -846,7 +843,7 @@ impl ironclaw_loop_contracts::LoopModelPort for MockAgentLoopDriverHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockAgentLoopDriverHost {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }
 
@@ -1085,10 +1082,7 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
 }
 
 /// Builds a capability descriptor for the mock visible surface.
-pub fn capability_descriptor(
-    id: CapabilityId,
-    concurrency_hint: ConcurrencyHint,
-) -> CapabilityDescriptorView {
+pub fn capability_descriptor(id: CapabilityId) -> CapabilityDescriptorView {
     CapabilityDescriptorView {
         capability_id: id,
         provider: None,
@@ -1096,7 +1090,6 @@ pub fn capability_descriptor(
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
         description_trust: Default::default(),
-        concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }
 }

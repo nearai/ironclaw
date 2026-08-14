@@ -36,9 +36,17 @@ pub mod test_support;
 pub use account_state::{AuthAccountLastError, AuthAccountState, project_auth_account_state};
 pub use channel_connection::{ChannelAuthAccountState, ChannelConnectionService};
 pub use cleanup::{
-    CanceledCleanupFlow, SecretCleanupAction, SecretCleanupQuarantine,
-    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    CanceledCleanupFlow, DeferredLinkedDeviceRevoker, LinkedDeviceCleanupService,
+    LinkedDeviceRevokeError, LinkedDeviceRevokeRequest, LinkedDeviceRevoker, SecretCleanupAction,
+    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService,
 };
+// NOTE: `SessionBytes`, `LinkedSessionVersion` and `MAX_LINKED_SESSION_BYTES`
+// are DECLARED in `ironclaw_extension_contracts::linked_session` and are
+// deliberately NOT re-exported here. An extension package must be able to name
+// every type the custody port mentions, and its boundary rule forbids the edge
+// into this crate — so contracts is the one import path, and adding a second
+// one is what `reborn_extension_contract_location_scan` fails on.
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
@@ -47,8 +55,9 @@ pub use credential::{
     CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
-    binding_scope_owns_account,
+    CredentialSetupService, LinkedDeviceLinkCompletion, NewCredentialAccount,
+    OpaqueMaterialRequest, OpaqueMaterialSnapshot, OpaqueMaterialWrite, OpaqueMaterialWriteOutcome,
+    ProviderBackedCredentialAccountService, binding_scope_owns_account,
 };
 pub use delivery_registrations::{
     DeliveryRegistrationPaths, FilesystemDeliveryRegistrationStore, validate_registration_endpoint,
@@ -74,13 +83,16 @@ pub use engine::{
 pub use error::{AuthErrorCode, AuthProductError};
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::InMemoryAuthProductServices;
+#[cfg(any(test, feature = "test-support"))]
+pub use fakes::device_link::{DeviceLinkDriverCall, RecordingDeviceLinkDriver};
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
-    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
-    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
-    flow_matches_turn_gate_query, flow_shares_setup_owner_root, is_setup_class_continuation,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, AuthFlowStepAdvance,
+    AuthFlowStepAdvanceInput, AuthFlowStepState, CredentialAccountUpdateBinding,
+    CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    credential_status_for_completed_flow, flow_matches_turn_gate_query,
+    flow_shares_setup_owner_root, is_setup_class_continuation,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -114,14 +126,22 @@ pub use product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, RuntimeCredentialAccountVisibilityPolicy,
     map_account_error, runtime_credential_account_selection_request,
 };
+pub use product_auth::device_link::{
+    DEVICE_LINK_FLOW_MAX_TTL_SECONDS, DEVICE_LINK_FLOW_TTL_SECONDS, DEVICE_LINK_MAX_POLL_ATTEMPTS,
+    DEVICE_LINK_POLL_INTERVAL_MILLIS, DEVICE_LINK_STEP_TTL_SECONDS, DeviceLinkFlowDriver,
+    DeviceLinkStartRequest,
+};
 pub use product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 pub use product_auth::oauth::oauth_gate::{
     OAuthGateChallengeRequest, OAuthGateFlowDriver, auth_scope_for_blocked_turn, turn_gate_query,
 };
 pub use provider::{
-    AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, PkceVerifierSecret, validate_provider_callback_request,
+    AuthProviderClient, DeviceLinkBeginRequest, DeviceLinkBinding, DeviceLinkCancelReason,
+    DeviceLinkCancelRequest, DeviceLinkDriver, DeviceLinkDriverError, DeviceLinkLinkedAccount,
+    DeviceLinkPollRequest, DeviceLinkStepOutcome, DeviceLinkSubmitRequest, DeviceLinkVendorUserRef,
+    OAuthAuthorizationCode, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    PkceVerifierSecret, validate_provider_callback_request,
 };
 pub use scope::{AuthProductScope, AuthSurface};
 

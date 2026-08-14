@@ -42,6 +42,7 @@ use ironclaw_assistant::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
+use ironclaw_extension_contracts::channel::ChannelConnectionStrategy;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
@@ -434,6 +435,8 @@ struct HarnessOptions {
     /// command actions (`/model set`, `set-provider`) deny by default;
     /// scenarios proving the admin path override this to an admin role.
     actor_role: AdminUserRole,
+    /// Optional connection-strategy override for migration boundary tests.
+    connection_strategy: Option<ChannelConnectionStrategy>,
 }
 
 impl HarnessOptions {
@@ -445,6 +448,7 @@ impl HarnessOptions {
             manifest_commands: None,
             foreign_scope_approvals: false,
             actor_role: AdminUserRole::Member,
+            connection_strategy: None,
         }
     }
 }
@@ -474,6 +478,15 @@ async fn build_harness_with_manifest_commands(
 ) -> Harness {
     let mut options = HarnessOptions::new(mode);
     options.manifest_commands = Some(commands);
+    build_harness_with_options(options).await
+}
+
+async fn build_harness_with_connection_strategy(
+    mode: TurnMode,
+    connection_strategy: ChannelConnectionStrategy,
+) -> Harness {
+    let mut options = HarnessOptions::new(mode);
+    options.connection_strategy = Some(connection_strategy);
     build_harness_with_options(options).await
 }
 
@@ -537,9 +550,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
-    let host =
-        slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
-            .await;
+    let host = slack_test_extension_host_with_manifest_options(
+        options.manifest_commands.as_deref(),
+        options.connection_strategy,
+    )
+    .await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -831,11 +846,12 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// (binding the real `SlackChannelAdapter`) — the snapshot both the ingress
 /// router and the delivery resolver read.
 async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHost> {
-    slack_test_extension_host_with_manifest_commands(None).await
+    slack_test_extension_host_with_manifest_options(None, None).await
 }
 
-async fn slack_test_extension_host_with_manifest_commands(
+async fn slack_test_extension_host_with_manifest_options(
     manifest_commands: Option<&[&str]>,
+    connection_strategy: Option<ChannelConnectionStrategy>,
 ) -> Arc<ironclaw_extension_host::ExtensionHost> {
     use ironclaw_extension_host::test_support::{
         FakeEgressFactory, FakeToolAdapter, RecordingDrain,
@@ -858,6 +874,7 @@ async fn slack_test_extension_host_with_manifest_commands(
                         .with_reply(adapter.clone())
                         .with_delivery(adapter)
                 },
+                device_link: None,
             })
         }
     }
@@ -876,6 +893,18 @@ async fn slack_test_extension_host_with_manifest_commands(
         let mut manifest = slack_manifest_from_bundled_inventory();
         if let Some(commands) = manifest_commands {
             manifest = replace_toml_array(&manifest, "commands", commands);
+        }
+        if let Some(connection_strategy) = connection_strategy {
+            let strategy = match connection_strategy {
+                ChannelConnectionStrategy::AdminManagedChannels => "admin_managed_channels",
+                ChannelConnectionStrategy::WebGeneratedCode => "web_generated_code",
+                ChannelConnectionStrategy::DeviceLink => "device_link",
+                ChannelConnectionStrategy::OAuth => "oauth",
+            };
+            manifest = manifest.replace(
+                "strategy = \"oauth\"",
+                &format!("strategy = \"{strategy}\""),
+            );
         }
         ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
             manifest,
@@ -898,6 +927,9 @@ async fn slack_test_extension_host_with_manifest_commands(
             reserved_capability_ids: Default::default(),
             reserved_ingress_routes: Default::default(),
             hook_deadline: Duration::from_secs(5),
+            linked_sessions: crate::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(crate::UnavailableLinkedAccountResolution),
+            admin_secrets: None,
         })
         .await,
     );
@@ -2525,7 +2557,7 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
     assert_eq!(messages[0]["channel"], "C889");
     assert_eq!(
         messages[0]["text"].as_str(),
-        Some(slack_generic_connect_required_notice().as_str()),
+        Some(slack_manifest_connect_required_notice().as_str()),
         "the notice is this wiring's connect_required copy, verbatim"
     );
     assert_eq!(
@@ -2631,7 +2663,7 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     assert_eq!(messages.len(), 2, "A's reply + carol's nudge: {messages:?}");
     assert_eq!(
         messages[1]["text"].as_str(),
-        Some(slack_generic_connect_required_notice().as_str()),
+        Some(slack_manifest_connect_required_notice().as_str()),
     );
     assert_eq!(
         messages[1]["thread_ts"], "1710000007.000001",
@@ -4721,28 +4753,16 @@ const HYDRATED_TOP_LEVEL_MENTION: &str = r#"{
 }"#;
 
 /// The `connect_required` copy this assembly's wiring produces. The harness
-/// wires `channel_pairing: None` (composition wires the real registry, whose
-/// per-extension pairing service serves the manifest's
-/// `[connection.notices]` copy — pinned at the integration tier), so the
-/// host falls back to [`ChannelConnectionNoticePolicy::generic`] over the
-/// manifest's display name. Deriving the expectation from the same
-/// production constructor and the shipped manifest's `name` keeps this a pin
-/// of the wiring, not a test-local copy of the wording.
-fn slack_generic_connect_required_notice() -> String {
+/// wires `channel_pairing: None`, so the host reads the non-pairing fallback
+/// from the resolved manifest's `[channel.connection.notices]` policy. Read
+/// that shipped value here instead of duplicating its wording in the test.
+fn slack_manifest_connect_required_notice() -> String {
     let manifest = slack_manifest_from_bundled_inventory();
-    let prefix = "\nname = \"";
-    let start = manifest
-        .find(prefix)
-        .expect("bundled slack manifest declares its display name") // safety: shipped manifest fixture declares `name`.
-        + prefix.len();
-    let end = manifest[start..]
-        .find('"')
-        .map(|offset| start + offset)
-        .expect("manifest name string is closed"); // safety: shipped manifest fixture is valid TOML.
-    ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy::generic(
-        &manifest[start..end],
-    )
-    .connect_required
+    let manifest: toml::Value = toml::from_str(&manifest).expect("bundled Slack manifest parses"); // safety: shipped compile-time fixture is valid TOML.
+    manifest["channel"]["connection"]["notices"]["connect_required"]
+        .as_str()
+        .expect("bundled Slack manifest declares connect_required") // safety: shipped manifest contract requires connection notices.
+        .to_string()
 }
 
 const APP_MENTION_AUTH: &str = r#"{
@@ -5270,6 +5290,7 @@ fn generic_outbound_target_deps(
         assembly: Arc::clone(&harness.assembly),
         channel_config: Arc::clone(&harness.channel_config),
         dm_targets,
+        identity_lookup: Arc::clone(&harness.identity_lookup) as Arc<dyn RebornUserIdentityLookup>,
         identity: ChannelOutboundTargetIdentity {
             tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
@@ -5475,6 +5496,59 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
             entry.summary.target_id.as_str()
         );
     }
+}
+
+/// REGRESSION (device-link cutover): a DM target recorded under the retired
+/// proof-code pairing flow is dead weight once the manifest switches to
+/// device linking — the harness's unversioned identity row (exactly what that
+/// ceremony left behind) must not validate it. The target is offered again
+/// only once the actor holds a device-link identity, and then exactly once.
+#[tokio::test]
+async fn device_link_outbound_target_requires_the_linked_identity() {
+    let harness = build_harness_with_connection_strategy(
+        TurnMode::Running,
+        ChannelConnectionStrategy::DeviceLink,
+    )
+    .await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("seed retained pre-cutover DM target");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list");
+    assert_eq!(
+        listed.len(),
+        0,
+        "a retired pairing's delivery target is not offered until the account \
+         is device-linked"
+    );
+
+    let installation = AdapterInstallationId::new(INSTALLATION).expect("installation");
+    harness.identity_lookup.bind(
+        crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1
+            .provider_user_id(&installation, SLACK_USER),
+        UserId::new(USER).expect("user"),
+    );
+    let listed_after_link = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list after linking");
+    assert_eq!(
+        listed_after_link.len(),
+        1,
+        "the linked identity revalidates the recorded target, exactly once"
+    );
 }
 
 /// REGRESSION (OAuth post-bind provisioning): Slack's `conversations.open`

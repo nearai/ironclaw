@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 import {
   channelConnection,
+  deviceLinkSetupSecret,
   hasChannelSurface,
   isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
@@ -79,6 +80,7 @@ function renderModal({
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
     }),
+    DeviceLinkPanel() {},
     PairingWebCodePanel() {},
     Button() {},
     Icon() {},
@@ -140,6 +142,7 @@ function renderModal({
     // The real surface-taxonomy helpers: modal routing must key off declared
     // channel surfaces and connect strategies, exactly as production does.
     channelConnection,
+    deviceLinkSetupSecret,
     hasChannelSurface,
     isWebGeneratedCodeConnection,
     resolveFocusTarget,
@@ -174,6 +177,7 @@ function renderModal({
   return {
     calls,
     context,
+    DeviceLinkPanel: context.DeviceLinkPanel,
     PairingWebCodePanel: context.PairingWebCodePanel,
     invalidations,
     notifications,
@@ -909,4 +913,80 @@ test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", ()
     null,
     "the pre-opened popup is passed with its opener severed"
   );
+});
+
+test("ConfigureModal routes a device-link credential to the link panel, never a paste box", () => {
+  // `RebornExtensionCredentialSetup::DeviceLink` has no secret for the user to
+  // paste: the vendor issues the payload and the host takes custody of the
+  // resulting session. Falling back to the manual-token form here would ask
+  // for a value that does not exist.
+  const view = renderModal({
+    surfaces: [{ kind: "auth" }],
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.DeviceLinkPanel),
+    true,
+    "a device-link credential must render the multi-step link panel",
+  );
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    false,
+    "a device link is not a host-issued pairing code",
+  );
+  const body = JSON.stringify(view.rendered);
+  assert.ok(!body.includes("pairing.placeholder"), "no secret paste box");
+  assert.ok(
+    !body.includes("extensions.noConfigRequired"),
+    "device-link Configure must never claim no configuration is required",
+  );
+});
+
+test("ConfigureModal leaves a manual-token credential on the paste form", () => {
+  // The device-link branch must key off the declared setup kind alone; a
+  // manual-token extension keeps the form it has always had.
+  const view = renderModal({
+    surfaces: toolSurfaces,
+    packageRef: { kind: "extension", id: "provider-neutral-tool" },
+    displayName: "Provider Neutral Tool",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "api_token",
+          provider: "vendor-a",
+          prompt: "API token",
+          provided: false,
+          setup: { kind: "manual_token" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.DeviceLinkPanel),
+    false,
+    "only a declared device-link credential reaches the link panel",
+  );
+  assert.match(JSON.stringify(view.rendered), /API token/);
 });

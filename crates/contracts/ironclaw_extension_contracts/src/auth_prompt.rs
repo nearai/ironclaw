@@ -30,6 +30,11 @@ use ironclaw_host_api::ids::InvocationId;
 use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::turn::TurnRunId;
 
+use crate::device_link::{
+    DeviceLinkDisplayKind, DeviceLinkErrorCode, DeviceLinkInputKind, DeviceLinkMode,
+    DeviceLinkStepKind,
+};
+
 /// Maximum byte length for a bounded identifier-shaped prompt field.
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
 /// Maximum byte length for a free-text prompt field.
@@ -63,6 +68,18 @@ pub enum AuthPromptChallengeKind {
     /// (e.g. Telegram `/start <code>`), then the run resumes server-side.
     /// Nothing is pasted into IronClaw. Wire value is `pairing`.
     Pairing,
+    /// Multi-step device link: the card walks a user through a vendor's own
+    /// "link a device" handshake — showing a scannable payload or a link,
+    /// polling while the vendor waits, and asking for whatever the vendor
+    /// demands next (an identifier, a one-time code, an account password).
+    ///
+    /// Distinct from [`AuthPromptChallengeKind::Pairing`] in both directions of
+    /// travel: pairing is host-issued and completes when the user carries a
+    /// host code to the external side, while a device link is vendor-issued and
+    /// completes when the vendor accepts. A pairing card is one screen; this
+    /// one advances through steps and can ask for a secret. Wire value is
+    /// `device_link`.
+    DeviceLink,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
@@ -108,6 +125,121 @@ pub struct PairingPromptView {
     pub expires_at: DateTime<Utc>,
 }
 
+/// One frame of a multi-step device link, as a card renders it.
+///
+/// **Everything here is presentation.** The step machine, its revision
+/// compare-and-swap, and the TTLs are the auth engine's; the protocol is the
+/// extension's. This carries what a screen has to draw and what a poller has to
+/// obey, and nothing that would let a consumer advance the flow itself.
+///
+/// **`qr_payload` is sensitive.** On the scan path it *is* the vendor's login
+/// token: whoever renders it can invite a device onto the account. Show it to
+/// the account's own user, never log it, never forward it to a channel that is
+/// not the user's own surface. It is a `String` here only because the wire
+/// shape is a string; the typed, redacting form is
+/// [`crate::device_link::DeviceLinkPayload`], which is what the engine holds.
+///
+/// `revision` is the flow revision the frame was rendered from — a consumer
+/// submitting the next step echoes it so a stale card cannot overwrite a newer
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkPromptView {
+    /// Short provider id (the extension the link belongs to).
+    pub provider: String,
+    /// Human-readable name for the account being linked.
+    pub display_name: String,
+    /// Which frame this is.
+    pub step: DeviceLinkStepKind,
+    /// Copy for the current step, authored by the recipe or the host.
+    pub instructions: String,
+    /// The payload to render as a scannable code or a link, when the current
+    /// step displays one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_payload: Option<String>,
+    /// A short code to show the user, when the vendor issues one directly
+    /// rather than as a scannable payload.
+    ///
+    /// Means only that. It used to double as the completed frame's resolved
+    /// account identity, which left a card unable to tell "read this code to
+    /// your phone" from "this is who you linked as" — see
+    /// [`DeviceLinkPromptView::vendor_user_ref`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The resolved account identity on a completed frame.
+    ///
+    /// Showing it is the one control that makes a substituted login visible
+    /// (PROPOSAL §3.2), so it carries its own slot rather than borrowing the
+    /// one a mid-flow code uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_user_ref: Option<String>,
+    /// Label for the input the current step is asking for ("Login code",
+    /// "Account password"). Present only on an input step; its presence is what
+    /// tells a card to render a field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_label: Option<String>,
+    /// When the current frame stops being valid.
+    pub expires_at: DateTime<Utc>,
+    /// The flow revision this frame was rendered from.
+    pub revision: u64,
+    /// How long a consumer waits between polls.
+    pub poll_interval_ms: u64,
+    /// Back-off the vendor asked for, when it asked for one. Overrides
+    /// `poll_interval_ms` for the next poll only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// Why the last attempt failed, on a failed frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<DeviceLinkErrorCode>,
+    /// The durable flow this frame belongs to (§8.12). A card with no flow id
+    /// cannot poll or submit, so it starts a flow of its own instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    /// Which value an input step is asking for. Drives the masked-password
+    /// affordance — absent, a consumer falls back to a code-shaped field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_kind: Option<DeviceLinkInputKind>,
+    /// Which of the extension's declared paths the flow is on, so a card can
+    /// offer "use the other path instead".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<DeviceLinkMode>,
+    /// Whether the extension declares a second path at all.
+    ///
+    /// Load-bearing, not decorative: without it a card renders a switch for
+    /// every vendor, and one that declares no alternate answers
+    /// [`crate::device_link::DeviceLinkError::UnsupportedMode`] — a wedge the
+    /// user cannot retry out of. Absent, a consumer must assume `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_available: Option<bool>,
+    /// The recipe's own name for the primary path ("Scan a code").
+    ///
+    /// The recipe promises the labels a user reads come from the extension.
+    /// Carrying them here is what keeps that promise: a card with no label
+    /// falls back to generic host copy, never to one vendor's ceremony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode_label: Option<String>,
+    /// The recipe's own name for the fallback path ("Use my phone number").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_mode_label: Option<String>,
+    /// How the payload is meant to be rendered.
+    ///
+    /// The contract has always distinguished a scannable code from a link;
+    /// this is where that reaches a card. Absent, a consumer renders both
+    /// affordances as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_kind: Option<DeviceLinkDisplayKind>,
+    /// The installed extension this link belongs to.
+    ///
+    /// Distinct from `provider`, which is the credential-authority namespace:
+    /// a card needs the installed identity to name what it is linking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    /// Whether a fresh `begin` could succeed after a failed frame. Mirrors
+    /// `DeviceLinkStep::Failed`'s own bit; absent, a consumer derives it from
+    /// `error_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restartable: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthPromptView {
     pub turn_run_id: TurnRunId,
@@ -148,6 +280,11 @@ pub struct AuthPromptView {
     /// bearer challenge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing: Option<PairingPromptView>,
+    /// Device-link frame. Present only when `challenge_kind == DeviceLink`.
+    /// Additive + serde-default, so rows written before the device-link method
+    /// existed deserialize as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_link: Option<DeviceLinkPromptView>,
 }
 
 /// Render one structured auth challenge for text-based channel adapters.
@@ -210,6 +347,9 @@ pub struct AuthPromptContextView {
     pub connection: Option<ConnectionPromptContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing: Option<PairingPromptView>,
+    /// Device-link frame — see [`AuthPromptView::device_link`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_link: Option<DeviceLinkPromptView>,
 }
 
 impl AuthPromptContextView {
@@ -250,9 +390,25 @@ impl AuthPromptContextView {
             expires_at,
             connection,
             pairing,
+            device_link: None,
         };
         view.validate()?;
         Ok(view)
+    }
+
+    /// Attach (or clear) the device-link frame, re-validating the whole view.
+    ///
+    /// A builder rather than an eighth constructor parameter: the two existing
+    /// constructors already carry seven, and every caller that does not link a
+    /// device would have to pass `None` through a wider signature for a field
+    /// only one challenge kind uses.
+    pub fn with_device_link(
+        mut self,
+        device_link: Option<DeviceLinkPromptView>,
+    ) -> Result<Self, ProductAdapterError> {
+        self.device_link = device_link;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn from_auth_prompt(prompt: &AuthPromptView) -> Result<Option<Self>, ProductAdapterError> {
@@ -267,7 +423,8 @@ impl AuthPromptContextView {
             prompt.expires_at,
             prompt.connection.clone(),
             prompt.pairing.clone(),
-        )
+        )?
+        .with_device_link(prompt.device_link.clone())
         .map(Some)
     }
 
@@ -299,7 +456,72 @@ impl AuthPromptContextView {
         if let Some(pairing) = self.pairing.as_ref() {
             pairing.validate()?;
         }
+        if let Some(device_link) = self.device_link.as_ref() {
+            device_link.validate()?;
+        }
         Ok(())
+    }
+}
+
+impl DeviceLinkPromptView {
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "device_link_prompt_provider",
+            &self.provider,
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "device_link_prompt_display_name",
+            &self.display_name,
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "device_link_prompt_instructions",
+            &self.instructions,
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_qr_payload",
+            self.qr_payload.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_code",
+            self.code.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_secret_label",
+            self.secret_label.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_flow_id",
+            self.flow_id.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        // The recipe-authored strings are extension-supplied, so they are
+        // bounded on the same terms as every other text a card renders.
+        validate_optional_display_text(
+            "device_link_prompt_default_mode_label",
+            self.default_mode_label.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_alternate_mode_label",
+            self.alternate_mode_label.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_extension_id",
+            self.extension_id.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "device_link_prompt_vendor_user_ref",
+            self.vendor_user_ref.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )
     }
 }
 
@@ -388,6 +610,8 @@ impl<'de> Deserialize<'de> for AuthPromptContextView {
             connection: Option<ConnectionPromptContext>,
             #[serde(default)]
             pairing: Option<PairingPromptView>,
+            #[serde(default)]
+            device_link: Option<DeviceLinkPromptView>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -400,6 +624,7 @@ impl<'de> Deserialize<'de> for AuthPromptContextView {
             wire.connection,
             wire.pairing,
         )
+        .and_then(|view| view.with_device_link(wire.device_link))
         .map_err(serde::de::Error::custom)
     }
 }
@@ -457,6 +682,7 @@ mod tests {
             (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
             (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
             (AuthPromptChallengeKind::Pairing, "\"pairing\""),
+            (AuthPromptChallengeKind::DeviceLink, "\"device_link\""),
             (AuthPromptChallengeKind::Other, "\"other\""),
         ] {
             let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
@@ -481,6 +707,7 @@ mod tests {
             expires_at: None,
             connection: None,
             pairing: None,
+            device_link: None,
         };
 
         assert!(AuthPromptContextView::from_auth_prompt(&prompt).is_err());
@@ -511,6 +738,34 @@ mod tests {
             expires_at: None,
             connection: None,
             pairing,
+            device_link: None,
+        }
+    }
+
+    fn device_link_view() -> DeviceLinkPromptView {
+        DeviceLinkPromptView {
+            provider: "example".to_string(),
+            display_name: "Personal account".to_string(),
+            step: DeviceLinkStepKind::Display,
+            instructions: "Open your account's device settings and scan this.".to_string(),
+            qr_payload: Some("scheme://login?token=AAAA-BBBB".to_string()),
+            code: None,
+            secret_label: None,
+            expires_at: DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp"),
+            revision: 3,
+            poll_interval_ms: 3_000,
+            retry_after_ms: None,
+            error_code: None,
+            flow_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            input_kind: None,
+            mode: Some(DeviceLinkMode::Default),
+            restartable: None,
+            alternate_available: Some(false),
+            default_mode_label: None,
+            alternate_mode_label: None,
+            display_kind: Some(DeviceLinkDisplayKind::QrCode),
+            extension_id: Some("example".to_string()),
+            vendor_user_ref: None,
         }
     }
 
@@ -782,6 +1037,190 @@ mod tests {
                 "pairing field {mutate} must reject independently"
             );
         }
+    }
+
+    /// The device-link frame rides both views as an additive optional field,
+    /// survives the wire in both directions, and reaches the context view
+    /// through `from_auth_prompt` rather than having to be re-attached by hand.
+    #[test]
+    fn device_link_frame_round_trips_through_both_views() {
+        let mut prompt = view(None, None);
+        prompt.challenge_kind = Some(AuthPromptChallengeKind::DeviceLink);
+        prompt.device_link = Some(device_link_view());
+
+        let encoded = serde_json::to_value(&prompt).expect("serialize prompt");
+        assert_eq!(encoded["challenge_kind"], "device_link");
+        assert_eq!(encoded["device_link"]["step"], "display");
+        assert_eq!(encoded["device_link"]["revision"], 3);
+        assert_eq!(encoded["device_link"]["poll_interval_ms"], 3_000);
+        assert!(
+            encoded["device_link"].get("retry_after_ms").is_none(),
+            "absent optionals are omitted, not encoded as null: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_value::<AuthPromptView>(encoded).expect("deserialize prompt"),
+            prompt
+        );
+
+        let context = AuthPromptContextView::from_auth_prompt(&prompt)
+            .expect("valid")
+            .expect("challenge kind present");
+        assert_eq!(context.challenge_kind, AuthPromptChallengeKind::DeviceLink);
+        assert_eq!(context.device_link.as_ref(), prompt.device_link.as_ref());
+
+        let encoded = serde_json::to_value(&context).expect("serialize context");
+        assert_eq!(
+            serde_json::from_value::<AuthPromptContextView>(encoded).expect("deserialize context"),
+            context
+        );
+    }
+
+    /// A prompt written before the device-link method existed has no field at
+    /// all; it must deserialize as `None` rather than failing.
+    #[test]
+    fn device_link_field_is_additive_for_rows_written_without_it() {
+        let legacy = serde_json::json!({
+            "turn_run_id": TurnRunId::new(),
+            "auth_request_ref": "gate:auth-legacy",
+            "headline": "Authentication required",
+            "body": "Authenticate to continue this run.",
+            "challenge_kind": "oauth_url",
+        });
+        let decoded: AuthPromptView =
+            serde_json::from_value(legacy).expect("legacy row deserializes");
+        assert!(decoded.device_link.is_none());
+
+        let context = serde_json::json!({ "challenge_kind": "device_link" });
+        let decoded: AuthPromptContextView =
+            serde_json::from_value(context).expect("legacy context deserializes");
+        assert!(decoded.device_link.is_none());
+    }
+
+    /// The frame's bounded fields fail closed, independently, and through the
+    /// wire — the same contract every sibling projection here holds.
+    #[test]
+    fn every_device_link_frame_field_rejects_on_its_own() {
+        let oversize = "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1);
+        let long_id = "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1);
+
+        for (label, mutate) in [
+            ("provider", 0usize),
+            ("display_name", 1),
+            ("instructions", 2),
+            ("qr_payload", 3),
+            ("code", 4),
+            ("secret_label", 5),
+        ] {
+            let mut frame = device_link_view();
+            match mutate {
+                0 => frame.provider = long_id.clone(),
+                1 => frame.display_name = oversize.clone(),
+                2 => frame.instructions = oversize.clone(),
+                3 => frame.qr_payload = Some(oversize.clone()),
+                4 => frame.code = Some(long_id.clone()),
+                _ => frame.secret_label = Some(long_id.clone()),
+            }
+            assert!(
+                AuthPromptContextView::new(
+                    AuthPromptChallengeKind::DeviceLink,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("base context")
+                .with_device_link(Some(frame))
+                .is_err(),
+                "{label} must reject independently"
+            );
+        }
+
+        // Empty is rejected distinctly from oversized.
+        let mut empty_instructions = device_link_view();
+        empty_instructions.instructions = String::new();
+        assert!(
+            AuthPromptContextView::new(
+                AuthPromptChallengeKind::DeviceLink,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("base context")
+            .with_device_link(Some(empty_instructions))
+            .is_err()
+        );
+
+        // And the wire path validates too, so a hand-built payload cannot slip
+        // past the constructor.
+        let wire = serde_json::json!({
+            "challenge_kind": "device_link",
+            "device_link": {
+                "provider": format!("{}bad", '\u{0}'),
+                "display_name": "Personal account",
+                "step": "display",
+                "instructions": "Scan this.",
+                "expires_at": "2023-11-14T22:13:20Z",
+                "revision": 1,
+                "poll_interval_ms": 3000,
+            },
+        });
+        assert!(serde_json::from_value::<AuthPromptContextView>(wire).is_err());
+    }
+
+    /// Every optional populated and valid, so each validator arm in
+    /// `DeviceLinkPromptView::validate` runs instead of short-circuiting.
+    #[test]
+    fn fully_populated_device_link_frame_passes_every_validator_arm() {
+        let frame = DeviceLinkPromptView {
+            provider: "example".to_string(),
+            display_name: "Personal account".to_string(),
+            step: DeviceLinkStepKind::Failed,
+            instructions: "That code was not accepted. Try again.".to_string(),
+            qr_payload: Some("scheme://login?token=AAAA-BBBB".to_string()),
+            code: Some("A1B2C3".to_string()),
+            secret_label: Some("Login code".to_string()),
+            expires_at: DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp"),
+            revision: 9,
+            poll_interval_ms: 3_000,
+            retry_after_ms: Some(30_000),
+            error_code: Some(DeviceLinkErrorCode::InvalidInput),
+            flow_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            input_kind: Some(DeviceLinkInputKind::Code),
+            mode: Some(DeviceLinkMode::Alternate),
+            restartable: Some(true),
+            alternate_available: Some(true),
+            default_mode_label: Some("Scan a code".to_string()),
+            alternate_mode_label: Some("Use your account name".to_string()),
+            display_kind: Some(DeviceLinkDisplayKind::Link),
+            extension_id: Some("example".to_string()),
+            vendor_user_ref: Some("@example-user".to_string()),
+        };
+
+        let context = AuthPromptContextView::new(
+            AuthPromptChallengeKind::DeviceLink,
+            Some("example".to_string()),
+            Some("Personal account".to_string()),
+            None,
+            Some(DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp")),
+            None,
+        )
+        .expect("base context")
+        .with_device_link(Some(frame))
+        .expect("every populated field is within bounds");
+
+        context.validate().expect("revalidation succeeds");
+
+        let encoded = serde_json::to_value(&context).expect("serialize");
+        assert_eq!(encoded["device_link"]["error_code"], "invalid_input");
+        assert_eq!(encoded["device_link"]["retry_after_ms"], 30_000);
+        assert_eq!(
+            serde_json::from_value::<AuthPromptContextView>(encoded)
+                .expect("wire round-trip revalidates every arm"),
+            context
+        );
     }
 
     /// `validate_bounded_text` treats newline and tab as legal formatting but

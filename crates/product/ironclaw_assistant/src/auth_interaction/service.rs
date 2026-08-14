@@ -227,8 +227,14 @@ impl DefaultAuthInteractionService {
         gate: &AuthGateRecord,
     ) -> Result<(), ProductSurfaceFailure> {
         match gate.status() {
+            // `AwaitingVendor` is a live device link (payload displayed, host
+            // polling the vendor). A Deny on it is the same instruction as a
+            // Deny on any other non-terminal flow: cancel it. Grouped with the
+            // other active statuses deliberately — a fallthrough would have
+            // left the link running after the user declined.
             AuthFlowStatus::Pending
             | AuthFlowStatus::AwaitingUser
+            | AuthFlowStatus::AwaitingVendor
             | AuthFlowStatus::CallbackReceived
             | AuthFlowStatus::Completing => {
                 self.flow_manager
@@ -445,16 +451,25 @@ fn map_auth_product_error(error: AuthProductError) -> ProductSurfaceFailure {
         AuthProductError::CrossScopeDenied => {
             auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
+        // `UnsupportedOperation` joins this arm rather than
+        // `UnsupportedResult`: it names a seam this backend never implements,
+        // which is the same thing a caller can do about `MalformedConfig` —
+        // nothing, and not by retrying differently.
         AuthProductError::BackendUnavailable
         | AuthProductError::BackendConflict
         | AuthProductError::LifecycleActivationFailed
+        | AuthProductError::UnsupportedOperation { .. }
         | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
+        // A stale link revision means the handle addresses a credential that
+        // was torn down and re-established underneath it — the same class as
+        // an already-terminal flow, so it maps to `StaleAuth`.
         AuthProductError::Canceled
         | AuthProductError::FlowAlreadyTerminal
         | AuthProductError::ProviderDenied
         | AuthProductError::RefreshFailed
+        | AuthProductError::LinkRevisionStale { .. }
         | AuthProductError::InvalidGrant => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
         AuthProductError::MalformedCallback
         | AuthProductError::TokenExchangeFailed
@@ -478,6 +493,7 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductSurfaceFail
         AuthProductError::BackendUnavailable
         | AuthProductError::BackendConflict
         | AuthProductError::LifecycleActivationFailed
+        | AuthProductError::UnsupportedOperation { .. }
         | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
@@ -490,6 +506,7 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductSurfaceFail
         | AuthProductError::FlowAlreadyTerminal
         | AuthProductError::ProviderDenied
         | AuthProductError::RefreshFailed
+        | AuthProductError::LinkRevisionStale { .. }
         | AuthProductError::InvalidGrant => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
         AuthProductError::MalformedCallback
         | AuthProductError::TokenExchangeFailed

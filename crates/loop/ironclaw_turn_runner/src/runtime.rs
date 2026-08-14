@@ -95,52 +95,6 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
-/// Environment variable that enables bounded concurrent capability batches.
-pub const REBORN_PARALLEL_TOOL_BATCH_ENV: &str = "REBORN_PARALLEL_TOOL_BATCH";
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ParallelToolBatchMode {
-    #[default]
-    Off,
-    On,
-}
-
-impl ParallelToolBatchMode {
-    pub fn from_env() -> Self {
-        match std::env::var(REBORN_PARALLEL_TOOL_BATCH_ENV) {
-            Ok(value) => Self::from_raw(Some(&value)),
-            Err(std::env::VarError::NotPresent) => Self::Off,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
-                    "REBORN_PARALLEL_TOOL_BATCH is not valid UTF-8; falling back to Off"
-                );
-                Self::Off
-            }
-        }
-    }
-
-    fn from_raw(raw: Option<&str>) -> Self {
-        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-            Some("on" | "1" | "true") => Self::On,
-            None | Some("" | "off" | "0" | "false") => Self::Off,
-            Some(_) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_PARALLEL_TOOL_BATCH_ENV,
-                    "unrecognized REBORN_PARALLEL_TOOL_BATCH value; falling back to Off"
-                );
-                Self::Off
-            }
-        }
-    }
-
-    fn enables_parallel_batches(self) -> bool {
-        matches!(self, Self::On)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -160,9 +114,6 @@ pub struct DefaultPlannedRuntimeConfig {
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
-    /// Rollout switch for bounded concurrent execution of batches whose
-    /// capability descriptors all permit parallel execution.
-    pub parallel_tool_batch: ParallelToolBatchMode,
     /// Profile-owned visibility preferences, keyed by capability-surface
     /// profile id. Values are canonical capability ids and never grant access.
     pub tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
@@ -185,7 +136,6 @@ impl Default for DefaultPlannedRuntimeConfig {
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
-            parallel_tool_batch: ParallelToolBatchMode::from_env(),
             tool_disclosure_profile_pins: HashMap::new(),
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
@@ -687,7 +637,6 @@ where
     let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
         parts.config.planned_model_availability_retry_attempts,
-        parts.config.parallel_tool_batch.enables_parallel_batches(),
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
@@ -1110,10 +1059,10 @@ mod tests {
     };
 
     use super::{
-        DefaultPlannedRuntimeConfig, ParallelToolBatchMode,
-        REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV, RuntimeProfiledCapabilityPortFactory,
-        SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
-        ToolDisclosureMode, parse_tool_disclosure_profile_pins, scheduler_permit_count,
+        DefaultPlannedRuntimeConfig, REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
+        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
+        ToolDisclosureCapabilityDecorator, ToolDisclosureMode, parse_tool_disclosure_profile_pins,
+        scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -1130,9 +1079,9 @@ mod tests {
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, ConcurrencyHint,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-        LoopRunContext, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, InMemoryRunProfileResolver,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+        RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     };
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
@@ -1142,38 +1091,6 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory,
     };
-
-    #[test]
-    fn parallel_tool_batch_mode_fails_closed_to_off() {
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(None),
-            ParallelToolBatchMode::Off
-        );
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(Some("")),
-            ParallelToolBatchMode::Off
-        );
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(Some("garbage")),
-            ParallelToolBatchMode::Off
-        );
-        assert_eq!(
-            ParallelToolBatchMode::from_raw(Some("off")),
-            ParallelToolBatchMode::Off
-        );
-        assert!(!ParallelToolBatchMode::Off.enables_parallel_batches());
-    }
-
-    #[test]
-    fn parallel_tool_batch_mode_accepts_explicit_on_values() {
-        for raw in ["on", "ON", "1", "true", "TRUE"] {
-            assert_eq!(
-                ParallelToolBatchMode::from_raw(Some(raw)),
-                ParallelToolBatchMode::On
-            );
-        }
-        assert!(ParallelToolBatchMode::On.enables_parallel_batches());
-    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {
@@ -1707,7 +1624,6 @@ mod tests {
             safe_name: capability_id.to_string(),
             safe_description: format!("{capability_id} description"),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         }
     }

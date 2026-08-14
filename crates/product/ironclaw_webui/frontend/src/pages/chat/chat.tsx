@@ -24,7 +24,7 @@ import { useChat } from "./hooks/useChat";
 import { useChatCommands } from "./hooks/useChatCommands";
 import { matchCommand } from "./lib/chat-commands";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
-import { channelConnectionFromGate } from "./lib/gates";
+import { channelConnectionFromGate, gateIsDeviceLink } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
@@ -46,6 +46,23 @@ function getInspectorPanel() {
     })),
   );
   return LazyInspectorPanel;
+}
+
+// The device-link card carries a whole multi-step flow — payload rendering,
+// step machine, polling, input forms — for a gate most sessions never see.
+// Loaded on demand for the same reason the inspector is: the initial /chat
+// route pays for what every chat needs, not for every card it might ever show.
+let LazyAuthDeviceLinkCard: React.LazyExoticComponent<
+  React.ComponentType<{ gate: unknown; onCancel: () => void }>
+> | null = null;
+
+function getAuthDeviceLinkCard() {
+  LazyAuthDeviceLinkCard ??= React.lazy(() =>
+    import("./components/auth-device-link-card").then(({ AuthDeviceLinkCard }) => ({
+      default: AuthDeviceLinkCard,
+    })),
+  );
+  return LazyAuthDeviceLinkCard;
 }
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
@@ -160,6 +177,9 @@ export function Chat({
     : null;
   const activeThreadHasChannelConnectionGate =
     activeThreadHasGate && Boolean(channelConnectionGate);
+  // Same one-predicate discipline as the pairing selector above: the branch
+  // and the chunk it pulls are decided together, never re-derived at render.
+  const DeviceLinkCard = gateIsDeviceLink(pendingGate) ? getAuthDeviceLinkCard() : null;
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
@@ -486,6 +506,17 @@ export function Chat({
                     onCancel={() =>
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
+                )
+                : DeviceLinkCard
+                  ? (
+                  // A device link is a multi-step vendor handshake, not a
+                  // credential to paste: the card drives the flow itself and
+                  // the run resumes when the host takes custody of the
+                  // session. Cancelling abandons the parked turn, exactly as
+                  // the pairing card does.
+                  <React.Suspense fallback={null}>
+                    <DeviceLinkCard gate={pendingGate} onCancel={handleCancelRun} />
+                  </React.Suspense>
                 )
                 : pendingGate.challengeKind === "manual_token"
                   ? (

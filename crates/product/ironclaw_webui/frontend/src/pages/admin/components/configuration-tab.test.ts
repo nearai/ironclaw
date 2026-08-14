@@ -8,6 +8,7 @@ import "../../../i18n/en";
 import {
   ConfigurationGroup,
   buildConfigurationSaveMutation,
+  configurationSaveErrorMessageKey,
 } from "./configuration-tab";
 
 function visit(node, fn) {
@@ -155,6 +156,17 @@ test("configuration save mutation carries the loaded revision and client idempot
       { handle: "public_name", value: "fixture-bot" },
     ],
   });
+});
+
+test("revision conflicts tell the operator the form was refreshed for a safe retry", () => {
+  assert.equal(
+    configurationSaveErrorMessageKey({ status: 409 }),
+    "admin.configuration.saveConflict",
+  );
+  assert.equal(
+    configurationSaveErrorMessageKey(new Error("offline")),
+    "admin.configuration.saveFailed",
+  );
 });
 
 test.each([

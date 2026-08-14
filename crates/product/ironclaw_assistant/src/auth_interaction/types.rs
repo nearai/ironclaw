@@ -172,6 +172,17 @@ impl AuthInteractionStatus {
             AuthFlowStatus::AwaitingUser => Some(Self::AwaitingUser),
             AuthFlowStatus::CallbackReceived => Some(Self::CallbackReceived),
             AuthFlowStatus::Completing => Some(Self::Completing),
+            // TODO(design): `AwaitingVendor` is non-terminal but has no
+            // chat-serviceable projection today. It is mapped to `None` — the
+            // device-link flow does not appear as a pending *chat* auth
+            // interaction — which matches the position already taken in
+            // `run_delivery/prompts.rs` (`auth_prompt_is_serviceable` returns
+            // false for `DeviceLink`: "completed in the web app or not at
+            // all"). If the product decides the chat list should show an
+            // in-progress link (read-only, pointing at the web app), this
+            // needs an `AuthInteractionStatus::AwaitingVendor` variant plus a
+            // wire-contract decision; do not add one implicitly.
+            AuthFlowStatus::AwaitingVendor => None,
             AuthFlowStatus::Completed
             | AuthFlowStatus::Failed
             | AuthFlowStatus::Expired
@@ -181,8 +192,8 @@ impl AuthInteractionStatus {
 }
 
 impl AuthInteractionChallengeView {
-    fn from_challenge(challenge: &AuthChallenge) -> Self {
-        match challenge {
+    fn from_challenge(challenge: &AuthChallenge) -> Option<Self> {
+        Some(match challenge {
             AuthChallenge::OAuthUrl { expires_at, .. } => Self::OAuthRedirectRequired {
                 expires_at: *expires_at,
             },
@@ -218,7 +229,15 @@ impl AuthInteractionChallengeView {
                 account_id: *account_id,
                 provider: provider.clone(),
             },
-        }
+            // TODO(design): a device-link step has no redacted chat-surface
+            // projection. Two of its steps carry secrets (login code, cloud
+            // password) and the frame is a multi-round card the web app owns,
+            // so nothing is emitted here rather than inventing a truncated
+            // view. If chat should ever *display* (not service) an in-flight
+            // link, add an explicit `AuthInteractionChallengeView` variant and
+            // decide which fields are safe — do not widen this mapping ad hoc.
+            AuthChallenge::DeviceLinkStep { .. } => return None,
+        })
     }
 }
 
@@ -322,7 +341,7 @@ impl AuthGateRecord {
                 .flow
                 .challenge
                 .as_ref()
-                .map(AuthInteractionChallengeView::from_challenge),
+                .and_then(AuthInteractionChallengeView::from_challenge),
             expires_at: self.flow.expires_at,
         })
     }

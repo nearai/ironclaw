@@ -1822,6 +1822,8 @@ fn auth_flow(
         updated_at: now,
         expires_at: now + Duration::minutes(10),
         continuation_emitted_at: None,
+        // Single-shot OAuth fixture: no multi-step device-link state.
+        step_state: None,
         // Generic auth-interaction contract fixture, not extension-owned.
         requester_extension: None,
     }
