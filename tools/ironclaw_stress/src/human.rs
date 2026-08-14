@@ -522,7 +522,11 @@ fn push_db_probe_table(output: &mut String, db_probe: &DbProbeSummary) {
             "idle_seconds",
             measurement.idle_observation_seconds.to_string(),
         );
-        push_metric(output, "stats_scope", measurement.stats_scope.clone());
+        push_metric(
+            output,
+            "stats_scope",
+            measurement.stats_scope.as_str().to_string(),
+        );
         push_metric(output, "stats_reset", measurement.reset_stats.to_string());
         if !db_probe.delta.libsql_table_writes.is_empty() {
             push_libsql_table_write_table(output, db_probe);
