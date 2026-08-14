@@ -34,10 +34,10 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
-    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ConcurrencyHint,
-    ContentDigest, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-    LoopHostMilestoneSink, LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext,
-    LoopSafeSummary, ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
+    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ContentDigest,
+    LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+    LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary,
+    ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
     resolution::{self, GatedResolution},
@@ -1775,7 +1775,7 @@ impl HostRuntimeLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }
 
@@ -1870,7 +1870,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
                     description_trust: capability.description_trust,
-                    concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
                 })
             })
@@ -3155,20 +3154,6 @@ fn provider_tool_name_base(capability_id: &str) -> String {
     }
 }
 
-pub fn concurrency_hint_from_effects(effects: &[EffectKind]) -> ConcurrencyHint {
-    if effects.is_empty() {
-        return ConcurrencyHint::Exclusive;
-    }
-    if effects
-        .iter()
-        .all(|effect| matches!(effect, EffectKind::ReadFilesystem | EffectKind::UseSecret))
-    {
-        ConcurrencyHint::SafeForParallel
-    } else {
-        ConcurrencyHint::Exclusive
-    }
-}
-
 fn should_retry_result_write(
     outcome: &RuntimeCapabilityOutcome,
     result: &Result<GatedResolution, AgentLoopHostError>,
@@ -4155,49 +4140,6 @@ mod tests {
     use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
     use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
-
-    #[test]
-    fn concurrency_hint_treats_empty_effects_as_exclusive() {
-        assert_eq!(
-            concurrency_hint_from_effects(&[]),
-            ConcurrencyHint::Exclusive
-        );
-    }
-
-    #[test]
-    fn concurrency_hint_treats_read_and_secret_effects_as_parallel_safe() {
-        let effects = vec![EffectKind::ReadFilesystem, EffectKind::UseSecret];
-
-        assert_eq!(
-            concurrency_hint_from_effects(&effects),
-            ConcurrencyHint::SafeForParallel
-        );
-    }
-
-    #[test]
-    fn concurrency_hint_treats_any_mutating_effect_as_exclusive() {
-        let exclusive_effects = [
-            EffectKind::WriteFilesystem,
-            EffectKind::DeleteFilesystem,
-            EffectKind::Network,
-            EffectKind::ExecuteCode,
-            EffectKind::SpawnProcess,
-            EffectKind::DispatchCapability,
-            EffectKind::ModifyExtension,
-            EffectKind::ModifyApproval,
-            EffectKind::ModifyBudget,
-            EffectKind::ExternalWrite,
-            EffectKind::Financial,
-        ];
-
-        for effect in exclusive_effects {
-            assert_eq!(
-                concurrency_hint_from_effects(&[effect]),
-                ConcurrencyHint::Exclusive,
-                "{effect:?}"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn decorating_factory_with_no_decorators_delegates_to_inner() {

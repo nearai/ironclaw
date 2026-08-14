@@ -323,6 +323,15 @@ pub enum RuntimeCredentialAccountSetup {
     /// connect gate, this variant is host-issued-code, provider-keyed, and
     /// serviced by the standard auth-continuation fan-out.
     Pairing,
+    /// Linked device: the user authorizes a long-lived session on the vendor's
+    /// own client (a login code delivered in-app, plus a second factor where
+    /// the account has one), and the host takes custody of the resulting
+    /// session material. Distinct from every neighbour here — there is no
+    /// authorization server and no bearer token (`OAuth`), the user never
+    /// hands over a pre-existing secret (`ManualToken`), and a credential
+    /// account IS minted (`Pairing`). Satisfaction is the stored session, so
+    /// revocation is host-side deletion plus a vendor-side session logout.
+    DeviceLink,
     /// Setup kinds this enum no longer models but persisted records may still
     /// carry — e.g. the pre-OAuth `channel_pairing` Slack connect gate removed
     /// by #5604, which was serialized inside `TurnRunRecord.credential_requirements`
@@ -448,6 +457,46 @@ mod credential_setup_wire_tests {
             serde_json::json!({"kind": "pairing"}),
             "the pairing gate's persisted wire shape is locked"
         );
+    }
+
+    /// The linked-device setup kind round-trips as `device_link` in both
+    /// directions. It is persisted inside `TurnRunRecord.credential_requirements`
+    /// for a run parked on a device-link gate, so the token is a durable wire
+    /// contract, not an internal name.
+    #[test]
+    fn device_link_setup_round_trips_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(RuntimeCredentialAccountSetup::DeviceLink).expect("serializes"),
+            serde_json::json!({"kind": "device_link"}),
+            "the device-link setup's persisted wire shape is locked"
+        );
+
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"device_link"}"#).expect("device_link");
+        assert_eq!(parsed, RuntimeCredentialAccountSetup::DeviceLink);
+    }
+
+    /// Adding `DeviceLink` must not turn the `#[serde(other)]` catch-all into
+    /// a match on known kinds: a kind a *future* binary introduces still has
+    /// to fold to `Retired` rather than fail the whole turn-state snapshot.
+    /// Pinned separately from the legacy case above because that one tests a
+    /// kind we retired, and this one tests a kind we have not invented yet —
+    /// the direction that breaks when someone "tightens" the enum.
+    #[test]
+    fn unknown_future_setup_kind_still_folds_to_retired() {
+        for wire in [
+            r#"{"kind":"device_link_v2"}"#,
+            r#"{"kind":"passkey","challenge":"abc"}"#,
+            r#"{"kind":"linked_device"}"#,
+        ] {
+            let parsed: RuntimeCredentialAccountSetup =
+                serde_json::from_str(wire).expect("an unknown setup kind must stay loadable");
+            assert_eq!(
+                parsed,
+                RuntimeCredentialAccountSetup::Retired,
+                "{wire} must fold to Retired"
+            );
+        }
     }
 }
 

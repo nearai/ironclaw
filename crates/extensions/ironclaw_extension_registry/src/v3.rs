@@ -84,6 +84,11 @@ pub enum ManifestV3Error {
     #[error("[auth.{vendor}] recipe is not referenced by any credential")]
     UnreferencedAuthRecipe { vendor: String },
     #[error(
+        "manifest declares more than one `method = \"device_link\"` auth surface \
+         ([auth.{first}] and [auth.{second}]); an extension links at most one account"
+    )]
+    MultipleDeviceLinkRecipes { first: String, second: String },
+    #[error(
         "credential audience host `{host}` must be a literal host (wildcards are not allowed \
          in v3 manifests)"
     )]
@@ -359,6 +364,14 @@ pub(crate) fn parse_v3(
 
     // Validate recipes.
     let mut recipes: BTreeMap<VendorId, VendorAuthRecipe> = BTreeMap::new();
+    // At most one device-link surface per extension, structurally, the way
+    // `[channel]` is at most one. Nothing downstream can express two: the
+    // binding slot holds a single adapter, and the host resolves the flow's
+    // vendor by scanning the surfaces and taking the first device-link match —
+    // so a second one would not be rejected, it would be silently ignored, and
+    // flows, minted accounts, and custody grants would all attribute to
+    // whichever vendor happened to sort first.
+    let mut device_link_vendor: Option<String> = None;
     for (vendor, recipe) in raw.auth {
         recipe
             .validate()
@@ -366,6 +379,15 @@ pub(crate) fn parse_v3(
                 vendor: vendor.clone(),
                 error,
             })?;
+        if matches!(recipe, VendorAuthRecipe::DeviceLink(_)) {
+            if let Some(first) = &device_link_vendor {
+                return Err(ManifestV3Error::MultipleDeviceLinkRecipes {
+                    first: first.clone(),
+                    second: vendor.clone(),
+                });
+            }
+            device_link_vendor = Some(vendor.clone());
+        }
         recipes.insert(VendorId::new(vendor)?, recipe);
     }
 
@@ -695,12 +717,7 @@ pub(crate) fn parse_v3(
     let auth = recipes
         .into_iter()
         .map(|(vendor, recipe)| {
-            let setup = match &recipe {
-                VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
-                    scopes: oauth.scopes.clone(),
-                },
-                VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
-            };
+            let setup = account_setup_for_recipe(&recipe);
             ResolvedAuthSurface {
                 vendor,
                 setup,
@@ -864,6 +881,27 @@ fn derived_host_ports(effects: &[EffectKind], sandboxed_runtime: bool) -> Vec<St
     }
 }
 
+/// Project a declared auth recipe onto the credential-account setup a runtime
+/// credential requirement carries.
+///
+/// One function, two call sites (the per-credential requirement and the
+/// per-vendor resolved auth surface) precisely because they must never
+/// disagree: a vendor whose surface says `oauth` while its credentials say
+/// `manual_token` produces a connect affordance that services a challenge the
+/// engine cannot mint.
+fn account_setup_for_recipe(recipe: &VendorAuthRecipe) -> RuntimeCredentialAccountSetup {
+    match recipe {
+        VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
+            scopes: oauth.scopes.clone(),
+        },
+        VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
+        // Display metadata only — the recipe declares no scopes and no
+        // endpoints, so there is nothing to carry onto the setup. Satisfaction
+        // is the stored session the device link produces.
+        VendorAuthRecipe::DeviceLink(_) => RuntimeCredentialAccountSetup::DeviceLink,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, private normalization helper pending a CredentialContext bundle if it grows, extension-runtime P2
 fn credential_from_v3(
     handle: &str,
@@ -886,12 +924,7 @@ fn credential_from_v3(
             vendor: vendor.as_str().to_string(),
         });
     };
-    let setup = match recipe {
-        VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
-            scopes: oauth.scopes.clone(),
-        },
-        VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
-    };
+    let setup = account_setup_for_recipe(recipe);
     referenced_vendors.insert(vendor.clone(), ());
     Ok(RawRuntimeCredentialV2 {
         handle: handle.to_string(),

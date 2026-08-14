@@ -20,6 +20,40 @@ pub struct LoadContext {
     pub extension_id: String,
     pub installation_id: String,
     pub resolved: Arc<ResolvedExtensionManifest>,
+    /// Admin-configuration secret material for **this** extension's declared
+    /// secret fields, resolvable at load — the one I/O-legal point before
+    /// `bind`. Exists for the device-link class of extension, whose vendor
+    /// protocol library must hold the operator's application secret
+    /// in-process (the declared carve-out); every other factory ignores it.
+    /// Pre-scoped to the loading extension: a factory cannot name another
+    /// extension's fields through it.
+    pub admin_secrets: Arc<dyn LoadTimeAdminSecrets>,
+}
+
+/// Load-time access to the loading extension's own secret admin fields.
+#[async_trait]
+pub trait LoadTimeAdminSecrets: Send + Sync {
+    /// The stored value of one of this extension's `secret = true` admin
+    /// fields, or `None` when unset (or when the deployment wires no
+    /// admin-configuration service). Factories treat `None` as "not
+    /// configured" and construct adapters that fail closed.
+    async fn secret(
+        &self,
+        handle: &ironclaw_host_api::ids::SecretHandle,
+    ) -> Option<secrecy::SecretString>;
+}
+
+/// The fail-closed default: every field reads as unset.
+pub struct UnavailableLoadTimeAdminSecrets;
+
+#[async_trait]
+impl LoadTimeAdminSecrets for UnavailableLoadTimeAdminSecrets {
+    async fn secret(
+        &self,
+        _handle: &ironclaw_host_api::ids::SecretHandle,
+    ) -> Option<secrecy::SecretString> {
+        None
+    }
 }
 
 /// A loaded extension: the entrypoint plus, for discovery-owning loaders
@@ -57,12 +91,15 @@ pub trait ExtensionLoader: Send + Sync {
 /// (overview.md §4.0): the native loader resolves `runtime.service` against
 /// the injected factory set. Composition receives these as input and never
 /// links a concrete extension crate.
+#[async_trait]
 pub trait NativeExtensionFactory: Send + Sync {
     /// The `runtime.service` identifier this factory serves
     /// (e.g. `some-vendor.extension/v1`).
     fn service(&self) -> &str;
 
-    /// Produce the extension's entrypoint. Runs at load time; `bind` stays
+    /// Produce the extension's entrypoint. Runs at load time — the one
+    /// I/O-legal point (a factory may resolve its extension's admin-secret
+    /// fields through [`LoadContext::admin_secrets`]); `bind` stays
     /// side-effect-free.
-    fn load(&self, ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError>;
+    async fn load(&self, ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError>;
 }

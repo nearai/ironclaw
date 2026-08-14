@@ -110,6 +110,12 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
         TRIGGER_CREATE_DESCRIPTION.contains("never through integration messaging tools"),
         "messages to the requester must be steered away from act-as-user vendor sends: {TRIGGER_CREATE_DESCRIPTION}"
     );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("may use the linked integration capabilities available to the owning user")
+            && !TRIGGER_CREATE_DESCRIPTION.contains("unavailable to scheduled automations"),
+        "trigger_create must allow future scheduled loop-runs to use the owning user's linked integrations: {TRIGGER_CREATE_DESCRIPTION}"
+    );
 }
 
 #[test]

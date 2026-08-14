@@ -14,13 +14,13 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-    CapabilityInputRepair, CapabilityResumeToken, ConcurrencyHint, LoopCancelReasonKind,
-    LoopCancellationSignal, LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError,
-    LoopCompactionMode, LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind,
-    LoopContextCompactionKind, LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput,
-    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView,
-    LoopProcessRef, LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition,
-    LoopRecoveryStage, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+    CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionMode,
+    LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
+    LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef,
+    LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+    LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation, ObservationTrust,
     ParentLoopOutput, PromptMode, ProviderToolCallReplay, ToolObservationDetail,
     ToolObservationStatus, VisibleCapabilityRequest, resolution,
@@ -34,9 +34,8 @@ use crate::state::{
     TerminalWarningObservation,
 };
 use crate::strategies::{
-    BoundedParallelBatchPolicyStrategy, CapabilityBatchTurnSummary, CapabilityFilter,
-    DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
-    capability_error_to_failure_kind,
+    CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
+    StopKind, TurnSummary, capability_error_to_failure_kind,
 };
 use crate::test_support::compaction::{
     active_task_preserving_compaction_index, compaction_metadata,
@@ -3474,7 +3473,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
+async fn model_emitted_batch_overlaps_calls_by_default_and_preserves_input_order() {
     let first_ref = LoopResultRef::new("result:parallel-first").expect("valid");
     let second_ref = LoopResultRef::new("result:parallel-second").expect("valid");
     let host = MockHost::new(vec![two_calls_response(), reply_response()])
@@ -3506,11 +3505,7 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
     let run_host = host.clone();
     let executor = tokio::spawn(async move {
         CanonicalAgentLoopExecutor
-            .execute_family(
-                &support::family_with_parallel_batch_execution(),
-                &run_host,
-                state,
-            )
+            .execute_family(&crate::families::default(), &run_host, state)
             .await
     });
 
@@ -4464,7 +4459,6 @@ async fn parallel_batch_merges_exiting_sibling_state_into_gate_checkpoint() {
     // with a recovery strategy that aborts capability errors (so the sibling
     // outcome exits).
     let planner = DefaultPlanner::compose_default()
-        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
         .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
     let family = LoopFamily::new(
         LoopFamilyId::new("executor-exit-sibling-merge-test").expect("valid test family id"),
@@ -4654,7 +4648,6 @@ async fn parallel_batch_rebuilds_pre_gate_terminal_exit_against_merged_checkpoin
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
     let planner = DefaultPlanner::compose_default()
-        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
         .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
     let family = LoopFamily::new(
         LoopFamilyId::new("executor-rebuilt-exit-test").expect("valid test family id"),
@@ -4793,7 +4786,6 @@ async fn coalesced_dependent_gate_precedes_later_terminal_sibling() {
             ),
         ]);
     let planner = DefaultPlanner::compose_default()
-        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
         .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
     let family = LoopFamily::new(
         LoopFamilyId::new("coalesced-gate-terminal-order-test").expect("valid test family id"),
@@ -5012,10 +5004,9 @@ async fn parallel_batch_cancelled_sibling_ends_run_with_checked_state() {
 }
 
 #[tokio::test]
-async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enabled() {
-    let host = MockHost::new(vec![calls_response_with_count(2)])
-        .with_default_concurrency_hint(ConcurrencyHint::Exclusive)
-        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+async fn ordered_middleware_preserves_the_complete_model_batch_contract() {
+    let host = MockHost::new(vec![calls_response_with_count(2)]).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new("gate:exclusive-early-break").expect("valid"),
@@ -5025,7 +5016,8 @@ async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enab
                 .resolution,
             ],
             stopped_on_suspension: true,
-        }]);
+        },
+    ]);
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
@@ -10939,7 +10931,6 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -11342,7 +11333,6 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
             // Z: demo.write
@@ -11353,7 +11343,6 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 safe_name: "demo_write".to_string(),
                 safe_description: "demo write capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -11613,7 +11602,6 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -11829,7 +11817,6 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])

@@ -250,6 +250,10 @@ name = "reborn_group_extensions"
 path = "tests/integration/group_extensions/main.rs"
 
 [[test]]
+name = "reborn_group_device_link"
+path = "tests/integration/group_device_link/main.rs"
+
+[[test]]
 name = "reborn_group_triggers"
 path = "tests/integration/group_triggers/main.rs"
 

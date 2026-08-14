@@ -1678,6 +1678,7 @@ test("useChatEvents: gate-only projection rebuilds pending gate from gate identi
     authorizationUrl: null,
     expiresAt: null,
     connection: null,
+    deviceLink: null,
   });
   assert.deepEqual(plain(harness.activeRun), {
     runId,

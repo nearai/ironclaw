@@ -231,6 +231,7 @@ fn channel_connection_strategy(
         ChannelConnectionStrategy::WebGeneratedCode => {
             RebornChannelConnectStrategy::WebGeneratedCode
         }
+        ChannelConnectionStrategy::DeviceLink => RebornChannelConnectStrategy::DeviceLink,
         ChannelConnectionStrategy::OAuth => RebornChannelConnectStrategy::OAuth,
     }
 }

@@ -234,8 +234,8 @@ impl HookedLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HookedLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        true
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -699,6 +699,10 @@ mod tests {
 
     #[async_trait]
     impl LoopCapabilityPort for AlwaysCompletedPort {
+        fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+            false
+        }
+
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
@@ -713,7 +717,6 @@ mod tests {
                     safe_name: "cap.x".to_string(),
                     safe_description: "test capability".to_string(),
                     description_trust: Default::default(),
-                    concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::Exclusive,
                     parameters_schema: serde_json::Value::Null,
                 }],
             })
@@ -763,14 +766,14 @@ mod tests {
     struct DenyingHook;
 
     #[test]
-    fn hooked_port_requires_ordered_batch_entry() {
+    fn hooked_port_preserves_inner_ordered_batch_requirement() {
         let wrapped = HookedLoopCapabilityPort::new(
             Arc::new(AlwaysCompletedPort::new()),
             Arc::new(HookDispatcher::new(HookRegistry::new())),
             tenant(),
         );
 
-        assert!(wrapped.requires_ordered_batch_invocation());
+        assert!(!wrapped.requires_ordered_batch_invocation(&[invocation("cap.x")]));
     }
 
     #[async_trait]

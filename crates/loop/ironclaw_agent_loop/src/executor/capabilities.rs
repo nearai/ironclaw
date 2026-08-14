@@ -37,18 +37,16 @@ use super::{
     cancelled_reason_from_signal, capability_batch_counts, capability_call_signature,
     capability_error_failure_category, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_port_error_is_terminal, capability_summary,
-    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    gate_tool_result_summary, honor_capability_retry_alteration,
-    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary_or_fallback,
+    capability_is_visible, capability_port_error_is_terminal, clear_matching_pending_auth_resume,
+    clear_matching_pending_external_tool_resume, failed_exit, gate_tool_result_summary,
+    honor_capability_retry_alteration, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
     strategies::{
-        BatchPolicy, CapabilityBatchExecutionMode, CapabilityBatchTurnSummary,
-        CapabilityErrorSummary, GateKind, RecoveryOutcome, RetryAlteration,
-        SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
+        BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
+        RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
     },
 };
 
@@ -210,15 +208,15 @@ impl CapabilityStage {
         policy: BatchPolicy,
         invocations: Vec<LoopRequest>,
     ) -> Result<InvokedCapabilityBatch, ironclaw_loop_contracts::AgentLoopHostError> {
-        if ctx.planner.batch().execution_mode() != CapabilityBatchExecutionMode::BoundedParallel
-            || policy != BatchPolicy::Parallel
-            || ctx.host.requires_ordered_batch_invocation()
-        {
+        let ordered = invocations.len() >= 2
+            && policy == BatchPolicy::Parallel
+            && ctx.host.requires_ordered_batch_invocation(&invocations);
+        if invocations.len() < 2 || policy != BatchPolicy::Parallel || ordered {
             return ctx
                 .host
                 .invoke_capability_batch(LoopRequestBatch {
                     invocations,
-                    stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential),
+                    stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential) || ordered,
                 })
                 .await
                 .map(InvokedCapabilityBatch::from_resolution_batch);
@@ -480,13 +478,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             }
         }
 
-        // Compute batch policy from the final set of calls that will actually
-        // reach invoke_capability_batch (post auth-deny partition if applicable).
-        let summaries = visible_calls
-            .iter()
-            .map(|call| capability_summary(&surface_index, call))
-            .collect::<Vec<_>>();
-        let policy = ctx.planner.batch().policy(&state, &summaries);
+        // Multiple calls in one model response are the model's declaration
+        // that the calls are semantically independent. The host may still
+        // require ordered batch entry for operational or policy reasons.
+        let policy = BatchPolicy::Parallel;
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
 

@@ -1184,7 +1184,7 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
         .expect("telegram group lists fields");
     // Each handle must carry ITS OWN manifest help text — a distinctive
     // fragment per field, so a description copied to every field or attached
-    // to the wrong handle fails here even though all four are non-empty.
+    // to the wrong handle fails here even though all six are non-empty.
     let expected_fragments = [
         ("telegram_bot_token", "BotFather"),
         ("telegram_webhook_secret", "random string you invent"),
@@ -1193,6 +1193,8 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
             "/webhooks/extensions/telegram/updates",
         ),
         ("bot_username", "without the leading @"),
+        ("telegram_api_id", "API development tools"),
+        ("telegram_api_hash", "issued beside your api_id"),
     ];
     for (handle, fragment) in expected_fragments {
         let description = telegram_fields
@@ -1515,11 +1517,11 @@ async fn user_extension_removal_does_not_erase_admin_configuration() {
 }
 
 /// Tenant administrator configuration is consumed by the channel host but is
-/// never projected onto an ordinary caller's personal setup surface. Pairing
-/// still proves the manifest-declared consumer received the saved deployment
-/// values without exposing their handles or labels through the setup API.
+/// never projected onto an ordinary caller's personal setup surface. Telegram
+/// uses its device-link setup and therefore must not expose the retired bot
+/// proof-code pairing route.
 #[tokio::test]
-async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consumes_it() {
+async fn telegram_setup_hides_admin_configuration_and_excludes_legacy_pairing() {
     let fixture = AdminConfigurationFixture::new("effective-consumer").await;
     let (save_status, save_body) = put_json(
         fixture.operator_router(),
@@ -1566,7 +1568,7 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
     )
     .await;
     let (pairing_status, pairing_body) = post_json(
-        fixture.pairing_member_router(),
+        fixture.legacy_pairing_member_router(),
         "/api/webchat/v2/extensions/telegram/pairing/mint",
         serde_json::json!({}),
     )
@@ -1589,7 +1591,7 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
             StatusCode::OK,
             StatusCode::OK,
             StatusCode::BAD_REQUEST,
-            StatusCode::OK,
+            StatusCode::NOT_FOUND,
         ),
         "save: {save_body}; install: {install_body}; setup: {setup_body}; list: {list_body}; \
          registry: {registry_body}; caller admin submit: {caller_admin_submit_body}; pairing: \
@@ -1605,10 +1607,14 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
         "telegram_webhook_secret",
         "telegram_webhook_url",
         "bot_username",
+        "telegram_api_id",
+        "telegram_api_hash",
         "Bot token",
         "Webhook secret token",
         "Public webhook URL",
         "Bot username",
+        "MTProto api_id",
+        "MTProto api_hash",
         "Telegram deployment configuration",
     ] {
         for (surface, wire) in &ordinary_caller_wires {
@@ -1622,17 +1628,23 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
         setup_body.get("fields").is_none(),
         "caller setup must not expose an administrator field collection: {setup_body}"
     );
-    assert!(
-        pairing_body["code"]
-            .as_str()
-            .is_some_and(|code| !code.is_empty()),
-        "pairing mint omitted its code: {pairing_body}"
+    let credential_requirements = setup_body
+        .pointer("/payload/extensions/0/summary/credential_requirements")
+        .and_then(Value::as_array)
+        .expect("Telegram setup projects credential requirements");
+    assert_eq!(
+        credential_requirements,
+        &[serde_json::json!({
+            "name": "telegram_linked_session",
+            "provider": "telegram",
+            "required": true,
+            "setup": {"kind": "device_link"}
+        })],
+        "one linked session shared by every Telegram tool must render as one setup requirement"
     );
-    assert!(
-        pairing_body["deep_link"]
-            .as_str()
-            .is_some_and(|link| link.starts_with("https://t.me/ironclaw_test_bot?start=")),
-        "pairing mint did not consume the manifest-configured deep-link value: {pairing_body}"
+    assert_eq!(
+        pairing_body["error"], "unknown_extension",
+        "device-link Telegram must not register the retired pairing service: {pairing_body}"
     );
     fixture.shutdown().await;
 }
@@ -1657,6 +1669,9 @@ impl AdminConfigurationFixture {
         .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
         .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
         .with_bundled_first_party_for_test()
+        .with_native_extension_factories(vec![
+            reborn_support::harness::profiles::extension::telegram_fixture_factory(),
+        ])
         .with_network_http_egress_for_test(Arc::new(
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
@@ -1703,7 +1718,7 @@ impl AdminConfigurationFixture {
         }))
     }
 
-    fn pairing_member_router(&self) -> Router {
+    fn legacy_pairing_member_router(&self) -> Router {
         let pairing = ironclaw_webui::channel_pairing_route_mount(
             self.runtime
                 .channel_pairing_registry()

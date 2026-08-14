@@ -1404,11 +1404,11 @@ def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
 # ---------------------------------------------------------------------------
 
 
-def test_every_production_provider_write_maps_to_a_resettable_world():
-    """No production write can run without a world that gets reset."""
+def test_every_deterministically_tested_provider_write_maps_to_a_resettable_world():
+    """No replayable provider write can run without a world that gets reset."""
     unreset = unreset_mutating_tools()
     assert not unreset, (
-        "these production tools declare `external_write` but belong to no "
+        "these deterministically tested tools declare `external_write` but belong to no "
         f"provider world the harness can reset: {sorted(unreset)}. A journey "
         "using one would mutate a world that nothing restores, and the next "
         "test would inherit the result. Add the world to _TOOL_WORLD_PREFIXES "

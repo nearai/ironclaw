@@ -276,6 +276,7 @@ mod tests {
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
             updated_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
         }

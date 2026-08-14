@@ -77,6 +77,18 @@ pub enum AuthProductError {
     Canceled,
     #[error("auth flow is already terminal")]
     FlowAlreadyTerminal,
+    /// The `link_revision` a caller presented is not the account's current
+    /// one: the link was torn down and re-established under it, so the handle
+    /// it holds addresses a credential that no longer exists.
+    #[error("linked-account revision is stale (current {current})")]
+    LinkRevisionStale { current: u64 },
+    /// The implementation does not provide this operation at all. Distinct
+    /// from [`Self::BackendUnavailable`], which means "try again later" — this
+    /// one never succeeds against this implementation, and naming the
+    /// operation is what makes an unwired seam diagnosable instead of looking
+    /// like an outage.
+    #[error("auth backend does not support {operation}")]
+    UnsupportedOperation { operation: &'static str },
     #[error("invalid auth request: {reason}")]
     InvalidRequest { reason: String },
 }
@@ -110,6 +122,14 @@ impl AuthProductError {
             Self::BackendConflict => AuthErrorCode::BackendUnavailable,
             Self::Canceled => AuthErrorCode::Canceled,
             Self::FlowAlreadyTerminal => AuthErrorCode::FlowAlreadyTerminal,
+            // A stale link revision is, to a product surface, a credential
+            // that is no longer there — the same recovery ("link it again"),
+            // and no new wire code for a caller to learn.
+            Self::LinkRevisionStale { .. } => AuthErrorCode::CredentialMissing,
+            // An unwired seam is not a request defect; it is the backend
+            // refusing to serve, which is what `backend_unavailable` already
+            // means on the wire. The operation name stays server-side.
+            Self::UnsupportedOperation { .. } => AuthErrorCode::BackendUnavailable,
             Self::InvalidRequest { .. } => AuthErrorCode::InvalidRequest,
         }
     }

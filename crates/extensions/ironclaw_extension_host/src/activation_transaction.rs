@@ -662,6 +662,8 @@ mod tests {
                 .map(|scope| ProviderScope::new(*scope).expect("provider scope"))
                 .collect(),
             provider_identity: None,
+            // This fixture is an OAuth-shaped account, never a linked device.
+            link_revision: 0,
             created_at: Utc
                 .with_ymd_and_hms(2025, 12, 1, 0, 0, 0)
                 .single()

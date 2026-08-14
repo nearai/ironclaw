@@ -110,7 +110,7 @@ test("messagesFromTimeline: equal pending text without timeline id is preserved"
   );
 });
 
-test("messagesFromTimeline: rejected_busy user record maps to error status with durable resend copy", () => {
+test("messagesFromTimeline: rejected_busy user record maps to an i18n-backed resend error", () => {
   const messages = messagesFromTimeline([
     {
       message_id: "msg-rb",
@@ -125,10 +125,8 @@ test("messagesFromTimeline: rejected_busy user record maps to error status with 
   assert.equal(messages[0].id, "msg-msg-rb");
   assert.equal(messages[0].role, "user");
   assert.equal(messages[0].status, "error");
-  assert.equal(
-    messages[0].error,
-    "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
-  );
+  assert.equal(messages[0].errorKey, "chat.busyRejectedResend");
+  assert.equal(messages[0].error, undefined);
 });
 
 test("messagesFromTimeline: deferred_busy user record maps to queued status with no error copy", () => {

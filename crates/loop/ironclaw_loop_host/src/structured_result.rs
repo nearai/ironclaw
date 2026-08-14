@@ -30,7 +30,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityProgress,
-    ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
     ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
     resolution, sanitize_model_visible_text,
 };
@@ -65,7 +65,6 @@ pub fn structured_result_capability(
             STRUCTURED_RESULT_CAPABILITY_ID,
             STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
             STRUCTURED_RESULT_TOOL_DESCRIPTION,
-            ConcurrencyHint::Exclusive,
             schema,
         )?,
         Arc::new(StructuredResultHandler {

@@ -195,6 +195,11 @@ impl std::fmt::Display for HttpsEndpoint {
 pub enum VendorAuthRecipe {
     Oauth2Code(Box<OAuth2CodeRecipe>),
     ApiKey(Box<ApiKeyRecipe>),
+    /// Device-link: the one method whose mechanics an extension implements
+    /// rather than declares. The recipe carries **display metadata only** —
+    /// everything protocol-shaped arrives through
+    /// [`crate::device_link::DeviceLinkAdapter`].
+    DeviceLink(Box<DeviceLinkRecipe>),
 }
 
 impl VendorAuthRecipe {
@@ -202,14 +207,17 @@ impl VendorAuthRecipe {
         match self {
             Self::Oauth2Code(recipe) => &recipe.display_name,
             Self::ApiKey(recipe) => &recipe.display_name,
+            Self::DeviceLink(recipe) => &recipe.display_name,
         }
     }
 
-    /// Scope ceiling this recipe grants (empty for `api_key`).
+    /// Scope ceiling this recipe grants (empty for `api_key` and
+    /// `device_link` — a linked device holds the account's own authority, and
+    /// there is no scope parameter to intersect against).
     pub fn scope_ceiling(&self) -> &[String] {
         match self {
             Self::Oauth2Code(recipe) => &recipe.scopes,
-            Self::ApiKey(_) => &[],
+            Self::ApiKey(_) | Self::DeviceLink(_) => &[],
         }
     }
 
@@ -218,11 +226,19 @@ impl VendorAuthRecipe {
         match self {
             Self::Oauth2Code(recipe) => recipe.validate(),
             Self::ApiKey(recipe) => recipe.validate(),
+            Self::DeviceLink(recipe) => recipe.validate(),
         }
     }
 
     /// The declared idle-keepalive threshold, if any (`oauth2_code` only —
     /// `api_key` credentials have no refresh token to keep alive).
+    ///
+    /// **`device_link` returns `None`, and that is load-bearing.** The
+    /// keepalive sweep refreshes an OAuth token in the background. A linked
+    /// device session has no refresh token; it holds a rotating vendor key
+    /// under compare-and-swap custody, and a sweep touching it would either be
+    /// a no-op or a clobber. Sweeping is opt-in by declaration, so `None` keeps
+    /// these accounts out of it entirely.
     pub fn keepalive_idle_threshold(&self) -> Option<std::time::Duration> {
         match self {
             Self::Oauth2Code(recipe) => recipe
@@ -230,7 +246,7 @@ impl VendorAuthRecipe {
                 .as_ref()
                 .and_then(|refresh| refresh.keepalive_idle_seconds)
                 .map(|seconds| std::time::Duration::from_secs(u64::from(seconds))),
-            Self::ApiKey(_) => None,
+            Self::ApiKey(_) | Self::DeviceLink(_) => None,
         }
     }
 
@@ -264,8 +280,90 @@ impl VendorAuthRecipe {
                 b.setup_url = None;
                 a == b
             }
+            // **This arm is required, and its absence would not fail the
+            // build.** The `_ => false` fallthrough below is a legal answer for
+            // every mismatched pair, so two `device_link` recipes sharing a
+            // vendor would simply be declared incompatible — a failure that
+            // surfaces at *activation*, on a user's machine, not at compile
+            // time.
+            //
+            // A device-link recipe is display metadata end to end (§3.2:
+            // mechanics come from the adapter), so nothing it carries today can
+            // conflict. Written as a field-clearing comparison rather than a
+            // bare `true` so that a future non-presentational field starts
+            // mattering by itself instead of silently inheriting "always
+            // compatible".
+            (Self::DeviceLink(a), Self::DeviceLink(b)) => {
+                let mut a = a.clone();
+                let mut b = b.clone();
+                a.display_name = String::new();
+                b.display_name = String::new();
+                a.default_mode_label = None;
+                b.default_mode_label = None;
+                a.alternate_mode_label = None;
+                b.alternate_mode_label = None;
+                a.instructions = None;
+                b.instructions = None;
+                a.setup_url = None;
+                b.setup_url = None;
+                a == b
+            }
             _ => false,
         }
+    }
+}
+
+/// Device-link recipe: **display metadata only**.
+///
+/// Every other recipe here is executable data — endpoints the engine calls,
+/// pointers it reads. This one is not, because a device-link handshake is a
+/// multi-round protocol conversation on a connection the extension owns, and no
+/// descriptor expresses that. What is left is what a card needs to render:
+/// names, labels, and where the user should look. The mechanics live behind
+/// [`crate::device_link::DeviceLinkAdapter`].
+///
+/// Consequently there is nothing here to keep alive, nothing to intersect
+/// scopes against, and — see
+/// [`VendorAuthRecipe::compatible_for_shared_vendor`] — nothing that can
+/// conflict between two extensions sharing a vendor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceLinkRecipe {
+    pub display_name: String,
+    /// What the primary path is called on the card ("Scan a code"). Absent
+    /// means the host uses its own generic copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode_label: Option<String>,
+    /// What the fallback path is called. **Absent means the extension declares
+    /// no alternate path**, and the card offers no switch — an adapter asked
+    /// for [`crate::device_link::DeviceLinkMode::Alternate`] anyway answers
+    /// [`crate::device_link::DeviceLinkError::UnsupportedMode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_mode_label: Option<String>,
+    /// What the user has to do on their own device, in the vendor's own terms.
+    /// Without it the host can say a link is required but not how to make one,
+    /// and a model asked to help will invent the steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Where the user can review or revoke the resulting device. Rendered as a
+    /// link, so `HttpsEndpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<HttpsEndpoint>,
+}
+
+impl DeviceLinkRecipe {
+    pub fn validate(&self) -> Result<(), RecipeValidationError> {
+        if self.display_name.trim().is_empty() {
+            return Err(RecipeValidationError::EmptyDisplayName);
+        }
+        for label in [&self.default_mode_label, &self.alternate_mode_label] {
+            if let Some(label) = label
+                && label.trim().is_empty()
+            {
+                return Err(RecipeValidationError::EmptyDeviceLinkModeLabel);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -599,6 +697,8 @@ pub enum RecipeValidationError {
     ReservedAuthorizeParam { param: String },
     #[error("api_key recipes must declare at least one field")]
     ApiKeyWithoutFields,
+    #[error("device_link mode labels must not be empty when declared")]
+    EmptyDeviceLinkModeLabel,
     #[error("validation probe must declare at least one success status")]
     ProbeWithoutSuccessStatus,
     #[error("validation probe injects `{handle}`, which is not one of the recipe's fields")]
@@ -1033,6 +1133,9 @@ setup_url = "https://vendor.example/settings/tokens"
                 VendorAuthRecipe::ApiKey(recipe) => {
                     (recipe.instructions.as_deref(), recipe.setup_url.as_ref())
                 }
+                VendorAuthRecipe::DeviceLink(recipe) => {
+                    (recipe.instructions.as_deref(), recipe.setup_url.as_ref())
+                }
             };
             assert_eq!(instructions, Some(expected_instructions), "{label}");
             assert_eq!(
@@ -1069,10 +1172,158 @@ fields = [ { handle = "example_token", label = "Token", secret = true } ]
             let (instructions, setup_url) = match recipe {
                 VendorAuthRecipe::Oauth2Code(recipe) => (recipe.instructions, recipe.setup_url),
                 VendorAuthRecipe::ApiKey(recipe) => (recipe.instructions, recipe.setup_url),
+                VendorAuthRecipe::DeviceLink(recipe) => (recipe.instructions, recipe.setup_url),
             };
             assert!(instructions.is_none());
             assert!(setup_url.is_none());
         }
+    }
+
+    fn device_link_recipe_toml() -> &'static str {
+        r#"
+method = "device_link"
+display_name = "Personal account"
+default_mode_label = "Scan a code"
+alternate_mode_label = "Use my number instead"
+instructions = "Open your account's device settings and link a new device."
+setup_url = "https://vendor.example/settings/devices"
+"#
+    }
+
+    #[test]
+    fn device_link_recipe_parses_display_metadata_and_round_trips() {
+        let recipe: VendorAuthRecipe = toml::from_str(device_link_recipe_toml()).expect("parse");
+        recipe.validate().expect("valid");
+        assert_eq!(recipe.display_name(), "Personal account");
+        assert!(
+            recipe.scope_ceiling().is_empty(),
+            "a linked device holds the account's own authority; there is no scope to intersect"
+        );
+
+        let VendorAuthRecipe::DeviceLink(inner) = &recipe else {
+            panic!("expected device_link");
+        };
+        assert_eq!(inner.default_mode_label.as_deref(), Some("Scan a code"));
+        assert_eq!(
+            inner.alternate_mode_label.as_deref(),
+            Some("Use my number instead")
+        );
+        assert_eq!(
+            inner.setup_url.as_ref().map(HttpsEndpoint::as_str),
+            Some("https://vendor.example/settings/devices")
+        );
+
+        let json = serde_json::to_string(&recipe).expect("serialize JSON");
+        assert!(json.contains("\"method\":\"device_link\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<VendorAuthRecipe>(&json).expect("deserialize JSON"),
+            recipe
+        );
+        let encoded_toml = toml::to_string(&recipe).expect("serialize TOML");
+        assert_eq!(
+            toml::from_str::<VendorAuthRecipe>(&encoded_toml).expect("deserialize TOML"),
+            recipe
+        );
+    }
+
+    /// The `device_link` arm of `keepalive_idle_threshold` must be `None`: a
+    /// linked device session has no refresh token, and the background sweep
+    /// touching one would either no-op or clobber a rotating vendor key.
+    #[test]
+    fn device_link_recipes_are_never_swept_by_the_keepalive_pass() {
+        let recipe: VendorAuthRecipe = toml::from_str(device_link_recipe_toml()).expect("parse");
+        assert_eq!(recipe.keepalive_idle_threshold(), None);
+
+        let minimal: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "device_link"
+display_name = "Personal account"
+"#,
+        )
+        .expect("parse minimal");
+        assert_eq!(minimal.keepalive_idle_threshold(), None);
+    }
+
+    /// The arm this test exists for is invisible to the compiler: without an
+    /// explicit `(DeviceLink, DeviceLink)` case the `_ => false` fallthrough
+    /// still builds, and two extensions sharing a vendor fail at ACTIVATION.
+    #[test]
+    fn two_device_link_recipes_for_one_vendor_are_compatible() {
+        let base: VendorAuthRecipe = toml::from_str(device_link_recipe_toml()).expect("parse");
+
+        let mut other = base.clone();
+        if let VendorAuthRecipe::DeviceLink(inner) = &mut other {
+            inner.display_name = "My personal account".to_string();
+            inner.default_mode_label = Some("Scan this".to_string());
+            inner.alternate_mode_label = None;
+            inner.instructions = Some("Different copy entirely.".to_string());
+            inner.setup_url =
+                Some(HttpsEndpoint::new("https://vendor.example/settings/sessions").unwrap());
+        }
+        assert!(
+            base.compatible_for_shared_vendor(&other),
+            "a device_link recipe is display metadata end to end, so nothing in it can conflict"
+        );
+        assert!(
+            other.compatible_for_shared_vendor(&base),
+            "and symmetrically"
+        );
+
+        // Across methods it stays incompatible, which is what the fallthrough
+        // is actually for.
+        let api_key: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [{ handle = "example_token", label = "Token" }]
+"#,
+        )
+        .expect("parse api_key");
+        assert!(!base.compatible_for_shared_vendor(&api_key));
+        assert!(!api_key.compatible_for_shared_vendor(&base));
+    }
+
+    #[test]
+    fn device_link_recipe_validation_fails_closed() {
+        let empty_name: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "device_link"
+display_name = "   "
+"#,
+        )
+        .expect("parse");
+        assert!(matches!(
+            empty_name.validate().unwrap_err(),
+            RecipeValidationError::EmptyDisplayName
+        ));
+
+        for field in ["default_mode_label", "alternate_mode_label"] {
+            let recipe: VendorAuthRecipe = toml::from_str(&format!(
+                "method = \"device_link\"\ndisplay_name = \"Personal account\"\n{field} = \"\"\n"
+            ))
+            .expect("parse");
+            assert!(
+                matches!(
+                    recipe.validate().unwrap_err(),
+                    RecipeValidationError::EmptyDeviceLinkModeLabel
+                ),
+                "{field} must reject an empty label"
+            );
+        }
+
+        // Unknown keys and non-HTTPS setup URLs fail at deserialization, like
+        // every other recipe.
+        let unknown = toml::from_str::<VendorAuthRecipe>(
+            "method = \"device_link\"\ndisplay_name = \"Personal account\"\nsurprise = \"x\"\n",
+        )
+        .expect_err("unknown key");
+        assert!(unknown.to_string().contains("surprise"), "{unknown}");
+
+        let insecure = toml::from_str::<VendorAuthRecipe>(
+            "method = \"device_link\"\ndisplay_name = \"Personal account\"\nsetup_url = \"http://vendor.example/devices\"\n",
+        )
+        .expect_err("non-HTTPS setup URL");
+        assert!(insecure.to_string().contains("https"), "{insecure}");
     }
 
     #[test]

@@ -1564,6 +1564,181 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
     );
 }
 
+// ─── PROPOSAL §4.5: the linked-device ownership pin, on the durable store ─────
+
+/// The bump is the operation that makes an account a linked device, so it is
+/// where the ownership pin is enforced. Without it, a `UserReusable` account —
+/// which `is_authorized_for_requester` answers `true` for on *any* requester,
+/// and which ownership-aware cleanup deliberately does not delete — would pick
+/// up a live vendor device authorization.
+#[tokio::test]
+async fn filesystem_bump_link_revision_refuses_an_account_whose_ownership_is_not_pinned() {
+    use ironclaw_host_api::ids::ExtensionId;
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let owner = ExtensionId::new("test-ext").unwrap();
+    let other = ExtensionId::new("other-ext").unwrap();
+    let session = SecretHandle::new("linked-session").unwrap();
+
+    let reusable = service
+        .create_account(crate::NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(session.clone()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+    let error = service
+        .bump_link_revision(&scope, reusable.id)
+        .await
+        .expect_err("a reusable account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a reusable account: {error:?}"
+    );
+    let stored = service
+        .get_account(crate::CredentialAccountLookupRequest::new(
+            scope.clone(),
+            reusable.id,
+        ))
+        .await
+        .unwrap()
+        .expect("the account still exists");
+    assert_eq!(
+        stored.link_revision, 0,
+        "a refused bump must not have written a revision"
+    );
+
+    let shared = service
+        .create_account(crate::NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: crate::CredentialAccountLabel::new("shared-linked").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(owner.clone()),
+            granted_extensions: vec![other],
+            access_secret: Some(session.clone()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+    let error = service
+        .bump_link_revision(&scope, shared.id)
+        .await
+        .expect_err("a granted account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a granted account: {error:?}"
+    );
+
+    let pinned = service
+        .create_account(crate::NewCredentialAccount::for_linked_device(
+            scope.clone(),
+            google_provider(),
+            crate::CredentialAccountLabel::new("pinned-linked").unwrap(),
+            owner,
+            session,
+        ))
+        .await
+        .unwrap();
+    let linked = service
+        .bump_link_revision(&scope, pinned.id)
+        .await
+        .expect("the sanctioned mint shape links");
+    assert_eq!(linked.link_revision, 1);
+    assert!(linked.is_linked_device());
+}
+
+/// Deactivating an extension must delete a linked device's session blob, not
+/// merely mark the account inactive: an inactive extension cannot make a vendor
+/// call, so a retained blob is a live device authorization nothing can end.
+#[tokio::test]
+async fn filesystem_cleanup_deletes_a_linked_device_session_blob_on_deactivate() {
+    use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+    use ironclaw_host_api::ids::ExtensionId;
+    use secrecy::SecretString;
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let ext_id = ExtensionId::new("test-ext").unwrap();
+    let session = SecretHandle::new("linked-session").unwrap();
+
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            session.clone(),
+            SecretString::from("session-blob"),
+            None,
+        )
+        .await
+        .unwrap();
+    let account = service
+        .create_account(crate::NewCredentialAccount::for_linked_device(
+            scope.clone(),
+            google_provider(),
+            account_label(),
+            ext_id.clone(),
+            session.clone(),
+        ))
+        .await
+        .unwrap();
+    service
+        .bump_link_revision(&scope, account.id)
+        .await
+        .unwrap();
+
+    let report = service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: scope.clone(),
+            extension_id: ext_id.clone(),
+            provider: None,
+            lifecycle_package: None,
+            action: SecretCleanupAction::Deactivate,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.revoked_accounts,
+        vec![account.id],
+        "a deactivated linked device is revoked, not retained"
+    );
+    assert!(report.retained_accounts.is_empty());
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &session)
+            .await
+            .unwrap()
+            .is_none(),
+        "deactivate must delete the linked-device session blob"
+    );
+    let stored = service
+        .get_account(
+            crate::CredentialAccountLookupRequest::new(scope.clone(), account.id)
+                .for_extension(ext_id),
+        )
+        .await
+        .unwrap()
+        .expect("the account record survives as a tombstone");
+    assert_eq!(stored.status, CredentialAccountStatus::Revoked);
+    assert!(stored.access_secret.is_none());
+}
+
 // ─── fix: cleanup matches owner granularity + provider-selected OAuth accounts ─
 
 /// The production shape the Slack disconnect issues: the OAuth flow stored the
@@ -2305,6 +2480,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
         refresh_secret: None,
         scopes: vec![],
         provider_identity: None,
+        link_revision: 0,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -3680,6 +3856,7 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
         refresh_secret: None,
         scopes: vec![],
         provider_identity: None,
+        link_revision: 0,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -4795,5 +4972,285 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         .unwrap();
     assert!(retry.canceled_turn_gate_continuations.is_empty());
     assert_eq!(status(pending.id).await, AuthFlowStatus::Canceled);
+}
+
+/// The durable half of the opaque-material contract the in-memory fake already
+/// pins: a concurrent writer must LOSE the compare-and-swap and be told the
+/// current version — never last-writer-wins, because the material is a
+/// rotating vendor session key and a clobbered key is a silently dead link.
+#[tokio::test]
+async fn filesystem_opaque_material_write_rejects_a_concurrent_conflict_with_the_current_version() {
+    use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
+    use ironclaw_host_api::ids::ExtensionId;
+
+    use crate::{OpaqueMaterialRequest, OpaqueMaterialWrite, OpaqueMaterialWriteOutcome};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let owner = ExtensionId::new("test-ext").unwrap();
+    let session = SecretHandle::new("linked-session").unwrap();
+
+    let account = service
+        .create_account(crate::NewCredentialAccount::for_linked_device(
+            scope.clone(),
+            google_provider(),
+            crate::CredentialAccountLabel::new("linked").unwrap(),
+            owner.clone(),
+            session,
+        ))
+        .await
+        .unwrap();
+    let account = service
+        .bump_link_revision(&scope, account.id)
+        .await
+        .unwrap();
+    let target = OpaqueMaterialRequest {
+        scope: scope.clone(),
+        account_id: account.id,
+        requester_extension: Some(owner.clone()),
+        link_revision: account.link_revision,
+    };
+
+    assert!(
+        service
+            .load_opaque_material(target.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing is stored before the first write"
+    );
+
+    let first = service
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target.clone(),
+            expected: LinkedSessionVersion::absent(),
+            material: SessionBytes::new(b"blob-1".to_vec()).unwrap(),
+        })
+        .await
+        .unwrap();
+    let OpaqueMaterialWriteOutcome::Stored { version: v1 } = first else {
+        panic!("first write must store");
+    };
+
+    let losing = service
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target.clone(),
+            expected: LinkedSessionVersion::absent(),
+            material: SessionBytes::new(b"imposter".to_vec()).unwrap(),
+        })
+        .await
+        .unwrap();
+    match losing {
+        OpaqueMaterialWriteOutcome::Conflict { current } => {
+            assert_eq!(current, v1, "the loser learns the current version");
+        }
+        OpaqueMaterialWriteOutcome::Stored { .. } => {
+            panic!("a second absent-expectation write must not win")
+        }
+    }
+    let stored = service
+        .load_opaque_material(target.clone())
+        .await
+        .unwrap()
+        .expect("material stored");
+    assert_eq!(stored.material.expose(), b"blob-1");
+    assert_eq!(stored.version, v1);
+
+    let second = service
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target.clone(),
+            expected: v1,
+            material: SessionBytes::new(b"blob-2".to_vec()).unwrap(),
+        })
+        .await
+        .unwrap();
+    let OpaqueMaterialWriteOutcome::Stored { version: v2 } = second else {
+        panic!("a write presenting the current version must store");
+    };
+    let stored = service
+        .load_opaque_material(target)
+        .await
+        .unwrap()
+        .expect("material stored");
+    assert_eq!(stored.material.expose(), b"blob-2");
+    assert_eq!(stored.version, v2);
+}
+
+/// The durable revision gate: a request presenting a stale `link_revision` is
+/// refused with the current one — for load AND store — and a requester the
+/// account does not authorize is denied rather than told anything.
+#[tokio::test]
+async fn filesystem_opaque_material_access_is_gated_on_revision_and_requester() {
+    use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
+    use ironclaw_host_api::ids::ExtensionId;
+
+    use crate::{OpaqueMaterialRequest, OpaqueMaterialWrite};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let owner = ExtensionId::new("test-ext").unwrap();
+    let other = ExtensionId::new("other-ext").unwrap();
+    let session = SecretHandle::new("linked-session").unwrap();
+
+    let account = service
+        .create_account(crate::NewCredentialAccount::for_linked_device(
+            scope.clone(),
+            google_provider(),
+            crate::CredentialAccountLabel::new("linked").unwrap(),
+            owner.clone(),
+            session,
+        ))
+        .await
+        .unwrap();
+    let account = service
+        .bump_link_revision(&scope, account.id)
+        .await
+        .unwrap();
+    let target = OpaqueMaterialRequest {
+        scope: scope.clone(),
+        account_id: account.id,
+        requester_extension: Some(owner.clone()),
+        link_revision: account.link_revision,
+    };
+    service
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target.clone(),
+            expected: LinkedSessionVersion::absent(),
+            material: SessionBytes::new(b"blob-1".to_vec()).unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let stale = OpaqueMaterialRequest {
+        link_revision: 0,
+        ..target.clone()
+    };
+    let error = service
+        .load_opaque_material(stale.clone())
+        .await
+        .expect_err("a stale revision must not read the credential");
+    assert!(
+        matches!(error, AuthProductError::LinkRevisionStale { current: 1 }),
+        "unexpected load error: {error:?}"
+    );
+    let error = service
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: stale,
+            expected: LinkedSessionVersion::absent(),
+            material: SessionBytes::new(b"stale-blob".to_vec()).unwrap(),
+        })
+        .await
+        .expect_err("a stale revision must not write the credential");
+    assert!(
+        matches!(error, AuthProductError::LinkRevisionStale { current: 1 }),
+        "unexpected store error: {error:?}"
+    );
+
+    let foreign = OpaqueMaterialRequest {
+        requester_extension: Some(other),
+        ..target
+    };
+    let error = service
+        .load_opaque_material(foreign)
+        .await
+        .expect_err("an unauthorized requester must be denied");
+    assert!(
+        matches!(error, AuthProductError::CrossScopeDenied),
+        "unexpected requester error: {error:?}"
+    );
+}
+
+/// The whole completion policy over the durable store: mint pinned, custody
+/// durable before return, re-link reuses the SAME account with a bumped
+/// revision (evicting old handles via the revision gate), and a revoked
+/// account is never resurrected — a fresh one is minted instead.
+#[tokio::test]
+async fn filesystem_linked_device_completion_mints_reuses_and_never_resurrects_revoked() {
+    use ironclaw_extension_contracts::linked_session::SessionBytes;
+    use ironclaw_host_api::ids::ExtensionId;
+
+    use crate::{LinkedDeviceLinkCompletion, OpaqueMaterialRequest};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let owner = ExtensionId::new("test-ext").unwrap();
+    let completion = |material: &[u8]| LinkedDeviceLinkCompletion {
+        scope: scope.clone(),
+        provider: google_provider(),
+        owner_extension: owner.clone(),
+        label: crate::CredentialAccountLabel::new("Linked personal account").unwrap(),
+        material: SessionBytes::new(material.to_vec()).unwrap(),
+    };
+
+    let first = service
+        .complete_linked_device_link(completion(b"blob-1"))
+        .await
+        .expect("first link mints");
+    assert_eq!(first.link_revision, 1);
+    assert!(first.is_linked_device());
+    assert!(first.linked_device_ownership_is_pinned());
+    assert_eq!(first.status, CredentialAccountStatus::Configured);
+    let loaded = service
+        .load_opaque_material(OpaqueMaterialRequest {
+            scope: scope.clone(),
+            account_id: first.id,
+            requester_extension: Some(owner.clone()),
+            link_revision: 1,
+        })
+        .await
+        .unwrap()
+        .expect("custody is durable before completion returns");
+    assert_eq!(loaded.material.expose(), b"blob-1");
+
+    let relink = service
+        .complete_linked_device_link(completion(b"blob-2"))
+        .await
+        .expect("re-link reuses");
+    assert_eq!(relink.id, first.id, "re-link must reuse the same account");
+    assert_eq!(relink.link_revision, 2);
+    let error = service
+        .load_opaque_material(OpaqueMaterialRequest {
+            scope: scope.clone(),
+            account_id: first.id,
+            requester_extension: Some(owner.clone()),
+            link_revision: 1,
+        })
+        .await
+        .expect_err("the old revision's handles are dead after a re-link");
+    assert!(matches!(
+        error,
+        AuthProductError::LinkRevisionStale { current: 2 }
+    ));
+    let loaded = service
+        .load_opaque_material(OpaqueMaterialRequest {
+            scope: scope.clone(),
+            account_id: first.id,
+            requester_extension: Some(owner.clone()),
+            link_revision: 2,
+        })
+        .await
+        .unwrap()
+        .expect("re-linked custody is readable at the new revision");
+    assert_eq!(loaded.material.expose(), b"blob-2");
+
+    service
+        .update_status(&scope, first.id, CredentialAccountStatus::Revoked)
+        .await
+        .unwrap();
+    let fresh = service
+        .complete_linked_device_link(completion(b"blob-3"))
+        .await
+        .expect("linking after a revoke mints fresh");
+    assert_ne!(
+        fresh.id, first.id,
+        "a revoked account's status machine is terminal; it must not be resurrected"
+    );
+    assert_eq!(fresh.link_revision, 1);
 }
 // arch-exempt: large_file, durable auth contract coverage remains centralized, plan #6175
