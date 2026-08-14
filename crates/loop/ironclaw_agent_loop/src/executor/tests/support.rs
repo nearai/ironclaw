@@ -182,23 +182,6 @@ impl MockHost {
             },
         );
         self.context.product_context = Some(product_context);
-        self.extra_capability_descriptors
-            .push(CapabilityDescriptorView {
-                capability_id: CapabilityId::new(
-                    ironclaw_host_api::execution_policy::NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
-                )
-                .expect("completion capability id"),
-                provider: None,
-                runtime: RuntimeKind::FirstParty,
-                safe_name: "complete_nothing_to_report".to_string(),
-                safe_description: "Complete without an ordinary result".to_string(),
-                description_trust: Default::default(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }),
-            });
         self
     }
 

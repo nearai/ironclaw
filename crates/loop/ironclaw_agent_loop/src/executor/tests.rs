@@ -3087,9 +3087,9 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
-async fn scheduled_no_result_control_terminalizes_without_capability_dispatch_or_reply() {
-    let response = no_result_completion_response(serde_json::json!({}));
-    let host = MockHost::new(vec![response]).with_suppressed_scheduled_context();
+async fn exact_silent_reply_terminalizes_suppressed_schedule_without_finalizing_reply() {
+    let host = MockHost::new(vec![reply_response_with_text("  [SILENT]\n")])
+        .with_suppressed_scheduled_context();
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
@@ -3112,48 +3112,9 @@ async fn scheduled_no_result_control_terminalizes_without_capability_dispatch_or
     assert!(host.batch_invocations().is_empty());
 }
 
-fn no_result_completion_response(
-    arguments: serde_json::Value,
-) -> ironclaw_loop_contracts::LoopModelResponse {
-    ironclaw_loop_contracts::LoopModelResponse {
-        chunks: Vec::new(),
-        safe_reasoning_deltas: Vec::new(),
-        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
-            activity_id: CapabilityActivityId::new(),
-            surface_version: surface_version(),
-            capability_id: ironclaw_host_api::ids::CapabilityId::new(
-                ironclaw_host_api::execution_policy::NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
-            )
-            .expect("completion capability id"),
-            input_ref: CapabilityInputRef::new("input:nothing-to-report").expect("input ref"),
-            effective_capability_ids: Vec::new(),
-            provider_replay: Some(ProviderToolCallReplay {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                provider_turn_id: "turn:nothing-to-report".to_string(),
-                provider_call_id: "call:nothing-to-report".to_string(),
-                provider_tool_name: ironclaw_host_api::ids::ProviderToolName::new(
-                    "builtin__complete_nothing_to_report",
-                )
-                .expect("provider tool name"),
-                arguments,
-                response_reasoning: None,
-                reasoning: None,
-                signature: None,
-            }),
-        }]),
-        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
-            .expect("model id"),
-        usage: None,
-    }
-}
-
 #[tokio::test]
-async fn no_result_control_is_denied_outside_scheduled_suppression_context() {
-    let host = MockHost::new(vec![
-        no_result_completion_response(serde_json::json!({})),
-        reply_response(),
-    ]);
+async fn exact_silent_reply_is_visible_outside_scheduled_suppression_context() {
+    let host = MockHost::new(vec![reply_response_with_text("[SILENT]")]);
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
@@ -3166,18 +3127,16 @@ async fn no_result_control_is_denied_outside_scheduled_suppression_context() {
         LoopExit::Completed(ref completed)
             if completed.completion_kind == LoopCompletionKind::FinalReply
     ));
-    assert_eq!(host.finalized_assistant_messages().len(), 1);
+    assert_eq!(host.finalized_assistant_messages(), vec!["[SILENT]"]);
     assert!(host.single_invocations().is_empty());
     assert!(host.batch_invocations().is_empty());
 }
 
 #[tokio::test]
-async fn no_result_control_rejects_non_empty_input() {
-    let host = MockHost::new(vec![
-        no_result_completion_response(serde_json::json!({"unexpected": true})),
-        reply_response(),
-    ])
-    .with_suppressed_scheduled_context();
+async fn reply_that_mentions_silent_is_delivered_normally() {
+    let reply = "The literal marker [SILENT] is documented here.";
+    let host =
+        MockHost::new(vec![reply_response_with_text(reply)]).with_suppressed_scheduled_context();
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
@@ -3190,13 +3149,13 @@ async fn no_result_control_rejects_non_empty_input() {
         LoopExit::Completed(ref completed)
             if completed.completion_kind == LoopCompletionKind::FinalReply
     ));
-    assert_eq!(host.finalized_assistant_messages().len(), 1);
+    assert_eq!(host.finalized_assistant_messages(), vec![reply]);
     assert!(host.single_invocations().is_empty());
     assert!(host.batch_invocations().is_empty());
 }
 
 #[tokio::test]
-async fn no_result_control_preserves_a_pending_external_tool_resume() {
+async fn exact_silent_reply_preserves_a_pending_external_tool_resume() {
     let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
     let family = crate::families::default();
     let ctx = StageContext {
@@ -3214,34 +3173,24 @@ async fn no_result_control_preserves_a_pending_external_tool_resume() {
         provider_replay: None,
         disposition: None,
     });
-    let calls = match no_result_completion_response(serde_json::json!({})).output {
-        ParentLoopOutput::CapabilityCalls(calls) => calls,
-        ParentLoopOutput::AssistantReply(_) => panic!("expected completion call"),
-    };
-    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
-        &host,
-        VisibleCapabilityRequest,
-    )
-    .await
-    .expect("visible surface");
-
-    let step = CapabilityStage
+    let step = AssistantReplyStage
         .process(
             ctx,
-            CapabilityInput {
+            AssistantReplyInput {
                 state,
-                surface,
-                calls,
+                reply: ironclaw_loop_contracts::AssistantReply {
+                    content: "[SILENT]".to_string(),
+                },
             },
         )
         .await
-        .expect("capability stage");
+        .expect("assistant reply stage");
 
     let TurnCompletedStep::Continue { state, .. } = step else {
         panic!("pending resume must prevent a nothing-to-report exit");
     };
     assert!(state.pending_external_tool_resume.is_some());
-    assert!(host.finalized_assistant_messages().is_empty());
+    assert_eq!(host.finalized_assistant_messages(), vec!["[SILENT]"]);
     assert!(host.single_invocations().is_empty());
     assert!(host.batch_invocations().is_empty());
 }

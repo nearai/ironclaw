@@ -8,10 +8,10 @@ use crate::{error::HostApiError, ids::CapabilityId};
 
 const MAX_REQUIRED_SKILL_NAME_BYTES: usize = 64;
 
-/// Loop-control capability exposed only to scheduled runs that explicitly opt
-/// into no-result suppression. The agent loop terminalizes this call itself;
-/// it never crosses capability dispatch as an ordinary tool invocation.
-pub const NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID: &str = "builtin.complete_nothing_to_report";
+/// Reserved exact final response for a scheduled run that has no result to
+/// deliver. The loop recognizes it only for an explicit suppression policy and
+/// converts it to the typed durable outcome before transcript finalization.
+pub const NOTHING_TO_REPORT_SENTINEL: &str = "[SILENT]";
 
 /// How a successful run's ordinary result is handled after settlement.
 ///

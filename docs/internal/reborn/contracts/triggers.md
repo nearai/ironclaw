@@ -109,15 +109,14 @@ persisted policies still deserialize as `deliver` for compatibility.
   prompt asks the model to return the human-readable `no_result_text`, and a
   completed run has a normal deliverable result.
 - `suppress_when_nothing_to_report` is explicit opt-in. The scheduled-run
-  surface exposes the host-owned `builtin.complete_nothing_to_report` terminal
-  control in addition to the task capability allowlist. Selecting it writes a
-  final checkpoint and produces `LoopCompletionKind::NothingToReport` without
-  dispatching an ordinary capability or persisting a synthetic assistant
-  reply. The turn kernel accepts that completion kind only for a scheduled run
-  carrying the explicit suppression policy, then persists
-  `TurnExecutionOutcome::NothingToReport`. Ordinary assistant text always
-  remains a deliverable result and is never interpreted as a suppression
-  signal.
+  prompt instructs the model to return exactly `[SILENT]` when the run has no
+  result. The loop recognizes only that complete normalized response, converts
+  it before transcript finalization, writes a final checkpoint, and produces
+  `LoopCompletionKind::NothingToReport`. The turn kernel accepts that completion
+  kind only for a scheduled run carrying the explicit suppression policy, then
+  persists `TurnExecutionOutcome::NothingToReport`. Content that merely mentions
+  `[SILENT]`, and every reply outside the opted-in scheduled context, remains a
+  normal deliverable result.
 
 Execution outcome and delivery outcome are separate durable facts. A
 `NothingToReport` completion records delivery as `Suppressed` and performs no

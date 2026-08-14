@@ -25,7 +25,9 @@ use ironclaw_composition::{
 };
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
 use ironclaw_extension_contracts::external::ExternalActorRef;
-use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
+use ironclaw_host_api::execution_policy::{
+    NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy, TurnExecutionPolicy,
+};
 use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -40,17 +42,16 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, RuntimeCapabilityOutcome,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -211,7 +212,7 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn LoopCapabilityPort>,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         if !request
             .messages
@@ -220,33 +221,9 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
         {
             return self.stream_model(request).await;
         }
-        let call = ProviderToolCall {
-            provider_id: "trigger-e2e-provider".to_string(),
-            provider_model_id: "trigger-e2e-model".to_string(),
-            turn_id: Some("trigger-e2e-nothing-to-report-turn".to_string()),
-            id: "trigger-e2e-nothing-to-report-call".to_string(),
-            name: ProviderToolName::new(provider_tool_name_for_capability_id(
-                NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
-            ))
-            .expect("nothing-to-report provider tool name"),
-            arguments: json!({}),
-            response_reasoning: None,
-            reasoning: None,
-            signature: None,
-        };
-        let candidate = capabilities
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
-            .await
-            .map_err(|error| {
-                HostManagedModelError::safe(
-                    HostManagedModelErrorKind::InvalidOutput,
-                    error.safe_summary,
-                )
-            })?;
         self.requests.lock().await.push(request);
-        Ok(HostManagedModelResponse::capability_calls(
-            vec![candidate],
-            "",
+        Ok(HostManagedModelResponse::assistant_reply(
+            NOTHING_TO_REPORT_SENTINEL,
         ))
     }
 }

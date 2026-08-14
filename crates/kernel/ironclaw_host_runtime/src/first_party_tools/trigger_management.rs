@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
     error::HostApiError,
-    execution_policy::{NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, TurnExecutionPolicy},
+    execution_policy::TurnExecutionPolicy,
     ids::CapabilityId,
     invocation::InvocationOrigin,
     resource::{ResourceScope, ResourceUsage},
@@ -42,8 +42,6 @@ pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
-
-const COMPLETE_NOTHING_TO_REPORT_DESCRIPTION: &str = "Finish this scheduled routine with the typed outcome that there is nothing to report. Call this only when the stored task found no result and its explicit delivery policy permits suppression. This is a terminal action: do not combine it with other calls and do not return a final reply afterward.";
 
 /// Grounding description for the read path (issue #7246): the model was
 /// observed fabricating automation status ("your digest routine is running")
@@ -91,13 +89,6 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
             "Resume a caller-scoped paused trigger so it may fire on its stored schedule. Use only when the user explicitly asks to resume or enable that routine; listing to avoid duplicates or to ensure exactly one routine exists is read-only and must not resume it.",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
-            COMPLETE_NOTHING_TO_REPORT_DESCRIPTION,
-            vec![EffectKind::DispatchCapability],
-            PermissionMode::Allow,
             resource_profile(),
         )?,
     ])
@@ -173,26 +164,7 @@ fn insert_trigger_handlers(
         handler.clone(),
     );
     registry.insert_handler(CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?, handler);
-    registry.insert_handler(
-        CapabilityId::new(NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID)?,
-        Arc::new(NoResultCompletionDispatchBackstop),
-    );
     Ok(())
-}
-
-struct NoResultCompletionDispatchBackstop;
-
-#[async_trait]
-impl FirstPartyCapabilityHandler for NoResultCompletionDispatchBackstop {
-    async fn dispatch(
-        &self,
-        _request: FirstPartyCapabilityRequest,
-    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        Err(FirstPartyCapabilityError::with_safe_summary(
-            RuntimeDispatchErrorKind::PolicyDenied,
-            "nothing-to-report completion must be handled by the scheduled-run loop control boundary",
-        ))
-    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

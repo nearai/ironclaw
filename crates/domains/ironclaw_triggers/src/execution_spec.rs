@@ -1,7 +1,7 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use ironclaw_host_api::execution_policy::{
-    NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, ResultDeliveryPolicy, TurnExecutionPolicy,
+    NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy, TurnExecutionPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -85,8 +85,7 @@ impl TriggerExecutionSpec {
         let no_result_instruction = match self.policy.result_delivery {
             ResultDeliveryPolicy::Deliver => Cow::Borrowed(self.no_result_text.as_str()),
             ResultDeliveryPolicy::SuppressWhenNothingToReport => Cow::Owned(format!(
-                "Call `{}` with an empty object and do not return a final reply.",
-                NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID.replace('.', "__")
+                "Return exactly `{NOTHING_TO_REPORT_SENTINEL}` and nothing else."
             )),
         };
         render_template(

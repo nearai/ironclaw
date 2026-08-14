@@ -1059,11 +1059,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
-        "schemas/builtin/complete_nothing_to_report.input.v1.json" => json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
         _ => return None,
     })
 }

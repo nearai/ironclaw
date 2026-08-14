@@ -74,13 +74,6 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_RESUME_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
-    // This terminal control is covered through the production-composed
-    // scheduled-run path by
-    // `scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart`
-    // in `ironclaw_composition/tests/trigger_poller_e2e.rs`. That test makes
-    // the model select the typed action, verifies durable suppression before
-    // reservation/provider dispatch, and repeats the read-back after restart.
-    ironclaw_host_api::execution_policy::NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID,
