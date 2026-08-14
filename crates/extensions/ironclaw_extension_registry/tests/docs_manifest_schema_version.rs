@@ -8,6 +8,7 @@
 //! fence entry widens this scan with it. Fenced areas may legitimately name
 //! the retired literal.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ironclaw_extension_registry::MANIFEST_SCHEMA_VERSION_V3;
@@ -50,9 +51,54 @@ fn parse_fence(docs_root: &Path) -> Fence {
     fence
 }
 
-/// Fail-closed floor: ~130 published pages exist today. A walk that visits
-/// fewer than this many means the walker broke, not that the docs shrank.
-const MIN_SCANNED_PAGES: usize = 60;
+/// Extensionless page routes from docs.json navigation — the independent
+/// definition of the published surface the walk is validated against
+/// (instead of a count floor). Entries with spaces are generated OpenAPI
+/// endpoint pages ("GET /users") with no source file.
+fn nav_routes(docs_root: &Path) -> BTreeSet<String> {
+    let path = docs_root.join("docs.json");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .expect("parse docs/docs.json");
+    let mut routes = BTreeSet::new();
+    collect_nav_pages(&manifest["navigation"], &mut routes);
+    routes.retain(|route| !route.contains(' '));
+    assert!(
+        !routes.is_empty(),
+        "docs.json navigation names no source-backed pages — nothing to \
+         validate the walk against; refusing rather than passing vacuously"
+    );
+    routes
+}
+
+fn collect_nav_pages(node: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match node {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                match (key.as_str(), value) {
+                    ("pages", serde_json::Value::Array(entries)) => {
+                        for entry in entries {
+                            if let Some(page) = entry.as_str() {
+                                out.insert(page.to_string());
+                            } else {
+                                collect_nav_pages(entry, out);
+                            }
+                        }
+                    }
+                    _ => collect_nav_pages(value, out),
+                }
+            }
+        }
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                collect_nav_pages(entry, out);
+            }
+        }
+        _ => {}
+    }
+}
 
 fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -105,12 +151,29 @@ fn published_pages(docs_root: &Path) -> Vec<PathBuf> {
 #[test]
 fn published_docs_never_mention_the_retired_v2_schema() {
     let root = repo_root();
-    let pages = published_pages(&root.join("docs"));
+    let docs_root = root.join("docs");
+    let pages = published_pages(&docs_root);
+
+    // Every navigation page must be among the walked pages, or the walker or
+    // fence parse broke — refuse rather than scan a partial tree.
+    let walked_routes: BTreeSet<String> = pages
+        .iter()
+        .map(|page| {
+            page.strip_prefix(&docs_root)
+                .expect("page under docs root")
+                .with_extension("")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    let unwalked: Vec<String> = nav_routes(&docs_root)
+        .into_iter()
+        .filter(|route| !walked_routes.contains(route))
+        .collect();
     assert!(
-        pages.len() >= MIN_SCANNED_PAGES,
-        "walked only {} published pages (floor is {MIN_SCANNED_PAGES}); the \
-         walker or the fence parse broke — refusing to verify almost nothing",
-        pages.len(),
+        unwalked.is_empty(),
+        "docs.json navigation publishes pages the walk did not visit: \
+         {unwalked:?} — the walker or the fence parse broke",
     );
 
     let mut offenders = Vec::new();

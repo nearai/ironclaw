@@ -16,11 +16,6 @@ use std::process::Command;
 /// but the doc may legitimately document any visible form.
 const VISIBLE_ALIASES: &[(&str, &[&str])] = &[("ironhub", &["iron-hub", "hub"])];
 
-/// Fail-closed floor: the doc currently carries 30 command rows. A parse that
-/// finds fewer than this many means the table format changed, not that the
-/// CLI shrank — refuse rather than verify almost nothing.
-const MIN_DOC_COMMAND_ROWS: usize = 15;
-
 fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
@@ -121,15 +116,10 @@ fn cli_reference_documents_every_subcommand_and_no_retired_ones() {
 
     let real = help_subcommands();
     let documented = documented_command_paths(&doc);
-    assert!(
-        documented.len() >= MIN_DOC_COMMAND_ROWS,
-        "extracted only {} `ironclaw <command>` rows from {} (floor is {}); \
-         the table format changed — fix the extractor, not the doc",
-        documented.len(),
-        doc_path.display(),
-        MIN_DOC_COMMAND_ROWS,
-    );
 
+    // No row-count floor: the binary's own subcommand set is the fail-closed
+    // anchor — a broken extractor drops some subcommand's only row and the
+    // completeness check below fails.
     let documented_first_words: BTreeSet<&str> =
         documented.iter().map(|path| path[0].as_str()).collect();
     let undocumented: Vec<&String> = real
@@ -143,7 +133,8 @@ fn cli_reference_documents_every_subcommand_and_no_retired_ones() {
     assert!(
         undocumented.is_empty(),
         "subcommands missing from docs/using/cli.mdx: {undocumented:?} — add a \
-         `| `ironclaw <command>` | ... |` row for each (any visible alias form counts)",
+         `| `ironclaw <command>` | ... |` row for each (any visible alias form \
+         counts); every subcommand missing means the row extractor broke",
     );
 
     // Every documented path must exist in the binary, nested commands
