@@ -5,7 +5,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_event_log::{EventError, EventSink, RuntimeEvent, RuntimeEventId};
+use ironclaw_event_log::{
+    EventError, EventSink, MAX_RUNTIME_EVENT_DURATION_MS, RuntimeEvent, RuntimeEventId,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
@@ -23,7 +25,6 @@ const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
 const HOOK_CAPABILITY_ID: &str = "loop.hook";
 const RECOVERY_CAPABILITY_ID: &str = "loop.recovery";
 const RECOVERY_EVENT_ID_DOMAIN: &[u8] = b"ironclaw:loop-recovery-event:v1";
-const MAX_MODEL_CALL_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 fn recovery_event_id(run_id: TurnRunId, sequence: u64) -> RuntimeEventId {
     // Purpose: stable logical deduplication across the event-append/checkpoint
@@ -195,7 +196,7 @@ impl DurableLoopHostMilestoneSink {
             .map(|started| {
                 u64::try_from(started.elapsed().as_millis())
                     .unwrap_or(u64::MAX)
-                    .min(MAX_MODEL_CALL_DURATION_MS)
+                    .min(MAX_RUNTIME_EVENT_DURATION_MS)
             })
             .unwrap_or(0)
     }
@@ -228,7 +229,7 @@ impl LoopHostMilestoneSink for DurableLoopHostMilestoneSink {
             return Ok(());
         };
         self.event_sink
-            .emit(event)
+            .emit_lossless(event)
             .await
             .map_err(durable_event_error)
     }
@@ -449,7 +450,11 @@ fn durable_event_error(error: EventError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_event_log::{EventSink, InMemoryEventSink, RuntimeEventKind};
+    use ironclaw_event_log::{
+        DurableEventLog, EventCursor, EventLogEntry, EventReplay, EventSink, EventStreamKey,
+        InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
+    };
+    use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
     use ironclaw_host_api::{
         ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
         result_meta::FailureKind,
@@ -461,6 +466,78 @@ mod tests {
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::{CapabilityActivityId, TurnId, TurnScope};
+    use tokio::sync::Semaphore;
+
+    struct StalledEventLog {
+        inner: InMemoryDurableEventLog,
+        append_started: Semaphore,
+        append_release: Semaphore,
+    }
+
+    impl StalledEventLog {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryDurableEventLog::new(),
+                append_started: Semaphore::new(0),
+                append_release: Semaphore::new(0),
+            }
+        }
+
+        async fn wait_for_append(&self) {
+            self.append_started
+                .acquire()
+                .await
+                .expect("append-start semaphore stays open")
+                .forget();
+        }
+
+        fn release_appends(&self, count: usize) {
+            self.append_release.add_permits(count);
+        }
+    }
+
+    #[async_trait]
+    impl DurableEventLog for StalledEventLog {
+        async fn append(
+            &self,
+            event: RuntimeEvent,
+        ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<RuntimeEvent>,
+        ) -> Vec<Result<EventLogEntry<RuntimeEvent>, EventError>> {
+            self.append_started.add_permits(1);
+            self.append_release
+                .acquire()
+                .await
+                .expect("append-release semaphore stays open")
+                .forget();
+            self.inner.append_batch(events).await
+        }
+
+        async fn read_after_cursor(
+            &self,
+            stream: &EventStreamKey,
+            filter: &ReadScope,
+            after: Option<EventCursor>,
+            limit: usize,
+        ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+            self.inner
+                .read_after_cursor(stream, filter, after, limit)
+                .await
+        }
+
+        async fn head_cursor(
+            &self,
+            stream: &EventStreamKey,
+            after: EventCursor,
+        ) -> Result<EventCursor, EventError> {
+            self.inner.head_cursor(stream, after).await
+        }
+    }
 
     const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -794,7 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_attempt_persists_only_one_bounded_terminal_event() {
+    async fn model_attempt_persists_only_one_positive_bounded_terminal_event() {
         for (terminal_kind, expected_kind) in [
             (
                 LoopHostMilestoneKind::ModelCompleted {
@@ -831,6 +908,16 @@ mod tests {
             sink.publish_loop_milestone(started)
                 .await
                 .expect("model start is tracked in memory");
+            {
+                let mut started = sink
+                    .model_started_at
+                    .lock()
+                    .expect("model-start map is not poisoned");
+                let recorded_start = started
+                    .get_mut(&run_id)
+                    .expect("ModelStarted records the run timestamp");
+                *recorded_start = Instant::now() - std::time::Duration::from_millis(1);
+            }
             sink.publish_loop_milestone(terminal)
                 .await
                 .expect("model terminal event is emitted");
@@ -841,9 +928,95 @@ mod tests {
             assert!(
                 events[0]
                     .duration_ms
-                    .is_some_and(|duration| duration <= MAX_MODEL_CALL_DURATION_MS),
-                "terminal model event must carry a bounded duration"
+                    .is_some_and(|duration| duration > 0
+                        && duration <= MAX_RUNTIME_EVENT_DURATION_MS),
+                "terminal model event must carry a positive bounded duration"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn durable_milestone_waits_for_full_coalescing_channel_without_loss() {
+        let (started, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::ModelStarted {
+                requested_model_profile_id: None,
+            });
+        let mut terminal = started.clone();
+        terminal.kind = LoopHostMilestoneKind::ModelCompleted {
+            effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("test-model")
+                .unwrap(),
+        };
+        let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &fixture_thread_scope(),
+            thread_id,
+            run_id,
+        )
+        .expect("fixture scope");
+        let filler_scope = milestone_scope
+            .resource_scope(&started)
+            .expect("fixture milestone matches durable scope");
+        let stream = EventStreamKey::from_scope(&filler_scope);
+        let log = Arc::new(StalledEventLog::new());
+        let coalescing = Arc::new(CoalescingEventSink::new(
+            Arc::clone(&log) as Arc<dyn DurableEventLog>,
+            EventBatchConfig {
+                max_batch: 1,
+                flush_interval: std::time::Duration::from_secs(60),
+                channel_capacity: 1,
+            },
+        ));
+        let event_sink: Arc<dyn EventSink> = coalescing.clone();
+        let sink = DurableLoopHostMilestoneSink::new(event_sink, milestone_scope);
+
+        sink.publish_loop_milestone(started)
+            .await
+            .expect("model start is tracked in memory");
+        let filler = RuntimeEvent::loop_cancelled(
+            filler_scope,
+            capability_id(LOOP_RUN_CAPABILITY_ID).expect("loop capability id"),
+        );
+        coalescing
+            .emit(filler.clone())
+            .await
+            .expect("first best-effort event starts the stalled append");
+        log.wait_for_append().await;
+        coalescing
+            .emit(filler)
+            .await
+            .expect("second best-effort event fills the bounded channel");
+
+        let terminal_publish = sink.publish_loop_milestone(terminal);
+        tokio::pin!(terminal_publish);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                terminal_publish.as_mut()
+            )
+            .await
+            .is_err(),
+            "durable milestone enqueue must wait instead of reporting success while the channel is full"
+        );
+
+        log.release_appends(4);
+        terminal_publish
+            .await
+            .expect("durable milestone enqueues after capacity becomes available");
+        coalescing
+            .flush()
+            .await
+            .expect("graceful flush persists the accepted durable milestone");
+
+        let replay = log
+            .read_after_cursor(&stream, &ReadScope::default(), None, 10)
+            .await
+            .expect("replay persisted events");
+        assert_eq!(replay.entries.len(), 3);
+        assert!(
+            replay
+                .entries
+                .iter()
+                .any(|entry| entry.record.kind == RuntimeEventKind::ModelCompleted),
+            "the durable terminal milestone must survive bounded-channel overload"
+        );
     }
 }

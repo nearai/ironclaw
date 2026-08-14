@@ -9,24 +9,32 @@ use crate::runtime_event::RuntimeEvent;
 
 /// Async event sink used by runtime/composition services.
 ///
-/// **Best-effort observability.** The contract requires that a sink failure
-/// **must not** change runtime outcomes. The trait returns `Result` so
-/// implementations can surface diagnostics to a separate observer/log,
-/// **never** so callers can `?`-propagate the error and short-circuit the
-/// surrounding workflow.
+/// [`EventSink::emit`] is **best-effort observability**. A failure from that
+/// method must not change runtime outcomes. The trait returns `Result` so
+/// implementations can surface diagnostics to a separate observer/log, never
+/// so best-effort callers can short-circuit the surrounding workflow.
 ///
-/// Callers (dispatcher, process manager, host runtime) must:
+/// Durable lifecycle producers use [`EventSink::emit_lossless`] instead. That
+/// method may wait for bounded write-behind capacity and may propagate an
+/// enqueue failure. Lifecycle shutdown must then call [`EventSink::flush`] to
+/// wait for accepted events to reach durable storage.
+///
+/// Best-effort callers (dispatcher, process manager, host runtime) must:
 ///
 /// 1. invoke `emit(...).await`;
 /// 2. record any returned error to a diagnostics channel of their choice;
 /// 3. continue with their original success/failure result.
-///
-/// A type-level enforcement of this contract (no-fail emit + separate
-/// fallible diagnostics surface) is a deliberate follow-up; see the
-/// "best-effort sink contract" follow-up issue.
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
+
+    /// Enqueue an event without treating a full bounded write-behind channel
+    /// as success. Synchronous and non-dropping sinks can inherit this default.
+    /// Any sink whose [`EventSink::emit`] may report success after dropping an
+    /// event must override this method.
+    async fn emit_lossless(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.emit(event).await
+    }
 
     /// Flush any buffered events to durable storage. Synchronous sinks are
     /// already durable on `emit` return, so the default is a no-op. Write-behind

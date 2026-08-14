@@ -39,7 +39,7 @@ use ironclaw_assistant::{
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
     RunStateApprovalInteractionReadModel,
 };
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventSink, RuntimeEvent};
+use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventError, EventSink, RuntimeEvent};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::turn::{
@@ -528,7 +528,7 @@ pub enum RebornRuntimeError {
     #[error("user sandbox shutdown failed: {0}")]
     UserSandboxShutdown(#[source] RuntimeProcessError),
     #[error("runtime event flush failed: {0}")]
-    RuntimeEventFlush(String),
+    RuntimeEventFlush(#[source] EventError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -2492,7 +2492,7 @@ impl RebornRuntime {
         self.runtime_event_sink
             .flush()
             .await
-            .map_err(|error| RebornRuntimeError::RuntimeEventFlush(error.to_string()))?;
+            .map_err(RebornRuntimeError::RuntimeEventFlush)?;
         Ok(())
     }
 
@@ -2938,7 +2938,7 @@ impl RebornRuntime {
             }
         })?;
         self.runtime_event_sink
-            .emit(RuntimeEvent::loop_cancelled(
+            .emit_lossless(RuntimeEvent::loop_cancelled(
                 ResourceScope {
                     tenant_id: scope.tenant_id.clone(),
                     user_id: self.actor_user_id.clone(),

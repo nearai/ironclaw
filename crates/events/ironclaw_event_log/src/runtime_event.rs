@@ -881,7 +881,7 @@ const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
 const MAX_ERROR_SUMMARY_BYTES: usize = 512;
 /// One day. A stuck model request can run longer, but durable observability
 /// metadata stays bounded and never becomes an unbounded wall-clock counter.
-const MAX_RUNTIME_EVENT_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const MAX_RUNTIME_EVENT_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 const REDACTED_ERROR_SUMMARY: &str = "the tool failure details were redacted";
 const WORKSPACE_FILE_ERROR_SUMMARY: &str = "can't access your workspace file";
 
@@ -1529,6 +1529,43 @@ mod tests {
         let completed_round_trip: RuntimeEvent =
             serde_json::from_str(&completed_wire).expect("deserialize model completion");
         assert_eq!(completed_round_trip, completed);
+
+        let mut raw_wire = serde_json::to_value(RuntimeEvent::model_completed(
+            scope(),
+            capability(),
+        ))
+        .expect("serialize raw terminal event fixture");
+        raw_wire
+            .as_object_mut()
+            .expect("runtime event must serialize as an object")
+            .insert("duration_ms".to_string(), serde_json::json!(u64::MAX));
+        let raw_wire = serde_json::to_string(&raw_wire).expect("encode raw terminal event fixture");
+        let untrusted: RuntimeEvent =
+            serde_json::from_str(&raw_wire).expect("deserialize untrusted terminal event");
+        assert_eq!(
+            untrusted.duration_ms,
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "ordinary wire deserialization must clamp oversized durations"
+        );
+        let trusted = runtime_event_from_trusted_json_str(&raw_wire)
+            .expect("deserialize trusted replay terminal event");
+        assert_eq!(
+            trusted.duration_ms,
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "trusted replay deserialization must clamp oversized durations"
+        );
+
+        let mut directly_constructed = RuntimeEvent::model_completed(scope(), capability());
+        directly_constructed.duration_ms = Some(u64::MAX);
+        let directly_constructed_wire =
+            serde_json::to_value(directly_constructed).expect("serialize direct terminal event");
+        assert_eq!(
+            directly_constructed_wire
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64),
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "serialization must clamp oversized public-field values"
+        );
 
         let historical_started = RuntimeEvent::model_started(scope(), capability());
         let mut historical_wire =

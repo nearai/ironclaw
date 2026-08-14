@@ -149,6 +149,7 @@ async fn emits_coalesce_into_a_single_batched_append_preserving_order() {
         EventBatchConfig {
             max_batch: 256,
             flush_interval: Duration::from_millis(50),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -205,6 +206,7 @@ async fn crash_before_flush_loses_only_the_unflushed_tail() {
         EventBatchConfig {
             max_batch: 1000,
             flush_interval: Duration::from_secs(10),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -281,6 +283,7 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
             // Large interval so the drain loop never fires on the timer;
             // the final batch is released only when flush() sends its ack.
             flush_interval: Duration::from_secs(10),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -355,11 +358,10 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
 }
 
 #[tokio::test]
-async fn flush_propagates_partial_append_batch_failure() {
-    // Verify that a per-event rejection inside `append_batch` propagates all
-    // the way through `flush()` as an `Err`. The sink's `flush()` contract
-    // guarantees `Ok(())` only when every queued event landed durably; callers
-    // rely on that guarantee for graceful-shutdown sequencing.
+async fn flush_propagates_partial_append_failure_from_prior_drain_window() {
+    // A per-event rejection must remain pending until the lifecycle owner
+    // flushes, even when the failed batch drained before the Flush message
+    // reached the channel.
     let log = Arc::new(CountingEventLog::new());
     log.inject_partial_failure
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -367,7 +369,8 @@ async fn flush_propagates_partial_append_batch_failure() {
         Arc::clone(&log) as Arc<dyn DurableEventLog>,
         EventBatchConfig {
             max_batch: 256,
-            flush_interval: Duration::from_millis(50),
+            flush_interval: Duration::from_millis(10),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -382,6 +385,7 @@ async fn flush_propagates_partial_append_batch_failure() {
         .await
         .expect("emit must buffer without blocking");
     }
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let result = sink.flush().await;
     assert!(

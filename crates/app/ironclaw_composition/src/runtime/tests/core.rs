@@ -18,6 +18,29 @@ use crate::test_support::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_ses
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+use ironclaw_event_log::{EventError, EventSink, RuntimeEvent, RuntimeEventKind};
+
+#[derive(Default)]
+struct OverloadedEventSink {
+    best_effort_attempts: AtomicUsize,
+    durable_events: StdMutex<Vec<RuntimeEvent>>,
+}
+
+#[async_trait]
+impl EventSink for OverloadedEventSink {
+    async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
+        self.best_effort_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn emit_lossless(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.durable_events
+            .lock()
+            .expect("durable event recording mutex is not poisoned")
+            .push(event);
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct SlackDmOpenNetworkEgress {
@@ -4196,7 +4219,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
 }
 
 #[tokio::test]
-async fn cancel_run_propagates_to_subagent_children() {
+async fn cancel_run_propagates_to_children_without_loss_under_sink_overload() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
@@ -4217,7 +4240,10 @@ async fn cancel_run_propagates_to_subagent_children() {
     })
     .with_model_gateway_override(gateway);
 
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let overloaded_event_sink = Arc::new(OverloadedEventSink::default());
+    let event_sink: Arc<dyn EventSink> = overloaded_event_sink.clone();
+    runtime.runtime_event_sink = event_sink;
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
     let conversation = runtime.new_conversation().await.expect("conversation");
     let parent_scope = runtime.turn_scope_for(&conversation.0);
@@ -4363,6 +4389,30 @@ async fn cancel_run_propagates_to_subagent_children() {
         .await
         .expect("child state");
     assert_eq!(child_state.status, TurnStatus::Cancelled);
+
+    assert_eq!(
+        overloaded_event_sink
+            .best_effort_attempts
+            .load(Ordering::SeqCst),
+        0,
+        "cancellation must not use the best-effort path that drops on overload"
+    );
+    let cancellation_events = overloaded_event_sink
+        .durable_events
+        .lock()
+        .expect("durable event recording mutex is not poisoned");
+    assert_eq!(
+        cancellation_events.len(),
+        2,
+        "parent and child cancellation events must both use lossless enqueue"
+    );
+    assert!(
+        cancellation_events
+            .iter()
+            .all(|event| event.kind == RuntimeEventKind::LoopCancelled),
+        "the lossless cancellation path must retain only the expected cancellation records"
+    );
+    drop(cancellation_events);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

@@ -26,9 +26,9 @@
 //!   (bounded by `flush_interval` or `max_batch`) is lost.
 //! - The [`EventSink::flush`] override drains everything queued before the
 //!   call, for graceful shutdown and deterministic tests.
-//! - The internal channel is bounded ([`CHANNEL_CAPACITY`]). Events emitted
-//!   while the channel is full are dropped (best-effort sink contract) and
-//!   counted via [`CoalescingEventSink::dropped_count`].
+//! - The internal channel is bounded by [`EventBatchConfig::channel_capacity`].
+//!   [`EventSink::emit`] drops best-effort events while the channel is full;
+//!   [`EventSink::emit_lossless`] waits for capacity for durable lifecycle events.
 //!
 //! ## Loss semantics — best-effort by design, NOT at-least-once
 //!
@@ -39,10 +39,10 @@
 //! Ordering & durability above), all bounded and observable:
 //!
 //! 1. **Overload drop** — sustained back-pressure fills the bounded channel;
-//!    `emit` drops (it must never block the caller per the [`EventSink`]
-//!    contract) and increments `dropped_count`. Back-pressure or an overflow
-//!    WAL would both violate the contract / re-introduce the unbounded-memory
-//!    failure this bound exists to prevent.
+//!    best-effort `emit` drops (it must never block the caller per that method's
+//!    contract) and increments `dropped_count`. Durable lifecycle producers use
+//!    `emit_lossless`, which waits for bounded capacity and is completed by the
+//!    lifecycle owner's graceful `flush`.
 //! 2. **Per-event reject** — a backend `append_batch` rejects some rows. The
 //!    successful rows are still durably committed (`append_batch` preserves the
 //!    successful prefix and returns per-event results); only the rejected rows
@@ -54,9 +54,9 @@
 //!    whole window for that flush is lost and `error!`-logged. Retrying a
 //!    panicking append is a panic loop, so the next window simply proceeds.
 //!
-//! If a stream ever needs at-least-once durability, it does not belong on this
-//! sink — the compliance audit log (`DurableAuditSink`) is a separate,
-//! synchronous, non-coalescing sink for exactly that.
+//! This sink does not retry backend rejects or survive process crashes. Producers
+//! that require lossless overload handling may use `emit_lossless` plus graceful
+//! `flush`; at-least-once durability still requires a different substrate.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,13 +67,10 @@ use ironclaw_event_log::{DurableEventLog, EventError, EventSink, RuntimeEvent};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, timeout_at};
 
-/// Maximum number of [`DrainMessage`]s queued in the write-behind channel.
-///
-/// Bounds memory consumption when the durable backend stalls (DB outage,
-/// slow INSERT, etc.). ~8 k events is a generous burst headroom for normal
-/// traffic; events emitted past this limit are dropped with a rate-limited
-/// `debug!` and counted by [`CoalescingEventSink::dropped_count`].
-const CHANNEL_CAPACITY: usize = 8192;
+/// Default maximum number of [`DrainMessage`]s queued in the write-behind
+/// channel. ~8 k events is generous burst headroom for normal traffic while
+/// still bounding memory when the durable backend stalls.
+const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
 
 /// Tuning for the write-behind coalescing event sink.
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +82,8 @@ pub struct EventBatchConfig {
     /// Upper bound on how long the first event of a window waits before its
     /// batch is flushed. Bounds both visibility lag and crash-loss tail.
     pub flush_interval: Duration,
+    /// Maximum queued messages while the durable backend is stalled.
+    pub channel_capacity: usize,
 }
 
 impl Default for EventBatchConfig {
@@ -92,6 +91,7 @@ impl Default for EventBatchConfig {
         Self {
             max_batch: 256,
             flush_interval: Duration::from_millis(50),
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
         }
     }
 }
@@ -110,6 +110,7 @@ enum DrainMessage {
 pub struct CoalescingEventSink {
     tx: mpsc::Sender<DrainMessage>,
     dropped: Arc<AtomicU64>,
+    channel_capacity: usize,
 }
 
 impl std::fmt::Debug for CoalescingEventSink {
@@ -124,10 +125,15 @@ impl std::fmt::Debug for CoalescingEventSink {
 impl CoalescingEventSink {
     /// Spawn the drain task and return a sink that buffers appends to `log`.
     pub fn new(log: Arc<dyn DurableEventLog>, config: EventBatchConfig) -> Self {
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let channel_capacity = config.channel_capacity.max(1);
+        let (tx, rx) = mpsc::channel(channel_capacity);
         let dropped = Arc::new(AtomicU64::new(0));
         tokio::spawn(drain_loop(log, config, rx));
-        Self { tx, dropped }
+        Self {
+            tx,
+            dropped,
+            channel_capacity,
+        }
     }
 
     /// Number of events dropped because the internal channel was full.
@@ -150,10 +156,7 @@ impl EventSink for CoalescingEventSink {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
         // Best-effort: buffer and return immediately. The channel is bounded;
         // if it is full (drain stalled) we drop the event rather than block
-        // the caller — the sink contract forbids blocking or short-circuiting
-        // the surrounding workflow. This drop is intentional and bounded; see
-        // the module-level "Loss semantics" (overload-drop mode). Durability
-        // for streams that need it lives in the synchronous `DurableAuditSink`.
+        // the caller. Durable lifecycle producers use `emit_lossless` below.
         match self.tx.try_send(DrainMessage::Event(Box::new(event))) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -167,13 +170,21 @@ impl EventSink for CoalescingEventSink {
                     tracing::debug!(
                         target: "ironclaw::reborn::event_store::coalescing",
                         dropped = new_dropped,
-                        "event dropped: coalescing channel at capacity ({CHANNEL_CAPACITY}); drain may be stalled"
+                        capacity = self.channel_capacity,
+                        "event dropped: coalescing channel at capacity; drain may be stalled"
                     );
                 }
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(sink_closed()),
         }
+    }
+
+    async fn emit_lossless(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.tx
+            .send(DrainMessage::Event(Box::new(event)))
+            .await
+            .map_err(|_| sink_closed())
     }
 
     /// Flush every event queued before this call, awaiting durable write. Used
@@ -201,6 +212,7 @@ async fn drain_loop(
     mut rx: mpsc::Receiver<DrainMessage>,
 ) {
     let max_batch = config.max_batch.max(1);
+    let mut pending_flush_error: Option<String> = None;
     loop {
         // Block until a window opens (or exit once every sender is dropped).
         let first = match rx.recv().await {
@@ -239,19 +251,25 @@ async fn drain_loop(
         }
 
         let flush_result = flush_batch(&log, std::mem::take(&mut batch)).await;
-        // EventError is not Clone, so capture the error message as a String and
-        // reconstruct one Err per ack. All acks for this window share the same
-        // outcome.
-        let flush_err_msg: Option<String> = flush_result.as_ref().err().map(|e| e.to_string());
-        for ack in acks {
-            let payload = match &flush_err_msg {
-                None => Ok(()),
-                Some(reason) => Err(EventError::Sink {
-                    reason: reason.clone(),
-                }),
-            };
-            // Receiver may have given up; ignore.
-            let _ = ack.send(payload);
+        if pending_flush_error.is_none() {
+            pending_flush_error = flush_result.err().map(|error| error.to_string());
+        }
+        if !acks.is_empty() {
+            // EventError is not Clone, so retain the first unreported failure
+            // as text and reconstruct one Err per ack. A graceful flush must
+            // surface failures from earlier drain windows, not only the window
+            // that happened to carry the Flush message.
+            let flush_err_msg = pending_flush_error.take();
+            for ack in acks {
+                let payload = match &flush_err_msg {
+                    None => Ok(()),
+                    Some(reason) => Err(EventError::Sink {
+                        reason: reason.clone(),
+                    }),
+                };
+                // Receiver may have given up; ignore.
+                let _ = ack.send(payload);
+            }
         }
 
         if closed {

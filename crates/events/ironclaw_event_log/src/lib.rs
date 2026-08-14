@@ -48,8 +48,8 @@ pub use in_memory::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
 pub use runtime_event::{
-    RuntimeEvent, RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
-    UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,
+    MAX_RUNTIME_EVENT_DURATION_MS, RuntimeEvent, RuntimeEventId, RuntimeEventKind,
+    UNCLASSIFIED_ERROR_KIND, UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,
     runtime_event_from_trusted_json_slice, runtime_event_from_trusted_json_str,
     sanitize_error_kind, sanitize_error_summary, sanitize_hook_id, sanitize_hook_label,
     sanitize_recovery_label,
