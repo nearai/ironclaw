@@ -1500,6 +1500,62 @@ fn tool_history_chat_body() -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn oversized_prepared_request_fails_before_reserving_the_idempotency_key() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("{\"verdict\":\"good\"}"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        reader.clone(),
+    )
+    .with_prepared_turn_port(port.clone());
+
+    // 129 seeded messages exceed the accept door's 128-message budget; the
+    // pre-reservation mirror must reject it so the idempotency key stays
+    // unburned.
+    let mut messages = vec![serde_json::json!({"role": "user", "content": "part"}); 129];
+    messages.push(serde_json::json!({"role": "assistant", "content": "reply"}));
+    let oversized = serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": messages,
+        "response_format": {"type": "json_object"}
+    });
+    let body = serde_json::to_vec(&oversized).expect("body");
+    let error = service
+        .complete_chat(
+            caller(),
+            &body,
+            Some(OpenAiCompatIdempotencyKey::new("prepared-retry-key").expect("key")),
+        )
+        .await
+        .expect_err("oversized prepared request must fail");
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(port.requests().len(), 0, "the door must not be reached");
+
+    // The corrected request reuses the SAME idempotency key and succeeds —
+    // proof the failed attempt reserved nothing.
+    let corrected = serde_json::to_vec(&json_schema_chat_body()).expect("body");
+    let response = service
+        .complete_chat(
+            caller(),
+            &corrected,
+            Some(OpenAiCompatIdempotencyKey::new("prepared-retry-key").expect("key")),
+        )
+        .await
+        .expect("corrected retry succeeds on the same key");
+    assert_eq!(
+        response.choices[0].message.content,
+        Some(serde_json::Value::String(
+            "{\"verdict\":\"good\"}".to_string()
+        ))
+    );
+    assert_eq!(port.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn json_schema_chat_routes_through_the_prepared_door() {
     let surface = Arc::new(FakeProductSurface::new());
     let port = Arc::new(RecordingPreparedTurnPort::new());

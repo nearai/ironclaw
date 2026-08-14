@@ -142,11 +142,23 @@ pub(crate) fn prepared_lane_output(
     Ok(None)
 }
 
+/// Mirrors of the accept door's deterministic bounds
+/// (`ironclaw_llm::agent_message`, re-exported via
+/// `ironclaw_threads::agent_message`); this crate cannot depend on the llm
+/// crate in production, so the values are pinned by the equality test below.
+pub(crate) const PREPARED_TEXT_PART_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const PREPARED_LIST_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const PREPARED_TOOL_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const PREPARED_LIST_MAX_MESSAGES: usize = 128;
+
 /// Cheap deterministic pre-validation for a prepared-lane request, run
 /// BEFORE the idempotency reservation so an invalid body never burns the
 /// caller's idempotency key (the same ordering the conversation lane's
 /// payload build provides). The accept door remains the authoritative
-/// validator; everything here is a faithful subset.
+/// validator; everything here is a faithful mirror of its DETERMINISTIC
+/// rejections — counts, byte budgets, call-id grammar, tool-name mapping,
+/// and tool-call/result pairing — so a body the door would refuse never
+/// reaches the reservation.
 pub(crate) fn prepared_pre_validate(
     messages: &[OpenAiChatMessage],
 ) -> Result<(), OpenAiCompatHttpError> {
@@ -215,6 +227,95 @@ pub(crate) fn prepared_pre_validate(
                 )));
             }
         }
+    }
+
+    // Byte budgets and pairing, mirroring the seed shapes the mapping
+    // produces: system/developer rows fold into ONE system prompt; every
+    // other message becomes one text part; tool-call arguments serialize
+    // as parsed JSON when they parse, else as the raw string.
+    fn joined_text_len(content: Option<&serde_json::Value>) -> usize {
+        match content {
+            None => 0,
+            Some(serde_json::Value::String(text)) => text.len(),
+            Some(serde_json::Value::Array(parts)) => parts
+                .iter()
+                .map(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::len)
+                        .unwrap_or(0)
+                })
+                .sum::<usize>()
+                .saturating_add(parts.len().saturating_sub(1).saturating_mul(2)),
+            Some(_) => 0,
+        }
+    }
+    let mut seeded_messages = 0usize;
+    let mut system_bytes = 0usize;
+    let mut total_bytes = 0usize;
+    let mut open_calls: Vec<&str> = Vec::new();
+    for message in messages {
+        let text_len = joined_text_len(message.content.as_ref());
+        match message.role {
+            OpenAiChatMessageRole::System | OpenAiChatMessageRole::Developer => {
+                system_bytes = system_bytes.saturating_add(text_len);
+                continue;
+            }
+            _ => {}
+        }
+        seeded_messages += 1;
+        if text_len > PREPARED_TEXT_PART_MAX_BYTES {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
+                "messages[].content exceeds the {PREPARED_TEXT_PART_MAX_BYTES} byte text budget"
+            ))));
+        }
+        total_bytes = total_bytes.saturating_add(text_len);
+        if matches!(message.role, OpenAiChatMessageRole::Tool) {
+            let call_id = message.tool_call_id.as_deref().unwrap_or_default();
+            let Some(open_at) = open_calls.iter().position(|open| *open == call_id) else {
+                return Err(OpenAiCompatHttpError::invalid_request(Some(
+                    "messages[].tool_call_id does not answer a prior assistant tool call"
+                        .to_string(),
+                )));
+            };
+            open_calls.remove(open_at);
+        }
+        for call in message.tool_calls.iter().flatten() {
+            let serialized_arguments =
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|_| {
+                        serde_json::Value::String(call.function.arguments.clone()).to_string()
+                    });
+            if serialized_arguments.len() > PREPARED_TOOL_ARGUMENTS_MAX_BYTES {
+                return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
+                    "messages[].tool_calls[].function.arguments exceeds the \
+                     {PREPARED_TOOL_ARGUMENTS_MAX_BYTES} byte budget"
+                ))));
+            }
+            total_bytes = total_bytes.saturating_add(serialized_arguments.len());
+            open_calls.push(call.id.as_str());
+        }
+    }
+    if !open_calls.is_empty() {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "messages[].tool_calls without a matching tool result".to_string(),
+        )));
+    }
+    if seeded_messages > PREPARED_LIST_MAX_MESSAGES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
+            "messages exceeds the {PREPARED_LIST_MAX_MESSAGES} seeded message limit"
+        ))));
+    }
+    if system_bytes > PREPARED_TEXT_PART_MAX_BYTES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
+            "system/developer content exceeds the {PREPARED_TEXT_PART_MAX_BYTES} byte budget"
+        ))));
+    }
+    if total_bytes > PREPARED_LIST_MAX_BYTES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
+            "messages exceed the {PREPARED_LIST_MAX_BYTES} byte request budget"
+        ))));
     }
     Ok(())
 }
@@ -352,6 +453,96 @@ mod tests {
         let mut request = base_request(vec![user_message("go")]);
         request.stream = Some(true);
         assert!(prepared_lane_output(&request).expect("lane").is_none());
+    }
+
+    #[test]
+    fn mirrored_bounds_match_the_accept_door_constants() {
+        use ironclaw_threads::agent_message as door;
+        assert_eq!(
+            PREPARED_TEXT_PART_MAX_BYTES,
+            door::AGENT_MESSAGE_TEXT_PART_MAX_BYTES
+        );
+        assert_eq!(PREPARED_LIST_MAX_BYTES, door::AGENT_MESSAGE_LIST_MAX_BYTES);
+        assert_eq!(
+            PREPARED_TOOL_ARGUMENTS_MAX_BYTES,
+            door::AGENT_MESSAGE_TOOL_ARGUMENTS_MAX_BYTES
+        );
+        assert_eq!(
+            PREPARED_LIST_MAX_MESSAGES,
+            door::AGENT_MESSAGE_LIST_MAX_MESSAGES
+        );
+    }
+
+    #[test]
+    fn pre_validation_mirrors_the_door_bounds_and_pairing() {
+        // 129 seeded messages: rejected before any reservation could burn.
+        let messages: Vec<OpenAiChatMessage> = (0..129).map(|_| user_message("hi")).collect();
+        assert!(prepared_pre_validate(&messages).is_err());
+
+        // Oversized single text part.
+        let messages = vec![user_message(&"x".repeat(PREPARED_TEXT_PART_MAX_BYTES + 1))];
+        assert!(prepared_pre_validate(&messages).is_err());
+
+        // A tool result answering no prior call.
+        let messages = vec![
+            user_message("go"),
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Tool,
+                content: Some(json!("result")),
+                name: None,
+                tool_call_id: Some("call_orphan".to_string()),
+                tool_calls: None,
+            },
+        ];
+        assert!(prepared_pre_validate(&messages).is_err());
+
+        // A tool call with no answering result.
+        let messages = vec![
+            user_message("go"),
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Assistant,
+                content: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
+                    id: "call_unanswered".to_string(),
+                    kind: crate::chat::OpenAiChatToolKind::Function,
+                    function: crate::chat::OpenAiChatToolCallFunction {
+                        name: "lookup".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+            },
+        ];
+        assert!(prepared_pre_validate(&messages).is_err());
+
+        // A well-formed paired round passes.
+        let messages = vec![
+            user_message("go"),
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Assistant,
+                content: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
+                    id: "call_1".to_string(),
+                    kind: crate::chat::OpenAiChatToolKind::Function,
+                    function: crate::chat::OpenAiChatToolCallFunction {
+                        name: "lookup".to_string(),
+                        arguments: "{\"q\":1}".to_string(),
+                    },
+                }]),
+            },
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Tool,
+                content: Some(json!("found it")),
+                name: None,
+                tool_call_id: Some("call_1".to_string()),
+                tool_calls: None,
+            },
+            user_message("continue"),
+        ];
+        prepared_pre_validate(&messages).expect("paired history passes pre-validation");
     }
 
     #[test]
