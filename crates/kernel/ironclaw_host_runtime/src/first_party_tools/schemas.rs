@@ -977,13 +977,14 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "result_delivery": {
                                     "type": "string",
                                     "enum": ["deliver", "suppress_when_nothing_to_report"],
-                                    "description": "Defaults to deliver. Choose suppress_when_nothing_to_report only when the user wants no ordinary delivery for a no-result run. If the user's intent is unclear, ask the user before calling trigger_create rather than guess. The trusted settlement boundary recognizes only the exact normalized [SILENT] response."
+                                    "description": "Required explicit choice. Choose suppress_when_nothing_to_report only when the user wants no ordinary delivery for a no-result run. If the user's intent is unclear, ask the user before calling trigger_create rather than guess."
                                 }
                             },
+                            "required": ["result_delivery"],
                             "additionalProperties": false
                         }
                     },
-                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text"],
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "policy"],
                     "additionalProperties": false
                 },
                 "schedule": {
@@ -1056,6 +1057,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
             },
             "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/complete_nothing_to_report.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
             "additionalProperties": false
         }),
         _ => return None,
@@ -1227,6 +1233,21 @@ mod tests {
         assert_eq!(
             schema["required"],
             serde_json::json!(["name", "execution_contract", "schedule"])
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["required"],
+            serde_json::json!([
+                "version",
+                "goal",
+                "success_criteria",
+                "output_instructions",
+                "no_result_text",
+                "policy"
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
+            serde_json::json!(["result_delivery"])
         );
         assert!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]

@@ -8,9 +8,10 @@ use crate::{error::HostApiError, ids::CapabilityId};
 
 const MAX_REQUIRED_SKILL_NAME_BYTES: usize = 64;
 
-/// Compatibility response recognized at trusted run settlement when an
-/// unattended execution explicitly opts into result suppression.
-pub const NOTHING_TO_REPORT_SENTINEL: &str = "[SILENT]";
+/// Loop-control capability exposed only to scheduled runs that explicitly opt
+/// into no-result suppression. The agent loop terminalizes this call itself;
+/// it never crosses capability dispatch as an ordinary tool invocation.
+pub const NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID: &str = "builtin.complete_nothing_to_report";
 
 /// How a successful run's ordinary result is handled after settlement.
 ///

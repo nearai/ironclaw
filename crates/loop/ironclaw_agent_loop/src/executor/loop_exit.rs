@@ -13,6 +13,7 @@ use crate::{
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     StageContext, attach_failure_explanation, completed_exit, failed_exit,
+    nothing_to_report_completed_exit,
 };
 
 /// Instruction injected by the tools-capable completion nudge — drive the model
@@ -122,6 +123,23 @@ impl ExecutorStage<ExitInput> for ExitStage {
         input: ExitInput,
     ) -> Result<LoopExit, AgentLoopExecutorError> {
         self.for_stop(ctx, input.state, input.kind).await
+    }
+}
+
+impl ExitStage {
+    pub(super) async fn complete_nothing_to_report(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+    ) -> Result<LoopExit, AgentLoopExecutorError> {
+        let state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+            CancelCheck::Continue(state) => *state,
+            CancelCheck::Exit(exit) => return Ok(exit),
+        };
+        let checked = CheckpointStage
+            .write(ctx, state, CheckpointKind::Final)
+            .await?;
+        nothing_to_report_completed_exit(ctx.host, checked.state, checked.checkpoint_id)
     }
 }
 

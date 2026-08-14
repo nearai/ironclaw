@@ -22,8 +22,8 @@ use ironclaw_turns::{
 // (PROPOSAL §11.2.4, pinned by `reborn_loop_port_location_scan`). The evidence
 // requests and the applier travel with it for the same reason — one home each.
 use ironclaw_turns::loop_exit::{
-    BlockedEvidenceRequest, CompletionEvidenceRequest, ExactCompletionReplyEvidenceRequest,
-    FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
 };
 
 /// Strict test/local evidence port. Defaults to distrust everything.
@@ -38,7 +38,6 @@ pub struct InMemoryLoopExitEvidencePort {
     blocked_evidence_verified: bool,
     failure_evidence_verified: bool,
     cancellation_observed: bool,
-    exact_completion_reply_matches: bool,
     latest_checkpoint_kind: Option<LoopCheckpointKind>,
 }
 
@@ -50,21 +49,18 @@ impl InMemoryLoopExitEvidencePort {
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
             cancellation_observed: false,
-            exact_completion_reply_matches: false,
             latest_checkpoint_kind: None,
         }
     }
 
     #[cfg(test)]
     pub fn all_verified() -> Self {
-        let mut evidence = Self::new()
+        Self::new()
             .with_completion_refs_verified(true)
             .with_final_checkpoint_verified(true)
             .with_blocked_evidence_verified(true)
             .with_failure_evidence_verified(true)
-            .with_cancellation_observed(true);
-        evidence.exact_completion_reply_matches = true;
-        evidence
+            .with_cancellation_observed(true)
     }
 
     #[cfg(test)]
@@ -117,13 +113,6 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
         _request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
         Ok(self.completion_refs_verified)
-    }
-
-    async fn final_reply_matches_exact_normalized(
-        &self,
-        _request: ExactCompletionReplyEvidenceRequest<'_>,
-    ) -> Result<bool, TurnError> {
-        Ok(self.exact_completion_reply_matches)
     }
 
     async fn verify_final_checkpoint(
@@ -307,32 +296,6 @@ where
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
         });
         Ok(replies_verified && results_verified)
-    }
-
-    async fn final_reply_matches_exact_normalized(
-        &self,
-        request: ExactCompletionReplyEvidenceRequest<'_>,
-    ) -> Result<bool, TurnError> {
-        let Some(final_ref) = request.reply_message_refs.last() else {
-            return Ok(false);
-        };
-        let Some(final_message_id) = message_id_from_ref(final_ref) else {
-            return Ok(false);
-        };
-        let history = self
-            .load_thread_history_for_turn(request.scope, request.run_id)
-            .await?;
-        let expected_run_id = request.run_id.to_string();
-        Ok(history.messages.iter().any(|message| {
-            message.message_id == final_message_id
-                && message.kind == MessageKind::Assistant
-                && message.status == MessageStatus::Finalized
-                && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
-                && message
-                    .content
-                    .as_deref()
-                    .is_some_and(|content| content.trim() == request.expected)
-        }))
     }
 
     async fn verify_final_checkpoint(

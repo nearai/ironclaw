@@ -32,6 +32,22 @@ pub(super) fn completed_exit(
     }))
 }
 
+pub(super) fn nothing_to_report_completed_exit(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: LoopExecutionState,
+    final_checkpoint_id: ironclaw_host_api::turn::TurnCheckpointId,
+) -> Result<LoopExit, AgentLoopExecutorError> {
+    let model_usage = state.cumulative_model_usage;
+    Ok(LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::NothingToReport,
+        reply_message_refs: Vec::new(),
+        result_refs: Vec::new(),
+        final_checkpoint_id: Some(final_checkpoint_id),
+        model_usage,
+        exit_id: exit_id(host, "nothing-to-report")?,
+    }))
+}
+
 pub(super) fn failed_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,

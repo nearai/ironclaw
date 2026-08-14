@@ -3088,6 +3088,48 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
+async fn scheduled_no_result_control_terminalizes_without_capability_dispatch_or_reply() {
+    let response = ironclaw_loop_contracts::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: CapabilityActivityId::new(),
+            surface_version: surface_version(),
+            capability_id: ironclaw_host_api::ids::CapabilityId::new(
+                ironclaw_host_api::execution_policy::NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
+            )
+            .expect("completion capability id"),
+            input_ref: CapabilityInputRef::new("input:nothing-to-report").expect("input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
+            .expect("model id"),
+        usage: None,
+    };
+    let host = MockHost::new(vec![response]).with_suppressed_scheduled_context();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let LoopExit::Completed(completed) = exit else {
+        panic!("expected completed exit");
+    };
+    assert_eq!(
+        completed.completion_kind,
+        LoopCompletionKind::NothingToReport
+    );
+    assert!(completed.reply_message_refs.is_empty());
+    assert!(completed.result_refs.is_empty());
+    assert!(completed.final_checkpoint_id.is_some());
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {

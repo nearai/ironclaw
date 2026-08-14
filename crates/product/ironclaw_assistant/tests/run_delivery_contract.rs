@@ -1114,7 +1114,6 @@ async fn observer_suppresses_durable_nothing_to_report_before_transport_dispatch
         Duration::from_secs(5),
     );
     let run_id = TurnRunId::new();
-    seed_final_message(&harness.threads, run_id, "[SILENT]").await;
 
     harness
         .observer
@@ -3086,7 +3085,6 @@ async fn triggered_nothing_to_report_records_suppression_without_delivery_attemp
     );
     seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
     let run_id = TurnRunId::new();
-    seed_final_message(&harness.threads, run_id, "[SILENT]").await;
 
     harness
         .driver

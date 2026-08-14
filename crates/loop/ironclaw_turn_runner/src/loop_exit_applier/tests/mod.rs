@@ -27,9 +27,8 @@ use ironclaw_turns::{
 
 use super::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, BlockedEvidenceRequest,
-    CompletionEvidenceRequest, ExactCompletionReplyEvidenceRequest, FailureEvidenceRequest,
-    InMemoryLoopExitEvidencePort, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
-    verify_tool_result_ref,
+    CompletionEvidenceRequest, FailureEvidenceRequest, InMemoryLoopExitEvidencePort,
+    LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort, verify_tool_result_ref,
 };
 
 mod support;
@@ -58,7 +57,49 @@ async fn loop_exit_applier_rejects_driver_supplied_evidence_policy() {
 }
 
 #[tokio::test]
-async fn exact_sentinel_is_settled_as_durable_nothing_to_report() {
+async fn typed_completion_is_settled_as_durable_nothing_to_report() {
+    let evidence = InMemoryLoopExitEvidencePort::all_verified();
+    let mut fixture = Fixture::new(evidence);
+    let mut product_context = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("automation-owner").expect("user"),
+        },
+    );
+    product_context.execution_policy = Some(TurnExecutionPolicy {
+        result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+        ..TurnExecutionPolicy::default()
+    });
+    fixture.claimed.state.product_context = Some(product_context);
+
+    let state = fixture
+        .applier
+        .apply(
+            &fixture.claimed,
+            LoopExit::Completed(LoopCompleted {
+                completion_kind: LoopCompletionKind::NothingToReport,
+                reply_message_refs: Vec::new(),
+                result_refs: Vec::new(),
+                final_checkpoint_id: Some(TurnCheckpointId::new()),
+                model_usage: None,
+                exit_id: ironclaw_host_api::turn::LoopExitId::new("exit:nothing-to-report")
+                    .expect("exit id"),
+            }),
+        )
+        .await
+        .expect("applied");
+
+    assert_eq!(state.status, TurnStatus::Completed);
+    assert_eq!(
+        state.execution_outcome,
+        Some(TurnExecutionOutcome::NothingToReport)
+    );
+}
+
+#[tokio::test]
+async fn ordinary_final_reply_under_suppression_policy_remains_result_available() {
     let evidence = InMemoryLoopExitEvidencePort::all_verified();
     let mut fixture = Fixture::new(evidence);
     let mut product_context = ProductTurnContext::new(
@@ -80,7 +121,7 @@ async fn exact_sentinel_is_settled_as_durable_nothing_to_report() {
         .apply(
             &fixture.claimed,
             completed_exit(
-                vec![LoopMessageRef::new("msg:reply").expect("reply ref")],
+                vec![LoopMessageRef::new("msg:ordinary-reply").expect("reply ref")],
                 None,
             ),
         )
@@ -90,7 +131,78 @@ async fn exact_sentinel_is_settled_as_durable_nothing_to_report() {
     assert_eq!(state.status, TurnStatus::Completed);
     assert_eq!(
         state.execution_outcome,
-        Some(TurnExecutionOutcome::NothingToReport)
+        Some(TurnExecutionOutcome::ResultAvailable)
+    );
+}
+
+#[tokio::test]
+async fn typed_nothing_to_report_completion_requires_explicit_scheduled_policy() {
+    let evidence = InMemoryLoopExitEvidencePort::all_verified();
+    let fixture = Fixture::new(evidence);
+    let exit = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::NothingToReport,
+        reply_message_refs: Vec::new(),
+        result_refs: Vec::new(),
+        final_checkpoint_id: None,
+        model_usage: None,
+        exit_id: ironclaw_host_api::turn::LoopExitId::new("exit:unapproved-nothing")
+            .expect("exit id"),
+    });
+
+    let state = fixture
+        .applier
+        .apply(&fixture.claimed, exit)
+        .await
+        .expect("applied");
+
+    assert_eq!(state.status, TurnStatus::Failed);
+    assert_eq!(
+        state
+            .failure
+            .and_then(|failure| failure.detail().map(str::to_string)),
+        Some("loop exit violation: nothing_to_report_not_allowed".to_string())
+    );
+}
+
+#[tokio::test]
+async fn typed_nothing_to_report_completion_always_requires_final_checkpoint_evidence() {
+    let evidence = InMemoryLoopExitEvidencePort::all_verified();
+    let mut fixture = Fixture::new(evidence);
+    let mut product_context = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("automation-owner").expect("user"),
+        },
+    );
+    product_context.execution_policy = Some(TurnExecutionPolicy {
+        result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+        ..TurnExecutionPolicy::default()
+    });
+    fixture.claimed.state.product_context = Some(product_context);
+    let exit = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::NothingToReport,
+        reply_message_refs: Vec::new(),
+        result_refs: Vec::new(),
+        final_checkpoint_id: None,
+        model_usage: None,
+        exit_id: ironclaw_host_api::turn::LoopExitId::new("exit:missing-final-checkpoint")
+            .expect("exit id"),
+    });
+
+    let state = fixture
+        .applier
+        .apply(&fixture.claimed, exit)
+        .await
+        .expect("applied");
+
+    assert_eq!(state.status, TurnStatus::Failed);
+    assert_eq!(
+        state
+            .failure
+            .and_then(|failure| failure.detail().map(str::to_string)),
+        Some("loop exit violation: missing_final_checkpoint".to_string())
     );
 }
 
@@ -613,112 +725,6 @@ async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
     assert!(
         verified,
         "the reply written under owners/<caller> must be found via the run actor's owner"
-    );
-}
-
-#[tokio::test]
-async fn exact_reply_evidence_never_substring_matches_the_sentinel() {
-    let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let turn_scope = TurnScope::new(
-        TenantId::new("tenant").expect("valid"),
-        Some(AgentId::new("agent").expect("valid")),
-        None,
-        ThreadId::new("thread").expect("valid"),
-    );
-    let thread_scope = ThreadScope {
-        tenant_id: turn_scope.tenant_id.clone(),
-        agent_id: turn_scope.agent_id.clone().expect("agent id"),
-        project_id: None,
-        owner_user_id: None,
-        mission_id: None,
-    };
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope.clone(),
-            thread_id: Some(turn_scope.thread_id.clone()),
-            created_by_actor_id: "user:test".to_string(),
-            title: None,
-            metadata_json: None,
-        })
-        .await
-        .expect("thread");
-    let run_id = TurnRunId::new();
-    let draft = thread_service
-        .append_assistant_draft(AppendAssistantDraftRequest {
-            scope: thread_scope.clone(),
-            thread_id: turn_scope.thread_id.clone(),
-            turn_run_id: run_id.to_string(),
-            content: MessageContent::text("The report mentions [SILENT] as data."),
-        })
-        .await
-        .expect("draft");
-    thread_service
-        .finalize_assistant_message(
-            &thread_scope,
-            &turn_scope.thread_id,
-            draft.message_id,
-            MessageContent::text("The report mentions [SILENT] as data."),
-        )
-        .await
-        .expect("finalized");
-    let exact_run_id = TurnRunId::new();
-    let exact_draft = thread_service
-        .append_assistant_draft(AppendAssistantDraftRequest {
-            scope: thread_scope.clone(),
-            thread_id: turn_scope.thread_id.clone(),
-            turn_run_id: exact_run_id.to_string(),
-            content: MessageContent::text(" \n[SILENT]\n "),
-        })
-        .await
-        .expect("exact draft");
-    thread_service
-        .finalize_assistant_message(
-            &thread_scope,
-            &turn_scope.thread_id,
-            exact_draft.message_id,
-            MessageContent::text(" \n[SILENT]\n "),
-        )
-        .await
-        .expect("exact finalized");
-    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
-        thread_service,
-        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
-        Arc::new(PanicLoopCheckpointStore),
-        empty_await_dependent_run_evidence(),
-        thread_scope,
-    );
-    let message_ref =
-        LoopMessageRef::new(format!("msg:{}", draft.message_id)).expect("message ref");
-
-    let matched = evidence
-        .final_reply_matches_exact_normalized(ExactCompletionReplyEvidenceRequest {
-            scope: &turn_scope,
-            run_id,
-            reply_message_refs: &[message_ref],
-            expected: "[SILENT]",
-        })
-        .await
-        .expect("evidence read");
-
-    assert!(
-        !matched,
-        "ordinary content mentioning the sentinel must remain a result"
-    );
-
-    let exact_message_ref =
-        LoopMessageRef::new(format!("msg:{}", exact_draft.message_id)).expect("exact message ref");
-    let exact_matched = evidence
-        .final_reply_matches_exact_normalized(ExactCompletionReplyEvidenceRequest {
-            scope: &turn_scope,
-            run_id: exact_run_id,
-            reply_message_refs: &[exact_message_ref],
-            expected: "[SILENT]",
-        })
-        .await
-        .expect("exact evidence read");
-    assert!(
-        exact_matched,
-        "outer whitespace is the only normalization allowed"
     );
 }
 

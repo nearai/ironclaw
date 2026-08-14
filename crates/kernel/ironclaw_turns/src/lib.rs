@@ -71,9 +71,9 @@ pub use ironclaw_host_api::turn::{
     TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
-    BlockedEvidenceRequest, CompletionEvidenceRequest, ExactCompletionReplyEvidenceRequest,
-    FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
-    LoopExitMapping, LoopExitValidationDecision, LoopExitViolation, LoopExitViolationKind,
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort, LoopExitMapping,
+    LoopExitValidationDecision, LoopExitViolation, LoopExitViolationKind,
 };
 pub use process_projection::{
     AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessMetadata,

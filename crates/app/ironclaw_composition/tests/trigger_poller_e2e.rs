@@ -40,16 +40,17 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -79,7 +80,8 @@ fn trigger_execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
@@ -199,17 +201,53 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
             .any(|message| message.content.contains(QA_9D_PROMPT))
         {
             QA_9D_RESULT
-        } else if request
-            .messages
-            .iter()
-            .any(|message| message.content.contains(QA_SILENT_PROMPT))
-        {
-            "[SILENT]"
         } else {
             "unexpected scheduled-trigger prompt"
         };
         self.requests.lock().await.push(request);
         Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        if !request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_SILENT_PROMPT))
+        {
+            return self.stream_model(request).await;
+        }
+        let call = ProviderToolCall {
+            provider_id: "trigger-e2e-provider".to_string(),
+            provider_model_id: "trigger-e2e-model".to_string(),
+            turn_id: Some("trigger-e2e-nothing-to-report-turn".to_string()),
+            id: "trigger-e2e-nothing-to-report-call".to_string(),
+            name: ProviderToolName::new(provider_tool_name_for_capability_id(
+                NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
+            ))
+            .expect("nothing-to-report provider tool name"),
+            arguments: json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidOutput,
+                    error.safe_summary,
+                )
+            })?;
+        self.requests.lock().await.push(request);
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
     }
 }
 
@@ -888,7 +926,7 @@ async fn seed_due_delivery_trigger(
             creator_user_id: UserId::new(USER).expect("valid user id"),
             agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
             project_id: None,
-            name: format!("{prompt} trigger"),
+            name: format!("delivery test {trigger_id}"),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: prompt.to_string(),
@@ -2259,7 +2297,10 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No result is available",
-                "policy": { "allowed_capability_ids": ["missing.capability"] }
+                "policy": {
+                    "allowed_capability_ids": ["missing.capability"],
+                    "result_delivery": "deliver"
+                }
             },
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
@@ -2286,7 +2327,10 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No result is available",
-                "policy": { "required_skills": ["missing-trigger-skill"] }
+                "policy": {
+                    "required_skills": ["missing-trigger-skill"],
+                    "result_delivery": "deliver"
+                }
             },
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
@@ -2314,7 +2358,10 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
                 "success_criteria": ["Return a definitive status"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No trigger status is available",
-                "policy": { "allowed_capability_ids": [] }
+                "policy": {
+                    "allowed_capability_ids": [],
+                    "result_delivery": "deliver"
+                }
             },
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),

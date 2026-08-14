@@ -29,7 +29,8 @@ fn execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal,
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 
@@ -197,7 +198,8 @@ fn trigger_create_input_accepts_cron_schedule() {
             "goal": "Check mail",
             "success_criteria": ["Report the mail check result"],
             "output_instructions": "Return a concise summary",
-            "no_result_text": "No mail found"
+            "no_result_text": "No mail found",
+            "policy": { "result_delivery": "deliver" }
         },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
     });
@@ -269,7 +271,8 @@ fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
             "goal": "Find failures",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
-            "no_result_text": "No failures"
+            "no_result_text": "No failures",
+            "policy": { "result_delivery": "deliver" }
         },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
     });
@@ -298,7 +301,10 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
-            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
         },
         "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
     });
@@ -344,7 +350,10 @@ async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
-            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
         },
         "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
     });

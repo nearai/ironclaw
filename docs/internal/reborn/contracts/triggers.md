@@ -98,18 +98,26 @@ selector before writing the trigger. The scheduler continues to submit the
 frozen prompt; only the neutral execution policy crosses the trusted-trigger
 turn boundary.
 
+New `trigger_create` calls must explicitly select
+`execution_contract.policy.result_delivery`; omission is a model-visible input
+error before persistence so the interactive model can ask the user. Legacy
+persisted policies still deserialize as `deliver` for compatibility.
+
 `execution_contract.policy.result_delivery` controls the no-result behavior:
 
-- `deliver` is the default and preserves the legacy contract. The rendered
+- `deliver` preserves the legacy contract. The rendered
   prompt asks the model to return the human-readable `no_result_text`, and a
   completed run has a normal deliverable result.
-- `suppress_when_nothing_to_report` is explicit opt-in. The rendered prompt
-  asks for exactly `[SILENT]` when the task has nothing to report. A trusted
-  completed-exit evidence adapter compares the normalized final reply for
-  exact equality; mentions, prefixes, suffixes, structured payloads, and other
-  ordinary content remain results. The trusted settlement persists
-  `TurnExecutionOutcome::NothingToReport` instead of asking delivery code to
-  inspect transcript text.
+- `suppress_when_nothing_to_report` is explicit opt-in. The scheduled-run
+  surface exposes the host-owned `builtin.complete_nothing_to_report` terminal
+  control in addition to the task capability allowlist. Selecting it writes a
+  final checkpoint and produces `LoopCompletionKind::NothingToReport` without
+  dispatching an ordinary capability or persisting a synthetic assistant
+  reply. The turn kernel accepts that completion kind only for a scheduled run
+  carrying the explicit suppression policy, then persists
+  `TurnExecutionOutcome::NothingToReport`. Ordinary assistant text always
+  remains a deliverable result and is never interpreted as a suppression
+  signal.
 
 Execution outcome and delivery outcome are separate durable facts. A
 `NothingToReport` completion records delivery as `Suppressed` and performs no

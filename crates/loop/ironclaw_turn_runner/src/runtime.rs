@@ -3,7 +3,10 @@
 use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_event_log::SecurityAuditSink;
-use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::{
+    execution_policy::{NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, ResultDeliveryPolicy},
+    ids::CapabilityId,
+};
 use ironclaw_loop_contracts::{
     AgentLoopDriverError, AgentLoopHostError, CapabilitySurfaceProfileId,
     CommunicationContextProvider, InstructionSafetyContext, LoopCapabilityPort,
@@ -1005,15 +1008,45 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             .resolve(run_context)
             .await
             .map_err(capability_resolve_error_to_agent_host_error)?;
+        let no_result_completion_enabled = run_context
+            .product_context
+            .as_ref()
+            .filter(|context| context.origin == ironclaw_turns::TurnOriginKind::ScheduledTrigger)
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
         if let Some(allowed) = run_context
             .product_context
             .as_ref()
             .and_then(|context| context.execution_policy.as_ref())
             .and_then(|execution_policy| execution_policy.allowed_capability_ids.as_ref())
         {
-            policy = policy.narrow_to_capability_ids(allowed.iter().cloned());
+            let completion_id = CapabilityId::new(NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID)
+                .map_err(|_| {
+                    AgentLoopHostError::new(
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                        "invalid no-result completion capability id",
+                    )
+                })?;
+            policy = policy.narrow_to_capability_ids(
+                allowed
+                    .iter()
+                    .cloned()
+                    .chain(no_result_completion_enabled.then_some(completion_id)),
+            );
         }
         let mut denied = self.global_denied.clone();
+        if !no_result_completion_enabled {
+            denied.push(
+                CapabilityId::new(NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID).map_err(|_| {
+                    AgentLoopHostError::new(
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                        "invalid no-result completion capability id",
+                    )
+                })?,
+            );
+        }
         if run_context
             .resolved_run_profile
             .capability_surface_profile_id
@@ -1031,7 +1064,7 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         capabilities = self.spawn_decorator.decorate(run_context, capabilities);
         capabilities = apply_capability_surface_policy(capabilities, Arc::clone(&policy));
         if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
-            let pins = self
+            let mut pins = self
                 .tool_disclosure_profile_pins
                 .get(
                     &run_context
@@ -1040,6 +1073,18 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
                 )
                 .cloned()
                 .unwrap_or_default();
+            if no_result_completion_enabled {
+                let completion_id = CapabilityId::new(NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID)
+                    .map_err(|_| {
+                    AgentLoopHostError::new(
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                        "invalid no-result completion capability id",
+                    )
+                })?;
+                if !pins.contains(&completion_id) {
+                    pins.push(completion_id);
+                }
+            }
             capabilities = decorator.decorate_with_policy_and_pins(
                 run_context,
                 capabilities,
@@ -1118,15 +1163,16 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
         capability_surface::CapabilitySurfacePolicy,
-        execution_policy::TurnExecutionPolicy,
+        execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy},
         ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
         resolution::{Resolution, ResolutionBatch},
         runtime::RuntimeKind,
         turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
     };
     use ironclaw_host_runtime::{
-        TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-        TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+        NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
@@ -1658,9 +1704,31 @@ mod tests {
             .await
             .expect("profiled capability port");
 
+        let completion_id = CapabilityId::new(NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID)
+            .expect("completion capability id");
+        let mut suppressed_context = context.clone();
+        suppressed_context
+            .product_context
+            .as_mut()
+            .and_then(|context| context.execution_policy.as_mut())
+            .expect("execution policy")
+            .result_delivery = ResultDeliveryPolicy::SuppressWhenNothingToReport;
+        factory
+            .create_capability_port(&suppressed_context)
+            .await
+            .expect("suppressed profiled capability port");
+
         let policies = policies.lock().unwrap();
         assert!(policies[0].permits_capability_id(&allowed));
         assert!(!policies[0].permits_capability_id(&excluded));
+        assert!(
+            !policies[0].permits_capability_id(&completion_id),
+            "ordinary scheduled runs must not see the suppression control"
+        );
+        assert!(
+            policies[1].permits_capability_id(&completion_id),
+            "explicit suppression keeps the terminal control even when the task allowlist is narrow"
+        );
     }
 
     // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────

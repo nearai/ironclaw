@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de};
 
 use ironclaw_loop_contracts::{
     LoopBlocked, LoopCancelled, LoopCheckpointKind, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopFailed, LoopModelUsage, ResolvedRunProfile,
+    LoopFailed, LoopModelUsage,
 };
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     TurnRunId, TurnRunState, TurnScope,
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
 };
-use ironclaw_host_api::execution_policy::{NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy};
+use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 
 /// Evidence request for completion refs returned by a driver.
 #[derive(Debug, Clone)]
@@ -29,17 +29,6 @@ pub struct CompletionEvidenceRequest<'a> {
     pub run_id: TurnRunId,
     pub reply_message_refs: &'a [LoopMessageRef],
     pub result_refs: &'a [LoopResultRef],
-}
-
-/// Evidence request for exact normalized text of the final referenced reply.
-/// The evidence adapter performs the content comparison so raw transcript text
-/// never enters the turn kernel.
-#[derive(Debug, Clone)]
-pub struct ExactCompletionReplyEvidenceRequest<'a> {
-    pub scope: &'a TurnScope,
-    pub run_id: TurnRunId,
-    pub reply_message_refs: &'a [LoopMessageRef],
-    pub expected: &'a str,
 }
 
 /// Evidence request for a terminal final checkpoint.
@@ -81,13 +70,6 @@ pub trait LoopExitEvidencePort: Send + Sync {
         &self,
         request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError>;
-
-    async fn final_reply_matches_exact_normalized(
-        &self,
-        _request: ExactCompletionReplyEvidenceRequest<'_>,
-    ) -> Result<bool, TurnError> {
-        Ok(false)
-    }
 
     async fn verify_final_checkpoint(
         &self,
@@ -182,23 +164,13 @@ impl LoopExitApplier {
             .is_some_and(|policy| {
                 policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
             });
-        if !suppress || completed.completion_kind != LoopCompletionKind::FinalReply {
-            return Ok(Some(TurnExecutionOutcome::ResultAvailable));
-        }
-        let matches = self
-            .evidence_port
-            .final_reply_matches_exact_normalized(ExactCompletionReplyEvidenceRequest {
-                scope: &claimed.state.scope,
-                run_id: claimed.state.run_id,
-                reply_message_refs: &completed.reply_message_refs,
-                expected: NOTHING_TO_REPORT_SENTINEL,
-            })
-            .await?;
-        Ok(Some(if matches {
-            TurnExecutionOutcome::NothingToReport
-        } else {
-            TurnExecutionOutcome::ResultAvailable
-        }))
+        Ok(Some(
+            if suppress && completed.completion_kind == LoopCompletionKind::NothingToReport {
+                TurnExecutionOutcome::NothingToReport
+            } else {
+                TurnExecutionOutcome::ResultAvailable
+            },
+        ))
     }
 
     pub async fn record_runner_failure(
@@ -241,6 +213,15 @@ impl LoopExitApplier {
         let mut policy = LoopExitValidationPolicy {
             require_final_checkpoint: profile.checkpoint_policy.require_final_checkpoint,
             allow_no_reply_completion: profile.checkpoint_policy.allow_no_reply_completion,
+            allow_nothing_to_report_completion: claimed
+                .state
+                .product_context
+                .as_ref()
+                .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+                .and_then(|context| context.execution_policy.as_ref())
+                .is_some_and(|policy| {
+                    policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+                }),
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
             completion_refs_verified: false,
@@ -250,6 +231,9 @@ impl LoopExitApplier {
 
         match exit {
             LoopExit::Completed(completed) => {
+                if completed.completion_kind == LoopCompletionKind::NothingToReport {
+                    policy.require_final_checkpoint = true;
+                }
                 policy.completion_refs_verified = self
                     .evidence_port
                     .verify_completion_refs(CompletionEvidenceRequest {
@@ -265,7 +249,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
-                        profile,
+                        policy.require_final_checkpoint,
                         completed.final_checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -291,7 +275,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
-                        profile,
+                        profile.checkpoint_policy.require_final_checkpoint,
                         cancelled.checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -311,7 +295,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
-                        profile,
+                        profile.checkpoint_policy.require_final_checkpoint,
                         failed.checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -326,10 +310,10 @@ impl LoopExitApplier {
         scope: &TurnScope,
         turn_id: TurnId,
         run_id: TurnRunId,
-        profile: &ResolvedRunProfile,
+        required: bool,
         checkpoint_id: Option<&TurnCheckpointId>,
     ) -> Result<bool, TurnError> {
-        if !profile.checkpoint_policy.require_final_checkpoint {
+        if !required {
             return Ok(true);
         }
         let Some(checkpoint_id) = checkpoint_id else {
@@ -539,6 +523,7 @@ fn validate_loop_exit(
 pub(crate) struct LoopExitValidationPolicy {
     require_final_checkpoint: bool,
     allow_no_reply_completion: bool,
+    allow_nothing_to_report_completion: bool,
     final_checkpoint_verified: bool,
     host_cancellation_observed: bool,
     completion_refs_verified: bool,
@@ -649,6 +634,8 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
             #[serde(default)]
             allow_no_reply_completion: bool,
             #[serde(default)]
+            allow_nothing_to_report_completion: bool,
+            #[serde(default)]
             final_checkpoint_verified: bool,
             #[serde(default)]
             host_cancellation_observed: bool,
@@ -662,6 +649,7 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
 
         let wire = WirePolicy::deserialize(deserializer)?;
         if wire.allow_no_reply_completion
+            || wire.allow_nothing_to_report_completion
             || wire.final_checkpoint_verified
             || wire.host_cancellation_observed
             || wire.completion_refs_verified
@@ -734,6 +722,7 @@ pub enum LoopExitViolationKind {
     UnverifiedFailureEvidence,
     CancellationNotObserved,
     NoReplyNotAllowed,
+    NothingToReportNotAllowed,
 }
 
 impl LoopExitViolationKind {
@@ -747,6 +736,7 @@ impl LoopExitViolationKind {
             Self::UnverifiedFailureEvidence => "unverified_failure_evidence",
             Self::CancellationNotObserved => "cancellation_not_observed",
             Self::NoReplyNotAllowed => "no_reply_not_allowed",
+            Self::NothingToReportNotAllowed => "nothing_to_report_not_allowed",
         }
     }
 
@@ -759,7 +749,8 @@ impl LoopExitViolationKind {
             | Self::MissingFinalCheckpoint
             | Self::UnverifiedBlockedEvidence
             | Self::UnverifiedFailureEvidence
-            | Self::NoReplyNotAllowed => "driver_protocol_violation",
+            | Self::NoReplyNotAllowed
+            | Self::NothingToReportNotAllowed => "driver_protocol_violation",
         }
     }
 
@@ -826,6 +817,15 @@ fn completion_kind_ref_violation(
                 Some(LoopExitViolationKind::MismatchedCompletionReferenceKind)
             } else if !policy.allow_no_reply_completion {
                 Some(LoopExitViolationKind::NoReplyNotAllowed)
+            } else {
+                None
+            }
+        }
+        LoopCompletionKind::NothingToReport => {
+            if exit.has_durable_completion_ref() {
+                Some(LoopExitViolationKind::MismatchedCompletionReferenceKind)
+            } else if !policy.allow_nothing_to_report_completion {
+                Some(LoopExitViolationKind::NothingToReportNotAllowed)
             } else {
                 None
             }

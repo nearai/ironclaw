@@ -168,6 +168,25 @@ impl MockHost {
         }
     }
 
+    pub(super) fn with_suppressed_scheduled_context(mut self) -> Self {
+        let mut product_context = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: UserId::new("scheduled-owner").expect("valid user"),
+            },
+        );
+        product_context.execution_policy = Some(
+            ironclaw_host_api::execution_policy::TurnExecutionPolicy {
+                result_delivery: ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport,
+                ..ironclaw_host_api::execution_policy::TurnExecutionPolicy::default()
+            },
+        );
+        self.context.product_context = Some(product_context);
+        self
+    }
+
     /// Enable driver-specific nudges on the run profile (gates the final-answer
     /// nudge at the budget / no-progress exit boundaries).
     pub(super) fn with_driver_nudges_enabled(mut self) -> Self {

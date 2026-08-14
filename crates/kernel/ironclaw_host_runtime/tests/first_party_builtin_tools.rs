@@ -56,7 +56,8 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
     HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
@@ -102,7 +103,8 @@ fn trigger_execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 
@@ -687,6 +689,21 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     assert!(
         required_names.contains(&"schedule"),
         "schedule must be listed in required; got {required_names:?}"
+    );
+    assert_eq!(
+        schema["properties"]["execution_contract"]["required"],
+        json!([
+            "version",
+            "goal",
+            "success_criteria",
+            "output_instructions",
+            "no_result_text",
+            "policy"
+        ])
+    );
+    assert_eq!(
+        schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
+        json!(["result_delivery"])
     );
     assert!(
         !required_names.contains(&"completion_policy"),
@@ -1342,6 +1359,46 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
     .unwrap_err();
 
     assert_eq!(error, FailureKind::InputEncode);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_requires_explicit_result_delivery_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Ambiguous notification",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Check whether example.com is reachable",
+                "success_criteria": ["Reachability checked"],
+                "output_instructions": "Return the result",
+                "no_result_text": "No change"
+            },
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Europe/Istanbul" }
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_failure_input_issue_expected(
+        &failure,
+        "execution_contract.policy.result_delivery",
+        DispatchInputIssueCode::MissingRequired,
+        "deliver or suppress_when_nothing_to_report",
+        "ambiguous delivery choice",
+    );
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -10326,6 +10383,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRIGGER_REMOVE_CAPABILITY_ID,
         TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_RESUME_CAPABILITY_ID,
+        NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID,
     ]
 }
 
