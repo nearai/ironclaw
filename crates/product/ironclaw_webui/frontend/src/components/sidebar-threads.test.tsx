@@ -251,7 +251,11 @@ test("SidebarThreads shows one sanitized error toast and allows a successful ret
     JSON.parse(JSON.stringify(context.toasts)),
     [["chat.deleteFailed", { tone: "error" }]],
   );
-  assert.equal(context.errors.length, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.errors)),
+    [["Failed to delete thread"]],
+    "browser diagnostics must not include the raw deletion error",
+  );
 
   confirmDialog.props.onConfirm();
   await flushPromises();

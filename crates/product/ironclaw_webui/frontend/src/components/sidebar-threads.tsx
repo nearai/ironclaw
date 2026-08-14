@@ -104,7 +104,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         .then(() => onDelete?.(thread.id))
         .then(() => setDeleteDialogOpen(false))
         .catch((error) => {
-          console.error("Failed to delete thread:", error);
+          console.error("Failed to delete thread");
           toast(deleteThreadErrorMessage(error, t), { tone: "error" });
         })
         .finally(() => setIsDeleting(false));
