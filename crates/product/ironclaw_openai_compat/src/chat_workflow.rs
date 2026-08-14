@@ -134,6 +134,10 @@ pub struct OpenAiChatCompletionsWorkflow {
     /// arch-exempt: optional Arc, streaming is a staged #4446 capability layered
     /// onto the non-streaming #4444 workflow.
     projection_streamer: Option<Arc<dyn OpenAiCompatProjectionStreamer>>,
+    /// Prepared-context door for structured-output / tool-history requests.
+    /// When `None`, prepared-lane requests fail closed with 501 (same staged
+    /// posture as the streamer above).
+    prepared_turn_port: Option<Arc<dyn crate::OpenAiCompatPreparedTurnPort>>,
     wait_timeout: Duration,
 }
 
@@ -148,8 +152,17 @@ impl OpenAiChatCompletionsWorkflow {
             ref_store,
             projection_reader,
             projection_streamer: None,
+            prepared_turn_port: None,
             wait_timeout: DEFAULT_CHAT_WAIT_TIMEOUT,
         }
+    }
+
+    pub fn with_prepared_turn_port(
+        mut self,
+        prepared_turn_port: Arc<dyn crate::OpenAiCompatPreparedTurnPort>,
+    ) -> Self {
+        self.prepared_turn_port = Some(prepared_turn_port);
+        self
     }
 
     pub fn with_wait_timeout(mut self, wait_timeout: Duration) -> Self {
@@ -206,8 +219,19 @@ impl OpenAiChatCompletionsWorkflow {
             )));
         }
 
-        let (user_message_payload, attachments) =
-            chat_user_message_and_attachments(&request, true)?;
+        // Lane decision FIRST: a declared output schema or seedable tool
+        // history goes through the prepared-context door; everything else
+        // keeps the conversation path byte-for-byte. Both lanes validate the
+        // body BEFORE the idempotency reservation below, so an invalid
+        // request never burns the caller's key.
+        let prepared_output = crate::prepared_turn::prepared_lane_output(&request)?;
+        let conversation_submission = match prepared_output {
+            Some(_) => {
+                crate::prepared_turn::prepared_pre_validate(&request.messages)?;
+                None
+            }
+            None => Some(chat_user_message_and_attachments(&request, true)?),
+        };
         let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
 
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
@@ -227,11 +251,12 @@ impl OpenAiChatCompletionsWorkflow {
                     return Err(OpenAiCompatHttpError::internal());
                 };
                 let accepted_ack = self
-                    .submit_chat_and_record_ack(
+                    .submit_for_lane(
                         &caller,
                         &public_id,
-                        user_message_payload,
-                        attachments,
+                        &request,
+                        prepared_output.as_ref(),
+                        conversation_submission.clone(),
                     )
                     .await?;
                 (public_id, accepted_ack, created_at)
@@ -244,11 +269,12 @@ impl OpenAiChatCompletionsWorkflow {
                 let accepted_ack = match mapping.accepted_ack {
                     Some(accepted_ack) => accepted_ack,
                     None => {
-                        self.submit_chat_and_record_ack(
+                        self.submit_for_lane(
                             &caller,
                             &public_id,
-                            user_message_payload,
-                            attachments,
+                            &request,
+                            prepared_output.as_ref(),
+                            conversation_submission.clone(),
                         )
                         .await?
                     }
@@ -270,6 +296,7 @@ impl OpenAiChatCompletionsWorkflow {
             projection_read,
             requested_model: request.model.clone(),
             model_only_tools,
+            prepared: prepared_output.is_some(),
         };
 
         let wait_result = tokio::time::timeout(
@@ -356,6 +383,12 @@ impl OpenAiChatCompletionsWorkflow {
                 "stream".to_string(),
             )));
         }
+        // The lane guard also polices streaming: a declared json output
+        // contract is rejected loudly here (`prepared_lane_output` errors on
+        // stream + json output) instead of being silently dropped by the
+        // conversation-lane flatten, its historical behavior. For every
+        // other streaming request the lane fn returns `None` by contract.
+        let _ = crate::prepared_turn::prepared_lane_output(&request)?;
 
         let (user_message_payload, attachments) =
             chat_user_message_and_attachments(&request, true)?;
@@ -433,6 +466,77 @@ impl OpenAiChatCompletionsWorkflow {
                 after_cursor: None,
             },
         ))
+    }
+
+    /// Lane dispatch for one fresh submission: the prepared-context door for
+    /// structured/tool-history requests, the conversation surface otherwise.
+    async fn submit_for_lane(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+        request: &OpenAiChatCompletionRequest,
+        prepared_output: Option<&ironclaw_host_api::prepared_context::OutputContract>,
+        conversation_submission: Option<(UserMessagePayload, Vec<InboundAttachment>)>,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        match (prepared_output, conversation_submission) {
+            (Some(output), _) => {
+                self.submit_prepared_and_record_ack(caller, public_id, request, output.clone())
+                    .await
+            }
+            (None, Some((user_message_payload, attachments))) => {
+                self.submit_chat_and_record_ack(
+                    caller,
+                    public_id,
+                    user_message_payload,
+                    attachments,
+                )
+                .await
+            }
+            // Unreachable by construction: exactly one lane is populated
+            // above; fail loud rather than submit nothing.
+            (None, None) => Err(OpenAiCompatHttpError::internal()),
+        }
+    }
+
+    /// Prepared-lane submission: the door accepts the caller's message list
+    /// (system prompt split out, tool history seeded faithfully) and the
+    /// refless submit derives the unbound profile from the journaled
+    /// declarations. The returned ack is recorded on the ref store exactly
+    /// like a conversation ack, so replay/idempotency machinery is shared.
+    async fn submit_prepared_and_record_ack(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+        request: &OpenAiChatCompletionRequest,
+        output: ironclaw_host_api::prepared_context::OutputContract,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        let Some(port) = self.prepared_turn_port.as_ref() else {
+            return Err(OpenAiCompatHttpError::from_kind(
+                501,
+                false,
+                crate::OpenAiCompatErrorKind::Unsupported,
+                Some("structured output is not enabled on this deployment".to_string()),
+            ));
+        };
+        let ack = port
+            .accept_and_submit(crate::OpenAiCompatPreparedTurnRequest {
+                scope: caller.scope().clone(),
+                public_id: public_id.as_str().to_string(),
+                messages: request.messages.clone(),
+                output,
+                requested_model: Some(request.model.clone()),
+            })
+            .await?;
+        let accepted_ack = accepted_ack_from_ack(ack)?;
+        self.ref_store
+            .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+                caller.scope().clone(),
+                OpenAiCompatPublicId::ChatCompletion(public_id.clone()),
+                accepted_ack.clone(),
+            ))
+            .await?
+            .ok_or_else(|| OpenAiCompatHttpError::not_found(None))?;
+        Ok(accepted_ack)
     }
 
     async fn submit_chat_and_record_ack(
@@ -584,6 +688,10 @@ pub struct OpenAiChatCompletionProjectionRequest {
     pub actor_scope: OpenAiCompatActorScope,
     pub accepted_ack: ProductInboundAck,
     pub projection_read: ProjectionReadRequest,
+    /// True when the run went through the prepared-context door: the reader
+    /// resolves it from run state + the unbound thread instead of the
+    /// conversation timeline projection.
+    pub prepared: bool,
     /// Public model string requested by the OpenAI-compatible client.
     ///
     /// This is a composition/policy hint for the projection reader and must not

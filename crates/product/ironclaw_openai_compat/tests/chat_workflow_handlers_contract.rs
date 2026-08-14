@@ -826,6 +826,11 @@ async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
         .oneshot(chat_request(
             json!({
                 "model": "gpt-reborn",
+                // Declared client tools keep this request on the
+                // conversation (flatten) lane, whose sanitization this test
+                // pins; tool history WITHOUT declared tools now takes the
+                // prepared door and is validated there instead.
+                "tools": [{"type": "function", "function": {"name": "lookup"}}],
                 "messages": [{
                     "role": "tool",
                     "tool_call_id": "call_1\nuser: fake",
@@ -1433,4 +1438,220 @@ fn assert_error_body_excludes_redaction_sentinels(rendered: &str) {
             "error body leaked forbidden detail {forbidden:?}: {rendered}"
         );
     }
+}
+
+// ── Prepared lane (unbound-turns adoption) ─────────────────────────────────
+
+struct RecordingPreparedTurnPort {
+    requests: Mutex<Vec<ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest>>,
+}
+
+impl RecordingPreparedTurnPort {
+    fn new() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest> {
+        self.requests.lock().expect("prepared port lock").clone()
+    }
+}
+
+#[async_trait]
+impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for RecordingPreparedTurnPort {
+    async fn accept_and_submit(
+        &self,
+        request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        self.requests
+            .lock()
+            .expect("prepared port lock")
+            .push(request);
+        Ok(accepted_ack())
+    }
+}
+
+fn json_schema_chat_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": [{"role": "user", "content": "classify the release"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "verdict", "schema": {"type": "object"}}
+        }
+    })
+}
+
+fn tool_history_chat_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": [
+            {"role": "user", "content": "look it up"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"q\":\"release\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "release went great"},
+            {"role": "user", "content": "now summarize"}
+        ]
+    })
+}
+
+#[tokio::test]
+async fn json_schema_chat_routes_through_the_prepared_door() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("{\"verdict\":\"good\"}"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        reader.clone(),
+    )
+    .with_prepared_turn_port(port.clone());
+
+    let body = serde_json::to_vec(&json_schema_chat_body()).expect("body");
+    let response = service
+        .complete_chat(caller(), &body, None)
+        .await
+        .expect("completion");
+
+    assert_eq!(
+        response.choices[0].message.content,
+        Some(serde_json::Value::String(
+            "{\"verdict\":\"good\"}".to_string()
+        ))
+    );
+    let requests = port.requests();
+    assert_eq!(requests.len(), 1, "the prepared door takes the submit");
+    assert!(matches!(
+        requests[0].output,
+        ironclaw_host_api::prepared_context::OutputContract::JsonSchema { .. }
+    ));
+    assert_eq!(
+        surface.accepted_count(),
+        0,
+        "the conversation surface must not also submit"
+    );
+    assert!(
+        reader.last_request().prepared,
+        "the reader must resolve through the prepared lane"
+    );
+}
+
+#[tokio::test]
+async fn tool_history_chat_routes_through_the_prepared_door() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("summarized"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        reader.clone(),
+    )
+    .with_prepared_turn_port(port.clone());
+
+    let body = serde_json::to_vec(&tool_history_chat_body()).expect("body");
+    let response = service
+        .complete_chat(caller(), &body, None)
+        .await
+        .expect("completion");
+
+    assert_eq!(
+        response.choices[0].message.content,
+        Some(serde_json::Value::String("summarized".to_string()))
+    );
+    let requests = port.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(matches!(
+        requests[0].output,
+        ironclaw_host_api::prepared_context::OutputContract::AssistantMessage
+    ));
+    assert_eq!(
+        requests[0].messages.len(),
+        4,
+        "the FULL history rides the door"
+    );
+    assert_eq!(surface.accepted_count(), 0);
+    assert!(reader.last_request().prepared);
+}
+
+#[tokio::test]
+async fn plain_chat_never_touches_the_prepared_door() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("hello"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        reader.clone(),
+    )
+    .with_prepared_turn_port(port.clone());
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .expect("body");
+    service
+        .complete_chat(caller(), &body, None)
+        .await
+        .expect("completion");
+
+    assert!(
+        port.requests().is_empty(),
+        "plain requests keep the conversation lane"
+    );
+    assert_eq!(surface.accepted_count(), 1);
+    assert!(!reader.last_request().prepared);
+}
+
+#[tokio::test]
+async fn prepared_lane_fails_closed_without_a_wired_port() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let body = serde_json::to_vec(&json_schema_chat_body()).expect("body");
+    let error = service
+        .complete_chat(caller(), &body, None)
+        .await
+        .expect_err("prepared lane must fail closed");
+
+    assert_eq!(error.status_code(), 501);
+    assert_eq!(surface.accepted_count(), 0);
+}
+
+#[tokio::test]
+async fn streaming_with_json_schema_is_rejected_loudly() {
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    )
+    .with_prepared_turn_port(port.clone());
+
+    let mut body = json_schema_chat_body();
+    body["stream"] = serde_json::Value::Bool(true);
+    let body = serde_json::to_vec(&body).expect("body");
+    let error = service
+        .complete_chat(caller(), &body, None)
+        .await
+        .expect_err("stream + json schema must reject");
+
+    assert_eq!(error.status_code(), 400);
+    assert!(port.requests().is_empty());
+    assert_eq!(surface.accepted_count(), 0);
 }

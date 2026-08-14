@@ -73,6 +73,9 @@ pub struct OpenAiCompatRouteMountPorts {
     /// deployment has no root LLM provider wired; the route then stays
     /// fail-closed (501) rather than reporting an empty catalog.
     pub llm_config: Option<Arc<dyn LlmConfigService>>,
+    /// Prepared-context door for structured-output / tool-history chat
+    /// requests. `None` keeps those requests fail-closed (501).
+    pub prepared_turn_port: Option<Arc<dyn crate::OpenAiCompatPreparedTurnPort>>,
 }
 
 /// Assemble the OpenAI-compatible router and its ingress descriptors from
@@ -86,19 +89,22 @@ pub fn openai_compat_route_mount(ports: OpenAiCompatRouteMountPorts) -> Protecte
         external_tool_store,
         external_tool_resume,
         llm_config,
+        prepared_turn_port,
     } = ports;
 
     let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(Arc::clone(
         &product_surface,
     )));
-    let chat_workflow = Arc::new(
-        OpenAiChatCompletionsWorkflow::new(
-            Arc::clone(&product_surface),
-            Arc::clone(&ref_store),
-            chat_projection_reader,
-        )
-        .with_projection_streamer(projection_streamer.clone()),
-    );
+    let mut chat_workflow = OpenAiChatCompletionsWorkflow::new(
+        Arc::clone(&product_surface),
+        Arc::clone(&ref_store),
+        chat_projection_reader,
+    )
+    .with_projection_streamer(projection_streamer.clone());
+    if let Some(prepared_turn_port) = prepared_turn_port {
+        chat_workflow = chat_workflow.with_prepared_turn_port(prepared_turn_port);
+    }
+    let chat_workflow = Arc::new(chat_workflow);
     let responses_workflow = Arc::new(
         OpenAiResponsesWorkflow::new(product_surface, ref_store, responses_projection_reader)
             .with_projection_streamer(projection_streamer)

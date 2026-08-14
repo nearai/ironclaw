@@ -1285,3 +1285,309 @@ fn response_cost_falls_back_to_default_rate_for_unknown_model() {
     assert_eq!(cost.input_cost_usd, "0.0025");
     assert_eq!(cost.cached_input_cost_usd, "0");
 }
+
+// ── Prepared-turn gateway (unbound-turns adoption) ─────────────────────────
+
+fn prepared_gateway(
+    threads: Arc<InMemorySessionThreadService>,
+    coordinator: Arc<dyn TurnCoordinator>,
+    suffix: &str,
+) -> OpenAiCompatPreparedTurnGateway {
+    OpenAiCompatPreparedTurnGateway {
+        thread_service: threads,
+        coordinator,
+        tenant_id: TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
+        agent_id: AgentId::new(format!("agent-{suffix}")).expect("agent"),
+        project_id: None,
+    }
+}
+
+struct RecordingSubmitCoordinator {
+    submissions: Mutex<Vec<ironclaw_turns::SubmitTurnRequest>>,
+}
+
+#[async_trait]
+impl TurnCoordinator for RecordingSubmitCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "unused".to_string(),
+        })
+    }
+
+    async fn submit_turn(
+        &self,
+        request: ironclaw_turns::SubmitTurnRequest,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+        let accepted_message_ref = request.accepted_message_ref.clone();
+        self.submissions.lock().expect("lock").push(request);
+        Ok(ironclaw_turns::SubmitTurnResponse::Accepted {
+            turn_id: ironclaw_host_api::turn::TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: ironclaw_host_api::turn::TurnStatus::Queued,
+            resolved_run_profile_id: ironclaw_host_api::turn::RunProfileId::unbound_structured(),
+            resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
+            event_cursor: ironclaw_host_api::turn::EventCursor(1),
+            accepted_message_ref,
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "unused".to_string(),
+        })
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: ironclaw_turns::CancelRunRequest,
+    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "unused".to_string(),
+        })
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "unused".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Err(TurnError::ScopeNotFound)
+    }
+}
+
+fn prepared_chat_messages() -> Vec<ironclaw_openai_compat::OpenAiChatMessage> {
+    serde_json::from_value(serde_json::json!([
+        {"role": "system", "content": "you are a classifier"},
+        {"role": "user", "content": "look it up"},
+        {"role": "assistant", "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{\"q\":\"release\"}"}
+        }]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "release went great"},
+        {"role": "user", "content": "classify it"}
+    ]))
+    .expect("messages")
+}
+
+#[tokio::test]
+async fn prepared_gateway_seeds_the_full_history_and_submits_reflessly() {
+    use ironclaw_openai_compat::OpenAiCompatPreparedTurnPort as _;
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(RecordingSubmitCoordinator {
+        submissions: Mutex::new(Vec::new()),
+    });
+    let gateway = prepared_gateway(threads.clone(), coordinator.clone(), "prep");
+
+    let ack = gateway
+        .accept_and_submit(ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest {
+            scope: OpenAiCompatActorScope::new(
+                TenantId::new("tenant-prep").expect("tenant"),
+                UserId::new("user-prep").expect("user"),
+                None,
+                None,
+            ),
+            public_id: "chatcmpl-prep-1".to_string(),
+            messages: prepared_chat_messages(),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({"type": "object"}),
+            },
+            requested_model: Some("gpt-reborn".to_string()),
+        })
+        .await
+        .expect("prepared submit");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    let submissions = coordinator.submissions.lock().expect("lock");
+    assert_eq!(submissions.len(), 1);
+    let submission = &submissions[0];
+    assert_eq!(submission.scope.thread_id.as_str(), "chatcmpl-prep-1");
+    assert!(matches!(
+        submission.scope.thread_owner,
+        ironclaw_host_api::turn::TurnThreadOwner::Ownerless
+    ));
+    assert!(submission.requested_run_profile.is_none());
+    assert_eq!(submission.requested_model.as_deref(), Some("gpt-reborn"));
+
+    // The seeded thread carries the full history shape: system + user +
+    // tool-result reference + trailing user (the pure tool-call assistant
+    // message seeds no row, matching the live transcript storage shape).
+    let gateway_scope = gateway.unbound_thread_scope();
+    let history = threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: gateway_scope.clone(),
+            thread_id: ThreadId::new("chatcmpl-prep-1").expect("thread"),
+        })
+        .await
+        .expect("history");
+    let kinds: Vec<MessageKind> = history.messages.iter().map(|m| m.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            MessageKind::System,
+            MessageKind::User,
+            MessageKind::ToolResultReference,
+            MessageKind::User,
+        ]
+    );
+    let declarations = threads
+        .read_prepared_context(
+            &gateway_scope,
+            &ThreadId::new("chatcmpl-prep-1").expect("thread"),
+        )
+        .await
+        .expect("record read")
+        .expect("prepared record");
+    assert!(matches!(
+        declarations.declarations.output,
+        ironclaw_host_api::prepared_context::OutputContract::JsonSchema { .. }
+    ));
+}
+
+#[tokio::test]
+async fn prepared_gateway_resolves_the_structured_result_payload() {
+    use ironclaw_openai_compat::OpenAiCompatPreparedTurnPort as _;
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let staging = Arc::new(RecordingSubmitCoordinator {
+        submissions: Mutex::new(Vec::new()),
+    });
+    let gateway = prepared_gateway(threads.clone(), staging.clone(), "sres");
+    let thread_id = ThreadId::new("chatcmpl-sres-1").expect("thread");
+
+    // Accept a structured context, then simulate the run writing its
+    // validated result: a builtin.structured_result tool row + the full
+    // payload in the durable record store.
+    gateway
+        .accept_and_submit(ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest {
+            scope: OpenAiCompatActorScope::new(
+                TenantId::new("tenant-sres").expect("tenant"),
+                UserId::new("user-sres").expect("user"),
+                None,
+                None,
+            ),
+            public_id: "chatcmpl-sres-1".to_string(),
+            messages: serde_json::from_value(serde_json::json!([
+                {"role": "user", "content": "classify"}
+            ]))
+            .expect("messages"),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({"type": "object"}),
+            },
+            requested_model: None,
+        })
+        .await
+        .expect("accept");
+
+    let run_id = TurnRunId::new();
+    let scope = gateway.unbound_thread_scope();
+    let payload = "{\"sentiment\":\"positive\"}";
+    threads
+        .put_tool_result_record(ironclaw_threads::PutToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            result_ref: "result:structured-1".to_string(),
+            content: payload.as_bytes().to_vec(),
+        })
+        .await
+        .expect("record");
+    threads
+        .append_tool_result_reference(ironclaw_threads::AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            result_ref: "result:structured-1".to_string(),
+            safe_summary: ToolResultSafeSummary::new("structured result recorded")
+                .expect("summary"),
+            provider_call: Some(ProviderToolCallReferenceEnvelope {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn.1".to_string(),
+                provider_call_id: "call.structured".to_string(),
+                provider_tool_name: ProviderToolName::new("builtin__structured_result")
+                    .expect("tool name"),
+                capability_id: CapabilityId::new(
+                    ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
+                )
+                .expect("capability"),
+                arguments: serde_json::json!({"sentiment": "positive"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+            model_observation: None,
+        })
+        .await
+        .expect("tool row");
+
+    let mut state = TurnRunState {
+        scope: gateway.unbound_turn_scope(&thread_id),
+        actor: Some(TurnActor::new(UserId::new("user-sres").expect("user"))),
+        turn_id: ironclaw_host_api::turn::TurnId::new(),
+        run_id,
+        status: ironclaw_host_api::turn::TurnStatus::Completed,
+        accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:sres")
+            .expect("ref"),
+        resolved_run_profile_id: ironclaw_host_api::turn::RunProfileId::unbound_structured(),
+        resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
+        allow_steering: false,
+        resolved_model_route: None,
+        model_usage: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: ironclaw_host_api::turn::EventCursor(1),
+        product_context: None,
+        resume_disposition: None,
+    };
+    state.scope = gateway.unbound_turn_scope(&thread_id);
+    let coordinator = Arc::new(StaticTurnCoordinator::new(state));
+    let gateway = OpenAiCompatPreparedTurnGateway {
+        thread_service: threads,
+        coordinator,
+        tenant_id: TenantId::new("tenant-sres").expect("tenant"),
+        agent_id: AgentId::new("agent-sres").expect("agent"),
+        project_id: None,
+    };
+
+    let request = OpenAiChatCompletionProjectionRequest {
+        public_id: ironclaw_openai_compat::OpenAiChatCompletionId::new("chatcmpl-sres-1")
+            .expect("public id"),
+        actor_scope: OpenAiCompatActorScope::new(
+            TenantId::new("tenant-sres").expect("tenant"),
+            UserId::new("user-sres").expect("user"),
+            None,
+            None,
+        ),
+        accepted_ack: ProductInboundAck::Accepted {
+            accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:sres")
+                .expect("ref"),
+            submitted_run_id: run_id,
+            submission: None,
+        },
+        projection_read: ProjectionReadRequest {
+            actor: TurnActor::new(UserId::new("user-sres").expect("user")),
+            scope: gateway.unbound_turn_scope(&thread_id),
+            after_cursor: None,
+            limit: None,
+        },
+        requested_model: "gpt-reborn".to_string(),
+        model_only_tools: Default::default(),
+        prepared: true,
+    };
+    let projection = gateway
+        .wait_for_unbound_completion(&request, Duration::from_millis(5))
+        .await
+        .expect("structured completion");
+    assert_eq!(projection.assistant_content.as_deref(), Some(payload));
+}
