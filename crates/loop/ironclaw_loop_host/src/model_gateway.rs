@@ -2640,6 +2640,14 @@ fn provider_replay_matches_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> bool {
+    // Seeded prepared-context tool history carries the host-owned sentinel
+    // identity: replay it as a faithful tool round on ANY route. The
+    // carve-out is exact-match on the sentinel only; the accept door forces
+    // `signature: None` on seeded envelopes, so this can never smuggle a
+    // real route's replay artifacts.
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return true;
+    }
     provider_call.provider_id == expected.provider_id
         && provider_call.provider_model_id == expected.provider_model_id
 }

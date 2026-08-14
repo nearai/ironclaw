@@ -1714,7 +1714,10 @@ where
         crate::prepared_context::validate_prepared_context_request(&request)?;
         let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
         let now = Utc::now();
-        let mut rows = crate::prepared_context::prepared_seed_rows(&request, &thread_id, now)?;
+        let crate::prepared_context::PreparedSeed {
+            mut rows,
+            tool_result_records,
+        } = crate::prepared_context::prepared_seed(&request, &thread_id, now)?;
 
         // MINT (idempotent): `ensure_thread` scope-checks an existing thread
         // and declares the listing indexes for a fresh one.
@@ -1763,6 +1766,20 @@ where
                 Err(FilesystemError::VersionMismatch { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
+        }
+
+        // Durable full-outcome records for seeded tool history, keyed by the
+        // deterministic seeded result refs so `builtin.result_read` paging
+        // resolves them exactly like live results. `put_tool_result_record`
+        // is CAS-idempotent, so a crashed retry converges.
+        for (result_ref, content) in tool_result_records {
+            self.put_tool_result_record(crate::PutToolResultRecordRequest {
+                scope: request.scope.clone(),
+                thread_id: thread_id.clone(),
+                result_ref,
+                content,
+            })
+            .await?;
         }
 
         let seeded_message_count = rows.len() as u64;

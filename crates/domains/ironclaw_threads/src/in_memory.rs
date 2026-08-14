@@ -218,7 +218,11 @@ impl SessionThreadService for InMemorySessionThreadService {
         crate::prepared_context::validate_prepared_context_request(&request)?;
         let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
         let now = Utc::now();
-        let rows = crate::prepared_context::prepared_seed_rows(&request, &thread_id, now)?;
+        let seed = crate::prepared_context::prepared_seed(&request, &thread_id, now)?;
+        let crate::prepared_context::PreparedSeed {
+            rows,
+            tool_result_records,
+        } = seed;
 
         let mut state = self.state.lock().await;
         if let Some(record) = state.prepared_contexts.get(&thread_id) {
@@ -270,6 +274,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             row.sequence = stored.next_sequence;
             stored.next_sequence += 1;
             stored.messages.push(row);
+        }
+        for (result_ref, bytes) in tool_result_records {
+            stored.tool_result_records.insert(result_ref, bytes);
         }
         stored.record.updated_at = Some(now);
 
