@@ -302,9 +302,7 @@ fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize
         .min(tokio::sync::Semaphore::MAX_PERMITS)
 }
 
-fn turn_run_scheduler_config(
-    config: &DefaultPlannedRuntimeConfig,
-) -> TurnRunSchedulerConfig {
+fn turn_run_scheduler_config(config: &DefaultPlannedRuntimeConfig) -> TurnRunSchedulerConfig {
     TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(config.worker_count))
         .with_runner_heartbeat_interval(config.heartbeat_interval)
@@ -836,6 +834,7 @@ where
     // spawn decoration and before disclosure. Override `disabled_capability_ids`
     // to re-enable it in targeted regression harnesses.
     let global_denied = parts.config.disabled_capability_ids.clone();
+    let scheduler_config = turn_run_scheduler_config(&parts.config);
     // Issue #5505: a scheduled-trigger fire must not be able to create,
     // remove, pause, or resume triggers (read-only trigger_list stays
     // available). These ids are folded into that run's one resolved policy only
@@ -952,7 +951,6 @@ where
         executor = executor.with_after_turn_memory_recorder(recorder);
     }
     let executor = Arc::new(executor);
-    let scheduler_config = turn_run_scheduler_config(&parts.config);
     let scheduler = TurnRunScheduler::new_with_process_runtime(
         process_system.runtime(),
         executor,
@@ -1142,8 +1140,7 @@ mod tests {
 
     #[test]
     fn planned_runtime_wires_fifteen_second_heartbeat_and_three_failure_budget() {
-        let scheduler_config =
-            turn_run_scheduler_config(&DefaultPlannedRuntimeConfig::default());
+        let scheduler_config = turn_run_scheduler_config(&DefaultPlannedRuntimeConfig::default());
         assert_eq!(
             scheduler_config.runner_heartbeat_interval(),
             std::time::Duration::from_secs(15)
