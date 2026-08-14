@@ -31,8 +31,7 @@ export function readValue() {
 });
 
 test("VM harness captures exported declarations and named export aliases", () => {
-  const exports = evaluate(
-    `
+  const source = `
 const base = 41;
 export interface AnswerMetadata {
   source: string;
@@ -43,9 +42,12 @@ function readAnswer() {
   return answer;
 }
 export { readAnswer as getAnswer };
-`,
-    ["answer", "getAnswer"]
-  );
+`;
+  const exportNames = ["answer", "getAnswer"];
+  const executableSource = sourceTextForVmTest(source, exportNames);
+
+  assert.doesNotMatch(executableSource, /^\s*(?:interface|type)\b/m);
+  const exports = evaluate(source, exportNames);
 
   assert.equal(exports.answer, 42);
   assert.equal(exports.getAnswer(), 42);
