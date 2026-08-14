@@ -1294,7 +1294,7 @@ fn prepared_gateway(
     suffix: &str,
 ) -> OpenAiCompatPreparedTurnGateway {
     OpenAiCompatPreparedTurnGateway {
-        service: Arc::new(ironclaw_assistant::UnboundPreparedTurnService::new(
+        service: Arc::new(ironclaw_assistant::UnboundTurnService::new(
             threads,
             coordinator,
             TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
@@ -1389,23 +1389,45 @@ impl TurnCoordinator for RecordingSubmitCoordinator {
     }
 }
 
-fn prepared_chat_messages() -> Vec<ironclaw_openai_compat::OpenAiChatMessage> {
-    serde_json::from_value(serde_json::json!([
-        {"role": "system", "content": "you are a classifier"},
-        {"role": "user", "content": "look it up"},
-        {"role": "assistant", "tool_calls": [{
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "lookup", "arguments": "{\"q\":\"release\"}"}
-        }]},
-        {"role": "tool", "tool_call_id": "call_1", "content": "release went great"},
-        {"role": "user", "content": "classify it"}
-    ]))
-    .expect("messages")
+/// The seed as the route crate's mapper produces it for the classic
+/// system + user + tool-round + user history.
+fn prepared_seed_messages() -> Vec<ironclaw_threads::agent_message::AgentMessage> {
+    use ironclaw_threads::agent_message::{
+        AgentMessage, AgentMessageRole, ContentPart, ToolCallContent, ToolResultContent,
+        ToolResultOutcome,
+    };
+    vec![
+        AgentMessage {
+            role: AgentMessageRole::User,
+            content: vec![ContentPart::text("look it up")],
+        },
+        AgentMessage {
+            role: AgentMessageRole::Assistant,
+            content: vec![ContentPart::ToolCall(ToolCallContent {
+                call_id: "call_1".to_string(),
+                capability: CapabilityId::new("external_tool.lookup").expect("capability"),
+                arguments: serde_json::json!({"q": "release"}),
+            })],
+        },
+        AgentMessage {
+            role: AgentMessageRole::Tool,
+            content: vec![ContentPart::ToolResult(ToolResultContent {
+                call_id: "call_1".to_string(),
+                outcome: ToolResultOutcome::Text {
+                    text: "release went great".to_string(),
+                },
+                is_error: false,
+            })],
+        },
+        AgentMessage {
+            role: AgentMessageRole::User,
+            content: vec![ContentPart::text("classify it")],
+        },
+    ]
 }
 
 #[tokio::test]
-async fn prepared_gateway_seeds_the_full_history_and_submits_reflessly() {
+async fn prepared_gateway_seeds_the_full_history_and_submits_unboundly() {
     use ironclaw_openai_compat::OpenAiCompatPreparedTurnPort as _;
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(RecordingSubmitCoordinator {
@@ -1422,7 +1444,8 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_reflessly() {
                 None,
             ),
             public_id: "chatcmpl-prep-1".to_string(),
-            messages: prepared_chat_messages(),
+            system_prompt: "you are a classifier".to_string(),
+            messages: prepared_seed_messages(),
             output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
                 schema: serde_json::json!({"type": "object"}),
             },
@@ -1438,7 +1461,7 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_reflessly() {
         .expect("lock")
         .first()
         .cloned()
-        .expect("one refless submission recorded");
+        .expect("one unbound submission recorded");
     let submission = &submission;
     assert_eq!(submission.scope.thread_id.as_str(), "chatcmpl-prep-1");
     assert!(matches!(
@@ -1505,10 +1528,13 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
                 None,
             ),
             public_id: "chatcmpl-sres-1".to_string(),
-            messages: serde_json::from_value(serde_json::json!([
-                {"role": "user", "content": "classify"}
-            ]))
-            .expect("messages"),
+            system_prompt: String::new(),
+            messages: vec![ironclaw_threads::agent_message::AgentMessage {
+                role: ironclaw_threads::agent_message::AgentMessageRole::User,
+                content: vec![ironclaw_threads::agent_message::ContentPart::text(
+                    "classify",
+                )],
+            }],
             output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
                 schema: serde_json::json!({"type": "object"}),
             },
@@ -1584,7 +1610,7 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
     state.scope = test_unbound_turn_scope("sres", &thread_id);
     let coordinator = Arc::new(StaticTurnCoordinator::new(state));
     let gateway = OpenAiCompatPreparedTurnGateway {
-        service: Arc::new(ironclaw_assistant::UnboundPreparedTurnService::new(
+        service: Arc::new(ironclaw_assistant::UnboundTurnService::new(
             threads,
             coordinator,
             TenantId::new("tenant-sres").expect("tenant"),

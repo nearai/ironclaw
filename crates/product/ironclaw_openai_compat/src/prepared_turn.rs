@@ -1,16 +1,22 @@
 //! Prepared-context submission port for chat completions (unbound-turns
 //! design §4 / one-engine §7 phase 1 adoption).
 //!
-//! A request whose contract today's conversation path silently mistreats —
-//! `response_format` json schema (parsed and dropped) or assistant/tool
-//! history (flattened into one JSON string) — is accepted through the
-//! engine's shared `accept_prepared_context` door instead: the message list
-//! seeds faithfully, the output contract journals beside it, and the refless
-//! submit derives the unbound run profile at admission. This crate owns only
-//! the port vocabulary and the lane decision; the implementation lives in
-//! composition, which holds the thread service and coordinator.
+//! Every non-streaming request without declared client tools is accepted
+//! through the engine's shared `accept_prepared_context` door: the message
+//! list seeds faithfully, the output contract journals beside it, and the
+//! submit derives the unbound run profile at admission. This crate owns the
+//! lane decision and the OpenAI-wire → engine-vocabulary mapping; validation
+//! is the accept door's own `validate_prepared_seed_content` (the ONE
+//! authoritative validator — no mirrored bounds), run BEFORE the idempotency
+//! reservation so a body the door would refuse never burns the caller's key.
+//! The port implementation lives in composition, which holds the thread
+//! service and coordinator.
 
 use async_trait::async_trait;
+use ironclaw_assistant::agent_message::{
+    AgentMessage, AgentMessageRole, ContentPart, ToolCallContent, ToolResultContent,
+    ToolResultOutcome,
+};
 use ironclaw_host_api::prepared_context::OutputContract;
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 
@@ -18,15 +24,17 @@ use crate::OpenAiCompatHttpError;
 use crate::chat::{OpenAiChatCompletionRequest, OpenAiChatMessage, OpenAiChatMessageRole};
 use crate::refs::OpenAiCompatActorScope;
 
-/// One prepared-lane submission: everything composition needs to seed the
-/// caller's message list and submit the refless turn. The public completion
-/// id doubles as the unbound thread id, exactly as the conversation lane
-/// used it, so retrieval and ref binding stay id-stable.
+/// One prepared-lane submission, already in the engine vocabulary: the wire
+/// mapping and validation happened in the workflow BEFORE the idempotency
+/// reservation, so composition only carries it to the door. The public
+/// completion id doubles as the unbound thread id, exactly as the
+/// conversation lane used it, so retrieval and ref binding stay id-stable.
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatPreparedTurnRequest {
     pub scope: OpenAiCompatActorScope,
     pub public_id: String,
-    pub messages: Vec<OpenAiChatMessage>,
+    pub system_prompt: String,
+    pub messages: Vec<AgentMessage>,
     pub output: OutputContract,
     pub requested_model: Option<String>,
 }
@@ -78,37 +86,13 @@ pub(crate) fn parse_response_format(
     }
 }
 
-/// Does the request replay a transcript rather than open a fresh chat?
-/// Any assistant or tool row, or more than one user turn, means the caller
-/// owns the history — the stateless-replay shape the prepared lane seeds
-/// faithfully (the retired path flattened it into one JSON string).
-pub(crate) fn has_replayed_history(messages: &[OpenAiChatMessage]) -> bool {
-    let mut user_turns = 0usize;
-    for message in messages {
-        match message.role {
-            OpenAiChatMessageRole::Tool | OpenAiChatMessageRole::Assistant => return true,
-            OpenAiChatMessageRole::User => user_turns += 1,
-            OpenAiChatMessageRole::System | OpenAiChatMessageRole::Developer => {}
-        }
-        if message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-        {
-            return true;
-        }
-    }
-    user_turns > 1
-}
-
-/// The prepared-lane decision for a NON-STREAMING request. The lane exists
-/// exactly where the conversation path mistreats the request's contract:
-/// a declared output schema, or replayed history (assistant/tool rows or
-/// multiple user turns) that would otherwise be flattened into one JSON
-/// string. Requests declaring live client tools stay on the conversation
-/// lane (the external-tool park/resume flow lives there); combining client
-/// tools with a structured output contract is rejected loudly instead of
-/// half-honored.
+/// The prepared-lane decision for a NON-STREAMING request: every request
+/// without declared client tools takes the door (`Some`), honoring its
+/// declared output contract or the assistant-message default. Requests
+/// declaring live client tools stay on the conversation lane (the
+/// external-tool park/resume flow lives there); combining client tools with
+/// a structured output contract is rejected loudly instead of half-honored,
+/// as is streaming with a JSON output contract.
 pub(crate) fn prepared_lane_output(
     request: &OpenAiChatCompletionRequest,
 ) -> Result<Option<OutputContract>, OpenAiCompatHttpError> {
@@ -129,195 +113,150 @@ pub(crate) fn prepared_lane_output(
             )));
         }
         // Streaming keeps the conversation lane wholesale (its projection
-        // subscription is conversation-scoped); tool history streams exactly
-        // as it did before.
+        // subscription is conversation-scoped); unbound-run streaming
+        // arrives with the run-observation façade.
         return Ok(None);
     }
-    if let Some(output) = output {
-        return Ok(Some(output));
+    if declares_tools {
+        return Ok(None);
     }
-    if has_replayed_history(&request.messages) && !declares_tools {
-        return Ok(Some(OutputContract::AssistantMessage));
-    }
-    Ok(None)
+    Ok(Some(output.unwrap_or_default()))
 }
 
-/// Mirrors of the accept door's deterministic bounds
-/// (`ironclaw_llm::agent_message`, re-exported via
-/// `ironclaw_threads::agent_message`); this crate cannot depend on the llm
-/// crate in production, so the values are pinned by the equality test below.
-pub(crate) const PREPARED_TEXT_PART_MAX_BYTES: usize = 64 * 1024;
-pub(crate) const PREPARED_LIST_MAX_BYTES: usize = 256 * 1024;
-pub(crate) const PREPARED_TOOL_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
-pub(crate) const PREPARED_LIST_MAX_MESSAGES: usize = 128;
-
-/// Cheap deterministic pre-validation for a prepared-lane request, run
-/// BEFORE the idempotency reservation so an invalid body never burns the
-/// caller's idempotency key (the same ordering the conversation lane's
-/// payload build provides). The accept door remains the authoritative
-/// validator; everything here is a faithful mirror of its DETERMINISTIC
-/// rejections — counts, byte budgets, call-id grammar, tool-name mapping,
-/// and tool-call/result pairing — so a body the door would refuse never
-/// reaches the reservation.
-pub(crate) fn prepared_pre_validate(
+/// Translate the OpenAI message list into the engine vocabulary:
+/// system/developer text becomes the prepared system prompt; user,
+/// assistant, and tool turns become `AgentMessage`s (tool history maps
+/// onto the same `external_tool.{name}` capability identity the live
+/// client-tool lane registers). Inline images and non-text parts are
+/// rejected loudly — the conversation lane keeps serving those.
+pub(crate) fn agent_messages_from_chat(
     messages: &[OpenAiChatMessage],
-) -> Result<(), OpenAiCompatHttpError> {
-    fn text_shape_ok(content: Option<&serde_json::Value>) -> bool {
+) -> Result<(String, Vec<AgentMessage>), OpenAiCompatHttpError> {
+    fn text_content(content: Option<&serde_json::Value>) -> Result<String, OpenAiCompatHttpError> {
         match content {
-            None | Some(serde_json::Value::String(_)) => true,
-            Some(serde_json::Value::Array(parts)) => parts
-                .iter()
-                .all(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("text")),
-            Some(_) => false,
+            None => Ok(String::new()),
+            Some(serde_json::Value::String(text)) => Ok(text.clone()),
+            Some(serde_json::Value::Array(parts)) => {
+                let mut sections = Vec::new();
+                for part in parts {
+                    match part.get("type").and_then(serde_json::Value::as_str) {
+                        Some("text") => sections.push(
+                            part.get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        ),
+                        _ => {
+                            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                                "only text content parts are supported on this request shape"
+                                    .to_string(),
+                            )));
+                        }
+                    }
+                }
+                Ok(sections.join("\n\n"))
+            }
+            Some(_) => Err(OpenAiCompatHttpError::invalid_request(Some(
+                "messages[].content".to_string(),
+            ))),
         }
     }
-    // Mirrors `ironclaw_safety::validate_provider_token` (the authoritative
-    // check at the accept door): 1..=512 bytes of [A-Za-z0-9_\-.:].
-    fn call_id_ok(value: &str) -> bool {
-        !value.is_empty()
-            && value.len() <= 512
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+
+    fn external_capability(
+        name: &str,
+    ) -> Result<ironclaw_host_api::ids::CapabilityId, OpenAiCompatHttpError> {
+        ironclaw_host_api::ids::CapabilityId::new(format!(
+            "external_tool.{}",
+            name.to_ascii_lowercase()
+        ))
+        .map_err(|_| {
+            OpenAiCompatHttpError::invalid_request(Some(format!(
+                "tool name {name:?} cannot be represented as a capability id"
+            )))
+        })
     }
-    if messages.is_empty() {
+
+    let mut system_sections: Vec<String> = Vec::new();
+    let mut converted: Vec<AgentMessage> = Vec::new();
+    for message in messages {
+        match message.role {
+            OpenAiChatMessageRole::System | OpenAiChatMessageRole::Developer => {
+                let text = text_content(message.content.as_ref())?;
+                if !text.is_empty() {
+                    system_sections.push(text);
+                }
+            }
+            OpenAiChatMessageRole::User => {
+                converted.push(AgentMessage {
+                    role: AgentMessageRole::User,
+                    content: vec![ContentPart::text(text_content(message.content.as_ref())?)],
+                });
+            }
+            OpenAiChatMessageRole::Assistant => {
+                let mut parts = Vec::new();
+                let text = text_content(message.content.as_ref())?;
+                if !text.is_empty() {
+                    parts.push(ContentPart::text(text));
+                }
+                for call in message.tool_calls.iter().flatten() {
+                    let arguments = serde_json::from_str(&call.function.arguments)
+                        .unwrap_or(serde_json::Value::String(call.function.arguments.clone()));
+                    parts.push(ContentPart::ToolCall(ToolCallContent {
+                        call_id: call.id.clone(),
+                        capability: external_capability(&call.function.name)?,
+                        arguments,
+                    }));
+                }
+                if !parts.is_empty() {
+                    converted.push(AgentMessage {
+                        role: AgentMessageRole::Assistant,
+                        content: parts,
+                    });
+                }
+            }
+            OpenAiChatMessageRole::Tool => {
+                let call_id = message.tool_call_id.clone().ok_or_else(|| {
+                    OpenAiCompatHttpError::invalid_request(Some(
+                        "messages[].tool_call_id".to_string(),
+                    ))
+                })?;
+                converted.push(AgentMessage {
+                    role: AgentMessageRole::Tool,
+                    content: vec![ContentPart::ToolResult(ToolResultContent {
+                        call_id,
+                        outcome: ToolResultOutcome::Text {
+                            text: text_content(message.content.as_ref())?,
+                        },
+                        is_error: false,
+                    })],
+                });
+            }
+        }
+    }
+    if converted.is_empty() {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "messages".to_string(),
         )));
     }
-    if messages.len() > crate::chat_workflow::MAX_CHAT_COMPLETION_MESSAGES {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
-            "messages exceeds the {} message limit",
-            crate::chat_workflow::MAX_CHAT_COMPLETION_MESSAGES
-        ))));
-    }
-    for message in messages {
-        if !text_shape_ok(message.content.as_ref()) {
-            return Err(OpenAiCompatHttpError::invalid_request(Some(
-                "only text content parts are supported with structured output or tool history"
-                    .to_string(),
-            )));
-        }
-        if matches!(message.role, OpenAiChatMessageRole::Tool) {
-            let Some(call_id) = message.tool_call_id.as_deref() else {
-                return Err(OpenAiCompatHttpError::invalid_request(Some(
-                    "messages[].tool_call_id".to_string(),
-                )));
-            };
-            if !call_id_ok(call_id) {
-                return Err(OpenAiCompatHttpError::invalid_request(Some(
-                    "messages[].tool_call_id".to_string(),
-                )));
-            }
-        }
-        for call in message.tool_calls.iter().flatten() {
-            if !call_id_ok(&call.id) {
-                return Err(OpenAiCompatHttpError::invalid_request(Some(
-                    "messages[].tool_calls[].id".to_string(),
-                )));
-            }
-            if ironclaw_host_api::ids::CapabilityId::new(format!(
-                "external_tool.{}",
-                call.function.name.to_ascii_lowercase()
-            ))
-            .is_err()
-            {
-                return Err(OpenAiCompatHttpError::invalid_request(Some(
-                    "messages[].tool_calls[].function.name".to_string(),
-                )));
-            }
-        }
-    }
+    Ok((system_sections.join("\n\n"), converted))
+}
 
-    // Byte budgets and pairing, mirroring the seed shapes the mapping
-    // produces: system/developer rows fold into ONE system prompt; every
-    // other message becomes one text part; tool-call arguments serialize
-    // as parsed JSON when they parse, else as the raw string.
-    fn joined_text_len(content: Option<&serde_json::Value>) -> usize {
-        match content {
-            None => 0,
-            Some(serde_json::Value::String(text)) => text.len(),
-            Some(serde_json::Value::Array(parts)) => parts
-                .iter()
-                .map(|part| {
-                    part.get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::len)
-                        .unwrap_or(0)
-                })
-                .sum::<usize>()
-                .saturating_add(parts.len().saturating_sub(1).saturating_mul(2)),
-            Some(_) => 0,
-        }
-    }
-    let mut seeded_messages = 0usize;
-    let mut system_bytes = 0usize;
-    let mut total_bytes = 0usize;
-    let mut open_calls: Vec<&str> = Vec::new();
-    for message in messages {
-        let text_len = joined_text_len(message.content.as_ref());
-        match message.role {
-            OpenAiChatMessageRole::System | OpenAiChatMessageRole::Developer => {
-                system_bytes = system_bytes.saturating_add(text_len);
-                continue;
+/// Map + validate a prepared-lane body with the accept door's own validator.
+/// Runs BEFORE the idempotency reservation; the returned pair rides the port
+/// request so the mapping happens exactly once.
+pub(crate) fn prepared_seed_from_chat(
+    messages: &[OpenAiChatMessage],
+) -> Result<(String, Vec<AgentMessage>), OpenAiCompatHttpError> {
+    let (system_prompt, mapped) = agent_messages_from_chat(messages)?;
+    ironclaw_assistant::validate_prepared_seed_content(&system_prompt, &mapped).map_err(
+        |error| match error {
+            ironclaw_assistant::SessionThreadError::InvalidPreparedContext { reason } => {
+                OpenAiCompatHttpError::invalid_request(Some(reason))
             }
-            _ => {}
-        }
-        seeded_messages += 1;
-        if text_len > PREPARED_TEXT_PART_MAX_BYTES {
-            return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
-                "messages[].content exceeds the {PREPARED_TEXT_PART_MAX_BYTES} byte text budget"
-            ))));
-        }
-        total_bytes = total_bytes.saturating_add(text_len);
-        if matches!(message.role, OpenAiChatMessageRole::Tool) {
-            let call_id = message.tool_call_id.as_deref().unwrap_or_default();
-            let Some(open_at) = open_calls.iter().position(|open| *open == call_id) else {
-                return Err(OpenAiCompatHttpError::invalid_request(Some(
-                    "messages[].tool_call_id does not answer a prior assistant tool call"
-                        .to_string(),
-                )));
-            };
-            open_calls.remove(open_at);
-        }
-        for call in message.tool_calls.iter().flatten() {
-            let serialized_arguments =
-                serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|_| {
-                        serde_json::Value::String(call.function.arguments.clone()).to_string()
-                    });
-            if serialized_arguments.len() > PREPARED_TOOL_ARGUMENTS_MAX_BYTES {
-                return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
-                    "messages[].tool_calls[].function.arguments exceeds the \
-                     {PREPARED_TOOL_ARGUMENTS_MAX_BYTES} byte budget"
-                ))));
-            }
-            total_bytes = total_bytes.saturating_add(serialized_arguments.len());
-            open_calls.push(call.id.as_str());
-        }
-    }
-    if !open_calls.is_empty() {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "messages[].tool_calls without a matching tool result".to_string(),
-        )));
-    }
-    if seeded_messages > PREPARED_LIST_MAX_MESSAGES {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
-            "messages exceeds the {PREPARED_LIST_MAX_MESSAGES} seeded message limit"
-        ))));
-    }
-    if system_bytes > PREPARED_TEXT_PART_MAX_BYTES {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
-            "system/developer content exceeds the {PREPARED_TEXT_PART_MAX_BYTES} byte budget"
-        ))));
-    }
-    if total_bytes > PREPARED_LIST_MAX_BYTES {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(format!(
-            "messages exceed the {PREPARED_LIST_MAX_BYTES} byte request budget"
-        ))));
-    }
-    Ok(())
+            other => OpenAiCompatHttpError::invalid_request(Some(other.to_string())),
+        },
+    )?;
+    Ok((system_prompt, mapped))
 }
 
 #[cfg(test)]
@@ -353,10 +292,41 @@ mod tests {
         }
     }
 
+    fn tool_round() -> Vec<OpenAiChatMessage> {
+        vec![
+            user_message("go"),
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Assistant,
+                content: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
+                    id: "call_1".to_string(),
+                    kind: crate::chat::OpenAiChatToolKind::Function,
+                    function: crate::chat::OpenAiChatToolCallFunction {
+                        name: "lookup".to_string(),
+                        arguments: "{\"q\":1}".to_string(),
+                    },
+                }]),
+            },
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Tool,
+                content: Some(json!("found it")),
+                name: None,
+                tool_call_id: Some("call_1".to_string()),
+                tool_calls: None,
+            },
+            user_message("continue"),
+        ]
+    }
+
     #[test]
-    fn plain_requests_stay_on_the_conversation_lane() {
+    fn plain_requests_take_the_prepared_lane_with_the_default_contract() {
         let request = base_request(vec![user_message("hi")]);
-        assert!(prepared_lane_output(&request).expect("lane").is_none());
+        assert!(matches!(
+            prepared_lane_output(&request).expect("lane"),
+            Some(OutputContract::AssistantMessage)
+        ));
     }
 
     #[test]
@@ -385,50 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_history_without_declared_tools_takes_the_prepared_lane() {
-        let mut request = base_request(vec![user_message("continue")]);
-        request.messages.push(OpenAiChatMessage {
-            role: OpenAiChatMessageRole::Tool,
-            content: Some(json!("result body")),
-            name: None,
-            tool_call_id: Some("call_1".to_string()),
-            tool_calls: None,
-        });
-        assert!(matches!(
-            prepared_lane_output(&request).expect("lane"),
-            Some(OutputContract::AssistantMessage)
-        ));
-    }
-
-    #[test]
-    fn multi_turn_text_history_takes_the_prepared_lane() {
-        let mut request = base_request(vec![user_message("first question")]);
-        request.messages.push(OpenAiChatMessage {
-            role: OpenAiChatMessageRole::Assistant,
-            content: Some(json!("first answer")),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
-        request.messages.push(user_message("follow-up"));
-        assert!(matches!(
-            prepared_lane_output(&request).expect("lane"),
-            Some(OutputContract::AssistantMessage)
-        ));
-
-        // Two user turns with no assistant row is still replayed history.
-        let request = base_request(vec![user_message("part one"), user_message("part two")]);
-        assert!(matches!(
-            prepared_lane_output(&request).expect("lane"),
-            Some(OutputContract::AssistantMessage)
-        ));
-    }
-
-    #[test]
     fn declared_tools_keep_the_conversation_lane_and_reject_schema_combos() {
         let mut request = base_request(vec![user_message("go")]);
         request.tools = Some(vec![]);
-        assert!(prepared_lane_output(&request).expect("lane").is_none());
+        assert!(matches!(
+            prepared_lane_output(&request).expect("lane"),
+            Some(OutputContract::AssistantMessage)
+        ));
 
         request.tools = Some(vec![crate::chat::OpenAiChatTool {
             kind: crate::chat::OpenAiChatToolKind::Function,
@@ -439,6 +372,8 @@ mod tests {
                 strict: None,
             },
         }]);
+        assert!(prepared_lane_output(&request).expect("lane").is_none());
+
         request.response_format = Some(json!({"type": "json_object"}));
         assert!(prepared_lane_output(&request).is_err());
     }
@@ -456,99 +391,54 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_bounds_match_the_accept_door_constants() {
-        use ironclaw_threads::agent_message as door;
-        assert_eq!(
-            PREPARED_TEXT_PART_MAX_BYTES,
-            door::AGENT_MESSAGE_TEXT_PART_MAX_BYTES
-        );
-        assert_eq!(PREPARED_LIST_MAX_BYTES, door::AGENT_MESSAGE_LIST_MAX_BYTES);
-        assert_eq!(
-            PREPARED_TOOL_ARGUMENTS_MAX_BYTES,
-            door::AGENT_MESSAGE_TOOL_ARGUMENTS_MAX_BYTES
-        );
-        assert_eq!(
-            PREPARED_LIST_MAX_MESSAGES,
-            door::AGENT_MESSAGE_LIST_MAX_MESSAGES
-        );
+    fn unknown_response_format_is_rejected_loudly() {
+        let mut request = base_request(vec![user_message("go")]);
+        request.response_format = Some(json!({"type": "xml"}));
+        assert!(parse_response_format(request.response_format.as_ref()).is_err());
     }
 
     #[test]
-    fn pre_validation_mirrors_the_door_bounds_and_pairing() {
-        // 129 seeded messages: rejected before any reservation could burn.
-        let messages: Vec<OpenAiChatMessage> = (0..129).map(|_| user_message("hi")).collect();
-        assert!(prepared_pre_validate(&messages).is_err());
+    fn mapping_folds_system_rows_and_pairs_tool_history() {
+        let mut messages = vec![OpenAiChatMessage {
+            role: OpenAiChatMessageRole::System,
+            content: Some(json!("be terse")),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        messages.extend(tool_round());
+        let (system_prompt, mapped) =
+            prepared_seed_from_chat(&messages).expect("mapped and validated");
+        assert_eq!(system_prompt, "be terse");
+        assert_eq!(mapped.len(), 4);
+        assert_eq!(mapped[1].role, AgentMessageRole::Assistant);
+        assert!(matches!(mapped[1].content[0], ContentPart::ToolCall(_)));
+        assert_eq!(mapped[2].role, AgentMessageRole::Tool);
+    }
 
-        // Oversized single text part.
-        let messages = vec![user_message(&"x".repeat(PREPARED_TEXT_PART_MAX_BYTES + 1))];
-        assert!(prepared_pre_validate(&messages).is_err());
+    /// The door's validator runs pre-reservation: bodies it would refuse are
+    /// rejected here (these shapes are the DOOR's rules — no local mirror to
+    /// drift; the assertions only prove the wiring).
+    #[test]
+    fn door_validation_runs_on_the_mapped_seed() {
+        // Over the door's message budget.
+        let messages: Vec<OpenAiChatMessage> = (0..200).map(|_| user_message("hi")).collect();
+        assert!(prepared_seed_from_chat(&messages).is_err());
 
         // A tool result answering no prior call.
         let messages = vec![
             user_message("go"),
             OpenAiChatMessage {
                 role: OpenAiChatMessageRole::Tool,
-                content: Some(json!("result")),
+                content: Some(json!("orphan")),
                 name: None,
                 tool_call_id: Some("call_orphan".to_string()),
                 tool_calls: None,
             },
         ];
-        assert!(prepared_pre_validate(&messages).is_err());
-
-        // A tool call with no answering result.
-        let messages = vec![
-            user_message("go"),
-            OpenAiChatMessage {
-                role: OpenAiChatMessageRole::Assistant,
-                content: None,
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
-                    id: "call_unanswered".to_string(),
-                    kind: crate::chat::OpenAiChatToolKind::Function,
-                    function: crate::chat::OpenAiChatToolCallFunction {
-                        name: "lookup".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                }]),
-            },
-        ];
-        assert!(prepared_pre_validate(&messages).is_err());
+        assert!(prepared_seed_from_chat(&messages).is_err());
 
         // A well-formed paired round passes.
-        let messages = vec![
-            user_message("go"),
-            OpenAiChatMessage {
-                role: OpenAiChatMessageRole::Assistant,
-                content: None,
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
-                    id: "call_1".to_string(),
-                    kind: crate::chat::OpenAiChatToolKind::Function,
-                    function: crate::chat::OpenAiChatToolCallFunction {
-                        name: "lookup".to_string(),
-                        arguments: "{\"q\":1}".to_string(),
-                    },
-                }]),
-            },
-            OpenAiChatMessage {
-                role: OpenAiChatMessageRole::Tool,
-                content: Some(json!("found it")),
-                name: None,
-                tool_call_id: Some("call_1".to_string()),
-                tool_calls: None,
-            },
-            user_message("continue"),
-        ];
-        prepared_pre_validate(&messages).expect("paired history passes pre-validation");
-    }
-
-    #[test]
-    fn unknown_response_format_is_rejected_loudly() {
-        let mut request = base_request(vec![user_message("go")]);
-        request.response_format = Some(json!({"type": "xml"}));
-        assert!(parse_response_format(request.response_format.as_ref()).is_err());
+        prepared_seed_from_chat(&tool_round()).expect("paired history validates");
     }
 }

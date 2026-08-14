@@ -46,7 +46,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
-    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
     FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     OrderedPage, OrderedQueryCursor, Page, RecordKind, RecordVersion, RootFilesystem,
     ScopedFilesystem, SortDirection, cas_update,
@@ -1507,6 +1507,111 @@ where
     }
 }
 
+impl<F> FilesystemSessionThreadService<F>
+where
+    F: RootFilesystem,
+{
+    /// One-time, per-scope backfill: stamp the `prepared_context` marker onto
+    /// pre-marker subagent threads (their legacy metadata is
+    /// `{"kind":"subagent",…}`) so listing exclusion reads ONE spelling. The
+    /// completion marker makes the sweep run once; retention holds — the
+    /// metadata is updated, never deleted.
+    async fn ensure_prepared_markers_migrated(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<(), SessionThreadError> {
+        let marker = prepared_marker_migration_marker_path(scope)?;
+        if self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            if entry.file_type != FileType::Directory {
+                continue;
+            }
+            let thread_id = ThreadId::new(entry.name).map_err(invalid_path)?;
+            self.stamp_legacy_subagent_thread(scope, &thread_id).await?;
+        }
+        self.filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &marker,
+                Entry::bytes(b"prepared-context-marker-v1".to_vec()),
+                CasExpectation::Any,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Stamp one thread if (and only if) its metadata carries the legacy
+    /// subagent spelling without the marker. CAS-retried against live writers.
+    async fn stamp_legacy_subagent_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let Some((mut stored, version)) = self.read_thread_versioned(scope, thread_id).await?
+            else {
+                return Ok(());
+            };
+            let needs_stamp = stored
+                .record
+                .metadata_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .is_some_and(|value| {
+                    value.get("kind").and_then(serde_json::Value::as_str) == Some("subagent")
+                        && value.get(crate::PREPARED_CONTEXT_METADATA_MARKER_KEY)
+                            != Some(&serde_json::Value::Bool(true))
+                });
+            if !needs_stamp {
+                return Ok(());
+            }
+            stored.record.metadata_json = Some(crate::prepared_context::stamped_metadata_json(
+                stored.record.metadata_json.as_deref(),
+            )?);
+            let entry = Self::thread_entry(&stored)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => {
+                    return self
+                        .refresh_thread_index_from_source(scope, thread_id)
+                        .await;
+                }
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted stamping prepared marker at {}",
+            path.as_str()
+        )))
+    }
+}
+
 #[async_trait]
 impl<F> SessionThreadService for FilesystemSessionThreadService<F>
 where
@@ -1879,7 +1984,7 @@ where
         crate::prepared_context::validate_prepared_context_request(&request)?;
         let stamped_metadata =
             crate::prepared_context::stamped_metadata_json(request.metadata_json.as_deref())?;
-        let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
+        let thread_id = request.thread_id.clone();
         let now = Utc::now();
         let crate::prepared_context::PreparedSeed {
             mut rows,
@@ -3209,6 +3314,8 @@ where
             .limit
             .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
             .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
+        self.ensure_prepared_markers_migrated(&request.scope)
+            .await?;
         let (listed, has_more) = self
             .list_thread_index_page(&request.scope, request.cursor.as_deref(), limit)
             .await?;
@@ -3479,6 +3586,15 @@ fn summary_record_path(
     scoped_path(&format!(
         "{}/summaries/{summary_id}.json",
         thread_root_string(scope, thread_id)
+    ))
+}
+
+fn prepared_marker_migration_marker_path(
+    scope: &ThreadScope,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/index-migrations/prepared-context-marker-v1.complete",
+        scope_axes_string(scope)
     ))
 }
 

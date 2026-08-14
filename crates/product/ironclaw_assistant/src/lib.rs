@@ -66,7 +66,7 @@ mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
 mod steering;
-mod unbound_prepared_turn;
+mod unbound_turn;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
@@ -386,10 +386,13 @@ pub use reborn_services::{
     parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
     set_notification_channels_for_model,
 };
-pub use unbound_prepared_turn::{
-    UnboundCompletionOutcome, UnboundPreparedTurnError, UnboundPreparedTurnService,
-    UnboundPreparedTurnSubmission,
+pub use unbound_turn::{
+    UnboundTurnError, UnboundTurnOutcome, UnboundTurnService, UnboundTurnSubmission,
 };
+// Route crates (ironclaw_openai_compat) are boundary-barred from a direct
+// ironclaw_threads dependency, so the prepared-door seed vocabulary and the
+// one door validator reach them through this product-orchestration surface.
+pub use ironclaw_threads::{SessionThreadError, agent_message, validate_prepared_seed_content};
 
 pub use product_surface_inbound::{
     DecodeInboundAttachments, IntoProductInboundCommand, ProductInboundCommand,

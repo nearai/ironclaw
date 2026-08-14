@@ -434,7 +434,7 @@ no vendor anything.
    identically for both lanes.
 8. **Thread transcripts are written by the run, not by output handlers.**
    The engine's thread-backed machinery persists messages lease-fenced
-   during the run (exactly as today) — for every run: a unbound turn's
+   during the run (exactly as today) — for every run: an unbound turn's
    transcript is its own unbound, ownerless thread, seeded at admission and
    written by the same machinery, internal to the coordinator and never
    enumerated by conversation surfaces (those query by owner and binding).
@@ -479,10 +479,10 @@ way — this is hygiene, not architecture.
 adoption shipped as a lane split rather than a wholesale rewrite of the
 route crate:
 
-- Non-streaming requests with a declared output schema OR replayed history
-  (assistant/tool rows, or multiple user turns) go through
-  `accept_prepared_context` and an unbound run; the flatten hack
-  (`openai_compat.chat_messages.v1`) no longer serves them. The completion
+- EVERY non-streaming request without declared client tools goes through
+  `accept_prepared_context` and an unbound run — no payload-shape
+  heuristic; the flatten hack (`openai_compat.chat_messages.v1`) serves
+  only the streaming and declared-tools conversation lanes. The completion
   reports the run's effective model and provider-reported usage from run
   state.
 - Streaming stays on the conversation lane wholesale (its projection
@@ -511,10 +511,10 @@ route crate:
 - [2026-08-11-channel-adapter-contract.md](2026-08-11-channel-adapter-contract.md)
   — the `ChannelIngress` / `ChannelReply` / `ChannelDelivery` split (#7477)
   the flows above consume.
-- `docs/reborn/contracts/conversation-binding.md` — binding resolution,
+- `docs/internal/reborn/contracts/conversation-binding.md` — binding resolution,
   idempotent accepted messages, `DeferredBusy`/`RejectedBusy` steering
   admission, sealed trusted trigger ingress.
-- `docs/reborn/contracts/events-projections.md` — the durable-vs-live event
+- `docs/internal/reborn/contracts/events-projections.md` — the durable-vs-live event
   planes and stream item vocabulary the observation façade standardizes.
-- `docs/reborn/contracts/approvals.md` — gate leases and resume, reached from
+- `docs/internal/reborn/contracts/approvals.md` — gate leases and resume, reached from
   conversation surfaces only.

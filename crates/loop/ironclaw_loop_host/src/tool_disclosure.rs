@@ -432,7 +432,7 @@ fn is_core_tool_definition(definition: &ProviderToolDefinition) -> bool {
 /// resolves whether the model emits the bare wire name, the dotted capability id,
 /// or the `__`-encoded form — for ANY provider, not just `builtin`.
 pub(crate) fn encode_provider_tool_name(capability_id: &str) -> String {
-    capability_id.replace('.', "__")
+    ironclaw_host_api::ids::ProviderToolName::encode_capability_str(capability_id)
 }
 
 pub(crate) fn definition_matches_provider_name(

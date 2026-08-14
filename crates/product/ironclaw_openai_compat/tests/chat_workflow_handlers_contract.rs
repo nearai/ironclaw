@@ -451,9 +451,12 @@ async fn chat_completion_replayed_pending_ref_submits_and_records_accepted_ack()
         Arc::new(service),
     ))
     .layer(axum::Extension(caller()));
+    // Anchor to the conversation lane (this pins conversation ack recording);
+    // the fingerprinted raw body and the resubmitted body must match exactly.
     let raw_body = json!({
         "model": "gpt-reborn",
-        "messages": [{"role": "user", "content": "hello"}]
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [{"type": "function", "function": {"name": "anchor_tool"}}]
     })
     .to_string();
     let idempotency_key =
@@ -1250,7 +1253,16 @@ fn test_router_with_workflow(
     .layer(axum::Extension(caller()))
 }
 
-fn chat_request(body: Value, idempotency_key: Option<&str>) -> Request<Body> {
+/// Router-level bodies anchor to the CONVERSATION lane by declaring a client
+/// tool (the prepared lane owns every non-streaming tool-less request):
+/// these tests pin conversation-lane ack, idempotency, and flatten
+/// semantics, which live behind declared tools and streaming today.
+fn chat_request(mut body: Value, idempotency_key: Option<&str>) -> Request<Body> {
+    if body.get("tools").is_none() && body.get("messages").is_some() {
+        body["tools"] = serde_json::json!([
+            {"type": "function", "function": {"name": "anchor_tool"}}
+        ]);
+    }
     raw_chat_request(body.to_string(), idempotency_key)
 }
 
@@ -1638,7 +1650,7 @@ async fn tool_history_chat_routes_through_the_prepared_door() {
 }
 
 #[tokio::test]
-async fn plain_chat_never_touches_the_prepared_door() {
+async fn plain_chat_takes_the_prepared_door() {
     let surface = Arc::new(FakeProductSurface::new());
     let port = Arc::new(RecordingPreparedTurnPort::new());
     let reader = Arc::new(RecordingChatProjectionReader::new(
@@ -1661,12 +1673,21 @@ async fn plain_chat_never_touches_the_prepared_door() {
         .await
         .expect("completion");
 
-    assert!(
-        port.requests().is_empty(),
-        "plain requests keep the conversation lane"
+    assert_eq!(
+        port.requests().len(),
+        1,
+        "every non-streaming tool-less request takes the prepared door"
     );
-    assert_eq!(surface.accepted_count(), 1);
-    assert!(!reader.last_request().prepared);
+    assert!(matches!(
+        port.requests()[0].output,
+        ironclaw_host_api::prepared_context::OutputContract::AssistantMessage
+    ));
+    assert_eq!(
+        surface.accepted_count(),
+        0,
+        "the conversation surface must not also submit"
+    );
+    assert!(reader.last_request().prepared);
 }
 
 #[tokio::test]

@@ -306,6 +306,21 @@ pub struct ProviderToolName(String);
 impl ProviderToolName {
     pub const MAX_BYTES: usize = 64;
 
+    /// The ONE capability-id → provider-tool-name mapping (`.` → `__`,
+    /// because provider tool grammars reject dots). Every surface that
+    /// renders a capability to a model tool name goes through here so the
+    /// mapping cannot fork.
+    pub fn for_capability(capability: &CapabilityId) -> Result<Self, HostApiError> {
+        Self::new(Self::encode_capability_str(capability.as_str()))
+    }
+
+    /// String form of the same mapping, for MATCHERS that compare arbitrary
+    /// model-emitted identifiers against the encoding (they cannot fail on
+    /// non-capability text). Rendering sites use [`Self::for_capability`].
+    pub fn encode_capability_str(capability_id: &str) -> String {
+        capability_id.replace('.', "__")
+    }
+
     pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
         let value = value.into();
         validate_provider_tool_name(&value)?;

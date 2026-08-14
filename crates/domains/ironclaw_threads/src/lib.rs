@@ -62,7 +62,7 @@ pub use prepared_context::{
     AcceptedPreparedContext, PREPARED_CONTEXT_METADATA_MARKER_KEY,
     PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PREPARED_SEED_PROVIDER_ID, PreparedContextRecord,
     PreparedContextRequest, ThreadServicePreparedContextSource, read_declarations_for_run_scope,
-    record_is_prepared_context_hidden,
+    record_is_prepared_context_hidden, validate_prepared_seed_content,
 };
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers

@@ -4456,8 +4456,9 @@ async fn list_threads_for_scope_excludes_ownerless_threads_from_owner_scoped_lis
 /// Prepared-context threads are working state, not conversations: the accept
 /// door stamps every minted thread and listings exclude the stamp EVEN when
 /// the request scope matches exactly (the ownerless pin above only covers the
-/// scope-tuple mismatch). Pre-marker subagent metadata (`"kind":"subagent"`)
-/// hides too; an ordinary conversation thread in the same scope stays listed.
+/// scope-tuple mismatch); an ordinary conversation thread in the same scope
+/// stays listed. (Pre-marker legacy rows exist only on the filesystem
+/// backend, whose one-time backfill is pinned in its own contract suite.)
 #[tokio::test]
 async fn list_threads_for_scope_excludes_prepared_context_threads_even_when_scope_matches() {
     let service = InMemorySessionThreadService::default();
@@ -4477,19 +4478,6 @@ async fn list_threads_for_scope_excludes_prepared_context_threads_even_when_scop
         })
         .await
         .unwrap();
-    service
-        .ensure_thread(EnsureThreadRequest {
-            scope: listing_scope.clone(),
-            thread_id: Some(ThreadId::new("subagent-legacy-001").unwrap()),
-            created_by_actor_id: "actor-hidden-list".into(),
-            title: None,
-            metadata_json: Some(
-                serde_json::json!({"kind": "subagent", "parent_run_id": "run-1"}).to_string(),
-            ),
-        })
-        .await
-        .unwrap();
-
     let view = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: listing_scope,
@@ -4506,7 +4494,7 @@ async fn list_threads_for_scope_excludes_prepared_context_threads_even_when_scop
     assert_eq!(
         ids,
         ["t-visible-001"],
-        "prepared-context and subagent threads must never surface in listings"
+        "prepared-context threads must never surface in listings"
     );
 }
 
@@ -4518,7 +4506,7 @@ async fn list_threads_for_scope_excludes_prepared_context_threads_even_when_scop
 async fn prepared_replay_rejects_key_and_actor_mismatches_through_the_service() {
     let service = InMemorySessionThreadService::default();
     let mut request = prepared_request("replay-guard", "replay-guard-key-1");
-    request.thread_id = Some(ThreadId::new("unbound-replay-guard-1").unwrap());
+    request.thread_id = ThreadId::new("unbound-replay-guard-1").unwrap();
     service
         .accept_prepared_context(request.clone())
         .await
@@ -4593,7 +4581,7 @@ fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContext
             },
         },
         idempotency_key: key.to_string(),
-        thread_id: None,
+        thread_id: ThreadId::new(format!("unbound-{key}")).expect("thread id"),
         title: None,
         metadata_json: None,
     }

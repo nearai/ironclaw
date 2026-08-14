@@ -80,7 +80,7 @@ fn complete_metadata() -> serde_json::Value {
 /// partial state). The NEW reader tolerates both directions: rows with the
 /// keys (every pre-change row) and rows without them (unbound rows).
 #[test]
-fn refless_metadata_rows_fail_closed_for_old_readers_and_tolerate_for_new() {
+fn unbound_metadata_rows_fail_closed_for_old_readers_and_tolerate_for_new() {
     /// The pre-change serde shape, frozen: both refs REQUIRED. This is what
     /// every binary before the unbound-turns change compiles the reader as.
     #[derive(serde::Deserialize)]

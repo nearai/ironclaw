@@ -219,18 +219,25 @@ impl OpenAiChatCompletionsWorkflow {
             )));
         }
 
-        // Lane decision FIRST: a declared output schema or seedable tool
-        // history goes through the prepared-context door; everything else
-        // keeps the conversation path byte-for-byte. Both lanes validate the
-        // body BEFORE the idempotency reservation below, so an invalid
-        // request never burns the caller's key.
+        // Lane decision FIRST: every non-streaming request without declared
+        // client tools goes through the prepared-context door; streaming and
+        // client-tool requests keep the conversation path byte-for-byte.
+        // Both lanes validate the body BEFORE the idempotency reservation
+        // below — the prepared lane by mapping onto the seed vocabulary and
+        // running the accept door's own validator — so an invalid request
+        // never burns the caller's key.
         let prepared_output = crate::prepared_turn::prepared_lane_output(&request)?;
-        let conversation_submission = match prepared_output {
-            Some(_) => {
-                crate::prepared_turn::prepared_pre_validate(&request.messages)?;
-                None
-            }
-            None => Some(chat_user_message_and_attachments(&request, true)?),
+        let (prepared_seed, conversation_submission) = match prepared_output.as_ref() {
+            Some(_) => (
+                Some(crate::prepared_turn::prepared_seed_from_chat(
+                    &request.messages,
+                )?),
+                None,
+            ),
+            None => (
+                None,
+                Some(chat_user_message_and_attachments(&request, true)?),
+            ),
         };
         let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
 
@@ -256,6 +263,7 @@ impl OpenAiChatCompletionsWorkflow {
                         &public_id,
                         &request,
                         prepared_output.as_ref(),
+                        prepared_seed.clone(),
                         conversation_submission.clone(),
                     )
                     .await?;
@@ -274,6 +282,7 @@ impl OpenAiChatCompletionsWorkflow {
                             &public_id,
                             &request,
                             prepared_output.as_ref(),
+                            prepared_seed.clone(),
                             conversation_submission.clone(),
                         )
                         .await?
@@ -476,14 +485,21 @@ impl OpenAiChatCompletionsWorkflow {
         public_id: &OpenAiChatCompletionId,
         request: &OpenAiChatCompletionRequest,
         prepared_output: Option<&ironclaw_host_api::prepared_context::OutputContract>,
+        prepared_seed: Option<(String, Vec<ironclaw_assistant::agent_message::AgentMessage>)>,
         conversation_submission: Option<(UserMessagePayload, Vec<InboundAttachment>)>,
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
-        match (prepared_output, conversation_submission) {
-            (Some(output), _) => {
-                self.submit_prepared_and_record_ack(caller, public_id, request, output.clone())
-                    .await
+        match (prepared_output, prepared_seed, conversation_submission) {
+            (Some(output), Some(seed), _) => {
+                self.submit_prepared_and_record_ack(
+                    caller,
+                    public_id,
+                    request,
+                    output.clone(),
+                    seed,
+                )
+                .await
             }
-            (None, Some((user_message_payload, attachments))) => {
+            (None, None, Some((user_message_payload, attachments))) => {
                 self.submit_chat_and_record_ack(
                     caller,
                     public_id,
@@ -494,21 +510,22 @@ impl OpenAiChatCompletionsWorkflow {
             }
             // Unreachable by construction: exactly one lane is populated
             // above; fail loud rather than submit nothing.
-            (None, None) => Err(OpenAiCompatHttpError::internal()),
+            _ => Err(OpenAiCompatHttpError::internal()),
         }
     }
 
     /// Prepared-lane submission: the door accepts the caller's message list
     /// (system prompt split out, tool history seeded faithfully) and the
-    /// refless submit derives the unbound profile from the journaled
-    /// declarations. The returned ack is recorded on the ref store exactly
-    /// like a conversation ack, so replay/idempotency machinery is shared.
+    /// submit derives the unbound profile from the journaled declarations.
+    /// The returned ack is recorded on the ref store exactly like a
+    /// conversation ack, so replay/idempotency machinery is shared.
     async fn submit_prepared_and_record_ack(
         &self,
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
         request: &OpenAiChatCompletionRequest,
         output: ironclaw_host_api::prepared_context::OutputContract,
+        seed: (String, Vec<ironclaw_assistant::agent_message::AgentMessage>),
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
         let Some(port) = self.prepared_turn_port.as_ref() else {
             return Err(OpenAiCompatHttpError::from_kind(
@@ -518,11 +535,13 @@ impl OpenAiChatCompletionsWorkflow {
                 Some("structured output is not enabled on this deployment".to_string()),
             ));
         };
+        let (system_prompt, messages) = seed;
         let ack = port
             .accept_and_submit(crate::OpenAiCompatPreparedTurnRequest {
                 scope: caller.scope().clone(),
                 public_id: public_id.as_str().to_string(),
-                messages: request.messages.clone(),
+                system_prompt,
+                messages,
                 output,
                 requested_model: Some(request.model.clone()),
             })

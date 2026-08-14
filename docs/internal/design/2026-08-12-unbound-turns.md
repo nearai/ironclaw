@@ -14,7 +14,11 @@ compat-preserving shape, the implementation went directly to the final
 contract:
 
 - **Naming**: "detached" became **unbound** (threads/profiles/families/
-  concurrency class) and the accept door is **`accept_prepared_context`**
+  concurrency class; the `unbound` per-class concurrency cap defaults to 4,
+  configurable via `[runner] max_concurrent_unbound_runs` /
+  `IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS`, where `0` means
+  unlimited — the same zero-sentinel every runner cap uses) and the accept
+  door is **`accept_prepared_context`**
   over a **`PreparedContextRequest`** with **`PreparedTurnDeclarations`**;
   the result tool is **`builtin.structured_result`**.
 - **Binding refs were deleted, not optionalized**: `SubmitTurnRequest`,
@@ -43,6 +47,17 @@ audit against this draft recorded these further landed-vs-drafted deltas:
   always server-generated; isolation rests on ownerless scoping plus the
   caller-scoped ref store, not on keeping the id secret. The run id rides
   the ack; the public id is the HTTP caller's handle.
+- **Thread ids are caller-supplied (server-minted upstream)**: the drafted
+  `(scope, idempotency_key)`-derived thread id shipped, then both production
+  callers (subagent spawn, OpenAI-compat) overrode it, so the derivation was
+  deleted as dead code — `PreparedContextRequest.thread_id` is required.
+  Idempotent replay converges on the caller's id via the journaled record;
+  the seeded ROW ids stay deterministic functions of the thread id, which is
+  what makes crashed retries converge row-by-row.
+- **One validator, ordered before reservation**: product surfaces call the
+  accept door's own `validate_prepared_seed_content` (threads tier) on the
+  mapped seed BEFORE reserving idempotency state — there is no mirrored
+  bounds copy anywhere to drift.
 - **Seeded reasoning (§4.4)**: the accept door seeds reasoning as display
   text on the provider envelope of a tool-call turn only (truncated to the
   provider-metadata budget, `signature` forced `None`); reasoning on an
@@ -359,7 +374,7 @@ pub struct SubmitTurnRequest {
 ```
 
 - `ResumeTurnRequest` carries the same two refs and optionalizes with it
-  (a unbound run resuming from an external-tool gate passes `None`).
+  (an unbound run resuming from an external-tool gate passes `None`).
 - The engine's posture toward the refs is unchanged: opaque pass-through,
   never parsed (boundary rule 3 in the companion doc). `None` simply means
   there is nothing to hand the delivery layer — which is correct: no
@@ -507,7 +522,7 @@ hand-rolled per caller.
 
 **Profiles are derived, not requested.** Every run resolves a
 `ResolvedRunProfile` at submit (I4), and admission derives it from what the
-accepted ref points at: a unbound-prepared context resolves the new
+accepted ref points at: an unbound-prepared context resolves the new
 unbound profiles (`unbound_structured` when the journaled `output` is a
 JSON schema, `unbound_default` otherwise — read from the declarations the
 helper stored); a conversation ref resolves exactly as today (`None` → the
@@ -542,7 +557,7 @@ idioms:
   - `unbound_structured` — `unbound_default` plus structured-output reply
     admission (§4.5).
 - **Materialization** (I1). There is exactly **one materialization path** —
-  the existing thread-backed context port — for both idioms: a unbound
+  the existing thread-backed context port — for both idioms: an unbound
   turn materializes from its own seeded thread. The canonical loop,
   compaction, checkpoints, recovery, and `LoopPromptBundleAuthority` apply
   unchanged and unforked. (Per-iteration re-materialization over a thread
@@ -1079,12 +1094,16 @@ convention.
 
 - **Threads are the unit of work; a conversation is a thread with a
   binding.** Unbound turns are runs on **unbound, ownerless threads**
-  minted by the coordinator at admission; the thread id stays internal
-  (the run id is the caller's handle). Each consequence replaces an
+  minted and seeded by `accept_prepared_context` BEFORE submission —
+  admission only reads the journaled declarations back and derives the
+  profile (the run id is the caller's handle). Each consequence replaces an
   earlier design element: there is **no snapshot-backed context port** (one
-  materialization path), **no thread-kind flag** (binding-absence plus
-  ownerlessness is the classifier, and owner-scoped listings already exclude
-  such threads structurally), **no kernel scope changes**
+  materialization path), **no kernel thread-kind flag** (✎ landed shape: the
+  accept door stamps a `prepared_context` marker into the minted thread's
+  metadata and listings exclude on that ONE spelling — necessary because
+  subagent child threads mirror the parent's owner, so ownerless scoping
+  alone cannot classify them; the filesystem backend backfills the marker
+  onto pre-marker subagent rows once per scope), **no kernel scope changes**
   (`TurnScope`/`LoopRunContext` untouched), and the process journal keeps
   its existing role. Subagent child threads are the in-tree precedent, now
   codified rather than accidental.

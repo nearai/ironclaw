@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use ironclaw_assistant::{
-    RebornTimelineRequest, TIMELINE_VIEW, UnboundPreparedTurnError, UnboundPreparedTurnService,
-    UnboundPreparedTurnSubmission,
+    RebornTimelineRequest, TIMELINE_VIEW, UnboundTurnError, UnboundTurnService,
+    UnboundTurnSubmission,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
@@ -101,7 +101,7 @@ pub async fn build_openai_compat_route_mount(
     // turn path uses, scoped to the deployment's default agent/project axes
     // with the ownerless unbound owner.
     let prepared_turn_gateway = Arc::new(OpenAiCompatPreparedTurnGateway {
-        service: Arc::new(UnboundPreparedTurnService::new(
+        service: Arc::new(UnboundTurnService::new(
             runtime.product_thread_service(),
             runtime.product_turn_coordinator(),
             tenant_id.clone(),
@@ -226,9 +226,9 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
 /// Thin adapter over the assistant-owned prepared-turn service: composition
 /// owns only the wire-DTO mapping and error translation; accept/submit and
 /// terminal read-back behavior live in
-/// `ironclaw_assistant::UnboundPreparedTurnService`.
+/// `ironclaw_assistant::UnboundTurnService`.
 struct OpenAiCompatPreparedTurnGateway {
-    service: Arc<UnboundPreparedTurnService>,
+    service: Arc<UnboundTurnService>,
 }
 
 impl OpenAiCompatPreparedTurnGateway {
@@ -269,152 +269,31 @@ impl OpenAiCompatPreparedTurnGateway {
     }
 }
 
-/// Translate the OpenAI message list into the engine vocabulary:
-/// system/developer text becomes the prepared system prompt; user,
-/// assistant, and tool turns become `AgentMessage`s (tool history maps
-/// onto the same `external_tool.{name}` capability identity the live
-/// client-tool lane registers). Inline images and non-text parts are
-/// rejected loudly — the conversation lane keeps serving those.
-fn agent_messages(
-    messages: &[ironclaw_openai_compat::OpenAiChatMessage],
-) -> Result<(String, Vec<ironclaw_llm::agent_message::AgentMessage>), OpenAiCompatHttpError> {
-    use ironclaw_llm::agent_message::{
-        AgentMessage, AgentMessageRole, ContentPart, ToolCallContent, ToolResultContent,
-        ToolResultOutcome,
-    };
-    use ironclaw_openai_compat::OpenAiChatMessageRole;
-
-    fn text_content(content: Option<&serde_json::Value>) -> Result<String, OpenAiCompatHttpError> {
-        match content {
-            None => Ok(String::new()),
-            Some(serde_json::Value::String(text)) => Ok(text.clone()),
-            Some(serde_json::Value::Array(parts)) => {
-                let mut sections = Vec::new();
-                for part in parts {
-                    match part.get("type").and_then(serde_json::Value::as_str) {
-                        Some("text") => sections.push(
-                            part.get("text")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                        ),
-                        _ => {
-                            return Err(OpenAiCompatHttpError::invalid_request(Some(
-                                "only text content parts are supported with structured \
-                                 output or tool history"
-                                    .to_string(),
-                            )));
-                        }
-                    }
-                }
-                Ok(sections.join("\n\n"))
-            }
-            Some(_) => Err(OpenAiCompatHttpError::invalid_request(Some(
-                "messages[].content".to_string(),
-            ))),
-        }
-    }
-
-    fn external_capability(
-        name: &str,
-    ) -> Result<ironclaw_host_api::ids::CapabilityId, OpenAiCompatHttpError> {
-        ironclaw_host_api::ids::CapabilityId::new(format!(
-            "external_tool.{}",
-            name.to_ascii_lowercase()
-        ))
-        .map_err(|_| {
-            OpenAiCompatHttpError::invalid_request(Some(format!(
-                "tool name {name:?} cannot be represented as a capability id"
-            )))
-        })
-    }
-
-    let mut system_sections: Vec<String> = Vec::new();
-    let mut converted: Vec<AgentMessage> = Vec::new();
-    for message in messages {
-        match message.role {
-            OpenAiChatMessageRole::System | OpenAiChatMessageRole::Developer => {
-                let text = text_content(message.content.as_ref())?;
-                if !text.is_empty() {
-                    system_sections.push(text);
-                }
-            }
-            OpenAiChatMessageRole::User => {
-                converted.push(AgentMessage {
-                    role: AgentMessageRole::User,
-                    content: vec![ContentPart::text(text_content(message.content.as_ref())?)],
-                });
-            }
-            OpenAiChatMessageRole::Assistant => {
-                let mut parts = Vec::new();
-                let text = text_content(message.content.as_ref())?;
-                if !text.is_empty() {
-                    parts.push(ContentPart::text(text));
-                }
-                for call in message.tool_calls.iter().flatten() {
-                    let arguments = serde_json::from_str(&call.function.arguments)
-                        .unwrap_or(serde_json::Value::String(call.function.arguments.clone()));
-                    parts.push(ContentPart::ToolCall(ToolCallContent {
-                        call_id: call.id.clone(),
-                        capability: external_capability(&call.function.name)?,
-                        arguments,
-                    }));
-                }
-                if !parts.is_empty() {
-                    converted.push(AgentMessage {
-                        role: AgentMessageRole::Assistant,
-                        content: parts,
-                    });
-                }
-            }
-            OpenAiChatMessageRole::Tool => {
-                let call_id = message.tool_call_id.clone().ok_or_else(|| {
-                    OpenAiCompatHttpError::invalid_request(Some(
-                        "messages[].tool_call_id".to_string(),
-                    ))
-                })?;
-                converted.push(AgentMessage {
-                    role: AgentMessageRole::Tool,
-                    content: vec![ContentPart::ToolResult(ToolResultContent {
-                        call_id,
-                        outcome: ToolResultOutcome::Text {
-                            text: text_content(message.content.as_ref())?,
-                        },
-                        is_error: false,
-                    })],
-                });
-            }
-        }
-    }
-    if converted.is_empty() {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "messages".to_string(),
-        )));
-    }
-    Ok((system_sections.join("\n\n"), converted))
-}
-
-fn map_prepared_turn_error(error: UnboundPreparedTurnError) -> OpenAiCompatHttpError {
+fn map_prepared_turn_error(error: UnboundTurnError) -> OpenAiCompatHttpError {
     match error {
-        UnboundPreparedTurnError::InvalidRequest { reason } => {
+        UnboundTurnError::InvalidRequest { reason } => {
             OpenAiCompatHttpError::invalid_request(Some(reason))
         }
-        UnboundPreparedTurnError::Unavailable => OpenAiCompatHttpError::from_kind(
+        UnboundTurnError::Unavailable => OpenAiCompatHttpError::from_kind(
             503,
             true,
             OpenAiCompatErrorKind::ServiceUnavailable,
             None,
         ),
-        UnboundPreparedTurnError::RunFailed { category } => {
+        UnboundTurnError::RunFailed { category } => {
             OpenAiCompatHttpError::from_kind(502, false, OpenAiCompatErrorKind::Internal, category)
         }
-        UnboundPreparedTurnError::RunCancelled => OpenAiCompatHttpError::from_kind(
+        UnboundTurnError::RunCancelled => OpenAiCompatHttpError::from_kind(
             409,
             false,
             OpenAiCompatErrorKind::Conflict,
             Some("the run was cancelled".to_string()),
         ),
-        UnboundPreparedTurnError::Internal => OpenAiCompatHttpError::internal(),
+        UnboundTurnError::Internal { reason } => {
+            // Operator diagnostics; the wire stays a bare 500.
+            tracing::debug!(%reason, "unbound turn internal error");
+            OpenAiCompatHttpError::internal()
+        }
     }
 }
 
@@ -424,15 +303,17 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
         &self,
         request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
-        let (system_prompt, messages) = agent_messages(&request.messages)?;
+        let idempotency_key = format!("openai-chat:{}", request.public_id);
         self.service
-            .accept_and_submit(UnboundPreparedTurnSubmission {
+            .accept_and_submit(UnboundTurnSubmission {
                 actor_user_id: request.scope.user_id().clone(),
                 public_id: request.public_id,
-                system_prompt,
-                messages,
+                system_prompt: request.system_prompt,
+                messages: request.messages,
+                tools: Vec::new(),
                 output: request.output,
                 requested_model: request.requested_model,
+                idempotency_key,
             })
             .await
             .map_err(map_prepared_turn_error)

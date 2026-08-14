@@ -1,5 +1,5 @@
 //! Whole-path integration coverage for the unbound (prepared-context) lane:
-//! `accept_prepared_context` → refless `submit_turn` → planned loop →
+//! `accept_prepared_context` → unbound `submit_turn` → planned loop →
 //! terminal state, driven through the group's ONE shared planned runtime and
 //! asserted at the thread-store and run-state seams.
 //!
@@ -88,7 +88,7 @@ fn prepared_request(
         }],
         declarations,
         idempotency_key: idempotency_key.to_string(),
-        thread_id: None,
+        thread_id: ironclaw_host_api::ids::ThreadId::new(format!("unbound-{idempotency_key}"))?,
         title: None,
         metadata_json: None,
     })

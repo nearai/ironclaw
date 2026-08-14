@@ -1,10 +1,10 @@
 //! Product orchestration for unbound prepared-turn submissions (unbound-turns
-//! design §4): the accept-door + refless-submit pair and the terminal
+//! design §4): the accept-door + submit pair and the terminal
 //! read-back that product surfaces (OpenAI-compat chat completions today)
 //! delegate to. One service serves both halves of the lane so the accept axes
 //! and the read-back axes can never drift: `accept_and_submit` seeds the
 //! caller-authored context onto an ownerless unbound thread (public id ==
-//! thread id) and submits reflessly; `wait_for_completion` resolves the
+//! thread id) and submits the unbound turn; `wait_for_completion` resolves the
 //! terminal outcome from run state plus the unbound thread's rows.
 //!
 //! Composition wires the service; route crates own only their wire DTOs and
@@ -36,7 +36,7 @@ use ironclaw_turns::{
 /// map these onto their own wire errors; the categories match the decisions
 /// a caller can act on (fix the request, retry, give up).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum UnboundPreparedTurnError {
+pub enum UnboundTurnError {
     /// The submission itself is invalid (bad seed content, bad public id).
     #[error("invalid unbound prepared turn submission: {reason}")]
     InvalidRequest { reason: String },
@@ -50,16 +50,25 @@ pub enum UnboundPreparedTurnError {
     #[error("unbound run was cancelled")]
     RunCancelled,
     /// An invariant the lane relies on did not hold (missing rows, undecodable
-    /// payload). Not caller-correctable.
-    #[error("unbound prepared turn internal error")]
-    Internal,
+    /// payload). Not caller-correctable; the reason is for operators, never
+    /// the wire.
+    #[error("unbound turn internal error: {reason}")]
+    Internal { reason: String },
+}
+
+impl UnboundTurnError {
+    fn internal(reason: impl Into<String>) -> Self {
+        Self::Internal {
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Terminal outcome of an unbound prepared turn: the output text plus the
 /// run evidence a wire surface reports (the model that actually ran and the
 /// provider-reported usage).
 #[derive(Debug, Clone, PartialEq)]
-pub struct UnboundCompletionOutcome {
+pub struct UnboundTurnOutcome {
     pub text: String,
     /// From the run's resolved model route; `None` when no route evidence
     /// was persisted (replay stubs).
@@ -69,21 +78,28 @@ pub struct UnboundCompletionOutcome {
 
 /// One prepared-turn submission in the engine vocabulary.
 #[derive(Debug, Clone)]
-pub struct UnboundPreparedTurnSubmission {
+pub struct UnboundTurnSubmission {
     pub actor_user_id: UserId,
     /// Public id doubling as the unbound thread id, exactly as the caller's
     /// retrieval path will use it.
     pub public_id: String,
     pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
+    /// Visible-surface selection journaled with the declarations. Empty
+    /// means "no tools".
+    pub tools: Vec<ironclaw_host_api::ids::CapabilityId>,
     pub output: OutputContract,
     pub requested_model: Option<String>,
+    /// Caller-owned idempotency key for the accept; the submit key derives
+    /// from it (`{key}:submit`). The caller owns its namespace — this
+    /// service serves any product surface, so it must not bake one in.
+    pub idempotency_key: String,
 }
 
 /// Prepared-context door + unbound-run resolver over the SAME thread service
 /// and coordinator the runtime's conversation path uses, scoped to the
 /// deployment's default agent/project axes with the ownerless unbound owner.
-pub struct UnboundPreparedTurnService {
+pub struct UnboundTurnService {
     thread_service: Arc<dyn SessionThreadService>,
     coordinator: Arc<dyn TurnCoordinator>,
     tenant_id: TenantId,
@@ -91,7 +107,7 @@ pub struct UnboundPreparedTurnService {
     project_id: Option<ProjectId>,
 }
 
-impl UnboundPreparedTurnService {
+impl UnboundTurnService {
     pub fn new(
         thread_service: Arc<dyn SessionThreadService>,
         coordinator: Arc<dyn TurnCoordinator>,
@@ -130,16 +146,16 @@ impl UnboundPreparedTurnService {
     }
 
     /// Accept the prepared context through the shared door and submit the
-    /// refless turn, both idempotent by the public id — a crash-retry returns
+    /// unbound turn, both idempotent by the public id — a crash-retry returns
     /// the SAME run instead of minting an orphan. Returns the same
     /// `ProductInboundAck::Accepted` shape conversation submits produce so
     /// callers' replay machinery is shared.
     pub async fn accept_and_submit(
         &self,
-        submission: UnboundPreparedTurnSubmission,
-    ) -> Result<ProductInboundAck, UnboundPreparedTurnError> {
+        submission: UnboundTurnSubmission,
+    ) -> Result<ProductInboundAck, UnboundTurnError> {
         let thread_id = ThreadId::new(submission.public_id.clone())
-            .map_err(|_| UnboundPreparedTurnError::Internal)?;
+            .map_err(|error| UnboundTurnError::internal(format!("invalid thread id: {error}")))?;
         let accepted = self
             .thread_service
             .accept_prepared_context(PreparedContextRequest {
@@ -148,21 +164,21 @@ impl UnboundPreparedTurnService {
                 system_prompt: submission.system_prompt,
                 messages: submission.messages,
                 declarations: PreparedTurnDeclarations {
-                    tools: Vec::new(),
+                    tools: submission.tools,
                     output: submission.output,
                     limits: Default::default(),
                 },
-                idempotency_key: format!("openai-chat:{}", submission.public_id),
-                thread_id: Some(thread_id.clone()),
+                idempotency_key: submission.idempotency_key.clone(),
+                thread_id: thread_id.clone(),
                 title: None,
                 metadata_json: None,
             })
             .await
             .map_err(|error| match error {
                 SessionThreadError::InvalidPreparedContext { reason } => {
-                    UnboundPreparedTurnError::InvalidRequest { reason }
+                    UnboundTurnError::InvalidRequest { reason }
                 }
-                _ => UnboundPreparedTurnError::Unavailable,
+                _ => UnboundTurnError::Unavailable,
             })?;
         let response = self
             .coordinator
@@ -173,10 +189,12 @@ impl UnboundPreparedTurnService {
                 requested_run_profile: None,
                 requested_model: submission.requested_model,
                 idempotency_key: IdempotencyKey::new(format!(
-                    "openai-chat-submit:{}",
-                    submission.public_id
+                    "{}:submit",
+                    submission.idempotency_key
                 ))
-                .map_err(|_| UnboundPreparedTurnError::Internal)?,
+                .map_err(|error| {
+                    UnboundTurnError::internal(format!("invalid thread id: {error}"))
+                })?,
                 received_at: chrono::Utc::now(),
                 requested_run_id: None,
                 parent_run_id: None,
@@ -186,10 +204,10 @@ impl UnboundPreparedTurnService {
             })
             .await
             .map_err(|error| match error.category() {
-                TurnErrorCategory::InvalidRequest => UnboundPreparedTurnError::InvalidRequest {
+                TurnErrorCategory::InvalidRequest => UnboundTurnError::InvalidRequest {
                     reason: error.to_string(),
                 },
-                _ => UnboundPreparedTurnError::Unavailable,
+                _ => UnboundTurnError::Unavailable,
             })?;
         let SubmitTurnResponse::Accepted {
             run_id,
@@ -211,9 +229,9 @@ impl UnboundPreparedTurnService {
         public_id: &str,
         run_id: TurnRunId,
         poll_interval: Duration,
-    ) -> Result<UnboundCompletionOutcome, UnboundPreparedTurnError> {
-        let thread_id =
-            ThreadId::new(public_id.to_string()).map_err(|_| UnboundPreparedTurnError::Internal)?;
+    ) -> Result<UnboundTurnOutcome, UnboundTurnError> {
+        let thread_id = ThreadId::new(public_id.to_string())
+            .map_err(|error| UnboundTurnError::internal(format!("invalid thread id: {error}")))?;
         let turn_scope = self.turn_scope(&thread_id);
         let thread_scope = self.thread_scope();
         loop {
@@ -224,13 +242,16 @@ impl UnboundPreparedTurnService {
                     run_id,
                 })
                 .await
-                .map_err(|_| UnboundPreparedTurnError::Unavailable)?;
+                .map_err(|error| {
+                    tracing::debug!(%error, "unbound run-state read failed");
+                    UnboundTurnError::Unavailable
+                })?;
             match state.status {
                 TurnStatus::Completed => {
                     let text = self
                         .resolve_completed_output(&thread_scope, &thread_id, run_id)
                         .await?;
-                    return Ok(UnboundCompletionOutcome {
+                    return Ok(UnboundTurnOutcome {
                         text,
                         effective_model: state
                             .resolved_model_route
@@ -240,11 +261,11 @@ impl UnboundPreparedTurnService {
                     });
                 }
                 TurnStatus::Failed | TurnStatus::RecoveryRequired => {
-                    return Err(UnboundPreparedTurnError::RunFailed {
+                    return Err(UnboundTurnError::RunFailed {
                         category: state.failure.map(|failure| failure.category().to_string()),
                     });
                 }
-                TurnStatus::Cancelled => return Err(UnboundPreparedTurnError::RunCancelled),
+                TurnStatus::Cancelled => return Err(UnboundTurnError::RunCancelled),
                 _ => tokio::time::sleep(poll_interval).await,
             }
         }
@@ -255,7 +276,7 @@ impl UnboundPreparedTurnService {
         thread_scope: &ThreadScope,
         thread_id: &ThreadId,
         run_id: TurnRunId,
-    ) -> Result<String, UnboundPreparedTurnError> {
+    ) -> Result<String, UnboundTurnError> {
         let structured = matches!(
             self.thread_service
                 .read_prepared_context(thread_scope, thread_id)
@@ -278,19 +299,25 @@ impl UnboundPreparedTurnService {
             })
             .await
             .map_err(map_thread_read_error)?
-            .ok_or(UnboundPreparedTurnError::Internal)?;
+            .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
         Ok(message.content.unwrap_or_default())
     }
 
     /// The validated structured result: the run's own
     /// `builtin.structured_result` tool row, paged out of the durable
     /// tool-result record store in full.
+    ///
+    /// This locates the row by scanning the (bounded) unbound thread's
+    /// history — acceptable for the polling read-back, and deliberately NOT
+    /// generalized: the phase-2 run-observation façade's terminal event
+    /// should carry the result ref and retire this scan. Do not add a second
+    /// consumer.
     async fn structured_result_payload(
         &self,
         thread_scope: &ThreadScope,
         thread_id: &ThreadId,
         run_id: TurnRunId,
-    ) -> Result<String, UnboundPreparedTurnError> {
+    ) -> Result<String, UnboundTurnError> {
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -327,7 +354,7 @@ impl UnboundPreparedTurnService {
                 })
             })
             .and_then(|message| message.tool_result_ref.clone())
-            .ok_or(UnboundPreparedTurnError::Internal)?;
+            .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
 
         let mut payload = Vec::new();
         let mut offset = 0u64;
@@ -343,14 +370,16 @@ impl UnboundPreparedTurnService {
                 })
                 .await
                 .map_err(map_thread_read_error)?
-                .ok_or(UnboundPreparedTurnError::Internal)?;
+                .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
             payload.extend_from_slice(&chunk.content);
             match chunk.next_offset {
                 Some(next) => offset = next,
                 None => break,
             }
         }
-        String::from_utf8(payload).map_err(|_| UnboundPreparedTurnError::Internal)
+        String::from_utf8(payload).map_err(|error| {
+            UnboundTurnError::internal(format!("stored result is not utf-8: {error}"))
+        })
     }
 
     async fn load_provider_calls_for(
@@ -358,8 +387,7 @@ impl UnboundPreparedTurnService {
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_ids: Vec<ThreadMessageId>,
-    ) -> Result<HashMap<ThreadMessageId, ProviderToolCallReferenceEnvelope>, UnboundPreparedTurnError>
-    {
+    ) -> Result<HashMap<ThreadMessageId, ProviderToolCallReferenceEnvelope>, UnboundTurnError> {
         if message_ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -380,9 +408,11 @@ impl UnboundPreparedTurnService {
     }
 }
 
-fn map_thread_read_error(error: SessionThreadError) -> UnboundPreparedTurnError {
+fn map_thread_read_error(error: SessionThreadError) -> UnboundTurnError {
     match error {
-        SessionThreadError::UnknownThread { .. } => UnboundPreparedTurnError::Internal,
-        _ => UnboundPreparedTurnError::Unavailable,
+        SessionThreadError::UnknownThread { .. } => {
+            UnboundTurnError::internal("unbound thread is missing")
+        }
+        _ => UnboundTurnError::Unavailable,
     }
 }

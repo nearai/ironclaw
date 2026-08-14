@@ -6129,10 +6129,75 @@ fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::Prep
             },
         },
         idempotency_key: key.to_string(),
-        thread_id: None,
+        thread_id: ThreadId::new(format!("unbound-{key}")).expect("thread id"),
         title: None,
         metadata_json: None,
     }
+}
+
+/// One-time backfill: a legacy subagent thread (metadata
+/// `{"kind":"subagent",…}` with no marker) is stamped on the first listing
+/// and stays hidden from then on — the single-marker predicate needs no
+/// second spelling.
+#[tokio::test]
+async fn filesystem_listing_backfills_the_marker_onto_legacy_subagent_threads() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let listing_scope = scope("legacy-backfill");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("subagent-legacy-001").unwrap()),
+            created_by_actor_id: "actor-legacy".into(),
+            title: None,
+            metadata_json: Some(
+                serde_json::json!({"kind": "subagent", "parent_run_id": "run-1"}).to_string(),
+            ),
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-legacy-001").unwrap()),
+            created_by_actor_id: "actor-legacy".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["t-visible-legacy-001"],
+        "the legacy subagent thread must be stamped and hidden on first listing"
+    );
+
+    // The stamp is durable — a second listing (marker predicate only, no
+    // legacy spelling consulted) still hides it.
+    let second = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.threads.len(), 1);
 }
 
 /// Two racing accepts for the SAME prepared request converge: deterministic

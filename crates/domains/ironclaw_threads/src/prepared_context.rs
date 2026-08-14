@@ -83,11 +83,12 @@ pub struct PreparedContextRequest {
     pub declarations: PreparedTurnDeclarations,
     /// Replay key: retrying returns the same prepared context.
     pub idempotency_key: String,
-    /// Explicit thread id override. `None` (the norm) derives a deterministic
-    /// id from `(scope, idempotency_key)`; the subagent spawn path passes its
-    /// own `subagent-{child_run_id}` id because crash reconstruction and the
-    /// await-edge machinery reference that scheme.
-    pub thread_id: Option<ThreadId>,
+    /// The thread to mint, chosen by the caller and always server-generated
+    /// upstream (subagent spawn passes `subagent-{child_run_id}`; OpenAI-compat
+    /// passes the public completion id). Idempotent replay converges on this
+    /// id via the journaled record; the seeded ROW ids stay deterministic
+    /// functions of it so crashed retries converge row-by-row.
+    pub thread_id: ThreadId,
     /// Optional human-facing title and metadata for the minted thread (the
     /// subagent path stores its crash-reconstruction metadata here).
     pub title: Option<String>,
@@ -120,42 +121,7 @@ pub struct PreparedContextRecord {
     pub created_at: DateTime<Utc>,
 }
 
-/// Deterministic thread id for a prepared-context accept: a pure function of
-/// `(scope, idempotency_key)`, so a crash-retry converges on the same thread
-/// (no orphans) and the same key under a different scope mints a different
-/// thread.
-pub(crate) fn prepared_thread_id(
-    request: &PreparedContextRequest,
-) -> Result<ThreadId, SessionThreadError> {
-    if let Some(thread_id) = &request.thread_id {
-        return Ok(thread_id.clone());
-    }
-    unbound_thread_id(&request.scope, &request.idempotency_key)
-}
-
-pub(crate) fn unbound_thread_id(
-    scope: &ThreadScope,
-    idempotency_key: &str,
-) -> Result<ThreadId, SessionThreadError> {
-    let scope_bytes = serde_json::to_vec(scope)
-        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"prepared-context:v1\0");
-    hasher.update(&scope_bytes);
-    hasher.update(b"\0");
-    hasher.update(idempotency_key.as_bytes());
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(32);
-    for byte in digest.iter().take(16) {
-        use std::fmt::Write as _;
-        let _ = write!(&mut hex, "{byte:02x}");
-    }
-    ThreadId::new(format!("unbound-{hex}")).map_err(|error| {
-        SessionThreadError::GeneratedThreadId(format!("unbound thread id invalid: {error}"))
-    })
-}
-
-/// Deterministic message id for seeded row `index` of a unbound thread, so
+/// Deterministic message id for seeded row `index` of an unbound thread, so
 /// a crashed retry re-writes the same rows instead of duplicating them
 /// (precedent: the capability display preview's derived message ids).
 pub(crate) fn prepared_seed_message_id(thread_id: &ThreadId, index: usize) -> ThreadMessageId {
@@ -240,23 +206,35 @@ pub(crate) fn validate_prepared_context_request(
     if request.actor_id.is_empty() {
         return Err(invalid("actor_id must not be empty"));
     }
-    if request.messages.is_empty() {
+    validate_prepared_seed_content(&request.system_prompt, &request.messages)
+}
+
+/// The content-deterministic half of the accept door's validation: message
+/// shape, byte budgets, tool pairing, and provider-grammar seedability.
+/// Product surfaces call THIS (the one authoritative validator) before
+/// reserving idempotency state, so a body the door would refuse never burns
+/// a caller's key — and there is no mirrored copy to drift.
+pub fn validate_prepared_seed_content(
+    system_prompt: &str,
+    messages: &[AgentMessage],
+) -> Result<(), SessionThreadError> {
+    if messages.is_empty() {
         return Err(invalid(
             "messages must not be empty; the last message is the accepted pin",
         ));
     }
-    if request.system_prompt.len() > AGENT_MESSAGE_TEXT_PART_MAX_BYTES {
+    if system_prompt.len() > AGENT_MESSAGE_TEXT_PART_MAX_BYTES {
         return Err(invalid(format!(
             "system_prompt exceeds {AGENT_MESSAGE_TEXT_PART_MAX_BYTES} bytes"
         )));
     }
-    validate_agent_messages(&request.messages)
+    validate_agent_messages(messages)
         .map_err(|error| invalid(format!("invalid message list: {error}")))?;
     // Seeded tool history is journaled as provider replay metadata, so every
     // caller-supplied identity fragment must satisfy the provider grammars
     // BEFORE any state is minted (validate-before-mint discipline: the
     // filesystem backend ensures the thread between validation and seeding).
-    for message in &request.messages {
+    for message in messages {
         let has_tool_call = message
             .content
             .iter()
@@ -295,7 +273,7 @@ pub(crate) fn validate_prepared_context_request(
 fn seeded_provider_tool_name(
     capability: &ironclaw_host_api::ids::CapabilityId,
 ) -> Result<ProviderToolName, SessionThreadError> {
-    ProviderToolName::new(capability.as_str().replace('.', "__")).map_err(|error| {
+    ProviderToolName::for_capability(capability).map_err(|error| {
         invalid(format!(
             "tool call capability {capability} has no provider-safe tool name: {error}"
         ))
@@ -775,34 +753,27 @@ mod tests {
             }],
             declarations: PreparedTurnDeclarations::default(),
             idempotency_key: "unbound-key-1".to_string(),
-            thread_id: None,
+            thread_id: ThreadId::new("unbound-test-thread-1").expect("thread id"),
             title: None,
             metadata_json: None,
         }
     }
 
     #[test]
-    fn thread_and_message_ids_are_deterministic_per_scope_and_key() {
-        let first = unbound_thread_id(&scope(), "key-a").expect("thread id");
-        let second = unbound_thread_id(&scope(), "key-a").expect("thread id");
-        assert_eq!(first, second, "same scope+key converges on one thread");
-
-        let other_key = unbound_thread_id(&scope(), "key-b").expect("thread id");
-        assert_ne!(first, other_key, "a different key mints a different thread");
-
-        let mut other_scope = scope();
-        other_scope.owner_user_id =
-            Some(ironclaw_host_api::ids::UserId::new("user-x").expect("user"));
-        let cross_scope = unbound_thread_id(&other_scope, "key-a").expect("thread id");
-        assert_ne!(first, cross_scope, "scope is part of the identity");
-
+    fn seed_message_ids_are_deterministic_per_thread_and_index() {
+        let thread = ThreadId::new("unbound-test-determinism").expect("thread id");
+        let other = ThreadId::new("unbound-test-determinism-2").expect("thread id");
         assert_eq!(
-            prepared_seed_message_id(&first, 0),
-            prepared_seed_message_id(&first, 0)
+            prepared_seed_message_id(&thread, 0),
+            prepared_seed_message_id(&thread, 0)
         );
         assert_ne!(
-            prepared_seed_message_id(&first, 0),
-            prepared_seed_message_id(&first, 1)
+            prepared_seed_message_id(&thread, 0),
+            prepared_seed_message_id(&thread, 1)
+        );
+        assert_ne!(
+            prepared_seed_message_id(&thread, 0),
+            prepared_seed_message_id(&other, 0)
         );
     }
 
@@ -813,7 +784,7 @@ mod tests {
             role: AgentMessageRole::Assistant,
             content: vec![ContentPart::text("earlier answer")],
         });
-        let thread_id = unbound_thread_id(&request.scope, &request.idempotency_key).unwrap();
+        let thread_id = request.thread_id.clone();
         let rows = prepared_seed(&request, &thread_id, Utc::now())
             .expect("rows")
             .rows;
@@ -918,7 +889,7 @@ mod tests {
     fn tool_history_seeds_replayable_tool_result_rows() {
         let mut request = request();
         request.messages = tool_round_messages("call_abc123", "web.search");
-        let thread_id = unbound_thread_id(&request.scope, &request.idempotency_key).unwrap();
+        let thread_id = request.thread_id.clone();
         validate_prepared_context_request(&request).expect("tool history validates");
         let seed = prepared_seed(&request, &thread_id, Utc::now()).expect("seed");
 
@@ -973,7 +944,7 @@ mod tests {
     #[test]
     fn replay_checks_key_and_actor_fail_closed() {
         let request = request();
-        let thread_id = unbound_thread_id(&request.scope, &request.idempotency_key).unwrap();
+        let thread_id = request.thread_id.clone();
         let record = PreparedContextRecord {
             schema_version: PREPARED_CONTEXT_RECORD_SCHEMA_VERSION,
             idempotency_key: request.idempotency_key.clone(),

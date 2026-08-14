@@ -416,7 +416,7 @@ mod tests {
             run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
             format!("run-notification:auth:{run_id}")
         );
-        // FinalReplyReady is the kind production always sends refless: its
+        // FinalReplyReady is the kind production always sends unbound: its
         // suffix keys the in-flight final-reply delivery identities, so a
         // rename would double-post final replies across a deploy.
         assert_eq!(

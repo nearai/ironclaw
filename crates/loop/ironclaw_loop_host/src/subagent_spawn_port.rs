@@ -1056,7 +1056,7 @@ impl SubagentSpawnCapabilityPort {
                     "subagent-spawn:{}:{child_run_id}",
                     self.run_context.run_id
                 ),
-                thread_id: Some(child_thread_id.clone()),
+                thread_id: child_thread_id.clone(),
                 title: Some("Subagent".to_string()),
                 metadata_json: Some(child_thread_metadata_json),
             })

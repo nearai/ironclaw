@@ -2182,6 +2182,12 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // ids and rebuild provider calls for the resolved target.
         "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
+        // Tool search stores the provider-encoded alias as an exact-match
+        // identifier so a query using the advertised provider name resolves to
+        // its capability. It consumes the single encoding owner
+        // (`ProviderToolName::encode_capability_str`) instead of re-deriving
+        // the `.` -> `__` mapping inline (unbound-turns follow-up, PR #7634).
+        "crates/ironclaw_loop_host/src/tool_search.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or synthetic provider tools.
         "crates/ironclaw_composition/src/llm_admin/openai_compat_serve.rs",

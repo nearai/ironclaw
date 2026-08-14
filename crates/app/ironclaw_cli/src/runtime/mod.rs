@@ -2322,6 +2322,29 @@ api_key_env = "NEARAI_API_KEY"
     }
 
     #[test]
+    fn runner_env_unbound_runs_zero_means_unlimited_and_positive_overrides() {
+        // The unbound cap uses the same zero-sentinel contract as every
+        // runner cap: a positive env value binds it, `0` lifts it entirely
+        // (over the built-in default of 4).
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        {
+            let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS", "9");
+            let settings = runner_settings(None).expect("should succeed");
+            assert_eq!(
+                settings.max_concurrent_unbound_runs.map(|v| v.get()),
+                Some(9)
+            );
+        }
+        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS", "0");
+        let settings = runner_settings(None).expect("should succeed");
+        assert!(
+            settings.max_concurrent_unbound_runs.is_none(),
+            "zero must mean unlimited, overriding the default cap"
+        );
+    }
+
+    #[test]
     fn runner_env_conversation_runs_positive_value_overrides() {
         // max_concurrent_conversation_runs defaults to None (unlimited); a
         // positive env value must set a bounded cap so a misspelled or

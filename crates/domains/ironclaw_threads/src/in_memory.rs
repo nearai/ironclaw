@@ -259,7 +259,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         crate::prepared_context::validate_prepared_context_request(&request)?;
         let stamped_metadata =
             crate::prepared_context::stamped_metadata_json(request.metadata_json.as_deref())?;
-        let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
+        let thread_id = request.thread_id.clone();
         let now = Utc::now();
         let seed = crate::prepared_context::prepared_seed(&request, &thread_id, now)?;
         let crate::prepared_context::PreparedSeed {
