@@ -4397,22 +4397,23 @@ async fn cancel_run_propagates_to_children_without_loss_under_sink_overload() {
         0,
         "cancellation must not use the best-effort path that drops on overload"
     );
-    let cancellation_events = overloaded_event_sink
-        .durable_events
-        .lock()
-        .expect("durable event recording mutex is not poisoned");
-    assert_eq!(
-        cancellation_events.len(),
-        2,
-        "parent and child cancellation events must both use lossless enqueue"
-    );
-    assert!(
-        cancellation_events
-            .iter()
-            .all(|event| event.kind == RuntimeEventKind::LoopCancelled),
-        "the lossless cancellation path must retain only the expected cancellation records"
-    );
-    drop(cancellation_events);
+    {
+        let cancellation_events = overloaded_event_sink
+            .durable_events
+            .lock()
+            .expect("durable event recording mutex is not poisoned");
+        assert_eq!(
+            cancellation_events.len(),
+            2,
+            "parent and child cancellation events must both use lossless enqueue"
+        );
+        assert!(
+            cancellation_events
+                .iter()
+                .all(|event| event.kind == RuntimeEventKind::LoopCancelled),
+            "the lossless cancellation path must retain only the expected cancellation records"
+        );
+    }
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
