@@ -42,79 +42,73 @@ themselves. See [Security](/security).
 ## Where Channel Setup Lives
 
 This is the single most common thing to get stuck on, so it's worth being precise.
+Channel setup has two halves, done in two different places:
 
 <Steps>
 
-<Step title="Open Extensions, then switch to the Channels tab">
+<Step title="Operator half: Admin → Configuration (once per instance)">
 
-In the sidebar, open **Extensions**. It opens on the **Registry** tab.
+In the sidebar, open **Admin**, then **Configuration**. Each channel that needs
+deployment credentials shows a configuration card there — **Telegram deployment
+configuration**, **Slack deployment configuration**, and so on. Fill in the card's
+fields and save. The values are stored in the encrypted secret store.
 
-<Warning>
-Registry is *not* where channels are set up. Click across to the **Channels** tab. Using
-**Configure** on a channel from the Registry tab leads to a dead end — see below.
-</Warning>
-
-</Step>
-
-<Step title="Scroll to the bottom of the Built-in section">
-
-The Channels tab opens with a **Built-in** panel. The Slack and Telegram connect cards are
-at the **bottom of that panel**, below the rows for the web and terminal channels. They're
-easy to miss on a short window — scroll.
+This is the half the whole instance shares: the Telegram bot token and webhook
+settings, the Slack app credentials.
 
 </Step>
 
-<Step title="Use Configure on the channel's card">
+<Step title="Personal half: Extensions (each person)">
 
-That card is the real setup surface. For Telegram it's where an operator enters the bot
-token; for Slack it's where the app credentials go.
+Open **Extensions**, install the channel's extension, and use **Connect** /
+**Configure** on its card. For Telegram this opens the *pairing* panel that links your
+Telegram account to your IronClaw user; for Slack it runs your personal OAuth
+connection. You can also just ask the agent in chat — it drives this half for you.
 
 </Step>
 
 </Steps>
 
-### Two Dead Ends to Know About
+### The One Dead End to Know About
 
 <AccordionGroup>
 
-<Accordion title="Configure on the Registry tab errors instead of setting up">
+<Accordion title='"An administrator must configure the Telegram bot first"'>
 
-Telegram appears in the Registry tab, and its **Configure** button opens the *pairing*
-panel. Pairing assumes the bot is already configured, so if it isn't, the only thing that
-surface can do is report:
+The pairing panel assumes the deployment configuration is already saved. If it isn't,
+the only thing that surface can do is report:
 
 ```
 An administrator must configure the Telegram bot first.
 ```
 
 That message is accurate but misleading — it reads like you lack permission. Nothing is
-wrong with your account. Go to the **Channels** tab and use the card at the bottom of the
-Built-in section instead.
+wrong with your account. Complete the operator half under **Admin → Configuration**
+first, then pair.
 
 </Accordion>
 
 <Accordion title="Asking the agent to connect only works after the operator step">
 
 "Connect Slack" in chat does work for the *personal* half of setup: the agent installs
-and activates the extension, and if your account still needs OAuth an in-chat connection
-panel opens right there — the same OAuth flow the Channels card runs. If your account is
-already connected, the agent confirms that and continues with your request.
+and activates the extension, and if your account still needs OAuth or pairing an
+in-chat connection panel opens right there. If your account is already connected, the
+agent confirms that and continues with your request.
 
-What the agent cannot do is the *operator* half — registering the Slack app or Telegram
-bot credentials for the whole instance. That step is deliberately kept out of the tools
-the agent can drive, so it stays in the web interface where you can see what you're
-authorizing. If chat setup dead-ends, complete the operator step using the path above
-first, then ask again.
+What the agent cannot do is the *operator* half — the deployment credentials under
+**Admin → Configuration**. That step is deliberately kept out of the tools the agent
+can drive, so it stays in the web interface where you can see what you're authorizing.
+If chat setup dead-ends, complete the operator step first, then ask again.
 
 </Accordion>
 
 </AccordionGroup>
 
 <Info>
-Telegram has **two** setup steps that are easy to confuse: an operator configures the bot
-token once for the whole instance, and then each person pairs their own Telegram account
-to their IronClaw user. The "administrator must configure" error means step one hasn't
-happened yet.
+Telegram has **two** setup steps that are easy to confuse: an operator saves the
+deployment configuration once for the whole instance, and then each person pairs their
+own Telegram account to their IronClaw user. The "administrator must configure" error
+means step one hasn't happened yet.
 </Info>
 
 ---

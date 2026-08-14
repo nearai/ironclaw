@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, OAuthProviderIdentity,
-    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
+    OAuthProviderIdentityBindingTransaction, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
 };
 use ironclaw_extension_contracts::channel_identity::{
@@ -169,7 +169,7 @@ pub async fn bind_channel_identities_for_callback(
     provider: &str,
     callback_scope: &AuthProductScope,
     provider_identity: Option<&OAuthProviderIdentity>,
-) -> Result<Option<OAuthProviderIdentityBindingRollback>, AuthProductError> {
+) -> Result<Option<OAuthProviderIdentityBindingTransaction>, AuthProductError> {
     let targets = channel_identity_targets(config, provider).await?;
     if targets.is_empty() {
         return Ok(None);
@@ -181,9 +181,15 @@ pub async fn bind_channel_identities_for_callback(
     let user_id = callback_scope.resource.user_id.clone();
 
     let mut bound: Vec<RebornIdentityProviderUserId> = Vec::new();
+    let mut post_binds = Vec::new();
     for target in &targets {
         match bind_one_target(config, provider, target, identity, &user_id).await {
-            Ok(provider_user_id) => bound.push(provider_user_id),
+            Ok(provider_user_id) => {
+                bound.push(provider_user_id);
+                if let Some(post_bind) = &target.post_bind {
+                    post_binds.push(Arc::clone(post_bind));
+                }
+            }
             Err(error) => {
                 // A later target failing must not leave earlier bindings in
                 // place: the callback is about to fail as a whole.
@@ -193,9 +199,18 @@ pub async fn bind_channel_identities_for_callback(
         }
     }
 
+    let commit_user_id = user_id.clone();
+    let external_actor_id = identity.subject.as_str().to_string();
+    let after_commit = Box::pin(async move {
+        for post_bind in post_binds {
+            post_bind
+                .provision_after_bind(commit_user_id.clone(), &external_actor_id)
+                .await;
+        }
+    });
     let rollback_store = Arc::clone(&config.rollback_store);
     let rollback_provider = provider.to_string();
-    Ok(Some(Box::pin(async move {
+    let rollback = Box::pin(async move {
         for provider_user_id in &bound {
             // Passing the full provider_user_id as the prefix confines the
             // delete to the bindings this exact callback wrote. Best-effort
@@ -216,7 +231,11 @@ pub async fn bind_channel_identities_for_callback(
                 );
             }
         }
-    })))
+    });
+    Ok(Some(OAuthProviderIdentityBindingTransaction::new(
+        after_commit,
+        rollback,
+    )))
 }
 
 /// Resolve which extensions the callback's provider binds identities for:
@@ -358,9 +377,6 @@ async fn bind_one_target(
             }
             RebornUserIdentityBindingError::Backend(_) => AuthProductError::BackendUnavailable,
         })?;
-    if let Some(post_bind) = &target.post_bind {
-        post_bind.provision_after_bind(user_id.clone(), identity.subject.as_str());
-    }
     Ok(provider_user_id)
 }
 
@@ -445,8 +461,6 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "AcmeChat messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -587,7 +601,7 @@ app_id = "/app_id"
         let post_bind = Arc::new(RecordingPostBind::default());
         configure_scoping_values(&mut fixture, Some(post_bind.clone()));
 
-        let rollback = bind_channel_identities_for_callback(
+        let transaction = bind_channel_identities_for_callback(
             &fixture.config,
             "acmechat",
             &callback_scope(&tenant(), "user-alice"),
@@ -612,13 +626,13 @@ app_id = "/app_id"
 
         assert_eq!(
             post_bind.calls(),
-            vec![(UserId::new("user-alice").expect("user"), "U123".to_string())],
-            "a discovered-extension bind must fire the factory's post-bind provisioning"
+            Vec::new(),
+            "post-bind provisioning must wait until OAuth completion commits"
         );
 
         // The returned rollback (callback completion failed afterwards) must
         // delete exactly the binding this callback wrote.
-        rollback.await;
+        transaction.rollback().await;
         assert_eq!(
             fixture.identity_store.deletes(),
             vec![(
@@ -627,6 +641,31 @@ app_id = "/app_id"
                 Some(format!("{FIXTURE_INSTALLATION_ID}:U123")),
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn committed_identity_runs_post_bind_only_after_commit() {
+        let mut fixture = fixture().await;
+        let post_bind = Arc::new(RecordingPostBind::default());
+        configure_scoping_values(&mut fixture, Some(post_bind.clone()));
+
+        let transaction = bind_channel_identities_for_callback(
+            &fixture.config,
+            "acmechat",
+            &callback_scope(&tenant(), "user-alice"),
+            Some(&identity("T-team", "A-app")),
+        )
+        .await
+        .expect("bind succeeds")
+        .expect("a channel extension bind returns a transaction");
+
+        assert_eq!(post_bind.calls(), Vec::new());
+        transaction.commit().await;
+        assert_eq!(
+            post_bind.calls(),
+            vec![(UserId::new("user-alice").expect("user"), "U123".to_string())]
+        );
+        assert_eq!(fixture.identity_store.deletes(), Vec::new());
     }
 
     #[tokio::test]
@@ -690,7 +729,7 @@ app_id = "/app_id"
         let mut fixture = fixture().await;
         configure_scoping_values(&mut fixture, None);
 
-        let rollback = bind_channel_identities_for_callback(
+        let transaction = bind_channel_identities_for_callback(
             &fixture.config,
             "unrelated-vendor",
             &callback_scope(&tenant(), "user-alice"),
@@ -698,7 +737,7 @@ app_id = "/app_id"
         )
         .await
         .expect("non-channel provider callbacks complete untouched");
-        assert!(rollback.is_none());
+        assert!(transaction.is_none());
         assert_eq!(fixture.identity_store.bindings(), Vec::new());
     }
 
@@ -786,7 +825,7 @@ app_id = "/app_id"
             }],
         };
 
-        let rollback = bind_channel_identities_for_callback(
+        let transaction = bind_channel_identities_for_callback(
             &config,
             "acmechat",
             &callback_scope(&tenant(), "user-alice"),
@@ -794,8 +833,8 @@ app_id = "/app_id"
         )
         .await
         .expect("bind succeeds")
-        .expect("rollback returned");
-        drop(rollback);
+        .expect("transaction returned");
+        transaction.commit().await;
 
         assert_eq!(
             fixture_binding_ids(&identity_store),
@@ -866,7 +905,7 @@ app_id = "/app_id"
     /// `expect_err` needs `Debug` on the success payload; the rollback
     /// future has none, so unwrap rejections manually.
     fn expect_reject(
-        result: Result<Option<OAuthProviderIdentityBindingRollback>, AuthProductError>,
+        result: Result<Option<OAuthProviderIdentityBindingTransaction>, AuthProductError>,
         context: &str,
     ) -> AuthProductError {
         match result {
@@ -895,8 +934,9 @@ app_id = "/app_id"
         }
     }
 
+    #[async_trait]
     impl ChannelIdentityPostBind for RecordingPostBind {
-        fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str) {
+        async fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str) {
             self.calls
                 .lock()
                 .expect("lock")

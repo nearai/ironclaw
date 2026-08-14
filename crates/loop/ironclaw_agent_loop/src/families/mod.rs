@@ -21,7 +21,7 @@ pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
 /// (see `family.rs` component-identity contract).
 fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts: u32) -> String {
     format!(
-        "ironclaw_agent_loop.default_family.v2:\
+        "ironclaw_agent_loop.default_family.v3:\
         family_id=default;\
         identity=component_identity_v1;\
         planner=DefaultPlanner;\
@@ -34,7 +34,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         gate:DefaultGateHandlingStrategy(block),\
         recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
-        stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
+        stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
         budget:DefaultBudgetStrategy(iteration_limit={iteration_limit},wall_clock_limit=none)"
     )
@@ -46,8 +46,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x4e, 0xea, 0x43, 0x5f, 0x26, 0x48, 0x1f, 0xfc, 0x7b, 0x96, 0x74, 0x9f, 0x04, 0x71, 0xb0, 0x6e,
-    0x31, 0x52, 0x4d, 0x0f, 0x54, 0x43, 0x58, 0xcf, 0xcf, 0xe6, 0xf6, 0x2c, 0x34, 0x6e, 0x08, 0x2c,
+    0x0a, 0x79, 0x29, 0xd2, 0x34, 0x55, 0x76, 0xc1, 0x57, 0x86, 0x5c, 0x02, 0xc2, 0xf8, 0x73, 0x4a,
+    0x7f, 0xd6, 0x49, 0xf2, 0x25, 0xa3, 0x77, 0x07, 0xab, 0xb3, 0x12, 0xda, 0xc4, 0x9f, 0xf5, 0x90,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -100,7 +100,7 @@ impl FamilyOverrides {
 /// Overrides are replay-relevant configuration, so an overridden composition
 /// carries a configuration-specific [`ComponentIdentity`] digest derived from
 /// the resolved values; only the pure-default composition keeps the static
-/// [`DEFAULT_FAMILY_DIGEST`], so existing replay identities are unchanged.
+/// [`DEFAULT_FAMILY_DIGEST`].
 pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     if overrides == FamilyOverrides::default() {
         return default();

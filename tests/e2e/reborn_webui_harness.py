@@ -1213,12 +1213,32 @@ async def create_thread(client: httpx.AsyncClient, base_url: str) -> str:
     return response.json()["thread"]["thread_id"]
 
 
+
+
+async def session_channel_extension_id(client: httpx.AsyncClient, base_url: str) -> str:
+    """The deployment's authenticated-session channel, from ``GET /session``.
+
+    The generic session-inbound route is keyed by this extension id; the
+    harness reads it the same way the SPA does instead of naming a channel.
+    """
+    response = await client.get(f"{base_url}/api/webchat/v2/session", timeout=15)
+    response.raise_for_status()
+    extension_id = response.json().get("session_channel_extension_id")
+    assert extension_id, "deployment advertises no session channel"
+    return extension_id
+
+
 async def _submit_message(
     client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
 ) -> dict:
+    extension_id = await session_channel_extension_id(client, base_url)
     response = await client.post(
-        f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
-        json={"client_action_id": client_action_id(), "content": content},
+        f"{base_url}/api/webchat/v2/channels/{extension_id}/messages",
+        json={
+            "client_action_id": client_action_id(),
+            "thread_id": thread_id,
+            "content": content,
+        },
         timeout=30,
     )
     assert response.status_code in (200, 202), response.text

@@ -598,11 +598,19 @@ async fn build_runtime_with_slack_delivery(
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }]);
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -1173,8 +1181,15 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
 /// while keeping the id costs nothing — so the step is written anyway,
 /// carrying the id. An earlier draft treated non-resolution as "destination is
 /// gone" and wiped the route; this test failed on exactly that.
-#[tokio::test]
-async fn stored_delivery_target_trigger_is_migrated_to_prompt() {
+#[test]
+fn stored_delivery_target_trigger_is_migrated_to_prompt() {
+    run_async_test_with_stack(
+        "stored_delivery_target_trigger_is_migrated_to_prompt",
+        stored_delivery_target_trigger_is_migrated_to_prompt_async,
+    );
+}
+
+async fn stored_delivery_target_trigger_is_migrated_to_prompt_async() {
     const LEGACY_PROMPT: &str = "stored-target-era digest prompt";
     let root = tempfile::tempdir().expect("tempdir");
     let model_gateway = Arc::new(DeliveryJourneyGateway::default());
@@ -1285,6 +1300,27 @@ async fn stored_delivery_target_trigger_is_migrated_to_prompt() {
         "a migrated routine must stay migrated"
     );
     third.shutdown().await.expect("third runtime shutdown");
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 /// QA-9B + QA-9D whole-path regression, retargeted to the explicit-delivery

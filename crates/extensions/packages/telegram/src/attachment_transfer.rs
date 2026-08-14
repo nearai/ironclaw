@@ -4,7 +4,8 @@
 
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, ChannelError, PartDeliveryOutcome,
+    ChannelAttachmentRef, ChannelError, InboundBatchFragment, NormalizedInboundMessage,
+    PartDeliveryOutcome,
 };
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
 use ironclaw_host_api::{
@@ -18,6 +19,37 @@ use crate::channel::{
     TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_TOKEN_PLACEHOLDER, telegram_message_response_outcome,
     telegram_outcome_for_egress_error,
 };
+
+/// Pure normalization result retained inside the Telegram package until the
+/// channel adapter completes the Bot API file-handle exchange.
+#[derive(Debug)]
+pub struct ParsedTelegramInboundMessage {
+    pub(crate) message: NormalizedInboundMessage,
+    pub(crate) pending_attachments: Vec<ChannelAttachmentRef>,
+}
+
+impl std::ops::Deref for ParsedTelegramInboundMessage {
+    type Target = NormalizedInboundMessage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+/// Batched counterpart of [`ParsedTelegramInboundMessage`].
+#[derive(Debug)]
+pub struct ParsedTelegramBatchFragment {
+    pub(crate) fragment: InboundBatchFragment,
+    pub(crate) pending_attachments: Vec<ChannelAttachmentRef>,
+}
+
+impl std::ops::Deref for ParsedTelegramBatchFragment {
+    type Target = InboundBatchFragment;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fragment
+    }
+}
 
 /// Largest attachment payload a Telegram transfer carries, in bytes.
 ///

@@ -223,12 +223,18 @@ struct ApiAdminCreatedUserRecord {
     user_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ApiSessionResponse {
+    session_channel_extension_id: Option<String>,
+}
+
 #[derive(Clone)]
 struct ApiHarness {
     client: Client,
     base_url: String,
     page_size: u32,
     request_timeout: Duration,
+    session_channel_extension_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -489,6 +495,12 @@ pub(crate) async fn run(
     let identity_count = args.users.saturating_add(args.api_background_users).max(1);
     let identities = load_identities(args, identity_count).await?;
     let identities = provision_missing_identities(args, run_id, &harness, identities).await?;
+    let session_bearer_token = identities
+        .first()
+        .and_then(|identity| identity.bearer_token.as_deref());
+    let harness = harness
+        .resolve_session_channel(session_bearer_token)
+        .await?;
     let foreground_identities = select_identities(&identities, 0, args.users);
     let background_identities =
         select_identities(&identities, args.users, args.api_background_users);
@@ -1164,13 +1176,7 @@ async fn run_full_flow(
         ),
     });
     let send = harness
-        .request_json(
-            user,
-            flow_kind.send_sample_name(),
-            Method::POST,
-            &format!("/api/webchat/v2/threads/{}/messages", user.thread_id),
-            Some(body),
-        )
+        .send_message(user, flow_kind.send_sample_name(), body)
         .await;
     let send_value = send.value.clone();
     api_samples.push(send.sample);
@@ -1292,13 +1298,7 @@ async fn run_scripted_full_flow(
         "content": stress_payload(marker, args.user_message_bytes),
     });
     let send = harness
-        .request_json(
-            user,
-            flow_kind.send_sample_name(),
-            Method::POST,
-            &format!("/api/webchat/v2/threads/{}/messages", user.thread_id),
-            Some(body),
-        )
+        .send_message(user, flow_kind.send_sample_name(), body)
         .await;
     let send_value = send.value.clone();
     api_samples.push(send.sample);
@@ -1607,7 +1607,70 @@ impl ApiHarness {
             base_url,
             page_size: args.api_page_size,
             request_timeout,
+            session_channel_extension_id: None,
         })
+    }
+
+    async fn resolve_session_channel(mut self, bearer_token: Option<&str>) -> Result<Self, String> {
+        let session = self
+            .request_json_with_bearer(
+                bearer_token,
+                "resolve_session_channel",
+                Method::GET,
+                "/api/webchat/v2/session",
+                None,
+            )
+            .await
+            .value
+            .map_err(|failure| {
+                format!(
+                    "resolve session channel: {}: {}",
+                    failure.bucket, failure.detail
+                )
+            })?;
+        let session: ApiSessionResponse = serde_json::from_value(session)
+            .map_err(|error| format!("parse WebUI session response: {error}"))?;
+        let extension_id = session
+            .session_channel_extension_id
+            .filter(|extension_id| !extension_id.trim().is_empty())
+            .ok_or_else(|| {
+                "WebUI session response did not advertise a session channel extension id"
+                    .to_string()
+            })?;
+        self.session_channel_extension_id = Some(extension_id);
+        Ok(self)
+    }
+
+    async fn send_message(
+        &self,
+        user: &ApiUser,
+        name: &'static str,
+        mut body: Value,
+    ) -> ApiCallResult {
+        let Some(extension_id) = self.session_channel_extension_id.as_deref() else {
+            let failure = FailureCause::new(
+                "api_session_channel_unavailable",
+                name,
+                "WebUI session channel was not resolved before sending a message",
+            );
+            return ApiCallResult {
+                sample: ApiRequestSample {
+                    name,
+                    latency: Duration::ZERO,
+                    failure: Some(failure.clone()),
+                },
+                value: Err(failure),
+            };
+        };
+        body["thread_id"] = Value::String(user.thread_id.clone());
+        self.request_json(
+            user,
+            name,
+            Method::POST,
+            &format!("/api/webchat/v2/channels/{extension_id}/messages"),
+            Some(body),
+        )
+        .await
     }
 
     async fn create_thread(
@@ -3073,6 +3136,82 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         Args::parse_from(args)
+    }
+
+    async fn read_test_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await.expect("read request");
+            assert_ne!(read, 0, "connection closed before complete request");
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = find_header_end(&request).map(|index| index + 4) else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).expect("request headers");
+            let content_length = parse_content_length(headers).unwrap_or(0);
+            if request.len() >= header_end + content_length {
+                return request;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_message_send_uses_advertised_session_channel_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                json!({"session_channel_extension_id": "web-app"}),
+                json!({"status": "submitted"}),
+            ] {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                requests.push(read_test_http_request(&mut stream).await);
+                write_json_response(&mut stream, 200, &response)
+                    .await
+                    .expect("write response");
+            }
+            requests
+        });
+
+        let mut args = parsed_api_args(&[]);
+        args.api_base_url = Some(format!("http://{address}"));
+        let harness = ApiHarness::new(&args)
+            .expect("build harness")
+            .resolve_session_channel(Some("session-token"))
+            .await
+            .expect("resolve session channel");
+        let user = ApiUser {
+            index: 0,
+            label: "stress-user".to_string(),
+            bearer_token: Some("session-token".to_string()),
+            thread_id: "thread-1".to_string(),
+            extra_thread_ids: Vec::new(),
+        };
+        harness
+            .send_message(
+                &user,
+                "send_message",
+                json!({"client_action_id": "action-1", "content": "hello"}),
+            )
+            .await
+            .value
+            .expect("message send succeeds");
+
+        let requests = server.await.expect("server task");
+        let session_request = std::str::from_utf8(&requests[0]).expect("session request");
+        assert!(session_request.starts_with("GET /api/webchat/v2/session HTTP/1.1\r\n"));
+
+        let message_request = &requests[1];
+        let header_end = find_header_end(message_request).expect("message headers") + 4;
+        let headers = std::str::from_utf8(&message_request[..header_end]).expect("message headers");
+        assert!(headers.starts_with("POST /api/webchat/v2/channels/web-app/messages HTTP/1.1\r\n"));
+        let body: Value =
+            serde_json::from_slice(&message_request[header_end..]).expect("message body");
+        assert_eq!(body["thread_id"], "thread-1");
+        assert_eq!(body["client_action_id"], "action-1");
+        assert_eq!(body["content"], "hello");
     }
 
     #[test]

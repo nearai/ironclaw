@@ -83,9 +83,9 @@ an at-most-once reservation it does not own (`ironclaw_outbound`).
   `cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries reborn_crate_dependency_boundaries_hold`
   and `--test reborn_same_layer_edge_inventory`
 - **Gate-pinned guidance.** Two crate files are contracts, not prose:
-  `ironclaw_webui/CONTRACT.md` (route table + 19-owner `handlers.rs` charter
-  map; `cargo test -p ironclaw_webui --test handlers_module_charter`) and
-  `ironclaw_assistant/AGENTS.md` (19-sub-owner `reborn_services` charter map;
+  `ironclaw_webui/CONTRACT.md` (route table + `handlers.rs` charter map;
+  `cargo test -p ironclaw_webui --test handlers_module_charter`) and
+  `ironclaw_assistant/AGENTS.md` (`reborn_services` charter map;
   `cargo test -p ironclaw_assistant --test reborn_services_module_charter`).
   Edit them only with the owning suite green; do not reflow or renumber.
 
@@ -111,11 +111,11 @@ an at-most-once reservation it does not own (`ironclaw_outbound`).
 
 ## Sources
 
-`docs/reborn/target-architecture/families/product.md` · PROPOSAL §6.9.1–6.9.5,
+`docs/internal/reborn/target-architecture/families/product.md` · PROPOSAL §6.9.1–6.9.5,
 §8, §12.11 D-B/D-H · gates: `crates/app/ironclaw_architecture_tests/tests/`
 (`reborn_dependency_boundaries.rs`, `reborn_transport_product_boundary.rs`,
 `reborn_service_method_freeze_ratchet.rs`, `reborn_operator_port_inversion.rs`,
 `reborn_product_contract_location_scan.rs`,
 `reborn_same_layer_edge_inventory.rs`) · module specs:
 `ironclaw_webui/CONTRACT.md` (root `AGENTS.md` Module Specs table) · conventions:
-`docs/reborn/guidance-conventions.md`.
+`docs/internal/reborn/guidance-conventions.md`.

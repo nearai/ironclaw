@@ -31,7 +31,7 @@ use run_action_descriptors::{
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
 pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
-pub const WEBUI_V2_ROUTE_SEND_MESSAGE: &str = "webui.v2.send_message";
+pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
@@ -54,9 +54,9 @@ pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
     "webui.v2.list_outbound_delivery_targets";
 pub const WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS: &str = "webui.v2.get_notification_channels";
 pub const WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS: &str = "webui.v2.set_notification_channels";
-pub const WEBUI_V2_ROUTE_WEB_PUSH_STATUS: &str = "webui.v2.web_push_status";
-pub const WEBUI_V2_ROUTE_WEB_PUSH_SUBSCRIBE: &str = "webui.v2.web_push_subscribe";
-pub const WEBUI_V2_ROUTE_WEB_PUSH_UNSUBSCRIBE: &str = "webui.v2.web_push_unsubscribe";
+pub const WEBUI_V2_ROUTE_NOTIFICATION_SETUP_STATUS: &str = "webui.v2.notification_setup_status";
+pub const WEBUI_V2_ROUTE_NOTIFICATION_SETUP_ENABLE: &str = "webui.v2.notification_setup_enable";
+pub const WEBUI_V2_ROUTE_NOTIFICATION_SETUP_DISABLE: &str = "webui.v2.notification_setup_disable";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
@@ -86,6 +86,8 @@ pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provid
 pub const WEBUI_V2_ROUTE_SET_ACTIVE_LLM: &str = "webui.v2.set_active_llm";
 pub const WEBUI_V2_ROUTE_GET_USER_MODEL_CATALOG: &str = "webui.v2.get_user_model_catalog";
 pub const WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY: &str = "webui.v2.set_user_model_policy";
+pub const WEBUI_V2_ROUTE_GET_USER_MODEL_PREFERENCE: &str = "webui.v2.get_user_model_preference";
+pub const WEBUI_V2_ROUTE_SET_USER_MODEL_PREFERENCE: &str = "webui.v2.set_user_model_preference";
 pub const WEBUI_V2_ROUTE_TEST_LLM_CONNECTION: &str = "webui.v2.test_llm_connection";
 pub const WEBUI_V2_ROUTE_LIST_LLM_MODELS: &str = "webui.v2.list_llm_models";
 pub const WEBUI_V2_ROUTE_START_NEARAI_LOGIN: &str = "webui.v2.start_nearai_login";
@@ -148,7 +150,8 @@ pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
-pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
+pub const WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE: &str =
+    "/api/webchat/v2/channels/{extension_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
 pub const WEBUI_V2_PATTERN_GET_RUN_ARTIFACT: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact";
@@ -178,10 +181,12 @@ pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK: &str =
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
 pub const WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS: &str =
     "/api/webchat/v2/outbound/notification-channels";
-pub const WEBUI_V2_PATTERN_WEB_PUSH_STATUS: &str = "/api/webchat/v2/web-push/status";
-pub const WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS: &str = "/api/webchat/v2/web-push/subscriptions";
-pub const WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS_REMOVE: &str =
-    "/api/webchat/v2/web-push/subscriptions/remove";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS: &str =
+    "/api/webchat/v2/channels/{extension_id}/notifications";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE: &str =
+    "/api/webchat/v2/channels/{extension_id}/notifications/enable";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE: &str =
+    "/api/webchat/v2/channels/{extension_id}/notifications/disable";
 pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
 pub const WEBUI_V2_PATTERN_ADMIN_USER: &str = "/api/webchat/v2/admin/users/{user_id}";
 pub const WEBUI_V2_PATTERN_ADMIN_USER_STATUS: &str = "/api/webchat/v2/admin/users/{user_id}/status";
@@ -223,6 +228,7 @@ pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
 pub const WEBUI_V2_PATTERN_SET_ACTIVE_LLM: &str = "/api/webchat/v2/llm/active";
 pub const WEBUI_V2_PATTERN_USER_MODEL_CATALOG: &str = "/api/webchat/v2/llm/models";
 pub const WEBUI_V2_PATTERN_USER_MODEL_POLICY: &str = "/api/webchat/v2/llm/model-policy";
+pub const WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE: &str = "/api/webchat/v2/llm/model-preference";
 pub const WEBUI_V2_PATTERN_TEST_LLM_CONNECTION: &str = "/api/webchat/v2/llm/test-connection";
 pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-models";
 pub const WEBUI_V2_PATTERN_START_NEARAI_LOGIN: &str = "/api/webchat/v2/llm/nearai/login";
@@ -305,7 +311,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         get_session_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
-        send_message_descriptor(),
+        session_channel_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
         logs_descriptor(),
@@ -329,9 +335,9 @@ pub fn webui_v2_routes_with_artifact_flags(
         list_outbound_delivery_targets_descriptor(),
         get_notification_channels_descriptor(),
         set_notification_channels_descriptor(),
-        web_push_status_descriptor(),
-        web_push_subscribe_descriptor(),
-        web_push_unsubscribe_descriptor(),
+        notification_setup_status_descriptor(),
+        notification_setup_enable_descriptor(),
+        notification_setup_disable_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
@@ -357,6 +363,8 @@ pub fn webui_v2_routes_with_artifact_flags(
         delete_llm_provider_descriptor(),
         set_active_llm_descriptor(),
         get_user_model_catalog_descriptor(),
+        get_user_model_preference_descriptor(),
+        set_user_model_preference_descriptor(),
         set_user_model_policy_descriptor(),
         test_llm_connection_descriptor(),
         list_llm_models_descriptor(),
@@ -487,11 +495,11 @@ fn create_thread_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn send_message_descriptor() -> IngressRouteDescriptor {
+fn session_channel_message_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_SEND_MESSAGE,
+        WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_SEND_MESSAGE,
+        WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
         mutation_policy(
             // Message bodies carry user text plus optional base64-encoded inline
             // attachments. 14 MiB matches the gateway-wide body budget and covers
@@ -1225,11 +1233,11 @@ fn set_notification_channels_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn web_push_status_descriptor() -> IngressRouteDescriptor {
+fn notification_setup_status_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_WEB_PUSH_STATUS,
+        WEBUI_V2_ROUTE_NOTIFICATION_SETUP_STATUS,
         NetworkMethod::Get,
-        WEBUI_V2_PATTERN_WEB_PUSH_STATUS,
+        WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
@@ -1239,14 +1247,15 @@ fn web_push_status_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn web_push_subscribe_descriptor() -> IngressRouteDescriptor {
+fn notification_setup_enable_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_WEB_PUSH_SUBSCRIBE,
+        WEBUI_V2_ROUTE_NOTIFICATION_SETUP_ENABLE,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS,
+        WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE,
         mutation_policy(
-            // A push subscription is a ~1 KiB endpoint URL plus two short
-            // base64url keys; 8 KiB leaves defensive headroom.
+            // The largest setup payload today is a web-app subscription: a
+            // ~1 KiB endpoint URL plus two short base64url keys; 8 KiB leaves
+            // defensive headroom for any channel's opaque payload.
             body_limit_kib(8),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
@@ -1255,11 +1264,11 @@ fn web_push_subscribe_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn web_push_unsubscribe_descriptor() -> IngressRouteDescriptor {
+fn notification_setup_disable_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_WEB_PUSH_UNSUBSCRIBE,
+        WEBUI_V2_ROUTE_NOTIFICATION_SETUP_DISABLE,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_WEB_PUSH_SUBSCRIPTIONS_REMOVE,
+        WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
         mutation_policy(
             body_limit_kib(8),
             mutation_rate_limit(),
@@ -1617,6 +1626,34 @@ fn get_user_model_catalog_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn get_user_model_preference_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_USER_MODEL_PREFERENCE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_user_model_preference_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_USER_MODEL_PREFERENCE,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }

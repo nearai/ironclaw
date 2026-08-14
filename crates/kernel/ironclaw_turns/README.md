@@ -93,5 +93,5 @@ cargo test -p ironclaw_architecture_tests   # after dependency/API changes
 - [`AGENTS.md`](./AGENTS.md) — working rules, the vocabulary-ownership map
   (what is *not* owned here), guardrails.
 - [`../AGENTS.md`](../AGENTS.md) — the kernel family.
-- `docs/reborn/contracts/turns-agent-loop.md`,
-  `docs/reborn/contracts/loop-exit.md`.
+- `docs/internal/reborn/contracts/turns-agent-loop.md`,
+  `docs/internal/reborn/contracts/loop-exit.md`.

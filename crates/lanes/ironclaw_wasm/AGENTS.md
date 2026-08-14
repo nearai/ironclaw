@@ -41,5 +41,5 @@ hand.
 [`README.md`](./README.md) — orientation: public surface, measured edges, the
 `wit/` ownership story, tests. [`../AGENTS.md`](../AGENTS.md) — the `lanes/`
 family boundary and its gates. Contracts of record:
-`docs/reborn/contracts/wasm.md`, `docs/reborn/contracts/runtime-workflows.md`,
-`docs/reborn/contracts/network.md`.
+`docs/internal/reborn/contracts/wasm.md`, `docs/internal/reborn/contracts/runtime-workflows.md`,
+`docs/internal/reborn/contracts/network.md`.

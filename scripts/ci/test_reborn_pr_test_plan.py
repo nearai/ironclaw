@@ -432,6 +432,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertNotEqual(plan["mode"], "none")
 
+    def test_document_fixture_change_runs_a_representative_integration_lane(
+        self,
+    ) -> None:
+        # A binary fixture is consumed by integration tests via `include_bytes!`;
+        # it must schedule a lane rather than hard-error as an unmapped path.
+        plan = self.plan("pull_request", ["tests/fixtures/redlined-contract.docx"])
+        self.assertEqual(plan["integration_lanes"], [0])
+
     def test_recorded_fixture_change_runs_only_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request",
@@ -440,6 +448,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
+
+    def test_non_qa_trace_fixture_does_not_fall_into_document_fixtures(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                ["tests/fixtures/llm_traces/unowned/example.json"],
+            )
 
     def test_reborn_e2e_scenario_change_is_owned_by_e2e_workflow(self) -> None:
         plan = self.plan(
@@ -945,6 +960,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
             self.plan(
                 "pull_request",
                 [".config/nextest.toml", "scripts/some-undecided-helper.sh"],
+            )
+
+    def test_shared_sccache_action_widens_to_exhaustive_plan(self) -> None:
+        """The shared sccache action is executed by every Reborn test lane."""
+        plan = self.plan(
+            "pull_request", [".github/actions/setup-sccache-dist/action.yml"]
+        )
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("shared sccache action changed", plan["reasons"][0])
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [
+                    ".github/actions/setup-sccache-dist/action.yml",
+                    ".github/actions/some-undecided-action/action.yml",
+                ],
             )
 
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
@@ -1539,21 +1573,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     exact_targets,
                 )
 
-    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
-        """The entrypoint and configs are decided; their neighbours are not.
+    def test_hosted_config_selects_its_root_test_partition(self) -> None:
+        """A container config with a root-test reader selects that partition.
 
-        `docker/` is classified per-file for the same reason repo-root
-        `scripts/` is: a blanket prefix would silently absorb paths with no
-        owning lane. Keep the fail-closed arm proven for the ones nobody has
-        decided — the hosted-single-tenant configs are read only by
-        `tests/dockerfile_runtime_home.rs`, which `_root_test_partitions()` does
-        not inventory, so no lane can be selected for them.
+        The hosted-single-tenant configs are read only by
+        `tests/dockerfile_runtime_home.rs`, inventoried by
+        `_root_test_partitions()` since the docs/internal/reborn consolidation
+        gave it a lane.
         """
+        reader = "tests/dockerfile_runtime_home.rs"
+        inventory = planner._root_test_partitions()
+        self.assertIn(reader, inventory)
         for path in (
+            reader,
             "docker/reborn/config.hosted-single-tenant.toml",
             "docker/reborn/config.hosted-single-tenant-volume.toml",
-            "docker/process-sandbox-entrypoint.sh",
         ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertEqual(plan["root_partitions"], [inventory[reader]])
+
+    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
+        """`docker/` is classified per-file for the same reason repo-root
+        `scripts/` is: a blanket prefix would silently absorb paths with no
+        owning lane. Keep the fail-closed arm proven for the one nobody has
+        decided.
+        """
+        for path in ("docker/process-sandbox-entrypoint.sh",):
             with self.subTest(path=path):
                 with self.assertRaisesRegex(
                     ValueError, "unclassified pull-request path"
@@ -1587,7 +1634,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
-                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                docs = self.plan("pull_request", ["docs/internal/reborn/README.md"])
                 self.assertEqual(plan["mode"], "none")
                 self.assertEqual(plan, docs)
 
@@ -1611,7 +1658,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
-                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                docs = self.plan("pull_request", ["docs/internal/reborn/README.md"])
                 self.assertEqual(plan["mode"], "none")
                 self.assertEqual(plan, docs)
 
@@ -1630,7 +1677,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         on the family-level guidance files, which the restructure edits in the
         same PR as the crates they describe.
         """
-        docs = self.plan("pull_request", ["docs/reborn/README.md"])
+        docs = self.plan("pull_request", ["docs/internal/reborn/README.md"])
         for path in ("crates/AGENTS.md", "crates/README.md", "crates/Architecture.md"):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])

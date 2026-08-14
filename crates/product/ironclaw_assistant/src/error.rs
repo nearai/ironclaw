@@ -16,7 +16,7 @@
 //! [`From<ProductOperationFailure>`] below is total and 1:1, so a port failure
 //! reaching product through `?` keeps its exact discriminant.
 //!
-//! See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
+//! See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
 //! ownership decision and the alternatives it beat.
 
 use ironclaw_host_api::error::HostApiError;
@@ -137,6 +137,11 @@ pub enum ProductSurfaceFailure {
     #[error("before-inbound policy failed: {reason}")]
     BeforeInboundPolicyFailed { reason: String, permanent: bool },
 
+    /// The caller's requested or saved model could not be resolved before the
+    /// inbound message was accepted.
+    #[error("inbound model resolution failed: {reason}")]
+    InboundModelResolutionFailed { reason: String, retryable: bool },
+
     /// Deferred channel attachment transfer failed before message acceptance.
     #[error("inbound attachment transfer failed: {reason}")]
     InboundAttachmentFailed { reason: String, retryable: bool },
@@ -155,6 +160,38 @@ pub enum ProductSurfaceFailure {
     /// requires a DM-only target (e.g. carries an OAuth authorization_url).
     #[error("outbound target is not a direct message but the payload requires one")]
     OutboundTargetNotDirectMessage,
+
+    /// A session caller's owned-thread binding could not be established: the
+    /// thread does not exist or is owned by another caller. The two cases are
+    /// deliberately indistinguishable (no existence oracle) and this failure
+    /// never settles the idempotency ledger — the caller may create the
+    /// thread and legitimately retry the same client action.
+    #[error("owned thread is not available to this caller")]
+    OwnedThreadUnavailable,
+
+    /// A session client action id was replayed against a different thread
+    /// than the one its accepted message belongs to. Never settles: the
+    /// retry against the original thread must still replay normally.
+    #[error("client action was already used for a different thread")]
+    ClientActionReplayMismatch,
+
+    /// An idempotent replay was recognized but its stored submission
+    /// reference can no longer be resolved (missing or unparseable run id),
+    /// so the prior outcome cannot be reported.
+    #[error("stored replay submission reference is unavailable: {reason}")]
+    ReplayUnavailable { reason: String },
+
+    /// The session skill-activation recorder failed before turn submission.
+    /// Internal: the message was accepted but the turn was not submitted.
+    #[error("skill activation bookkeeping failed: {reason}")]
+    SkillActivationFailed { reason: String },
+
+    /// The deployment has no inbound-attachment landing path wired. An
+    /// operator-fixable service gap (503), not a caller error — and
+    /// non-retryable for the same request, since retrying against the same
+    /// deployment cannot succeed until an operator wires the lander.
+    #[error("inbound attachment landing is not available")]
+    AttachmentLanderUnavailable,
 }
 
 impl From<HostApiError> for ProductSurfaceFailure {
@@ -259,9 +296,15 @@ pub fn lifecycle_product_surface_error(error: ProductSurfaceFailure) -> ProductS
         | ProductSurfaceFailure::AuthInteractionRejected { .. }
         | ProductSurfaceFailure::AuthContinuationRejected { .. }
         | ProductSurfaceFailure::BeforeInboundPolicyFailed { .. }
+        | ProductSurfaceFailure::InboundModelResolutionFailed { .. }
         | ProductSurfaceFailure::InboundAttachmentFailed { .. }
         | ProductSurfaceFailure::DuplicateAction { .. }
         | ProductSurfaceFailure::OutboundTargetNotDirectMessage
+        | ProductSurfaceFailure::OwnedThreadUnavailable
+        | ProductSurfaceFailure::ClientActionReplayMismatch
+        | ProductSurfaceFailure::ReplayUnavailable { .. }
+        | ProductSurfaceFailure::SkillActivationFailed { .. }
+        | ProductSurfaceFailure::AttachmentLanderUnavailable
         | ProductSurfaceFailure::UnknownInstallation => ProductSurfaceError::internal_invariant(),
     }
 }
@@ -317,10 +360,15 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
             }
             ProductSurfaceFailure::TurnSubmissionFailed { error } => {
                 let status_code = error.adapter_status_code();
+                // Capacity denials are settled as permanent by the workflow
+                // (`turn_error_is_retryable`), so the surfaced error must not
+                // invite a retry the ledger would only replay.
+                let retryable = !matches!(error.category(), TurnErrorCategory::CapacityExceeded)
+                    && matches!(status_code, 429 | 503);
                 ProductAdapterError::SurfaceRejected {
                     kind: surface_rejection_kind(error.category()),
                     status_code,
-                    retryable: matches!(status_code, 429 | 503),
+                    retryable,
                     reason: RedactedString::new(error.to_string()),
                 }
             }
@@ -380,6 +428,20 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
                     }
                 }
             }
+            ProductSurfaceFailure::InboundModelResolutionFailed { reason, retryable } => {
+                if retryable {
+                    ProductAdapterError::SurfaceTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::SurfaceRejected {
+                        kind: ProductSurfaceRejectionKind::InvalidRequest,
+                        status_code: 400,
+                        retryable: false,
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
             ProductSurfaceFailure::InboundAttachmentFailed { reason, retryable } => {
                 if retryable {
                     ProductAdapterError::SurfaceTransient {
@@ -397,6 +459,43 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
             ProductSurfaceFailure::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
+            ProductSurfaceFailure::OwnedThreadUnavailable => ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::ScopeNotFound,
+                status_code: 404,
+                retryable: false,
+                reason: RedactedString::new("thread not found"),
+            },
+            ProductSurfaceFailure::ClientActionReplayMismatch => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::DuplicateAction,
+                    status_code: 409,
+                    retryable: false,
+                    reason: RedactedString::new(
+                        "client action id was already used for a different thread",
+                    ),
+                }
+            }
+            ProductSurfaceFailure::ReplayUnavailable { reason } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::ReplayUnavailable,
+                    status_code: 409,
+                    retryable: false,
+                    reason: RedactedString::new(reason),
+                }
+            }
+            ProductSurfaceFailure::SkillActivationFailed { reason } => {
+                ProductAdapterError::Internal {
+                    detail: RedactedString::new(reason),
+                }
+            }
+            ProductSurfaceFailure::AttachmentLanderUnavailable => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::Unavailable,
+                    status_code: 503,
+                    retryable: false,
+                    reason: RedactedString::new("inbound attachment landing is not available"),
+                }
+            }
             ProductSurfaceFailure::UnsupportedActionKind { kind } => {
                 ProductAdapterError::Internal {
                     detail: RedactedString::new(format!("unsupported action kind: {kind}")),

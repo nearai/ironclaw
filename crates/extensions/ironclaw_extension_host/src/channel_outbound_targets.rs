@@ -132,7 +132,7 @@ impl GenericChannelOutboundTargetProvider {
         let Some(channel) = active.resolved.channel.as_ref() else {
             return Ok(None);
         };
-        if !channel.outbound {
+        if !channel.supports_outbound() {
             return Ok(None);
         }
         let Some(codec) = self

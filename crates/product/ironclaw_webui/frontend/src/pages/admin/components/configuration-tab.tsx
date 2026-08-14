@@ -125,6 +125,9 @@ export function ConfigurationGroup({ group, state }) {
             const hint = field.secret && field.provided
               ? "Configured. Leave blank to keep the stored value."
               : null;
+            const descriptionId = field.description
+              ? `${group.group_id}-${field.handle}-description`
+              : null;
             return (
               <div key={field.handle}>
                 <label htmlFor={`${group.group_id}-${field.handle}`} className="mb-1 block text-xs text-iron-300">
@@ -138,6 +141,7 @@ export function ConfigurationGroup({ group, state }) {
                   disabled={isSaving}
                   autoComplete={field.secret ? "new-password" : "off"}
                   spellCheck={false}
+                  aria-describedby={descriptionId || undefined}
                   onChange={(event) => {
                     const value = event.currentTarget.value;
                     dirtyHandlesRef.current.add(field.handle);
@@ -145,6 +149,9 @@ export function ConfigurationGroup({ group, state }) {
                     setValues((current) => ({ ...current, [field.handle]: value }));
                   }}
                 />
+                {field.description && (
+                  <p id={descriptionId} className="mt-1 text-[11px] text-iron-400">{field.description}</p>
+                )}
                 {hint && <p className="mt-1 text-[11px] text-iron-400">{hint}</p>}
               </div>
             );

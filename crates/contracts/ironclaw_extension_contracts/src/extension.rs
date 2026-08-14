@@ -2,8 +2,8 @@
 //!
 //! Declarative manifest data remains owned by `ironclaw_extension_registry`; this
 //! module defines the in-process callable shape a host publishes after loading
-//! and binding an extension. The callable facets are the existing
-//! [`ToolAdapter`] and [`ChannelAdapter`] contracts.
+//! and binding an extension. The callable facets are [`ToolAdapter`] and the
+//! channel's optional [`ChannelSurfaces`] capability set.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use ironclaw_host_api::{
 };
 
 use crate::channel::ChannelDescriptor;
-use crate::channel_adapter::ChannelAdapter;
+use crate::channel_adapter::ChannelSurfaces;
 use crate::tool_adapter::ToolAdapter;
 
 /// One loaded extension instance.
@@ -118,9 +118,9 @@ impl ExtensionContract {
 /// One loaded extension with its callable facets.
 ///
 /// Implementations must report metadata from the resolved host contract only.
-/// Invocation goes through [`ToolAdapter`]; channel behavior goes through
-/// [`ChannelAdapter`]. Authorization, approval, obligation, resource, and
-/// ingress policy remain host-owned.
+/// Invocation goes through [`ToolAdapter`]; channel behavior goes through the
+/// [`ChannelSurfaces`] halves. Authorization, approval, obligation, resource,
+/// and ingress policy remain host-owned.
 pub trait Extension: Send + Sync {
     fn contract(&self) -> &ExtensionContract;
 
@@ -128,8 +128,11 @@ pub trait Extension: Send + Sync {
         None
     }
 
-    fn channel_adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
-        None
+    /// The channel halves this extension implements. An all-`None` value is
+    /// the same fact as a missing `[channel]` section, which is why this
+    /// returns the set rather than an `Option` of one fused adapter.
+    fn channel_surfaces(&self) -> ChannelSurfaces {
+        ChannelSurfaces::default()
     }
 }
 

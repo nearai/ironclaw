@@ -16,12 +16,12 @@ service = "telegram.extension/v1"
 [admin_configuration]
 group_id = "extension.telegram"
 display_name = "Telegram deployment configuration"
-description = "Deployment credentials and public account metadata for the Telegram channel."
+description = "Deployment credentials for the Telegram channel. Telegram delivers updates by webhook, so the instance must be reachable over public HTTPS with a valid certificate — a local installation needs a tunnel (such as ngrok or Cloudflare Tunnel) in front of it."
 fields = [
-  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true },
-  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
-  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
-  { handle = "bot_username", label = "Bot username", secret = false, required = true },
+  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by BotFather when you create the bot (/newbot)." },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true, description = "A random string you invent (1–256 letters, digits, '_' or '-'). IronClaw registers it with Telegram and uses it to verify every incoming update." },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true, description = "The full public address Telegram delivers to: https://<your-host>/webhooks/extensions/telegram/updates. For a local installation, use your tunnel's hostname." },
+  { handle = "bot_username", label = "Bot username", secret = false, required = true, description = "Your bot's username without the leading @ (5–32 characters, ending in 'bot'). Used for the pairing link and group mentions." },
 ]
 # Shared-conversation admission is presence-based (run-acts-as-invoker):
 # any group/supergroup the bot has been added to is served — the update
@@ -33,10 +33,18 @@ fields = [
 [channel]
 id = "messages"
 display_name = "Telegram messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 commands = ["model", "status", "new", "stop", "interrupt"]
+
+# For a conversational vendor the two axes happen to share one mechanism — a
+# message in the chat — which is exactly why the reply/delivery distinction
+# stayed invisible until a streaming channel existed. They are still declared
+# separately: `message` here is a coincidence of transport, not one concept.
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.connection]
 provider = "telegram"
@@ -68,6 +76,24 @@ body_limit_bytes = 1048576
 kind = "shared_secret_header"
 secret_handle = "telegram_webhook_secret"
 header = "X-Telegram-Bot-Api-Secret-Token"
+
+# Vendor-side webhook wiring, formerly ChannelAdapter::activate/cleanup. Both
+# method bodies became zero lines: every input was already host-known (the
+# host owns the webhook route, so it owns the URL), and both calls already ran
+# through restricted egress with host-side credential injection. The bot token
+# rides the path placeholder the [[channel.egress]] injection declares; the
+# shared secret rides body_credentials, so neither ever enters adapter scope.
+# `setWebhook` is idempotent — Telegram overwrites the previous registration.
+[channel.ingress.registration]
+method = "post"
+path = "/bot{telegram_bot_token}/setWebhook"
+body = { url = "{telegram_webhook_url}" }
+body_credentials = ["telegram_webhook_secret"]
+
+[channel.ingress.deregistration]
+method = "post"
+path = "/bot{telegram_bot_token}/deleteWebhook"
+body = {}
 
 [[channel.egress]]
 scheme = "https"
@@ -122,4 +148,3 @@ injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 supports_markdown = false
 supports_threads = true
 can_reply_in_threads = false
-max_message_chars = 4096

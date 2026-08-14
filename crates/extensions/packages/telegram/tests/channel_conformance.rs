@@ -1,43 +1,25 @@
 //! TEST-1: the Telegram channel adapter runs the exported channel-adapter
 //! conformance suite against a scripted Bot API.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, ChannelContext, ChannelError, InboundOutcome, OutboundEnvelope, OutboundPart,
-    OutboundTarget, VerifiedInbound,
+    ChannelError, ChannelIngress, InboundOutcome, OutboundEnvelope, OutboundPart, OutboundTarget,
+    VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::test_support::conformance::{
-    ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
+    ChannelAdapterConformance, ConformanceInbound, ScriptedVendorServer,
+    run_channel_adapter_conformance,
 };
 use ironclaw_extension_contracts::tool_adapter::{
-    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_telegram_extension::GroupTriggerPolicy;
 use ironclaw_telegram_extension::{
     TELEGRAM_BOT_USERNAME_CONFIG, TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
 };
-
-#[derive(Default)]
-struct RecordingEgress {
-    requests: Mutex<Vec<RestrictedEgressRequest>>,
-}
-
-#[async_trait]
-impl RestrictedEgress for RecordingEgress {
-    async fn send(
-        &self,
-        request: RestrictedEgressRequest,
-    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-        self.requests.lock().expect("requests lock").push(request);
-        Ok(RestrictedEgressResponse {
-            status: 200,
-            body: br#"{"ok":true,"result":true}"#.to_vec(),
-        })
-    }
-}
 
 fn private_message_body() -> &'static [u8] {
     br#"{
@@ -67,10 +49,18 @@ fn scripted_bot_api(request: &RestrictedEgressRequest) -> RestrictedEgressRespon
 #[tokio::test]
 async fn telegram_adapter_satisfies_the_conformance_contract() {
     run_channel_adapter_conformance(ChannelAdapterConformance {
-        adapter: Arc::new(TelegramChannelAdapter::new(GroupTriggerPolicy::default())),
+        // Telegram implements every half, for the same reason Slack does:
+        // one vendor mechanism serves both output axes.
+        surfaces: {
+            let adapter = Arc::new(TelegramChannelAdapter::new(GroupTriggerPolicy::default()));
+            ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         extension_id: "telegram".to_string(),
         installation_id: "install_alpha".to_string(),
-        message_inbound: ConformanceInbound {
+        message_inbound: Some(ConformanceInbound {
             body: br#"{
                 "update_id": 99,
                 "message": {
@@ -83,14 +73,11 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
             }"#
             .to_vec(),
             headers: Vec::new(),
-        },
+        }),
         // Telegram has no URL-verification challenge; webhook auth rides the
         // shared secret header the host verifies.
         challenge_inbound: None,
         outbound_envelope: OutboundEnvelope {
-            extension_id: "telegram".to_string(),
-            installation_id: "install_alpha".to_string(),
-            delivery_attempt_id: "attempt-conformance".to_string(),
             target: OutboundTarget {
                 conversation: ExternalConversationRef::new(None, "8675309", None, None)
                     .expect("conversation"),
@@ -103,6 +90,7 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
                 },
             ],
             reply_context: None,
+            registrations: Vec::new(),
         },
         vendor_responses: Arc::new(scripted_bot_api),
         config: vec![
@@ -115,45 +103,21 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
                 "conformance_bot".to_string(),
             ),
         ],
-        expects_unsupported_free_target_listing: true,
     })
     .await;
 }
 
+// `activation_fails_closed_without_a_valid_bot_username` stood here. There is
+// no adapter activation hook any more, so the check it drove has one home
+// rather than two: the inbound path below, which rejects the same missing and
+// malformed identities. What genuinely changed is the *timing* — a
+// syntactically bad `bot_username` now fails the first inbound message
+// instead of activation. An absent value still fails activation, because the
+// manifest declares the field `required = true`.
+
 #[tokio::test]
-async fn activation_fails_closed_without_a_valid_bot_username() {
-    for username in [None, Some(""), Some(" configured_bot")] {
-        let egress = RecordingEgress::default();
-        let mut config = vec![(
-            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-            "https://host.example/hooks".to_string(),
-        )];
-        if let Some(username) = username {
-            config.push((
-                TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
-                username.to_string(),
-            ));
-        }
-        let context = ChannelContext {
-            extension_id: "telegram",
-            installation_id: "install_alpha",
-            config: &config,
-        };
-
-        let error = TelegramChannelAdapter::default()
-            .activate(&context, &egress)
-            .await
-            .expect_err("missing or invalid bot identity must fail activation");
-        assert!(matches!(error, ChannelError::VendorWiring { .. }));
-        assert!(
-            egress.requests.lock().expect("requests lock").is_empty(),
-            "invalid identity must fail before setWebhook"
-        );
-    }
-}
-
-#[test]
-fn inbound_identity_is_required_with_constructor_compatibility() {
+async fn inbound_identity_is_required_with_constructor_compatibility() {
+    let egress = ScriptedVendorServer::new(Arc::new(scripted_bot_api));
     for config in [
         Vec::new(),
         vec![(
@@ -161,14 +125,19 @@ fn inbound_identity_is_required_with_constructor_compatibility() {
             " configured_bot".to_string(),
         )],
     ] {
-        let result = TelegramChannelAdapter::default().inbound(VerifiedInbound {
-            extension_id: "telegram",
-            installation_id: "install_alpha",
-            config: &config,
-            body: private_message_body(),
-            headers: &[],
-            can_reply_in_threads: false,
-        });
+        let result = TelegramChannelAdapter::default()
+            .receive(
+                VerifiedInbound {
+                    extension_id: "telegram",
+                    installation_id: "install_alpha",
+                    config: &config,
+                    body: private_message_body(),
+                    headers: &[],
+                    can_reply_in_threads: false,
+                },
+                &egress,
+            )
+            .await;
         let Err(error) = result else {
             panic!("missing or invalid bot identity must fail inbound normalization");
         };
@@ -180,20 +149,25 @@ fn inbound_identity_is_required_with_constructor_compatibility() {
         ..GroupTriggerPolicy::default()
     });
     let outcome = adapter
-        .inbound(VerifiedInbound {
-            extension_id: "telegram",
-            installation_id: "install_alpha",
-            config: &[],
-            body: private_message_body(),
-            headers: &[],
-            can_reply_in_threads: false,
-        })
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &[],
+                body: private_message_body(),
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            &egress,
+        )
+        .await
         .expect("an explicitly configured constructor policy remains valid");
     assert!(matches!(outcome, InboundOutcome::Messages(_)));
 }
 
-#[test]
-fn username_enforces_vendor_grammar_for_inbound() {
+#[tokio::test]
+async fn username_enforces_vendor_grammar_for_inbound() {
+    let egress = ScriptedVendorServer::new(Arc::new(scripted_bot_api));
     let invalid_usernames = [
         "fixture_name".to_string(),
         "bot".to_string(),
@@ -204,14 +178,18 @@ fn username_enforces_vendor_grammar_for_inbound() {
         let config = vec![(TELEGRAM_BOT_USERNAME_CONFIG.to_string(), username.clone())];
         assert!(
             TelegramChannelAdapter::default()
-                .inbound(VerifiedInbound {
-                    extension_id: "telegram",
-                    installation_id: "install_alpha",
-                    config: &config,
-                    body: private_message_body(),
-                    headers: &[],
-                    can_reply_in_threads: false,
-                })
+                .receive(
+                    VerifiedInbound {
+                        extension_id: "telegram",
+                        installation_id: "install_alpha",
+                        config: &config,
+                        body: private_message_body(),
+                        headers: &[],
+                        can_reply_in_threads: false,
+                    },
+                    &egress
+                )
+                .await
                 .is_err(),
             "{username:?} must fail Telegram's public bot-username grammar"
         );
@@ -222,14 +200,19 @@ fn username_enforces_vendor_grammar_for_inbound() {
         let config = vec![(TELEGRAM_BOT_USERNAME_CONFIG.to_string(), username.clone())];
         assert!(
             matches!(
-                TelegramChannelAdapter::default().inbound(VerifiedInbound {
-                    extension_id: "telegram",
-                    installation_id: "install_alpha",
-                    config: &config,
-                    body: private_message_body(),
-                    headers: &[],
-                    can_reply_in_threads: false,
-                }),
+                TelegramChannelAdapter::default()
+                    .receive(
+                        VerifiedInbound {
+                            extension_id: "telegram",
+                            installation_id: "install_alpha",
+                            config: &config,
+                            body: private_message_body(),
+                            headers: &[],
+                            can_reply_in_threads: false,
+                        },
+                        &egress
+                    )
+                    .await,
                 Ok(InboundOutcome::Messages(_))
             ),
             "{username:?} is a valid boundary example"
@@ -241,14 +224,19 @@ fn username_enforces_vendor_grammar_for_inbound() {
         ..GroupTriggerPolicy::default()
     });
     assert!(matches!(
-        constructor_compatible.inbound(VerifiedInbound {
-            extension_id: "telegram",
-            installation_id: "install_alpha",
-            config: &[],
-            body: private_message_body(),
-            headers: &[],
-            can_reply_in_threads: false,
-        }),
+        constructor_compatible
+            .receive(
+                VerifiedInbound {
+                    extension_id: "telegram",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body: private_message_body(),
+                    headers: &[],
+                    can_reply_in_threads: false,
+                },
+                &egress
+            )
+            .await,
         Ok(InboundOutcome::Messages(_))
     ));
 }

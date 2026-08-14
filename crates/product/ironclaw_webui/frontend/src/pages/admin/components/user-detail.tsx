@@ -6,13 +6,11 @@ import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
-import { useUsage } from "../hooks/useAdminUsage";
 import { UserSecretsPanel } from "./user-secrets-panel";
 import { ThreadScrapingPanel } from "./thread-scraping-panel";
 import {
   formatRelativeTime,
   formatCost,
-  formatTokenCount,
   truncateId,
   statusTone,
   roleTone,
@@ -33,21 +31,19 @@ function DetailRow({ label, children }) {
 
 export function UserDetail({ userId, onBack, threadScrapingEnabled = false }) {
   const userQuery = useAdminUserDetail(userId);
-  const usageQuery = useUsage("month", userId);
   const adminState = useAdminUsers();
   return (
     <UserDetailView
       key={userId}
       onBack={onBack}
       userQuery={userQuery}
-      usageQuery={usageQuery}
       adminState={adminState}
       threadScrapingEnabled={threadScrapingEnabled}
     />
   );
 }
 
-export function UserDetailView({ onBack, userQuery, usageQuery, adminState, threadScrapingEnabled = false }) {
+export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEnabled = false }) {
   const t = useT();
   const {
     suspendUser,
@@ -74,7 +70,6 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState, thre
   const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const user = userQuery.data;
-  const usageEntries = usageQuery.data?.usage || [];
   const isActionPending = isSuspending || isActivating || isUpdating || isDeleting;
   const statusError = suspendError || activateError;
 
@@ -258,40 +253,6 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState, thre
       <UserSecretsPanel key={user.id} userId={user.id} />
 
       {threadScrapingEnabled && <ThreadScrapingPanel userId={user.id} />}
-
-      <Panel className="p-5 sm:p-6">
-        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.usage30Days")}</h3>
-        {usageEntries.length === 0
-          ? (<p className="py-4 text-sm text-iron-300">{t("admin.user.noUsage")}</p>)
-          : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-white/10 text-left">
-                      <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.model")}</th>
-                      <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.calls")}</th>
-                      <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 sm:table-cell">{t("admin.usage.input")}</th>
-                      <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 sm:table-cell">{t("admin.usage.output")}</th>
-                      <th className="pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.cost")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {usageEntries.map(
-                      (e, i) => (
-                        <tr key={i} className="border-b border-white/[0.06] last:border-0">
-                          <td className="py-3 pr-4 font-mono text-xs text-iron-100">{e.model}</td>
-                          <td className="py-3 pr-4 font-mono text-xs text-iron-300">{(e.call_count || 0).toLocaleString()}</td>
-                          <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{formatTokenCount(e.input_tokens)}</td>
-                          <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{formatTokenCount(e.output_tokens)}</td>
-                          <td className="py-3 font-mono text-xs text-iron-100">{formatCost(e.total_cost)}</td>
-                        </tr>
-                      )
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-      </Panel>
 
       <ConfirmDialog
         open={confirmDelete}

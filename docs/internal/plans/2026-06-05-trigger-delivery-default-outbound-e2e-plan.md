@@ -360,9 +360,9 @@ Not defaultable in the first E2E:
 
 ## Canonical Refs
 
-- `docs/reborn/contracts/communication-delivery-resolution.md`
+- `docs/internal/reborn/contracts/communication-delivery-resolution.md`
   - preference fields, rule order, and trigger delivery boundary.
-- `docs/reborn/how-to-port-channel-to-reborn.md`
+- `docs/internal/reborn/how-to-port-channel-to-reborn.md`
   - adapter outbound rendering boundary and Slack-like external channel
     capability model.
 - `crates/ironclaw_outbound/src/communication_preferences.rs`

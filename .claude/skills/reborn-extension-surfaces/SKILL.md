@@ -15,7 +15,7 @@ vocabulary (connectable channels, `slack_bot`, `slack_personal`, extension
 change trips that gate, you are re-introducing a deleted model.
 
 **Schema is `reborn.extension_manifest.v3`** — v2 plus explicit `[channel]`
-and `[auth.*]` sections. The design is law: `docs/reborn/extension-runtime/`
+and `[auth.*]` sections. The design is law: `docs/internal/reborn/extension-runtime/`
 (`overview.md` §3 the manifest, §4 the adapters, §5 the flows, §6 lifecycle).
 The worked example for *every* section below is the live Slack manifest —
 read it first: `crates/extensions/packages/slack/manifest.toml`.
@@ -71,10 +71,12 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
 1. Declare each capability as a `[[tools]]` entry (id, description, effects,
    default_permission, visibility, `input_schema_ref`, optional
    `prompt_doc_ref`) with a `[[tools.credentials]]` block naming its `vendor`,
-   `audience`, and `injection`. Copy the shape from
-   `crates/extensions/packages/slack/manifest.toml` (8 `[[tools]]` entries — count with
-   `grep -c '^\[\[tools\]\]' <manifest>`) or
-   `crates/extensions/packages/github/manifest.toml`.
+   `audience`, and `injection`. Copy the plain schema-declaring shape from
+   `crates/extensions/packages/github/manifest.toml`; for `standard_op`-bound
+   messaging tools the exemplar is
+   `crates/extensions/packages/slack/manifest.toml`, whose tools are all
+   standard-op-bound (count entries with `grep -c '^\[\[tools\]\]'
+   <manifest>` rather than trusting a written number).
 2. Schemas and prompt docs are **package assets** (`schemas/…`, `prompts/…`)
    embedded by the package module — not composition.
 3. Model-visible tool wording is product surface: if a tool acts *as the user*
@@ -85,7 +87,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
 4. A **messaging-shaped** tool (send/read/react over a conversation) binds
    `standard_op = "<op_name>"` instead of declaring its own schemas — a
    closed, host-owned vocabulary with host-canonical input/output schemas.
-   See `docs/reborn/extension-runtime/standard-operations.md` for the full
+   See `docs/internal/reborn/extension-runtime/standard-operations.md` for the full
    vocabulary and binding rules.
 
 ## Adding a channel surface
@@ -118,7 +120,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    composition iterates it by `extension_id` and never names a concrete crate.
 4. Conversation/actor binding is **data, not per-channel code**: the
    `conversation_model` value + the identity resolver drive it. Contract:
-   `docs/reborn/contracts/conversation-binding.md`. The actor→user resolver is
+   `docs/internal/reborn/contracts/conversation-binding.md`. The actor→user resolver is
    `ProviderIdentityActorResolver`
    (`crates/extensions/ironclaw_extension_host/src/provider_identity.rs`, re-exported by
    composition),

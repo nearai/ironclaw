@@ -27,25 +27,23 @@ ironclaw serve
 
 ## 频道设置入口在哪里
 
-这是最容易卡住的地方，因此这里写得具体一些：
+这是最容易卡住的地方，因此这里写得具体一些。频道设置分为两半，在两个不同的地方完成：
 
-1. 在侧边栏打开 **Extensions**。页面默认停在 **Registry** 标签页。
-2. 切换到 **Channels** 标签页 —— Registry 不是配置频道的地方。
-3. 在 **Built-in** 面板中**向下滚动到底部**，Slack 与 Telegram 的连接卡片位于 Web 与终端频道各行的下方。
-4. 在该卡片上点击 **Configure**，这才是真正的设置入口。
+1. **运维一半（每个实例一次）**：在侧边栏打开 **Admin**，进入 **Configuration**。每个需要部署凭据的频道都在这里有一张配置卡片 —— 例如 **Telegram deployment configuration**、**Slack deployment configuration**。填写字段并保存，取值会加密存储。
+2. **个人一半（每位用户各自完成）**：打开 **Extensions**，安装对应扩展，并在其卡片上使用 **Connect** / **Configure**。Telegram 打开的是账号配对面板，Slack 运行的是您个人的 OAuth 连接。也可以直接在聊天中让智能体完成这一半。
 
 <Warning>
-不要在 **Registry** 标签页中对 Telegram 点击 **Configure**。该按钮打开的是配对面板，而配对以“机器人已配置完成”为前提，因此只会报错：
+配对面板以“部署配置已保存”为前提。如果尚未保存，它只会报错：
 *"An administrator must configure the Telegram bot first."*
-这条信息看起来像权限不足，实际上不是 —— 只是您停留在了错误的标签页。
+这条信息看起来像权限不足，实际上不是 —— 请先在 **Admin → Configuration** 中完成运维一半，再进行配对。
 </Warning>
 
 <Note>
-在聊天中让智能体“连接 Slack / 设置 Telegram”是行不通的。智能体可以代您安装和使用**工具**类扩展，但频道连接属于运维操作，被有意排除在智能体可驱动的工具之外，需要您在 Web 界面中自行完成。
+在聊天中让智能体“连接 Slack / 设置 Telegram”只覆盖**个人一半**：安装并激活扩展、弹出连接或配对面板。运维一半 —— **Admin → Configuration** 中的部署凭据 —— 被有意排除在智能体可驱动的工具之外，需要您在 Web 界面中自行完成。
 </Note>
 
 <Info>
-Telegram 有**两个**容易混淆的步骤：由运维人员为整个实例配置一次机器人令牌；随后每位用户再将自己的 Telegram 账号与 IronClaw 用户配对。出现“administrator must configure”提示，说明第一步尚未完成。
+Telegram 有**两个**容易混淆的步骤：由运维人员为整个实例保存一次部署配置；随后每位用户再将自己的 Telegram 账号与 IronClaw 用户配对。出现“administrator must configure”提示，说明第一步尚未完成。
 </Info>
 
 <Note>

@@ -1,5 +1,5 @@
 //! Anti-slippage ratchet for the deployment-mode-as-type axis (§4.4 / §10 of
-//! `docs/reborn/contracts/runtime-profiles.md`).
+//! `docs/internal/reborn/contracts/runtime-profiles.md`).
 //!
 //! §4.4's rule: **a deployment mode is a config value, never a type the kernel or
 //! a substrate names.** Today a whole `Standalone*` shadow runtime encodes standalone

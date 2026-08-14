@@ -11,7 +11,7 @@
 #   Railway supplies PORT. Set IRONCLAW_REBORN_PROFILE=hosted-single-tenant for
 #   Postgres-backed storage, hosted-single-tenant-volume for a volume-backed
 #   preview, or hosted-single-tenant-volume-sandboxed-railway for the explicit
-#   Railway Sandbox preview described in docs/reborn/railway-sandbox-operator.md.
+#   Railway Sandbox preview described in docs/internal/reborn/railway-sandbox-operator.md.
 
 FROM node:22.23.1-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4 AS node_toolchain
 

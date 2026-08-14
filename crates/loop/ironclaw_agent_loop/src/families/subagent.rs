@@ -11,7 +11,7 @@ const SUBAGENT_WALL_CLOCK_LIMIT: Option<Duration> = None;
 
 #[cfg(test)]
 const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
-    "ironclaw_agent_loop.subagent_family.v2:",
+    "ironclaw_agent_loop.subagent_family.v3:",
     "family_id=subagent;",
     "identity=component_identity_v1;",
     "planner=DefaultPlanner;",
@@ -24,15 +24,15 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:DefaultGateHandlingStrategy(block),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
-    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
+    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xcd, 0x1a, 0x20, 0x55, 0xaf, 0x28, 0xf6, 0xbb, 0x47, 0x38, 0xdd, 0x81, 0x7f, 0x5c, 0x59, 0x3a,
-    0x1f, 0xfb, 0x3b, 0x5b, 0x87, 0x6f, 0x55, 0x4a, 0xc0, 0x20, 0x1b, 0xcc, 0x92, 0x46, 0xc2, 0x81,
+    0x0a, 0x12, 0x6b, 0xfc, 0x6f, 0xe3, 0x8e, 0x46, 0x5c, 0x31, 0xc7, 0x0d, 0xeb, 0x82, 0xd3, 0xaf,
+    0x42, 0x01, 0xac, 0x29, 0xf2, 0xf9, 0x85, 0xf5, 0x30, 0xe5, 0xe0, 0xb1, 0x49, 0x34, 0x5b, 0x06,
 ]);
 
 pub fn subagent() -> LoopFamily {

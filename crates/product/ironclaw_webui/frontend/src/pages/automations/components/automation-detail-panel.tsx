@@ -72,7 +72,7 @@ export function AutomationDetailPanel({
   const canResume = automation.state === "paused";
   const canPause = automation.state === "active" || automation.state === "scheduled";
   const canRename = Boolean(onRenameAutomation);
-  const actionLabel = canResume ? t("missions.action.resume") : t("missions.action.pause");
+  const actionLabel = canResume ? t("automations.action.resume") : t("automations.action.pause");
   const actionTitle = `${actionLabel}: ${automation.display_name}`;
   const renameTitle = `${t("automations.rename.action")}: ${automation.display_name}`;
   const handleAction = () => {

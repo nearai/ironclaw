@@ -124,14 +124,13 @@ impl RebornIntegrationGroup {
     }
 
     /// [`Self::extension_delivery_with_gated_write`] PLUS the complete
-    /// web-push channel: deployment binding (adapter + codec + catalog
-    /// provider) around one late-bound runtime slot, the slot on the
-    /// composition input (so `assemble_web_push` installs the subscription
-    /// store and seeds the VAPID credential), the bundled manifest, and a
-    /// vendor router answering push-service POSTs with `201` (`410` for the
-    /// reserved dead-subscription token).
-    pub async fn extension_delivery_with_web_push() -> HarnessResult<Self> {
-        Self::builder().extension_delivery_with_web_push().await
+    /// web-app channel: deployment binding (adapter + codec + catalog
+    /// provider), its generic first-party initializer (which seeds VAPID
+    /// material and publishes the public bootstrap), the bundled manifest,
+    /// and a vendor router answering push-service POSTs with `201` (`410` for
+    /// the reserved dead-subscription token).
+    pub async fn extension_delivery_with_web_app() -> HarnessResult<Self> {
+        Self::builder().extension_delivery_with_web_app().await
     }
 
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
@@ -316,6 +315,19 @@ impl RebornIntegrationGroup {
     pub async fn attachment_tools() -> HarnessResult<Self> {
         Self::builder().attachment_tools().await
     }
+
+    /// Group pairing the inbound attachment lander with the `read_file` /
+    /// `write_file` capabilities at auto-approve, so a landed document can be
+    /// read and then edited through real capability dispatch in one journey.
+    /// `attachment_tools()` deliberately surfaces no capabilities, and
+    /// `live_approvals()` gates every call — this is the combination a
+    /// document-editing journey needs. Attachments land under the SAME
+    /// `/workspace` mount `file_tools_profile` grants
+    /// (`ProjectScopedAttachmentLander` → `/workspace/attachments/...`), so the
+    /// model addresses the landed file by its stored `storage_key`.
+    pub async fn document_edit_tools() -> HarnessResult<Self> {
+        Self::builder().document_edit_tools().await
+    }
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -367,6 +379,13 @@ impl RebornIntegrationGroupBuilder {
     pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a document-edit group. See [`RebornIntegrationGroup::document_edit_tools`].
+    pub async fn document_edit_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::file::document_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
@@ -598,21 +617,21 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
-    /// Build a delivery group with the web-push channel wired. See
-    /// [`RebornIntegrationGroup::extension_delivery_with_web_push`].
-    pub async fn extension_delivery_with_web_push(
+    /// Build a delivery group with the web-app channel wired. See
+    /// [`RebornIntegrationGroup::extension_delivery_with_web_app`].
+    pub async fn extension_delivery_with_web_app(
         mut self,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        let (web_push_profile, _web_push_slot) = super::super::harness::profiles::extension::extension_delivery_with_web_push_tools_profile()?;
-        let host_runtime = build_group_capability_with_base(web_push_profile, &base)
+        let web_app_profile = super::super::harness::profiles::extension::extension_delivery_with_web_app_tools_profile()?;
+        let host_runtime = build_group_capability_with_base(web_app_profile, &base)
             .await?
             .with_run_owner_scoped_capability_dispatch();
         let scope = &base.product_harness.scope;
         let channel_connection =
             ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime.reborn_services_for_test().ok_or(
-                    "extension_delivery_with_web_push harness is missing its RebornServices bundle",
+                    "extension_delivery_with_web_app harness is missing its RebornServices bundle",
                 )?,
                 ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),

@@ -579,12 +579,17 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
     // the method, not a thread_id convention (F4 regression). Only the general
     // doc survives, so the two lanes stay disjoint (no duplicate snippet when
     // the host concatenates them).
+    //
+    // The surviving doc is an ORDINARY path, not `MEMORY.md`: the standing
+    // document leads this lane through the curated prefix and is deliberately
+    // excluded from the search half, so using it here would test that
+    // exclusion rather than the thread-scratch one.
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![
             search_result(
                 "tenant-native-memory",
                 "user-native-memory",
-                "MEMORY.md",
+                "notes/planning.md",
                 1.0,
                 "durable planning fact",
             ),
@@ -626,7 +631,7 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
         1,
         "long-term retrieval must exclude per-thread short-term scratch"
     );
-    assert_eq!(snippets[0].relative_path, "MEMORY.md");
+    assert_eq!(snippets[0].relative_path, "notes/planning.md");
 }
 
 #[tokio::test]
@@ -1268,3 +1273,449 @@ ironclaw_memory::memory_service_contract_full!(
             .expect("seed write through native's own write operation");
     }
 );
+
+// ---------------------------------------------------------------------------
+// The always-on curated prefix of the long-term lane (#7185)
+// ---------------------------------------------------------------------------
+// There is no separate host lane and no provider "curated" hook: this provider
+// serves its standing `MEMORY.md` as the head of the `read_long_term` lane the
+// host already asks for. What that owes the caller is pinned here — the
+// document the write guidance names is the document the lane serves, it is
+// served regardless of the turn's query, absence degrades to search-only, and
+// it stays scoped to the invocation user.
+
+/// A context request with a query chosen to match nothing in the seeded data,
+/// so anything the lane returns arrived through the curated prefix rather than
+/// through full-text search.
+fn unrelated_query_request(max_snippets: usize) -> MemoryServiceContextRequest {
+    MemoryServiceContextRequest {
+        query: "zzz unrelated vocabulary".to_string(),
+        max_snippets,
+        context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+    }
+}
+
+async fn save_standing_fact(
+    service: &NativeMemoryService,
+    invocation: &MemoryInvocation,
+    fact: &str,
+) {
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "memory".to_string(),
+                content: fact.to_string(),
+                append: true,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("curated write");
+}
+
+/// The whole point of the curated prefix: a fact saved through the reserved
+/// `memory` write target comes back on the long-term lane even when the turn's
+/// query shares no vocabulary with it. Full-text search cannot satisfy this —
+/// that is the #7185 bug — so a hit here can only have come from the standing
+/// document.
+#[tokio::test]
+async fn native_long_term_lane_serves_the_standing_document_for_an_unrelated_query() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, "the user prefers metric units").await;
+
+    let snippets = service
+        .read_long_term(invocation, unrelated_query_request(10))
+        .await
+        .expect("long-term lane retrieval");
+
+    assert_eq!(
+        snippets[0].relative_path, "MEMORY.md",
+        "the standing document must lead the lane, ahead of any search hit"
+    );
+    assert!(
+        snippets[0].text.contains("the user prefers metric units"),
+        "the guided save must be what the lane serves back: {:?}",
+        snippets[0].text
+    );
+}
+
+/// The curated prefix is a prefix, not a replacement: a search hit for the
+/// turn's actual query still reaches the model behind the standing document.
+#[tokio::test]
+async fn native_long_term_lane_keeps_search_hits_behind_the_standing_document() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, "the user prefers metric units").await;
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "notes/launch".to_string(),
+                content: "the launch checklist lives in the shared drive".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("searchable write");
+
+    let snippets = service
+        .read_long_term(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "launch checklist".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("long-term lane retrieval");
+
+    assert_eq!(snippets[0].relative_path, "MEMORY.md");
+    assert!(
+        snippets
+            .iter()
+            .any(|snippet| snippet.relative_path.contains("launch")),
+        "the query's own search hit must still be admitted: {:?}",
+        snippets
+            .iter()
+            .map(|snippet| snippet.relative_path.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A user who has never saved anything has no `MEMORY.md`. That is the normal
+/// state, not a fault: the lane degrades to search-only rather than failing, so
+/// a fresh install still gets ordinary retrieval.
+#[tokio::test]
+async fn native_absent_standing_document_degrades_the_lane_to_search_only() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "notes/launch".to_string(),
+                content: "the launch checklist lives in the shared drive".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("searchable write");
+
+    let snippets = service
+        .read_long_term(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "launch checklist".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("an absent standing document must not fail the lane");
+
+    assert!(
+        snippets
+            .iter()
+            .all(|snippet| snippet.relative_path != "MEMORY.md"),
+        "no standing document exists, so nothing may be invented for it"
+    );
+    assert!(
+        !snippets.is_empty(),
+        "the search half of the lane must still work"
+    );
+}
+
+/// The memory guidance tells the model to save each durable fact as its own
+/// one-line append, and the curated prefix splits `MEMORY.md` on line
+/// boundaries — so two guided saves must land as two lines. The backend append
+/// is byte-exact, so without a service-side terminator "drinks tea" then "lives
+/// in Berlin" persists as `drinks tealives in Berlin` and both facts reach
+/// later turns as one corrupted fact.
+#[tokio::test]
+async fn native_consecutive_curated_appends_stay_separate_facts() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    // Deliberately no trailing newline on either entry — this is exactly the
+    // shape the guidance's "one concise self-contained line" produces.
+    for fact in ["the user drinks tea", "the user lives in Berlin"] {
+        save_standing_fact(&service, &invocation, fact).await;
+    }
+
+    let document = service
+        .read(
+            invocation,
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
+            },
+        )
+        .await
+        .expect("standing document read");
+
+    let facts: Vec<&str> = document
+        .content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        facts,
+        vec!["the user drinks tea", "the user lives in Berlin"],
+        "consecutive appends must stay on their own lines, not run together"
+    );
+}
+
+/// The curated prefix is scoped like every other memory read: another user's
+/// standing document never reaches this user's lane. This is what makes the
+/// prefix safe to serve for every user with no per-user gate.
+#[tokio::test]
+async fn native_standing_document_is_scoped_to_the_invocation_user() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let owner = invocation();
+    save_standing_fact(&service, &owner, "the owner's standing fact").await;
+
+    let mut other = invocation();
+    other.scope.user_id = UserId::new("user-native-memory-other").unwrap();
+    let snippets = service
+        .read_long_term(other, unrelated_query_request(10))
+        .await
+        .expect("another user's lane still resolves");
+
+    assert!(
+        snippets.is_empty(),
+        "another user's standing document must never reach this lane: {:?}",
+        snippets
+            .iter()
+            .map(|snippet| snippet.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The standing document cannot consume the caller's whole snippet allowance:
+/// a large `MEMORY.md` is capped, and the last admitted chunk says so, or a
+/// clipped document reads as a complete one.
+#[tokio::test]
+async fn native_oversized_standing_document_is_capped_and_marked_truncated() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    for index in 0..200 {
+        save_standing_fact(
+            &service,
+            &invocation,
+            &format!("standing fact number {index} about the user and their long running work"),
+        )
+        .await;
+    }
+
+    let snippets = service
+        .read_long_term(invocation, unrelated_query_request(10))
+        .await
+        .expect("long-term lane retrieval");
+
+    assert_eq!(
+        snippets.len(),
+        4,
+        "the standing document is capped at its own budget, not the caller's"
+    );
+    assert!(
+        snippets
+            .last()
+            .expect("capped lane is non-empty")
+            .text
+            .ends_with(" (truncated)"),
+        "a clipped document must say so"
+    );
+}
+
+/// The standing document leads the lane, so it must not ALSO arrive as a search
+/// hit for a query that happens to match it — that spends a second snippet slot
+/// re-admitting what the model can already see, and displaces a different
+/// document that matched. Driven at a tight `max_snippets` so the displacement
+/// would be visible if it happened.
+#[tokio::test]
+async fn native_long_term_lane_does_not_readmit_the_standing_document_as_a_search_hit() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, "the user tracks kayak races").await;
+    service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "notes/kayak".to_string(),
+                content: "the kayak races start in autumn".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("searchable write");
+
+    // "kayak" matches BOTH documents, and only two slots are available.
+    let snippets = service
+        .read_long_term(
+            invocation,
+            MemoryServiceContextRequest {
+                query: "kayak".to_string(),
+                max_snippets: 2,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("long-term lane retrieval");
+
+    let paths: Vec<&str> = snippets
+        .iter()
+        .map(|snippet| snippet.relative_path.as_str())
+        .collect();
+    assert_eq!(
+        paths.iter().filter(|path| **path == "MEMORY.md").count(),
+        1,
+        "the standing document must appear exactly once: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|path| path.contains("kayak")),
+        "the matching note must keep its slot: {paths:?}"
+    );
+}
+
+/// One line longer than a chunk must not become an oversized chunk. The host
+/// sanitizes a curated chunk through the same path as a search hit, which
+/// truncates SILENTLY, so an over-long line would otherwise reach the model
+/// shortened with nothing saying so.
+#[tokio::test]
+async fn native_oversized_single_line_is_clipped_and_marked_by_the_provider() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    save_standing_fact(&service, &invocation, &"a".repeat(1200)).await;
+
+    let snippets = service
+        .read_long_term(invocation, unrelated_query_request(10))
+        .await
+        .expect("long-term lane retrieval");
+
+    assert!(!snippets.is_empty(), "the standing document must be served");
+    for snippet in &snippets {
+        assert!(
+            snippet.text.len() <= 400,
+            "every curated chunk must fit the raw-byte limit; got {} bytes",
+            snippet.text.len()
+        );
+    }
+    assert!(
+        snippets
+            .iter()
+            .any(|snippet| snippet.text.ends_with(" (truncated)")),
+        "clipped content must say it was clipped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The memory guidance this package ships (#7185)
+// ---------------------------------------------------------------------------
+// The guidance is this package's, so its content is pinned here rather than in
+// the host that appends it. Nothing else tells the model that persistent
+// memory exists, when a stated preference is worth saving, or how to phrase one
+// — and every failure mode below is invisible to the compiler.
+
+/// The load-bearing names: the exact tool ids the guidance instructs the model
+/// to call (a renamed tool leaves the instruction pointing at nothing), the
+/// curated `memory` target and the append mode the standing-document prefix
+/// reads back, and the never-save carve-out for secrets.
+///
+/// Both write modes are named on purpose. The save path is the append mode, so
+/// a forget instruction that does not say otherwise is read as "append the
+/// correction" — which leaves the entry the user asked to drop in the document,
+/// and the standing-document prefix then re-injects both.
+#[test]
+fn memory_guidance_names_the_save_path_and_its_limits() {
+    for expected in [
+        "ironclaw.memory.write",
+        "ironclaw.memory.search",
+        "`memory`",
+        "append: true",
+        "append: false",
+        "across conversations",
+        "Never save secrets",
+    ] {
+        assert!(
+            ironclaw_memory_native::MEMORY_GUIDANCE.contains(expected),
+            "memory guidance must mention {expected:?}"
+        );
+    }
+}
+
+/// Field-proven doctrine the guidance has to carry, each pinned because
+/// dropping it degrades recall quality in a way no compiler catches:
+///
+/// - **Declarative form.** A memory saved as an imperative ("Always respond
+///   concisely") is re-read as a standing directive on every later turn — and
+///   the standing-document prefix re-injects it every turn — so it can override
+///   what the user is asking for now. The worked example pair is the part
+///   models actually copy, so pin both halves.
+/// - **Staleness skip-list.** Task progress, session outcomes, and short-lived
+///   artifacts (PR numbers, commit SHAs) crowd out durable facts and go wrong
+///   within days.
+/// - **Priority framing.** Tells the model which memory is worth the write when
+///   it has to choose.
+#[test]
+fn memory_guidance_carries_the_write_quality_doctrine() {
+    for (doctrine, expected) in [
+        ("declarative-form rule", "declarative fact"),
+        (
+            "declarative example (good)",
+            "User prefers concise responses",
+        ),
+        ("declarative example (bad)", "Always respond concisely"),
+        ("staleness skip-list", "task progress"),
+        ("staleness skip-list", "commit SHAs"),
+        ("staleness horizon", "stale within a week"),
+        ("priority framing", "repeat or correct themselves"),
+    ] {
+        assert!(
+            ironclaw_memory_native::MEMORY_GUIDANCE.contains(expected),
+            "memory guidance lost its {doctrine}: expected {expected:?}"
+        );
+    }
+}
+
+/// Appended to every prompt on every turn while this provider is bound, so it
+/// has to stay worth that. Guidance that grows unchecked is how a system prompt
+/// quietly becomes the dominant cost of a cheap turn. It also has to open with
+/// a heading, because the host concatenates it after the user's own file and it
+/// must read as its own section rather than running into the previous
+/// paragraph.
+#[test]
+fn memory_guidance_is_a_compact_self_contained_section() {
+    let guidance = ironclaw_memory_native::MEMORY_GUIDANCE;
+    assert!(
+        guidance.starts_with('#'),
+        "guidance is appended as its own section and must open with a markdown heading; \
+         starts with {:?}",
+        guidance.chars().take(16).collect::<String>()
+    );
+    let lines = guidance.lines().count();
+    assert!(
+        lines <= 18,
+        "guidance is appended to every turn's prompt and must stay compact; {lines} lines"
+    );
+}

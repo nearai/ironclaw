@@ -312,6 +312,13 @@ SEL_V2 = {
     "nav_settings_inference": "a[href='/settings/inference']",
     "nav_settings_appearance": "a[href='/settings/appearance']",
     "settings_search_input": "input[type='search'][placeholder='Search settings...']",
+    "settings_model_selector": "[data-testid='settings-model-selector']",
+    "settings_model_selector_status": "[data-testid='settings-model-selector-status']",
+    "settings_model_policy_editor": "[data-testid='settings-model-policy-editor']",
+    "settings_model_policy_model_input": "[data-testid='settings-model-policy-model-input']",
+    "settings_model_policy_add_model": "[data-testid='settings-model-policy-add-model']",
+    "settings_model_policy_save": "[data-testid='settings-model-policy-save']",
+    "settings_model_policy_status": "[data-testid='settings-model-policy-status']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat

@@ -1,5 +1,5 @@
 //! WS0 baseline record for the target-architecture restructure (epic #3773,
-//! workstream #6920 — `docs/reborn/target-architecture/CHECKLIST.md` WS0).
+//! workstream #6920 — `docs/internal/reborn/target-architecture/CHECKLIST.md` WS0).
 //!
 //! CHECKLIST WS0 names five ratchets that must not regress while the
 //! restructure runs. Three of them are recorded beside the test that owns the
@@ -125,7 +125,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// observed value move with this record so the increase is explicit.
 /// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
 /// delivery refactor with #7214's sandbox profile and binding assembly.
-/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// ✎ Union re-measured on the #7373 merge (2026-08-08): the gate audit's
+/// independent re-equalization (40_423 → 40_524, same drift class) folds into
+/// the merged-tree figure, recorded with `[gate].loc_ceiling`/`loc_observed`.
+/// Re-measured on the MERGED tree (web-app channel assembly + #7171 skills
 /// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
 /// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
 /// this ratchet fails when the two disagree.
@@ -141,7 +144,28 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// manifest ceiling (41_810, seeded from the merge-queue commit where
 /// concurrent mainline growth adds ~79 LOC on top of this tree) stays within
 /// the nudge window of this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_731;
+/// ✎ Union re-measured 41_731 → 41_942 after merging #7471 with the channel
+/// capability branch. The process-journal pool assembly and channel
+/// registration/capability assembly are disjoint; the manifest ceiling and
+/// observed value move with this measured merged-tree record.
+/// ✎ Union re-measured 41_731 → 41_820 on 2026-08-12 (#7373 refresh merge
+/// of main): the audit branch's record (40_804) and main's chain fold;
+/// measured on the merged tree with `bash
+/// scripts/ci/check-composition-budget.sh --print`, and the manifest's
+/// `loc_ceiling`/`loc_observed` re-equalize to the same figure in this
+/// commit.
+/// ✎ Re-ratcheted 41_731 → 41_533 on 2026-08-12 for #7185: the memory-save
+/// guidance and its content pins moved out of composition into the
+/// memory-native package that owns them, and the prompt tests split out of the
+/// production file. This record moves with the manifest ceiling in the same
+/// commit — the gate's NUDGE fired, so the eviction is locked in rather than
+/// banked as headroom. Measured on this branch's merged tree with
+/// `bash scripts/ci/check-composition-budget.sh`.
+/// ✎ Union re-measured on 2026-08-12 after merging main (#7365's composition
+/// eviction + #7373 re-equalization) into the unified-channel branch; the
+/// merged tree is measured, not summed, and the manifest ceiling/observed
+/// move with this record in the same commit.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_780;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

@@ -4,7 +4,7 @@
 
 - Read `Cargo.toml` for backend feature shape.
 - Read `src/lib.rs` for trigger domain contracts and repository traits.
-- Use `docs/reborn/contracts/triggers.md` as the source of truth before changing behavior.
+- Use `docs/internal/reborn/contracts/triggers.md` as the source of truth before changing behavior.
 
 ## What This Crate Owns
 

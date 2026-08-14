@@ -1,50 +1,40 @@
-use std::sync::Mutex;
-
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
 use super::*;
 
-struct RecordingEgress {
-    requests: Mutex<Vec<RestrictedEgressRequest>>,
-    status: u16,
-}
-
-impl RecordingEgress {
-    fn ok() -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            status: 200,
-        }
-    }
-
-    fn failing() -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            status: 500,
-        }
-    }
-}
+struct InertEgress;
 
 #[async_trait]
-impl RestrictedEgress for RecordingEgress {
+impl RestrictedEgress for InertEgress {
+    async fn send(
+        &self,
+        _request: RestrictedEgressRequest,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        Err(RestrictedEgressError::PolicyDenied)
+    }
+}
+
+struct FixedAttachmentEgress;
+
+#[async_trait]
+impl RestrictedEgress for FixedAttachmentEgress {
     async fn send(
         &self,
         request: RestrictedEgressRequest,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-        self.requests.lock().expect("requests lock").push(request);
+        if request.url.ends_with("/getFile") {
+            return Ok(RestrictedEgressResponse {
+                status: 200,
+                body:
+                    br#"{"ok":true,"result":{"file_size":12,"file_path":"documents/fetched.bin"}}"#
+                        .to_vec(),
+            });
+        }
         Ok(RestrictedEgressResponse {
-            status: self.status,
-            body: b"{\"ok\":true}".to_vec(),
+            status: 200,
+            body: b"hello world!".to_vec(),
         })
-    }
-}
-
-fn context<'a>(config: &'a [(String, String)]) -> ChannelContext<'a> {
-    ChannelContext {
-        extension_id: "telegram",
-        installation_id: "install_alpha",
-        config,
     }
 }
 
@@ -55,107 +45,44 @@ fn bot_username_config() -> (String, String) {
     )
 }
 
-fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+async fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+    inbound_with_egress(body, &InertEgress).await
+}
+
+async fn inbound_with_egress(
+    body: &[u8],
+    egress: &dyn RestrictedEgress,
+) -> Result<InboundOutcome, ChannelError> {
     let config = [bot_username_config()];
-    TelegramChannelAdapter::default().inbound(VerifiedInbound {
-        extension_id: "telegram",
-        installation_id: "install_alpha",
-        config: &config,
-        body,
-        headers: &[],
-        can_reply_in_threads: false,
-    })
-}
-
-#[tokio::test]
-async fn activate_names_the_webhook_secret_as_a_declared_body_credential() {
-    let egress = RecordingEgress::ok();
-    let config = vec![
-        bot_username_config(),
-        (
-            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-            "https://host.example/webhooks/extensions/telegram/updates".to_string(),
-        ),
-    ];
     TelegramChannelAdapter::default()
-        .activate(&context(&config), &egress)
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &config,
+                body,
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            egress,
+        )
         .await
-        .expect("activate succeeds");
-    let requests = egress.requests.lock().expect("requests lock");
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert!(request.url.ends_with("/setWebhook"));
-    assert!(request.url.starts_with("https://api.telegram.org/"));
-    assert_eq!(
-        request.credential.as_ref().map(SecretHandle::as_str),
-        Some(TELEGRAM_BOT_TOKEN_HANDLE),
-        "the bot token is a host-injected handle, never bytes"
-    );
-    assert_eq!(
-        request
-            .body_credentials
-            .iter()
-            .map(SecretHandle::as_str)
-            .collect::<Vec<_>>(),
-        vec![TELEGRAM_WEBHOOK_SECRET_HANDLE],
-        "the webhook secret rides as a declared body-credential handle; \
-             the host inserts its VALUE at the manifest's /secret_token pointer"
-    );
-    let body: serde_json::Value =
-        serde_json::from_slice(request.body.as_deref().unwrap_or_default()).expect("json");
-    assert_eq!(
-        body["url"],
-        "https://host.example/webhooks/extensions/telegram/updates"
-    );
-    assert!(
-        body.get("secret_token").is_none(),
-        "the adapter must not fabricate the secret field; insertion is host-side"
-    );
-    assert!(
-        body.get("secret_token_handle").is_none(),
-        "the handle name must never be sent to the vendor"
-    );
 }
+
+// The three `activate`/`cleanup` tests that stood here moved with the
+// behavior: vendor-side webhook wiring is now the manifest's
+// `[channel.ingress.registration]` / `[channel.ingress.deregistration]`
+// recipes, run by the generic host executor. Every assertion they made — the
+// bot token travels as a handle and never as bytes, the webhook secret rides
+// `body_credentials` so the host inserts its VALUE at the declared pointer,
+// the rendered body carries `url` but never `secret_token`, a missing config
+// value and a vendor 5xx both fail activation, and deactivation calls
+// `deleteWebhook` — is re-pinned in
+// `ironclaw_extension_host::lifecycle::tests`, against the executor that now
+// owns them.
 
 #[tokio::test]
-async fn activate_fails_without_a_webhook_url_and_on_vendor_error() {
-    let egress = RecordingEgress::ok();
-    let bot_config = [bot_username_config()];
-    let error = TelegramChannelAdapter::default()
-        .activate(&context(&bot_config), &egress)
-        .await
-        .expect_err("missing webhook url must fail activation");
-    assert!(matches!(error, ChannelError::VendorWiring { .. }));
-
-    let failing = RecordingEgress::failing();
-    let config = vec![
-        bot_username_config(),
-        (
-            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-            "https://host.example/hooks".to_string(),
-        ),
-    ];
-    let error = TelegramChannelAdapter::default()
-        .activate(&context(&config), &failing)
-        .await
-        .expect_err("vendor failure must fail activation");
-    assert!(matches!(error, ChannelError::VendorWiring { .. }));
-}
-
-#[tokio::test]
-async fn cleanup_unregisters_the_webhook() {
-    let egress = RecordingEgress::ok();
-    TelegramChannelAdapter::default()
-        .cleanup(&context(&[]), &egress)
-        .await
-        .expect("cleanup succeeds");
-    let requests = egress.requests.lock().expect("requests lock");
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].url.ends_with("/deleteWebhook"));
-}
-
-#[test]
-fn private_chat_update_normalizes_to_one_message() {
+async fn private_chat_update_normalizes_to_one_message() {
     let outcome = inbound(
         br#"{
                 "update_id": 42,
@@ -168,6 +95,7 @@ fn private_chat_update_normalizes_to_one_message() {
                 }
             }"#,
     )
+    .await
     .expect("update parses");
     let InboundOutcome::Messages(messages) = outcome else {
         panic!("expected Messages");
@@ -183,8 +111,8 @@ fn private_chat_update_normalizes_to_one_message() {
     assert_eq!(messages[0].conversation.conversation_id(), "555");
 }
 
-#[test]
-fn ambient_group_chatter_and_non_message_updates_are_ignored() {
+#[tokio::test]
+async fn ambient_group_chatter_and_non_message_updates_are_ignored() {
     // Group message without any explicit trigger.
     assert!(matches!(
         inbound(
@@ -198,33 +126,35 @@ fn ambient_group_chatter_and_non_message_updates_are_ignored() {
                         "chat": {"id": -100200, "type": "group"}
                     }
                 }"#,
-        ),
+        )
+        .await,
         Ok(InboundOutcome::Ignore)
     ));
     // Non-message update kinds.
     assert!(matches!(
-            inbound(br#"{"update_id": 44, "edited_message": {"message_id": 9, "date": 1, "chat": {"id": 1, "type": "private"}}}"#),
+            inbound(br#"{"update_id": 44, "edited_message": {"message_id": 9, "date": 1, "chat": {"id": 1, "type": "private"}}}"#).await,
             Ok(InboundOutcome::Ignore)
         ));
 }
 
-#[test]
-fn malformed_updates_are_typed_parse_errors() {
+#[tokio::test]
+async fn malformed_updates_are_typed_parse_errors() {
     assert!(matches!(
-        inbound(br#"{"update_id":"#),
+        inbound(br#"{"update_id":"#).await,
         Err(ChannelError::Parse { .. })
     ));
     assert!(matches!(
         inbound(
             br#"{"message": {"message_id": 1, "date": 1, "chat": {"id": 1, "type": "private"}}}"#
-        ),
+        )
+        .await,
         Err(ChannelError::Parse { .. })
     ));
 }
 
-#[test]
-fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() {
-    let outcome = inbound(
+#[tokio::test]
+async fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() {
+    let outcome = inbound_with_egress(
         br#"{
                 "update_id": 45,
                 "message": {
@@ -240,7 +170,9 @@ fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() {
                     }
                 }
             }"#,
+        &FixedAttachmentEgress,
     )
+    .await
     .expect("attachment-only update parses");
     let InboundOutcome::Messages(messages) = outcome else {
         panic!("expected Messages");
@@ -248,12 +180,13 @@ fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() {
     assert_eq!(messages.len(), 1);
     assert!(messages[0].text.is_empty());
     assert_eq!(messages[0].attachments.len(), 1);
-    assert_eq!(messages[0].attachments[0].vendor_ref, "file-opaque-1");
+    assert_eq!(messages[0].attachments[0].id, "file-opaque-1");
+    assert!(messages[0].conversation_context.is_none());
 }
 
-#[test]
-fn private_media_group_update_becomes_a_triggered_batch_fragment() {
-    let outcome = inbound(
+#[tokio::test]
+async fn private_media_group_update_becomes_a_triggered_batch_fragment() {
+    let outcome = inbound_with_egress(
         br#"{
             "update_id": 46,
             "message": {
@@ -270,7 +203,9 @@ fn private_media_group_update_becomes_a_triggered_batch_fragment() {
                 }
             }
         }"#,
+        &FixedAttachmentEgress,
     )
+    .await
     .expect("media-group update parses");
     let InboundOutcome::BatchFragment(fragment) = outcome else {
         panic!("expected BatchFragment");
@@ -287,9 +222,9 @@ fn private_media_group_update_becomes_a_triggered_batch_fragment() {
     assert_eq!(fragment.message.attachments.len(), 1);
 }
 
-#[test]
-fn uncaptioned_group_media_fragment_is_retained_but_not_triggered() {
-    let outcome = inbound(
+#[tokio::test]
+async fn uncaptioned_group_media_fragment_is_retained_but_not_triggered() {
+    let outcome = inbound_with_egress(
         br#"{
             "update_id": 47,
             "message": {
@@ -306,7 +241,9 @@ fn uncaptioned_group_media_fragment_is_retained_but_not_triggered() {
                 }
             }
         }"#,
+        &FixedAttachmentEgress,
     )
+    .await
     .expect("media-group update parses");
     let InboundOutcome::BatchFragment(fragment) = outcome else {
         panic!("expected BatchFragment");

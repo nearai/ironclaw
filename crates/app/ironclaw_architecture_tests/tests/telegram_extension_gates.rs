@@ -7,7 +7,7 @@
 //! 2. The Reborn context stays free of the v1 pairing surface: no
 //!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend —
 //!    Telegram pairing is the WebGeneratedCode flow under
-//!    `/api/webchat/v2/channels/telegram/pairing`.
+//!    the generic `/api/webchat/v2/extensions/{extension_id}/pairing/{action}`.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -358,11 +358,6 @@ fn no_retired_taxonomy_telegram_identifiers() {
         if display.contains("telegram_extension_gates.rs") {
             continue;
         }
-        // `crates/ironclaw_gateway/static` is the v1 monolith's embedded UI,
-        // retained until the monolith retires — not reborn context.
-        if display.contains("ironclaw_gateway/static") {
-            continue;
-        }
         let Ok(contents) = std::fs::read_to_string(&file) else {
             continue;
         };
@@ -392,9 +387,7 @@ fn reborn_context_free_of_v1_pairing_routes() {
     let mut offenders = Vec::new();
     for file in rust_and_frontend_files(&root.join("crates")) {
         let display = file.display().to_string();
-        if display.contains("telegram_extension_gates.rs")
-            || display.contains("ironclaw_gateway/static")
-        {
+        if display.contains("telegram_extension_gates.rs") {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&file) else {
@@ -415,8 +408,8 @@ fn reborn_context_free_of_v1_pairing_routes() {
     }
     assert!(
         offenders.is_empty(),
-        "v1 pairing route literals found in the reborn context (telegram pairing is \
-         /api/webchat/v2/channels/telegram/pairing):\n{}",
+        "v1 pairing route literals found in the reborn context (pairing is generic: \
+         /api/webchat/v2/extensions/{{extension_id}}/pairing/{{action}}):\n{}",
         offenders.join("\n")
     );
 }

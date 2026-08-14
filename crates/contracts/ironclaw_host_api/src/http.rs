@@ -182,7 +182,7 @@ pub enum RuntimeCredentialTarget {
 /// Stored as one JSON blob under the channel's VAPID credential handle.
 /// `es256_private_key_pkcs8_b64url` is secret; the public key and subject
 /// are not, but travel inside the same material so the injector needs one
-/// resolution. Generation lives in `ironclaw_web_push`; parsing/signing at
+/// resolution. Generation lives in `ironclaw_web_app`; parsing/signing at
 /// the host egress credential boundary.
 ///
 /// `Debug` is hand-written to redact the private key: this type is serialized

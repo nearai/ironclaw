@@ -1,7 +1,7 @@
 use super::*;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentKind,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 
@@ -161,46 +161,6 @@ fn sample_parsed(payload: ProductInboundPayload) -> ParsedProductInbound {
     .expect("parsed")
 }
 
-fn attachment_descriptor(id: &str) -> ProductAttachmentDescriptor {
-    ProductAttachmentDescriptor::new(
-        id,
-        "application/pdf",
-        Some(format!("{id}.pdf")),
-        Some(4),
-        ProductAttachmentKind::Document,
-    )
-    .expect("descriptor")
-}
-
-fn envelope_with_channel_sources(sources: &[(&str, &str)]) -> ProductInboundEnvelope {
-    let descriptors = sources
-        .iter()
-        .map(|(id, _)| attachment_descriptor(id))
-        .collect::<Vec<_>>();
-    let refs = descriptors
-        .iter()
-        .zip(sources)
-        .map(|(descriptor, (_, vendor_ref))| ChannelAttachmentRef {
-            descriptor: descriptor.clone(),
-            vendor_ref: (*vendor_ref).to_string(),
-        })
-        .collect::<Vec<_>>();
-    ProductInboundEnvelope::from_trusted_parse(
-        sample_context(),
-        sample_parsed(ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "review the attachments",
-                descriptors,
-                ProductTriggerReason::DirectChat,
-            )
-            .expect("payload"),
-        )),
-    )
-    .expect("envelope")
-    .with_channel_attachment_refs(refs)
-    .expect("matching refs")
-}
-
 #[test]
 fn user_message_text_length_bounded() {
     let oversize = "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES + 1);
@@ -351,142 +311,6 @@ fn envelope_is_built_from_trusted_context() {
 }
 
 #[test]
-fn channel_attachment_refs_must_match_descriptors_and_stay_transient() {
-    let descriptor = ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
-        "file-1",
-        "application/pdf",
-        Some("report.pdf".to_string()),
-        Some(4),
-        ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
-    )
-    .expect("descriptor");
-    let source = ChannelAttachmentRef {
-        descriptor: descriptor.clone(),
-        vendor_ref: "opaque-provider-file-reference".to_string(),
-    };
-    let payload = ProductInboundPayload::UserMessage(
-        UserMessagePayload::new(
-            "review the report",
-            vec![descriptor],
-            ProductTriggerReason::DirectChat,
-        )
-        .expect("payload"),
-    );
-
-    let non_user_envelope = ProductInboundEnvelope::from_trusted_parse(
-        sample_context(),
-        sample_parsed(ProductInboundPayload::NoOp),
-    )
-    .expect("non-user envelope");
-    assert!(
-        non_user_envelope
-            .with_channel_attachment_refs(vec![source.clone()])
-            .is_err(),
-        "channel attachment refs require a user-message payload"
-    );
-
-    // Mismatched refs fail closed before any transfer authority exists.
-    let mismatched = ChannelAttachmentRef {
-        descriptor: ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
-            "other-file",
-            "application/pdf",
-            None,
-            None,
-            ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
-        )
-        .expect("descriptor"),
-        vendor_ref: "other".to_string(),
-    };
-    let envelope =
-        ProductInboundEnvelope::from_trusted_parse(sample_context(), sample_parsed(payload))
-            .expect("envelope");
-    assert!(
-        envelope
-            .clone()
-            .with_channel_attachment_refs(vec![mismatched])
-            .is_err(),
-        "refs that do not match the payload descriptors are rejected"
-    );
-
-    // Matching refs stamp, are readable host-side, and never serialize —
-    // the provider transfer reference is transient host state.
-    let envelope = envelope
-        .with_channel_attachment_refs(vec![source])
-        .expect("matching refs stamp");
-    assert_eq!(envelope.channel_attachment_refs().len(), 1);
-    let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
-    assert!(
-        !serialized.contains("opaque-provider-file-reference"),
-        "provider transfer references must not enter the serialized envelope"
-    );
-}
-
-#[test]
-fn rewritten_user_message_rejects_ambiguous_channel_sources() {
-    let envelope =
-        envelope_with_channel_sources(&[("duplicate", "vendor-a"), ("duplicate", "vendor-b")]);
-    let rewrite = UserMessagePayload::new(
-        "keep one",
-        vec![attachment_descriptor("duplicate")],
-        ProductTriggerReason::DirectChat,
-    )
-    .expect("rewrite");
-
-    let error = envelope
-        .with_rewritten_user_message(rewrite)
-        .expect_err("a descriptor matching two vendor refs is ambiguous");
-    assert!(matches!(
-        error,
-        ProductAdapterError::MalformedInboundPayload { .. }
-    ));
-}
-
-#[test]
-fn rewritten_user_message_rejects_reusing_one_channel_source() {
-    let envelope = envelope_with_channel_sources(&[("single", "vendor-one")]);
-    let descriptor = attachment_descriptor("single");
-    let rewrite = UserMessagePayload::new(
-        "duplicate the attachment",
-        vec![descriptor.clone(), descriptor],
-        ProductTriggerReason::DirectChat,
-    )
-    .expect("rewrite");
-
-    let error = envelope
-        .with_rewritten_user_message(rewrite)
-        .expect_err("one vendor ref cannot satisfy two rewritten attachments");
-    assert!(matches!(
-        error,
-        ProductAdapterError::MalformedInboundPayload { .. }
-    ));
-}
-
-#[test]
-fn rewritten_user_message_remaps_multiple_channel_sources_in_policy_order() {
-    let envelope =
-        envelope_with_channel_sources(&[("first", "vendor-first"), ("second", "vendor-second")]);
-    let rewrite = UserMessagePayload::new(
-        "reverse the attachments",
-        vec![
-            attachment_descriptor("second"),
-            attachment_descriptor("first"),
-        ],
-        ProductTriggerReason::DirectChat,
-    )
-    .expect("rewrite");
-
-    let rewritten = envelope
-        .with_rewritten_user_message(rewrite)
-        .expect("unique sources remap");
-    let vendor_refs = rewritten
-        .channel_attachment_refs()
-        .iter()
-        .map(|source| source.vendor_ref.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(vendor_refs, ["vendor-second", "vendor-first"]);
-}
-
-#[test]
 fn trusted_context_can_stamp_explicit_source_channel() {
     let evidence = ProtocolAuthEvidence::test_verified(
         AuthRequirement::SharedSecretHeader {
@@ -553,6 +377,7 @@ fn ack_durable_outcomes_classify_correctly() {
         ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("msg").expect("valid"),
             submitted_run_id: TurnRunId::new(),
+            submission: None,
         }
         .is_durable_outcome()
     );
@@ -696,5 +521,133 @@ fn policy_denied_hint_unchanged() {
     assert_eq!(
         ProductRejectionKind::PolicyDenied.user_facing_hint(),
         "That request was declined by policy."
+    );
+}
+
+// Unified-channel-model regression: acks settled into the durable ledger
+// before the submit-metadata fields existed must still deserialize, and the
+// new metadata must round-trip. The ledger replays stored acks verbatim, so
+// this is persisted-wire compatibility, not merely serde hygiene.
+#[test]
+fn ack_rows_without_submit_metadata_still_deserialize() {
+    let legacy_accepted = serde_json::json!({
+        "accepted": {
+            "accepted_message_ref": "msg:1",
+            "submitted_run_id": TurnRunId::new(),
+        }
+    });
+    let ack: ProductInboundAck =
+        serde_json::from_value(legacy_accepted).expect("legacy accepted row deserializes");
+    let ProductInboundAck::Accepted { submission, .. } = &ack else {
+        panic!("expected accepted ack");
+    };
+    assert!(submission.is_none(), "legacy rows have no submit metadata");
+
+    let legacy_rejected_busy = serde_json::json!({
+        "rejected_busy": {
+            "accepted_message_ref": "msg:2",
+            "active_run_id": null,
+        }
+    });
+    let ack: ProductInboundAck =
+        serde_json::from_value(legacy_rejected_busy).expect("legacy busy row deserializes");
+    let ProductInboundAck::RejectedBusy { busy, .. } = &ack else {
+        panic!("expected rejected-busy ack");
+    };
+    assert!(busy.is_none(), "legacy rows have no busy snapshot");
+}
+
+#[test]
+fn ack_submit_metadata_round_trips() {
+    let ack = ProductInboundAck::Accepted {
+        accepted_message_ref: AcceptedMessageRef::new("msg:3").expect("valid"),
+        submitted_run_id: TurnRunId::new(),
+        submission: Some(Box::new(AcceptedTurnSubmission {
+            turn_id: "turn-1".to_string(),
+            status: ironclaw_host_api::turn::TurnStatus::Queued,
+            resolved_run_profile_id: "profile".to_string(),
+            resolved_run_profile_version: 3,
+            event_cursor: ironclaw_host_api::turn::EventCursor::default(),
+        })),
+    };
+    let json = serde_json::to_value(&ack).expect("serializes");
+    let back: ProductInboundAck = serde_json::from_value(json).expect("round trips");
+    assert_eq!(ack, back);
+}
+
+// These enums ride the durable session-inbound action ledger; the variant
+// tags are persisted vocabulary and must follow the repo-wide snake_case
+// contract from the first row written — retrofitting a casing change later
+// is a data migration.
+#[test]
+fn inbound_trust_and_binding_directive_persist_snake_case_tags() {
+    let caller = crate::surface::ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-a").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("user-a").expect("user"),
+        None,
+        None,
+    );
+    let trust = serde_json::to_value(ProductInboundTrust::SessionCaller { caller })
+        .expect("serialize trust");
+    assert!(
+        trust.get("session_caller").is_some(),
+        "session-caller tag must persist snake_case: {trust}"
+    );
+
+    let external = serde_json::to_value(ProductInboundBindingDirective::ExternalRef)
+        .expect("serialize directive");
+    assert_eq!(external, serde_json::json!("external_ref"));
+    let owned = serde_json::to_value(ProductInboundBindingDirective::OwnedThread {
+        thread_id: ironclaw_host_api::ids::ThreadId::new("thread-a").expect("thread"),
+    })
+    .expect("serialize directive");
+    assert!(
+        owned.get("owned_thread").is_some(),
+        "owned-thread tag must persist snake_case: {owned}"
+    );
+}
+
+// The trust seam: a session envelope must never expose a verified webhook
+// claim, and external-ref builders must fail closed on it rather than
+// running the webhook binding machinery for a browser message.
+#[test]
+fn session_envelope_carries_caller_and_no_verified_claim() {
+    let caller = crate::surface::ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-a").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("user-a").expect("user"),
+        None,
+        None,
+    );
+    let thread_id = ironclaw_host_api::ids::ThreadId::new("thread-a").expect("thread");
+    let context = TrustedInboundContext::from_session_caller(
+        ProductAdapterId::new("web_app").expect("adapter"),
+        ProductSourceChannel::new("webui").expect("source"),
+        AdapterInstallationId::new("tenant-a").expect("installation"),
+        Utc::now(),
+        caller.clone(),
+        thread_id.clone(),
+    );
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new("action-1").expect("event"),
+        ExternalActorRef::new("user", "user-a", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(None, "thread-a", None, None).expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                .expect("payload"),
+        ),
+    )
+    .expect("parsed");
+    let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope");
+
+    assert!(envelope.auth_claim().is_none());
+    assert_eq!(envelope.session_caller(), Some(&caller));
+    assert!(matches!(
+        envelope.binding_directive(),
+        ProductInboundBindingDirective::OwnedThread { thread_id: bound } if bound == &thread_id
+    ));
+    assert!(envelope.require_verified_auth_claim().is_err());
+    assert!(
+        crate::binding::ResolveBindingRequest::from_envelope(&envelope).is_err(),
+        "session envelopes must not build external binding requests"
     );
 }

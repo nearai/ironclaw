@@ -4669,6 +4669,34 @@ mod tests {
     }
 
     #[test]
+    fn manifest_wire_normalizes_the_immediately_preceding_v3_channel_shape() {
+        use ironclaw_extension_contracts::channel::DeliveryTransport;
+
+        let record = manifest_record("legacy-channel", None);
+        let mut payload = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        payload["resolved"]["channel"] = serde_json::json!({
+            "id": "notifications",
+            "display_name": "Legacy notifications",
+            "inbound": false,
+            "outbound": true,
+            "notifications": true,
+            "conversation_model": "continuous",
+            "presentation": {
+                "supports_markdown": false,
+                "max_message_chars": 1500,
+            },
+        });
+
+        let wire: WireManifestRecord = serde_json::from_value(payload)
+            .expect("a persisted pre-split v3 channel remains readable");
+        let resolved = wire.resolved.expect("resolved manifest");
+        let channel = resolved.channel.expect("legacy channel remains active");
+        assert!(!channel.supports_reply());
+        assert_eq!(channel.delivery_transport(), Some(DeliveryTransport::Push));
+        assert!(channel.requires_enrollment());
+    }
+
+    #[test]
     fn manifest_wire_accepts_agreeing_legacy_and_canonical_roots() {
         let root = VirtualPath::new("/system/extensions/dual-root").expect("root");
         let record = ExtensionManifestRecord::from_toml_with_root_binding(

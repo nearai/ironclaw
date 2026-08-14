@@ -36,8 +36,8 @@ pub(super) enum ProductCommandHandler {
     AutomationRename,
     AutomationDelete,
     NotificationChannelsSet,
-    WebPushSubscribe,
-    WebPushUnsubscribe,
+    NotificationSetupEnable,
+    NotificationSetupDisable,
 }
 
 impl ProductCommandHandler {
@@ -76,8 +76,8 @@ impl ProductCommandHandler {
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
-            WEB_PUSH_SUBSCRIBE_COMMAND_ID => Some(Self::WebPushSubscribe),
-            WEB_PUSH_UNSUBSCRIBE_COMMAND_ID => Some(Self::WebPushUnsubscribe),
+            NOTIFICATION_SETUP_ENABLE_COMMAND_ID => Some(Self::NotificationSetupEnable),
+            NOTIFICATION_SETUP_DISABLE_COMMAND_ID => Some(Self::NotificationSetupDisable),
             _ => None,
         }
     }
@@ -316,16 +316,21 @@ impl ProductCommandHandler {
                 let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
                 command_output(services.set_notification_channels(caller, request).await?)
             }
-            Self::WebPushSubscribe => {
-                let request: RebornWebPushSubscribeRequest = product_command_input(input)?;
-                command_output(services.web_push_service.subscribe(caller, request).await?)
-            }
-            Self::WebPushUnsubscribe => {
-                let request: RebornWebPushUnsubscribeRequest = product_command_input(input)?;
+            Self::NotificationSetupEnable => {
+                let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
                 command_output(
                     services
-                        .web_push_service
-                        .unsubscribe(caller, request)
+                        .notification_setup_service
+                        .enable(caller, request)
+                        .await?,
+                )
+            }
+            Self::NotificationSetupDisable => {
+                let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .notification_setup_service
+                        .disable(caller, request)
                         .await?,
                 )
             }
@@ -344,6 +349,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderDelete,
     LlmActiveSet,
     LlmUserModelPolicySet,
+    LlmUserModelPreferenceSet,
     ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
@@ -373,6 +379,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
             LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID => Some(Self::LlmUserModelPolicySet),
+            LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID => Some(Self::LlmUserModelPreferenceSet),
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
@@ -403,6 +410,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
             Self::LlmUserModelPolicySet => "user model policy updated",
+            Self::LlmUserModelPreferenceSet => "user model preference updated",
             Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
@@ -445,6 +453,11 @@ impl ProductCapabilityHandler {
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
             Self::LlmUserModelPolicySet => {
                 services.invoke_user_model_policy_set(caller, input).await
+            }
+            Self::LlmUserModelPreferenceSet => {
+                services
+                    .invoke_user_model_preference_set(caller, input)
+                    .await
             }
             Self::ExtensionRegisterHostedMcp => {
                 let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
@@ -637,6 +650,7 @@ mod tests {
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
             LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+            LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
