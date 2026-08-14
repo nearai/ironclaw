@@ -41,7 +41,7 @@ pub struct ProviderIdentityActorResolver {
     /// `None` accepts every actor kind: binding keys are already
     /// installation-scoped, so an unbound kind simply resolves to nothing.
     actor_kind: Option<String>,
-    identity_keyspaces: Vec<crate::channel_identity::ChannelIdentityKeyspace>,
+    identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     lookup: Arc<dyn RebornUserIdentityLookup>,
     resolved_user_cache: Arc<Mutex<HashMap<String, CachedProviderIdentity>>>,
     cache_ttl: Duration,
@@ -58,7 +58,7 @@ impl ProviderIdentityActorResolver {
             provider: provider.into(),
             adapter_id: adapter_id.into(),
             actor_kind: Some(actor_kind.into()),
-            identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
             lookup,
             resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROVIDER_IDENTITY_CACHE_TTL,
@@ -78,18 +78,18 @@ impl ProviderIdentityActorResolver {
             provider: provider.into(),
             adapter_id: adapter_id.into(),
             actor_kind: None,
-            identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
             lookup,
             resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROVIDER_IDENTITY_CACHE_TTL,
         }
     }
 
-    pub fn with_identity_keyspaces(
+    pub fn with_identity_keyspace(
         mut self,
-        identity_keyspaces: impl IntoIterator<Item = crate::channel_identity::ChannelIdentityKeyspace>,
+        identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     ) -> Self {
-        self.identity_keyspaces = identity_keyspaces.into_iter().collect();
+        self.identity_keyspace = identity_keyspace;
         self
     }
 
@@ -132,10 +132,10 @@ impl ProviderIdentityActorResolver {
         Ok(())
     }
 
-    fn provider_user_ids_for_request(
+    fn provider_user_id_for_request(
         &self,
         request: &ProductActorUserResolutionRequest,
-    ) -> Option<Vec<String>> {
+    ) -> Option<String> {
         if request.adapter_id.as_str() != self.adapter_id {
             return None;
         }
@@ -145,13 +145,8 @@ impl ProviderIdentityActorResolver {
             return None;
         }
         Some(
-            self.identity_keyspaces
-                .iter()
-                .map(|keyspace| {
-                    keyspace
-                        .provider_user_id(&request.installation_id, request.external_actor_ref.id())
-                })
-                .collect(),
+            self.identity_keyspace
+                .provider_user_id(&request.installation_id, request.external_actor_ref.id()),
         )
     }
 
@@ -181,7 +176,7 @@ impl std::fmt::Debug for ProviderIdentityActorResolver {
             .field("provider", &self.provider)
             .field("adapter_id", &self.adapter_id)
             .field("actor_kind", &self.actor_kind)
-            .field("identity_keyspaces", &self.identity_keyspaces)
+            .field("identity_keyspace", &self.identity_keyspace)
             .finish_non_exhaustive()
     }
 }
@@ -192,18 +187,16 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
-        let Some(provider_user_ids) = self.provider_user_ids_for_request(&request) else {
+        let Some(provider_user_id) = self.provider_user_id_for_request(&request) else {
             return Ok(None);
         };
-        for provider_user_id in provider_user_ids {
-            if let Some(user_id) = self.cached_user(&provider_user_id)? {
-                return Ok(Some(ResolvedProductActorUser::new(user_id)));
-            }
-            let resolved = self.lookup_user(&provider_user_id).await?;
-            if let Some(user_id) = resolved {
-                self.cache_user(provider_user_id, user_id.clone())?;
-                return Ok(Some(ResolvedProductActorUser::new(user_id)));
-            }
+        if let Some(user_id) = self.cached_user(&provider_user_id)? {
+            return Ok(Some(ResolvedProductActorUser::new(user_id)));
+        }
+        let resolved = self.lookup_user(&provider_user_id).await?;
+        if let Some(user_id) = resolved {
+            self.cache_user(provider_user_id, user_id.clone())?;
+            return Ok(Some(ResolvedProductActorUser::new(user_id)));
         }
         Ok(None)
     }
@@ -213,18 +206,13 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         request: &ProductActorUserResolutionRequest,
         expected: &ResolvedProductActorUser,
     ) -> Result<bool, ProductOperationFailure> {
-        let Some(provider_user_ids) = self.provider_user_ids_for_request(request) else {
+        let Some(provider_user_id) = self.provider_user_id_for_request(request) else {
             return Ok(false);
         };
         // This is the revocation/freshness check, not the hot-path resolver:
         // reading the positive cache here would keep a removed identity
         // authoritative until its TTL elapsed and admit another channel turn.
-        for provider_user_id in provider_user_ids {
-            if self.lookup_user(&provider_user_id).await?.as_ref() == Some(&expected.user_id) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self.lookup_user(&provider_user_id).await?.as_ref() == Some(&expected.user_id))
     }
 }
 
@@ -265,8 +253,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_link_resolver_preserves_a_legacy_pairing_key() {
+    async fn device_link_resolver_ignores_a_retired_pairing_key() {
         let installation_id = installation("install-alpha");
+        // Seeded exactly as the retired proof-code ceremony left it: an
+        // unversioned binding, nothing under `device-link-v1`.
         let lookup = Arc::new(RecordingLookup::new([(
             installation_scoped_provider_user_id(&installation_id, "U123"),
             user("user:alice"),
@@ -276,12 +266,10 @@ mod tests {
             "telegram",
             lookup.clone(),
         )
-        .with_identity_keyspaces(
-            crate::channel_identity::channel_identity_lookup_keyspaces(Some(
+        .with_identity_keyspace(
+            crate::channel_identity::ChannelIdentityKeyspace::for_strategy(Some(
                 ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink,
-            ))
-            .iter()
-            .copied(),
+            )),
         );
 
         let resolved = resolver
@@ -295,18 +283,16 @@ mod tests {
             .expect("resolution succeeds");
 
         assert_eq!(
-            resolved,
-            Some(ResolvedProductActorUser::new(user("user:alice")))
+            resolved, None,
+            "a retired proof-code binding must not admit an actor on a device-link channel"
         );
         assert_eq!(
             lookup.calls(),
-            vec![
-                (
-                    "telegram".to_string(),
-                    "install-alpha:device-link-v1:U123".to_string()
-                ),
-                ("telegram".to_string(), "install-alpha:U123".to_string()),
-            ]
+            vec![(
+                "telegram".to_string(),
+                "install-alpha:device-link-v1:U123".to_string()
+            )],
+            "a device-link channel consults only the device-link namespace"
         );
     }
 

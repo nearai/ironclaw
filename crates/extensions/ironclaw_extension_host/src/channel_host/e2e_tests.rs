@@ -5498,12 +5498,13 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
     }
 }
 
-/// REGRESSION (device-link cutover): a DM target created by the retired
-/// proof-code pairing flow remains valid for the already-authorized bot
-/// channel after the manifest switches to device linking. This grandfathered
-/// channel proof does not create the separate personal linked credential.
+/// REGRESSION (device-link cutover): a DM target recorded under the retired
+/// proof-code pairing flow is dead weight once the manifest switches to
+/// device linking — the harness's unversioned identity row (exactly what that
+/// ceremony left behind) must not validate it. The target is offered again
+/// only once the actor holds a device-link identity, and then exactly once.
 #[tokio::test]
-async fn device_link_outbound_target_preserves_legacy_pairing_identity() {
+async fn device_link_outbound_target_requires_the_linked_identity() {
     let harness = build_harness_with_connection_strategy(
         TurnMode::Running,
         ChannelConnectionStrategy::DeviceLink,
@@ -5519,7 +5520,7 @@ async fn device_link_outbound_target_preserves_legacy_pairing_identity() {
             dm_target_payload(Some(TEAM), CHANNEL),
         )
         .await
-        .expect("seed retained legacy DM target");
+        .expect("seed retained pre-cutover DM target");
     let provider = generic_outbound_target_provider(&harness, dm_targets);
 
     let listed = provider
@@ -5528,8 +5529,9 @@ async fn device_link_outbound_target_preserves_legacy_pairing_identity() {
         .expect("target list");
     assert_eq!(
         listed.len(),
-        1,
-        "the grandfathered bot channel keeps its existing delivery target"
+        0,
+        "a retired pairing's delivery target is not offered until the account \
+         is device-linked"
     );
 
     let installation = AdapterInstallationId::new(INSTALLATION).expect("installation");
@@ -5545,7 +5547,7 @@ async fn device_link_outbound_target_preserves_legacy_pairing_identity() {
     assert_eq!(
         listed_after_link.len(),
         1,
-        "adding the stronger device identity must not duplicate delivery targets"
+        "the linked identity revalidates the recorded target, exactly once"
     );
 }
 

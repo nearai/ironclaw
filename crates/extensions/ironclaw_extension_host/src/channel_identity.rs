@@ -16,23 +16,33 @@ use crate::ChannelConfigService;
 
 /// Durable identity-key namespace selected by the connection ceremony.
 ///
-/// The original channel pairing and OAuth paths write
-/// `{installation}:{actor}`. Device-linked channels additionally write a
-/// versioned segment so the stronger proof remains distinguishable while the
-/// retired proof-code pairing row can keep authorizing its existing channel
-/// entrypoint during a zero-touch upgrade.
+/// The proof-code pairing and OAuth paths write `{installation}:{actor}`.
+/// Device-linked channels write a versioned segment instead, and that prefix
+/// is a **fence, not a fallback**: a row written by the retired proof-code
+/// ceremony can never satisfy a device-link lookup, so switching a channel's
+/// strategy to `device_link` fails closed — previously paired users are back
+/// at setup and re-link, exactly the ceremony a fresh installation gets.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChannelIdentityKeyspace {
     #[default]
-    Legacy,
+    Unversioned,
     DeviceLinkV1,
 }
 
 impl ChannelIdentityKeyspace {
+    /// The one keyspace a connection strategy reads and writes.
+    ///
+    /// Each strategy owns exactly one namespace — deliberately not a list, so
+    /// a cross-namespace fallback chain is not expressible. Rows the retired
+    /// proof-code ceremony left under `Unversioned` are inert data to a
+    /// device-link channel: never resolved for admission, connection status,
+    /// command roles, or outbound-target validation, and removed only by
+    /// their owner's explicit disconnect (the unversioned delete prefix
+    /// lexically contains the versioned one).
     pub fn for_strategy(strategy: Option<ChannelConnectionStrategy>) -> Self {
         match strategy {
             Some(ChannelConnectionStrategy::DeviceLink) => Self::DeviceLinkV1,
-            _ => Self::Legacy,
+            _ => Self::Unversioned,
         }
     }
 
@@ -49,30 +59,9 @@ impl ChannelIdentityKeyspace {
 
     pub fn provider_user_id_prefix(self, installation_id: &AdapterInstallationId) -> String {
         match self {
-            Self::Legacy => format!("{}:", installation_id.as_str()),
+            Self::Unversioned => format!("{}:", installation_id.as_str()),
             Self::DeviceLinkV1 => format!("{}:device-link-v1:", installation_id.as_str()),
         }
-    }
-}
-
-/// Lookup order for one connection strategy, strongest proof first.
-///
-/// Device linking is additive for the channel: a newly linked account binds
-/// under `DeviceLinkV1`, while a pre-cutover proof-code binding remains a
-/// valid bot-channel identity. Personal linked-account tools still require
-/// their credential account independently, so accepting the legacy channel
-/// proof cannot mint or grant personal linked-account authority.
-pub fn channel_identity_lookup_keyspaces(
-    strategy: Option<ChannelConnectionStrategy>,
-) -> &'static [ChannelIdentityKeyspace] {
-    const LEGACY: &[ChannelIdentityKeyspace] = &[ChannelIdentityKeyspace::Legacy];
-    const DEVICE_LINK: &[ChannelIdentityKeyspace] = &[
-        ChannelIdentityKeyspace::DeviceLinkV1,
-        ChannelIdentityKeyspace::Legacy,
-    ];
-    match strategy {
-        Some(ChannelConnectionStrategy::DeviceLink) => DEVICE_LINK,
-        _ => LEGACY,
     }
 }
 
@@ -163,7 +152,7 @@ pub fn channel_config_connection_scope_source(
 pub struct DiscoveredChannelExtension {
     pub extension_id: String,
     pub providers: Vec<String>,
-    pub identity_keyspaces: Vec<ChannelIdentityKeyspace>,
+    pub identity_keyspace: ChannelIdentityKeyspace,
 }
 
 /// Installed extensions whose manifest declares a channel surface, excluding
@@ -188,14 +177,13 @@ pub async fn discover_channel_extensions(
         }
         discovered.push(DiscoveredChannelExtension {
             extension_id,
-            identity_keyspaces: channel_identity_lookup_keyspaces(
+            identity_keyspace: ChannelIdentityKeyspace::for_strategy(
                 resolved
                     .channel
                     .as_ref()
                     .and_then(|channel| channel.connection.as_ref())
                     .map(|connection| connection.strategy),
-            )
-            .to_vec(),
+            ),
             providers: resolved
                 .auth
                 .iter()

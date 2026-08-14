@@ -615,7 +615,7 @@ impl GenericChannelHostAssembly {
         // per-extension provider identity the workflow's actor resolver uses
         // below, so the actor a command's role is resolved for is always the
         // same actor the conversation binding resolved.
-        let (command_role_provider, command_role_keyspaces, command_role_lookup) =
+        let (command_role_provider, command_role_keyspace, command_role_lookup) =
             self.provider_identity_lookup(source);
         let command_roles = Arc::new(
             crate::channel_command_roles::ChannelActorRoleResolver::new(
@@ -625,7 +625,7 @@ impl GenericChannelHostAssembly {
                 self.deps.identity.tenant_id.clone(),
                 self.deps.identity.operator_user_id.clone(),
             )
-            .with_identity_keyspaces(command_role_keyspaces),
+            .with_identity_keyspace(command_role_keyspace),
         );
 
         let adapter_id = ProductAdapterId::new(source.extension_id())
@@ -718,18 +718,17 @@ impl GenericChannelHostAssembly {
         source: &HostedChannelSource,
     ) -> (
         String,
-        Vec<crate::channel_identity::ChannelIdentityKeyspace>,
+        crate::channel_identity::ChannelIdentityKeyspace,
         Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
     ) {
-        let identity_keyspaces = crate::channel_identity::channel_identity_lookup_keyspaces(
+        let identity_keyspace = crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
             source
                 .resolved()
                 .channel
                 .as_ref()
                 .and_then(|channel| channel.connection.as_ref())
                 .map(|connection| connection.strategy),
-        )
-        .to_vec();
+        );
         let pairing_extension = self
             .deps
             .channel_pairing
@@ -741,7 +740,7 @@ impl GenericChannelHostAssembly {
         ) {
             (Some(lookup), Some(auth)) => (
                 auth.vendor.as_str().to_string(),
-                identity_keyspaces,
+                identity_keyspace,
                 Some(Arc::clone(lookup)),
             ),
             // Pairing-strategy channels have no OAuth vendor; verified
@@ -750,12 +749,12 @@ impl GenericChannelHostAssembly {
             // actors fail closed instead of inheriting the operator.
             (Some(lookup), None) if pairing_extension => (
                 source.extension_id().to_string(),
-                vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
                 Some(Arc::clone(lookup)),
             ),
             _ => (
                 source.extension_id().to_string(),
-                vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
                 None,
             ),
         }
@@ -770,7 +769,7 @@ impl GenericChannelHostAssembly {
         &self,
         source: &HostedChannelSource,
     ) -> Arc<dyn ProductActorUserResolver> {
-        let (provider, identity_keyspaces, provider_lookup) = self.provider_identity_lookup(source);
+        let (provider, identity_keyspace, provider_lookup) = self.provider_identity_lookup(source);
         match provider_lookup {
             Some(lookup) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
@@ -778,7 +777,7 @@ impl GenericChannelHostAssembly {
                     source.extension_id(),
                     lookup,
                 )
-                .with_identity_keyspaces(identity_keyspaces),
+                .with_identity_keyspace(identity_keyspace),
             ),
             None => Arc::new(OperatorActorUserResolver {
                 operator_user_id: self.deps.identity.operator_user_id.clone(),

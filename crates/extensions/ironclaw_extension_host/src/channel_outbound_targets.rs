@@ -104,7 +104,7 @@ struct ChannelTargetContext {
     /// offered only while this exact external actor remains bound to the
     /// caller in the strategy's identity namespace.
     identity_provider: Option<String>,
-    identity_keyspaces: Vec<crate::channel_identity::ChannelIdentityKeyspace>,
+    identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     /// The `*_team_id` connection-scoping claim value — the space every
     /// encoded conversation binds under. `None` until configured.
     space_id: Option<String>,
@@ -187,13 +187,12 @@ impl GenericChannelOutboundTargetProvider {
                     != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::AdminManagedChannels)
                     .then(|| connection.provider.as_str().to_string())
             }),
-            identity_keyspaces: crate::channel_identity::channel_identity_lookup_keyspaces(
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
                 channel
                     .connection
                     .as_ref()
                     .map(|connection| connection.strategy),
-            )
-            .to_vec(),
+            ),
             space_id,
         }))
     }
@@ -304,26 +303,25 @@ impl GenericChannelOutboundTargetProvider {
         let Some(provider) = context.identity_provider.as_deref() else {
             return Ok(Some(record));
         };
-        for keyspace in &context.identity_keyspaces {
-            let provider_user_id =
-                keyspace.provider_user_id(&context.installation_id, &record.external_actor_id);
-            let bound_user = self
-                .deps
-                .identity_lookup
-                .resolve_user_identity(provider, &provider_user_id)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        target: "ironclaw::reborn::channel_outbound_targets",
-                        extension_id = %context.extension_id,
-                        %error,
-                        "channel identity unavailable while validating outbound target"
-                    );
-                    OutboundError::Backend
-                })?;
-            if bound_user.as_ref() == Some(&caller.user_id) {
-                return Ok(Some(record));
-            }
+        let provider_user_id = context
+            .identity_keyspace
+            .provider_user_id(&context.installation_id, &record.external_actor_id);
+        let bound_user = self
+            .deps
+            .identity_lookup
+            .resolve_user_identity(provider, &provider_user_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_outbound_targets",
+                    extension_id = %context.extension_id,
+                    %error,
+                    "channel identity unavailable while validating outbound target"
+                );
+                OutboundError::Backend
+            })?;
+        if bound_user.as_ref() == Some(&caller.user_id) {
+            return Ok(Some(record));
         }
         Ok(None)
     }

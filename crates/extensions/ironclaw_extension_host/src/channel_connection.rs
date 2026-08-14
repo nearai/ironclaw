@@ -170,7 +170,7 @@ pub trait ChannelDisconnectCleanup: Send + Sync {
 pub struct ChannelConnectionEntry {
     pub extension_id: String,
     pub providers: Vec<String>,
-    pub identity_keyspaces: Vec<crate::channel_identity::ChannelIdentityKeyspace>,
+    pub identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     pub scope_source: Arc<dyn ChannelConnectionScopeSource>,
     pub disconnect_cleanup: Option<Arc<dyn ChannelDisconnectCleanup>>,
 }
@@ -269,7 +269,7 @@ impl GenericChannelConnectionService {
             entries.push(ChannelConnectionEntry {
                 extension_id: extension.extension_id,
                 providers: extension.providers,
-                identity_keyspaces: extension.identity_keyspaces,
+                identity_keyspace: extension.identity_keyspace,
                 scope_source: channel_config_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
@@ -299,20 +299,20 @@ impl GenericChannelConnectionService {
         scope: &ChannelConnectionScope,
     ) -> Result<bool, ProductSurfaceError> {
         for provider in &entry.providers {
-            for keyspace in &entry.identity_keyspaces {
-                let prefix = keyspace.provider_user_id_prefix(&scope.installation_id);
-                let connected = self
-                    .identity_lookup
-                    .user_has_provider_binding_with_provider_user_id_prefix(
-                        provider,
-                        &caller.user_id,
-                        Some(prefix.as_str()),
-                    )
-                    .await
-                    .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
-                if connected {
-                    return Ok(true);
-                }
+            let prefix = entry
+                .identity_keyspace
+                .provider_user_id_prefix(&scope.installation_id);
+            let connected = self
+                .identity_lookup
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    provider,
+                    &caller.user_id,
+                    Some(prefix.as_str()),
+                )
+                .await
+                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
+            if connected {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -346,10 +346,11 @@ impl GenericChannelConnectionService {
     ) -> Result<(), ProductSurfaceError> {
         for provider in &entry.providers {
             if let Some(scope) = scope {
-                // The legacy prefix contains the versioned key lexically, so
-                // one legacy-prefix delete removes both generations. This is
-                // exactly what explicit disconnect/removal wants.
-                let prefix = crate::channel_identity::ChannelIdentityKeyspace::Legacy
+                // The unversioned prefix contains the versioned key
+                // lexically, so one unversioned-prefix delete removes the
+                // live generation and any inert pre-cutover row alike. This
+                // is exactly what explicit disconnect/removal wants.
+                let prefix = crate::channel_identity::ChannelIdentityKeyspace::Unversioned
                     .provider_user_id_prefix(&scope.installation_id);
                 self.identity_delete_store
                     .delete_user_identity_bindings_for_user(
@@ -667,7 +668,7 @@ mod tests {
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
                 providers: vec![VENDOR.to_string()],
-                identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+                identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
                 scope_source: Arc::new(StaticScopeSource(scope)),
                 disconnect_cleanup,
             }],
@@ -768,17 +769,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_link_connection_preserves_a_legacy_pairing_binding() {
+    async fn device_link_connection_ignores_a_retired_pairing_binding() {
         let identity_store = bound_identity_store("install-alpha");
         let service = GenericChannelConnectionService::new(
             tenant(),
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
                 providers: vec![VENDOR.to_string()],
-                identity_keyspaces: crate::channel_identity::channel_identity_lookup_keyspaces(
+                identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
                     Some(ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink),
-                )
-                .to_vec(),
+                ),
                 scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
                 disconnect_cleanup: None,
             }],
@@ -796,21 +796,22 @@ mod tests {
                 .caller_channel_connections(caller())
                 .await
                 .expect("connection lookup"),
-            HashMap::from([(extension_key(), true)]),
-            "an old proof-code binding must keep the existing bot channel connected after upgrade",
+            HashMap::from([(extension_key(), false)]),
+            "a retired proof-code binding must not report the channel connected: \
+             the device-link cutover fails closed and the user re-links",
         );
     }
 
     #[tokio::test]
-    async fn device_link_disconnect_removes_legacy_and_versioned_bindings() {
+    async fn device_link_disconnect_removes_both_identity_generations() {
         let installation = AdapterInstallationId::new("install-alpha").expect("installation");
         let caller = caller();
-        let legacy_key = crate::channel_identity::ChannelIdentityKeyspace::Legacy
+        let retired_key = crate::channel_identity::ChannelIdentityKeyspace::Unversioned
             .provider_user_id(&installation, "U123");
         let device_key = crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1
             .provider_user_id(&installation, "U123");
         let identity_store = Arc::new(RecordingIdentityStore::new([
-            (legacy_key.clone(), caller.user_id.clone()),
+            (retired_key.clone(), caller.user_id.clone()),
             (device_key.clone(), caller.user_id.clone()),
         ]));
         let service = GenericChannelConnectionService::new(
@@ -818,12 +819,11 @@ mod tests {
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
                 providers: vec![VENDOR.to_string()],
-                identity_keyspaces: crate::channel_identity::channel_identity_lookup_keyspaces(
+                identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
                     Some(
                         ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink,
                     ),
-                )
-                .to_vec(),
+                ),
                 scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
                 disconnect_cleanup: None,
             }],
@@ -843,11 +843,11 @@ mod tests {
 
         assert_eq!(
             identity_store
-                .resolve_user_identity(VENDOR, &legacy_key)
+                .resolve_user_identity(VENDOR, &retired_key)
                 .await
-                .expect("resolve legacy identity"),
+                .expect("resolve retired identity"),
             None,
-            "explicit disconnect removes grandfathered bot authority"
+            "explicit disconnect scrubs the inert pre-cutover row too"
         );
         assert_eq!(
             identity_store
@@ -1038,7 +1038,7 @@ mod tests {
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
                 providers: vec![VENDOR.to_string()],
-                identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+                identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
                 scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
                 disconnect_cleanup: None,
             }],

@@ -253,20 +253,42 @@ before Telegram emits the new wire value. Older binaries do not understand the
 new manifest strategy, so the package manifest and runtime consumers ship in
 one release.
 
-No schema rewrite or background data migration is required. Mainline users may
-have a proof-code identity binding but cannot have this branch's linked-device
-credential. That existing binding remains valid only for the bot entrypoint and
-bot delivery it already authorized, giving the release a zero-touch channel
-upgrade. It is never reinterpreted as personal-account authority. Linking a
-personal account writes the stronger `device-link-v1` binding alongside the
-grandfathered row; identity resolution prefers that stronger namespace and
-falls back to the legacy namespace for compatibility. A cross-user collision
-in either namespace rejects the link. Fresh installations expose only device
-linking, and explicit disconnect/removal deletes both binding generations,
-revokes the personal session, and removes the DM target.
+No schema rewrite or background data migration is required — and no
+compatibility bridge exists either. **The cutover is deliberately breaking for
+previously paired users** (owner decision, 2026-08-14, superseding this
+document's earlier zero-touch design): a proof-code identity binding written
+before this release stops authorizing anything the moment the manifest
+declares `device_link`. Identity lookups for a device-link channel consult
+only the `device-link-v1` namespace; the retired row is inert data. A
+previously paired user therefore
+
+- sees the Telegram channel as not connected — the extension card is back to
+  setup and offers device linking;
+- receives the manifest's connect-required notice when they DM the bot,
+  instead of an admitted turn;
+- is offered no Telegram delivery target while unlinked (a target recorded
+  before the cutover revalidates the moment they re-link the same account; a
+  user who never had one records it with their first admitted DM);
+- links their account once, and everything works from there — the same
+  first-run ceremony a fresh installation gets.
+
+This is the UX every extension presents when required credentials are
+missing, which is the point: one connection model, no second lookup namespace
+kept live for compatibility. The versioned key prefix exists purely so
+retired rows can never satisfy a device-link lookup; it is not a fallback
+chain. Inert rows are neither migrated nor bulk-deleted (no destructive boot
+migration); a user's explicit disconnect scrubs both generations for that
+user, because the unversioned delete prefix lexically contains the versioned
+one.
+
+A retired row also cannot veto a link: cross-user collision checks run only
+in the `device-link-v1` namespace. A stale row's owner has no connected
+channel through which to clear it, while a colliding live link is always a
+freshly authenticated proof of the account it names.
 
 Rollback can restore Telegram's `web_generated_code` manifest declaration and
-pairing registry registration without rewriting grandfathered rows. Versioned
+pairing registry registration; pre-cutover rows are never rewritten, so they
+resume authorizing under the restored strategy unchanged. Versioned
 device-link bindings are ignored by the legacy strategy, but linked credentials
 should be revoked or the `device_link` strategy retained until affected users
 disconnect so operators do not leave inaccessible personal sessions behind.
@@ -292,6 +314,10 @@ disconnect so operators do not leave inaccessible personal sessions behind.
 - A credential completion failure conditionally rolls back the newly written
   binding.
 - A concurrent newer binding is not removed by an older rollback.
+- A retired proof-code binding is inert on a device-link channel: it neither
+  reports the channel connected, nor admits the actor, nor confers a command
+  role, nor validates a delivery target, nor vetoes another user's freshly
+  proven link — and explicit disconnect scrubs it alongside the versioned row.
 
 ### Integration tests
 

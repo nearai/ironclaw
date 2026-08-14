@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// the admin-users directory maps that user to an active-account role.
 pub struct ChannelActorRoleResolver {
     provider: String,
-    identity_keyspaces: Vec<crate::channel_identity::ChannelIdentityKeyspace>,
+    identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     identity_lookup: Option<Arc<dyn RebornUserIdentityLookup>>,
     admin_users: Arc<dyn AdminUserService>,
     tenant: TenantId,
@@ -37,7 +37,7 @@ impl ChannelActorRoleResolver {
     ) -> Self {
         Self {
             provider,
-            identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
             identity_lookup,
             admin_users,
             tenant,
@@ -45,11 +45,11 @@ impl ChannelActorRoleResolver {
         }
     }
 
-    pub fn with_identity_keyspaces(
+    pub fn with_identity_keyspace(
         mut self,
-        identity_keyspaces: impl IntoIterator<Item = crate::channel_identity::ChannelIdentityKeyspace>,
+        identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     ) -> Self {
-        self.identity_keyspaces = identity_keyspaces.into_iter().collect();
+        self.identity_keyspace = identity_keyspace;
         self
     }
 
@@ -70,33 +70,26 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
     ) -> Result<Option<AdminUserRole>, ProductSurfaceError> {
         let user_id = match &self.identity_lookup {
             Some(lookup) => {
-                let mut resolved = None;
-                for keyspace in &self.identity_keyspaces {
-                    match lookup
-                        .resolve_user_identity(
-                            &self.provider,
-                            &keyspace.provider_user_id(
-                                &context.installation_id,
-                                context.external_actor_ref.id(),
-                            ),
-                        )
-                        .await
-                    {
-                        Ok(Some(user_id)) => {
-                            resolved = Some(user_id);
-                            break;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                %error,
-                                provider = %self.provider,
-                                "channel-command role resolver: identity lookup failed"
-                            );
-                            return Err(Self::unavailable());
-                        }
+                let resolved = match lookup
+                    .resolve_user_identity(
+                        &self.provider,
+                        &self.identity_keyspace.provider_user_id(
+                            &context.installation_id,
+                            context.external_actor_ref.id(),
+                        ),
+                    )
+                    .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            provider = %self.provider,
+                            "channel-command role resolver: identity lookup failed"
+                        );
+                        return Err(Self::unavailable());
                     }
-                }
+                };
                 let Some(user_id) = resolved else {
                     return Ok(None);
                 };
@@ -518,9 +511,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_link_command_role_preserves_a_legacy_pairing_key() {
+    async fn device_link_command_role_ignores_a_retired_pairing_key() {
         let operator = user("operator-a");
         let bound_user = user("user-2");
+        // The binding exists only under the retired proof-code namespace; the
+        // directory would grant Admin if the actor resolved through it.
         let mut bindings = std::collections::HashMap::new();
         bindings.insert(
             installation_scoped_provider_user_id(&test_installation_id(), "admin-actor"),
@@ -542,12 +537,10 @@ mod tests {
             tenant("tenant-a"),
             operator,
         )
-        .with_identity_keyspaces(
-            crate::channel_identity::channel_identity_lookup_keyspaces(Some(
+        .with_identity_keyspace(
+            crate::channel_identity::ChannelIdentityKeyspace::for_strategy(Some(
                 ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink,
-            ))
-            .iter()
-            .copied(),
+            )),
         );
 
         assert_eq!(
@@ -555,20 +548,17 @@ mod tests {
                 .actor_role(&sample_context("admin-actor"))
                 .await
                 .expect("role lookup succeeds"),
-            Some(AdminUserRole::Admin),
+            None,
+            "a retired proof-code binding must not confer a command role on a \
+             device-link channel",
         );
         assert_eq!(
             lookup.calls(),
-            vec![
-                (
-                    "test-provider".to_string(),
-                    "install_alpha:device-link-v1:admin-actor".to_string()
-                ),
-                (
-                    "test-provider".to_string(),
-                    "install_alpha:admin-actor".to_string()
-                ),
-            ]
+            vec![(
+                "test-provider".to_string(),
+                "install_alpha:device-link-v1:admin-actor".to_string()
+            )],
+            "a device-link channel consults only the device-link namespace"
         );
     }
 

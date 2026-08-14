@@ -13,7 +13,6 @@ use ironclaw_host_api::{
     product_adapter::AdapterInstallationId,
     user_identity::{
         RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-        RebornUserIdentityLookup,
     },
 };
 
@@ -109,22 +108,12 @@ impl DeviceLinkChannelIdentityBinder {
         let keyspace = crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1;
         let prefix = keyspace.provider_user_id_prefix(&installation);
         let scoped_provider_user_id = keyspace.provider_user_id(&installation, vendor_user_ref);
-        let legacy_provider_user_id = crate::channel_identity::ChannelIdentityKeyspace::Legacy
-            .provider_user_id(&installation, vendor_user_ref);
 
-        // A retained proof-code binding remains valid for its original bot
-        // channel, but it must never be possible to link that same external
-        // actor to a different product user under the stronger namespace.
-        if self
-            .store
-            .resolve_user_identity(provider, &legacy_provider_user_id)
-            .await
-            .map_err(|_| DeviceLinkChannelIdentityError::StorageUnavailable)?
-            .is_some_and(|owner| owner != *user_id)
-        {
-            return Err(DeviceLinkChannelIdentityError::IdentityOwnedByAnotherUser);
-        }
-
+        // Collision policy runs entirely in the device-link namespace. A row
+        // the retired proof-code ceremony wrote is deliberately not consulted:
+        // it authorizes nothing after the cutover, and its owner has no
+        // connected channel through which to clear it, so letting it veto a
+        // freshly authenticated link would wedge the actor forever.
         if self
             .store
             .user_has_other_provider_binding(provider, user_id, &prefix, &scoped_provider_user_id)
@@ -261,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_pairing_identity_gains_a_stronger_device_link_binding() {
+    async fn a_retired_pairing_row_is_left_in_place_and_not_adopted() {
         let (binder, store, manifest) = harness();
         store
             .bind_user_identity(RebornUserIdentityBinding {
@@ -272,17 +261,17 @@ mod tests {
                         "U123",
                     ),
                 )
-                .expect("legacy provider user"),
+                .expect("retired provider user"),
                 user_id: user("alice"),
             })
             .await
-            .expect("seed legacy pairing binding");
+            .expect("seed retired pairing binding");
 
         binder
             .begin(&manifest, INSTALLATION, "acme-link", "U123", &user("alice"))
             .await
             .expect("device link binds independently")
-            .expect("legacy pairing row is not adopted as the new binding");
+            .expect("the retired pairing row is not adopted as the new binding");
 
         let device_link_key = crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1
             .provider_user_id(
@@ -300,47 +289,62 @@ mod tests {
             store
                 .resolve_user_identity(
                     "acme-link",
-                    &crate::channel_identity::ChannelIdentityKeyspace::Legacy.provider_user_id(
-                        &AdapterInstallationId::new(INSTALLATION).expect("installation"),
-                        "U123",
-                    ),
+                    &crate::channel_identity::ChannelIdentityKeyspace::Unversioned
+                        .provider_user_id(
+                            &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                            "U123",
+                        ),
                 )
                 .await
-                .expect("resolve legacy identity"),
+                .expect("resolve retired identity"),
             Some(user("alice")),
-            "device linking is additive and does not rewrite grandfathered bot authority"
+            "the retired row is untouched data: it grants nothing, and only its \
+             owner's disconnect removes it"
         );
     }
 
     #[tokio::test]
-    async fn legacy_pairing_owned_by_another_user_rejects_device_link() {
+    async fn a_retired_pairing_row_owned_by_another_user_does_not_block_the_link() {
         let (binder, store, manifest) = harness();
         let installation = AdapterInstallationId::new(INSTALLATION).expect("installation");
-        let legacy_key = crate::channel_identity::ChannelIdentityKeyspace::Legacy
+        let retired_key = crate::channel_identity::ChannelIdentityKeyspace::Unversioned
             .provider_user_id(&installation, "U123");
+        // The retired proof-code ceremony once bound this actor to bob. The
+        // cutover voided that claim: it must not be able to veto a link whose
+        // vendor_user_ref was just proven by an authenticated handshake —
+        // bob's row is invisible to lookups and bob has no connected channel
+        // through which to clear it.
         store
             .bind_user_identity(RebornUserIdentityBinding {
                 provider: RebornIdentityProviderId::new("acme-link").expect("provider"),
-                provider_user_id: RebornIdentityProviderUserId::new(&legacy_key)
-                    .expect("legacy provider user"),
+                provider_user_id: RebornIdentityProviderUserId::new(&retired_key)
+                    .expect("retired provider user"),
                 user_id: user("bob"),
             })
             .await
-            .expect("seed foreign legacy pairing binding");
+            .expect("seed foreign retired pairing binding");
 
-        assert_eq!(
-            binder
-                .begin(&manifest, INSTALLATION, "acme-link", "U123", &user("alice"))
-                .await
-                .expect_err("device link must not take over a grandfathered actor"),
-            DeviceLinkChannelIdentityError::IdentityOwnedByAnotherUser
-        );
+        binder
+            .begin(&manifest, INSTALLATION, "acme-link", "U123", &user("alice"))
+            .await
+            .expect("a retired pairing row must not veto a freshly proven link")
+            .expect("created binding receipt");
         assert_eq!(
             store
                 .resolve_user_identity("acme-link", &scoped("U123"))
                 .await
                 .expect("resolve device-link identity"),
-            None
+            Some(user("alice")),
+            "the proven identity binds under the device-link namespace"
+        );
+        assert_eq!(
+            store
+                .resolve_user_identity("acme-link", &retired_key)
+                .await
+                .expect("resolve retired identity"),
+            Some(user("bob")),
+            "the inert retired row is data, not authority: left for bob's own \
+             disconnect to scrub, never consulted by lookups"
         );
     }
 
