@@ -208,15 +208,15 @@ impl CapabilityStage {
         policy: BatchPolicy,
         invocations: Vec<LoopRequest>,
     ) -> Result<InvokedCapabilityBatch, ironclaw_loop_contracts::AgentLoopHostError> {
-        if invocations.len() < 2
-            || policy != BatchPolicy::Parallel
-            || ctx.host.requires_ordered_batch_invocation(&invocations)
-        {
+        let ordered = invocations.len() >= 2
+            && policy == BatchPolicy::Parallel
+            && ctx.host.requires_ordered_batch_invocation(&invocations);
+        if invocations.len() < 2 || policy != BatchPolicy::Parallel || ordered {
             return ctx
                 .host
                 .invoke_capability_batch(LoopRequestBatch {
                     invocations,
-                    stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential),
+                    stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential) || ordered,
                 })
                 .await
                 .map(InvokedCapabilityBatch::from_resolution_batch);

@@ -244,7 +244,10 @@ impl ExternalToolCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for ExternalToolCapabilityPort {
     fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
-        self.inner.requires_ordered_batch_invocation(invocations)
+        invocations
+            .iter()
+            .any(|invocation| self.owns_capability(&invocation.capability_id))
+            || self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -524,6 +527,10 @@ mod tests {
 
     #[async_trait]
     impl LoopCapabilityPort for EmptyInnerPort {
+        fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+            false
+        }
+
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
@@ -918,6 +925,30 @@ mod tests {
             ids.provider_capability_id.as_str(),
             "external_tool.client_tool"
         );
+    }
+
+    #[tokio::test]
+    async fn external_tool_batch_requires_ordered_entry() {
+        let (port, _run_context) =
+            wrapped_port_with_specs(vec![external_tool_spec("client_tool")]).await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let request = |capability_id: &str| LoopRequest {
+            activity_id: Default::default(),
+            surface_version: surface.version.clone(),
+            capability_id: CapabilityId::new(capability_id).expect("capability id"),
+            input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))
+                .expect("input ref"),
+            approval_resume: None,
+            auth_resume: None,
+        };
+
+        assert!(port.requires_ordered_batch_invocation(&[
+            request("regular.sibling"),
+            request("external_tool.client_tool"),
+        ]));
     }
 
     #[tokio::test]

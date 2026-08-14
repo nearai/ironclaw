@@ -400,6 +400,8 @@ impl CapabilityAuthResume {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopRequestBatch {
     pub invocations: Vec<LoopRequest>,
+    /// Stops after the first parking resolution and requires decorators to
+    /// preserve caller-order dispatch rather than re-fanning the batch out.
     pub stop_on_first_suspension: bool,
 }
 

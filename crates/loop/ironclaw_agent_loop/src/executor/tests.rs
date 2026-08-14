@@ -5004,7 +5004,7 @@ async fn parallel_batch_cancelled_sibling_ends_run_with_checked_state() {
 }
 
 #[tokio::test]
-async fn ordered_middleware_preserves_the_complete_model_batch() {
+async fn ordered_middleware_preserves_the_complete_model_batch_contract() {
     let host = MockHost::new(vec![calls_response_with_count(2)]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
@@ -5033,7 +5033,7 @@ async fn ordered_middleware_preserves_the_complete_model_batch() {
     assert!(host.single_invocations().is_empty());
     let batch_invocations = host.batch_invocations();
     assert_eq!(batch_invocations.len(), 1);
-    assert!(!batch_invocations[0].stop_on_first_suspension);
+    assert!(batch_invocations[0].stop_on_first_suspension);
 }
 
 #[tokio::test]
