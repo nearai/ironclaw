@@ -213,6 +213,8 @@ impl AgentTurnProcessRuntime {
             spawn_tree_descendant_cap: None,
             product_context: request.product_context,
             resume_disposition: None,
+            ownerless_thread: request.scope.thread_owner
+                == ironclaw_host_api::turn::TurnThreadOwner::Ownerless,
         };
         let concurrency_class = process_concurrency_class(
             metadata.product_context.as_ref(),
@@ -313,6 +315,8 @@ impl AgentTurnProcessRuntime {
             spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
             resume_disposition: None,
+            ownerless_thread: request.child_scope.thread_owner
+                == ironclaw_host_api::turn::TurnThreadOwner::Ownerless,
         };
         let concurrency_class = process_concurrency_class(
             metadata.product_context.as_ref(),
@@ -1132,8 +1136,17 @@ pub fn turn_run_state_from_process_snapshot(
     }
     let metadata = agent_turn_metadata_from_process_snapshot(&snapshot)?;
     let status = turn_status_from_process_status(snapshot.status, snapshot.suspension.as_ref())?;
+    let mut scope = turn_scope_from_process_scope(snapshot.scope)?;
+    // The `__system__` slot heuristic cannot tell an ownerless run from an
+    // actor-fallback run with no explicit owner; the journaled disposition
+    // marker is authoritative where metadata exists.
+    if scope.thread_owner == ironclaw_host_api::turn::TurnThreadOwner::Ownerless
+        && !metadata.ownerless_thread
+    {
+        scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::ActorFallback;
+    }
     Ok(TurnRunState {
-        scope: turn_scope_from_process_scope(snapshot.scope)?,
+        scope,
         actor: metadata.actor,
         turn_id: metadata.turn_id,
         run_id: turn_run_id_from_process_id(snapshot.process_id),
