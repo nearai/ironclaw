@@ -13,12 +13,12 @@
 //! service and coordinator.
 
 use async_trait::async_trait;
-use ironclaw_assistant::agent_message::{
+use ironclaw_host_api::prepared_context::OutputContract;
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_threads::agent_message::{
     AgentMessage, AgentMessageRole, ContentPart, ToolCallContent, ToolResultContent,
     ToolResultOutcome,
 };
-use ironclaw_host_api::prepared_context::OutputContract;
-use ironclaw_product_contracts::inbound::ProductInboundAck;
 
 use crate::OpenAiCompatHttpError;
 use crate::chat::{OpenAiChatCompletionRequest, OpenAiChatMessage, OpenAiChatMessageRole};
@@ -248,14 +248,14 @@ pub(crate) fn prepared_seed_from_chat(
     messages: &[OpenAiChatMessage],
 ) -> Result<(String, Vec<AgentMessage>), OpenAiCompatHttpError> {
     let (system_prompt, mapped) = agent_messages_from_chat(messages)?;
-    ironclaw_assistant::validate_prepared_seed_content(&system_prompt, &mapped).map_err(
-        |error| match error {
-            ironclaw_assistant::SessionThreadError::InvalidPreparedContext { reason } => {
+    ironclaw_threads::validate_prepared_seed_content(&system_prompt, &mapped).map_err(|error| {
+        match error {
+            ironclaw_threads::SessionThreadError::InvalidPreparedContext { reason } => {
                 OpenAiCompatHttpError::invalid_request(Some(reason))
             }
             other => OpenAiCompatHttpError::invalid_request(Some(other.to_string())),
-        },
-    )?;
+        }
+    })?;
     Ok((system_prompt, mapped))
 }
 

@@ -39,9 +39,9 @@ This crate is a product/API route surface, not a host runtime:
   `ProtectedRouteMount`. Which workflow gets which port, the builder order, the
   shared projection streamer, and "no LLM config means `/v1/models` stays
   fail-closed at 501" are this surface's own rules and belong to its owner.
-  Composition builds the port implementations (they name `ironclaw_threads` /
-  `ironclaw_turns` / `ironclaw_event_streams`, all on this crate's forbidden
-  list) and hands them over; it no longer knows the builder order.
+  Composition builds the port implementations (they name `ironclaw_turns` /
+  `ironclaw_event_streams`, on this crate's forbidden list) and hands them
+  over; it no longer knows the builder order.
 - Chat, Responses, and streaming paths route through the channel-neutral
   `ProductSurface` plus projection-reader/streamer ports rather than
   recreating v1 `/v1/chat/completions` LLM proxy behavior.

@@ -4246,7 +4246,14 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
-                "ironclaw_threads",
+                // `ironclaw_threads` is permitted (unbound-turns, PR #7634):
+                // the prepared chat-completions lane maps wire messages onto
+                // the accept door's seed vocabulary (`agent_message`) and runs
+                // the door's own `validate_prepared_seed_content` BEFORE the
+                // idempotency reservation — one validator, no mirrored bounds
+                // to drift. Thread/turn SERVICES still arrive as
+                // composition-built ports; the edge is vocabulary + the door
+                // validator only (`ironclaw_webui` holds the same edge).
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_turns",

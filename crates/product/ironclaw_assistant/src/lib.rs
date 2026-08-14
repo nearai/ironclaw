@@ -389,10 +389,6 @@ pub use reborn_services::{
 pub use unbound_turn::{
     UnboundTurnError, UnboundTurnOutcome, UnboundTurnService, UnboundTurnSubmission,
 };
-// Route crates (ironclaw_openai_compat) are boundary-barred from a direct
-// ironclaw_threads dependency, so the prepared-door seed vocabulary and the
-// one door validator reach them through this product-orchestration surface.
-pub use ironclaw_threads::{SessionThreadError, agent_message, validate_prepared_seed_content};
 
 pub use product_surface_inbound::{
     DecodeInboundAttachments, IntoProductInboundCommand, ProductInboundCommand,

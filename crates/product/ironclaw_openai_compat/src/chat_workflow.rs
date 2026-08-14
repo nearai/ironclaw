@@ -485,7 +485,7 @@ impl OpenAiChatCompletionsWorkflow {
         public_id: &OpenAiChatCompletionId,
         request: &OpenAiChatCompletionRequest,
         prepared_output: Option<&ironclaw_host_api::prepared_context::OutputContract>,
-        prepared_seed: Option<(String, Vec<ironclaw_assistant::agent_message::AgentMessage>)>,
+        prepared_seed: Option<(String, Vec<ironclaw_threads::agent_message::AgentMessage>)>,
         conversation_submission: Option<(UserMessagePayload, Vec<InboundAttachment>)>,
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
         match (prepared_output, prepared_seed, conversation_submission) {
@@ -525,7 +525,7 @@ impl OpenAiChatCompletionsWorkflow {
         public_id: &OpenAiChatCompletionId,
         request: &OpenAiChatCompletionRequest,
         output: ironclaw_host_api::prepared_context::OutputContract,
-        seed: (String, Vec<ironclaw_assistant::agent_message::AgentMessage>),
+        seed: (String, Vec<ironclaw_threads::agent_message::AgentMessage>),
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
         let Some(port) = self.prepared_turn_port.as_ref() else {
             return Err(OpenAiCompatHttpError::from_kind(
