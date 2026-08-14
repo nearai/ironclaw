@@ -55,10 +55,11 @@ Docker lane to pin placement parity.
 
 A developer-supplied `ANTHROPIC_API_KEY` was loaded from the macOS keychain and
 passed only through the explicitly configured developer environment variable.
-The evaluation used commit `9a03c1c174`, Claude Code 2.1.232,
-`claude-agent-acp` 0.67.0, and six isolated shared clones. Both lanes received
-the same prompts and seeded regressions. No tests were run, no remote pull
-requests were created, and every coding change stayed inside its task clone.
+The evaluation used commit `9a03c1c174`, Claude Code 2.1.232, and
+`claude-agent-acp` 0.67.0, with an isolated shared clone for each task and lane.
+Both lanes received the same prompts and seeded regressions. No tests were run,
+no remote pull requests were created, and every coding change stayed inside its
+task clone.
 
 The task set was:
 
