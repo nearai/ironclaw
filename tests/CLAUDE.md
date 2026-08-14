@@ -210,7 +210,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 **Auth** (`tests/integration/auth/`)
 | Behavior | Evidence |
 |---|---|
-| A full OAuth connect → callback → stored account round trip | `auth/oauth_connect.rs` |
+| A full OAuth connect → callback → stored account round trip; conflicting shared-vendor OAuth resource or metadata bindings fail resolution closed | `auth/oauth_connect.rs` |
 | Abandoning the OAuth popup, late callbacks, and retrying cleanly | `auth/oauth_popup_journeys.rs` |
 | Idle credentials get refreshed by the background sweep | `auth/oauth_refresh.rs` |
 | A missing credential parks a sign-in gate; denying it ends the run cleanly | `auth/auth_gate.rs` |

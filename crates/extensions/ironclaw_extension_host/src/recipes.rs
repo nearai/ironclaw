@@ -6,8 +6,9 @@
 //!
 //! Shared vendors (overview §3.2): every extension using a vendor embeds the
 //! recipe; recipes for one vendor must be identical except scope and
-//! presentation metadata, the scope ceiling is the union across extensions,
-//! and an incompatible pair is a conflict.
+//! presentation metadata, OAuth resource bindings must match exactly, the
+//! scope ceiling is the union across extensions, and an incompatible pair is
+//! a conflict.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -22,8 +23,8 @@ use ironclaw_host_api::ids::{ExtensionId, UserId};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "extensions `{first_extension}` and `{second_extension}` declare incompatible \
-     [auth.{vendor}] recipes (recipes for a shared vendor must be identical except \
-     scope and presentation metadata)"
+     [auth.{vendor}] recipes or OAuth resource bindings (shared-vendor recipes must be \
+     identical except scope and presentation metadata, and OAuth bindings must match)"
 )]
 pub struct VendorRecipeConflict {
     pub vendor: String,
@@ -33,7 +34,9 @@ pub struct VendorRecipeConflict {
 
 /// Unify the vendor recipes declared across `manifests` (overview §3.2):
 /// Recipes that differ only in scope or presentation metadata merge with a
-/// scope-ceiling union; anything else conflicts.
+/// scope-ceiling union. OAuth recipes must also carry identical effective
+/// resource and protected-resource metadata bindings; these fields are not
+/// meaningful for API-key recipes. Anything else conflicts.
 pub fn unified_vendor_recipes<'a>(
     manifests: impl IntoIterator<Item = &'a ResolvedExtensionManifest>,
 ) -> Result<Vec<ResolvedVendorAuthRecipe>, VendorRecipeConflict> {
@@ -53,25 +56,30 @@ pub fn unified_vendor_recipes<'a>(
                 .as_ref()
                 .map(|resource| resource.as_str().to_string())
                 .or_else(|| mcp_resource.clone());
+            let incoming = ResolvedVendorAuthRecipe {
+                vendor: vendor.clone(),
+                recipe: recipe.clone(),
+                token_exchange_resource: resource,
+                protected_resource_metadata_url: surface.protected_resource_metadata_url.clone(),
+            };
             match unified.get_mut(&vendor) {
                 None => {
-                    unified.insert(
-                        vendor.clone(),
-                        (
-                            extension_id.clone(),
-                            ResolvedVendorAuthRecipe {
-                                vendor,
-                                recipe: recipe.clone(),
-                                token_exchange_resource: resource.clone(),
-                                protected_resource_metadata_url: surface
-                                    .protected_resource_metadata_url
-                                    .clone(),
-                            },
-                        ),
-                    );
+                    unified.insert(vendor.clone(), (extension_id.clone(), incoming));
                 }
                 Some((first_extension, existing)) => {
-                    if !existing.recipe.compatible_for_shared_vendor(recipe) {
+                    let oauth_bindings_match = match (&existing.recipe, &incoming.recipe) {
+                        (VendorAuthRecipe::Oauth2Code(_), VendorAuthRecipe::Oauth2Code(_)) => {
+                            existing.token_exchange_resource == incoming.token_exchange_resource
+                                && existing.protected_resource_metadata_url
+                                    == incoming.protected_resource_metadata_url
+                        }
+                        _ => true,
+                    };
+                    if !existing
+                        .recipe
+                        .compatible_for_shared_vendor(&incoming.recipe)
+                        || !oauth_bindings_match
+                    {
                         return Err(VendorRecipeConflict {
                             vendor,
                             first_extension: first_extension.clone(),
@@ -81,20 +89,13 @@ pub fn unified_vendor_recipes<'a>(
                     if let (
                         VendorAuthRecipe::Oauth2Code(unified_recipe),
                         VendorAuthRecipe::Oauth2Code(incoming),
-                    ) = (&mut existing.recipe, recipe)
+                    ) = (&mut existing.recipe, &incoming.recipe)
                     {
                         for scope in &incoming.scopes {
                             if !unified_recipe.scopes.contains(scope) {
                                 unified_recipe.scopes.push(scope.clone());
                             }
                         }
-                    }
-                    if existing.token_exchange_resource.is_none() {
-                        existing.token_exchange_resource = resource.clone();
-                    }
-                    if existing.protected_resource_metadata_url.is_none() {
-                        existing.protected_resource_metadata_url =
-                            surface.protected_resource_metadata_url.clone();
                     }
                 }
             }
