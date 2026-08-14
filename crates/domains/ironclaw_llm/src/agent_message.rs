@@ -453,7 +453,7 @@ pub fn chat_messages_from_agent_messages(
     }
 
     let mut converted = Vec::with_capacity(messages.len());
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message.role {
             AgentMessageRole::User => {
                 converted.push(ChatMessage::user(render_text_and_attachments(
@@ -494,6 +494,8 @@ pub fn chat_messages_from_agent_messages(
                 converted.push(chat.with_reasoning_details(reasoning_details));
             }
             AgentMessageRole::Tool => {
+                // Validation above guarantees both lookups; re-raising the
+                // typed errors keeps this total without a panic path.
                 let result = message
                     .content
                     .iter()
@@ -501,12 +503,14 @@ pub fn chat_messages_from_agent_messages(
                         ContentPart::ToolResult(result) => Some(result),
                         _ => None,
                     })
-                    .expect("validated tool message carries exactly one tool_result");
+                    .ok_or(AgentMessageError::ToolMessageResultCount { index, found: 0 })?;
                 let name = capability_by_call
                     .iter()
                     .find(|(call_id, _)| call_id == &result.call_id)
                     .map(|(_, capability)| capability.clone())
-                    .expect("validated tool result pairs with an earlier call");
+                    .ok_or_else(|| AgentMessageError::UnpairedToolResult {
+                        call_id: result.call_id.clone(),
+                    })?;
                 let mut body = match &result.outcome {
                     ToolResultOutcome::Text { text } => text.clone(),
                     ToolResultOutcome::Json { value } => value.to_string(),

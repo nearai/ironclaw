@@ -66,8 +66,7 @@ pub const UNBOUND_STRUCTURED_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
 
 fn structured_result_capability() -> CapabilityId {
     CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID)
-        .expect("static unbound result capability id is a valid dotted id")
-    // safety: compile-time constant validated by the pin test below.
+        .expect("static unbound result capability id is a valid dotted id") // safety: compile-time constant validated by the pin test below.
 }
 
 /// The unbound-default family (unbound-turn design §4.2): the default
