@@ -386,6 +386,7 @@ fn malformed_config_from_recipe_validation_error(error: RecipeValidationError) -
         RecipeValidationError::EmptySignedPayload => "empty_signed_payload",
         RecipeValidationError::SignedPayloadBodyFalse => "signed_payload_body_false",
         RecipeValidationError::IncompleteTimestampRule => "incomplete_timestamp_rule",
+        RecipeValidationError::EmptyDeviceLinkModeLabel => "empty_device_link_mode_label",
     };
     tracing::debug!(
         operation = "oauth_recipe",

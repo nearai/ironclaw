@@ -28,7 +28,7 @@
 // arch-exempt: large_file, one contract surface — splitting by feature area at move time would give the same names two import paths, plan #7008
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::ids::{ThreadId, UserId};
 use ironclaw_host_api::turn::{AcceptedMessageRef, EventCursor, TurnRunId, TurnStatus};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -799,6 +799,11 @@ pub struct RebornOutboundDeliveryTargetCapabilities {
     pub final_replies: bool,
     pub gate_prompts: bool,
     pub auth_prompts: bool,
+    /// This target can receive blocked-automation notifications. Independent of
+    /// `final_replies`: the notification-channel picker filters on this, the
+    /// model-delivery list filters on `final_replies`.
+    #[serde(default)]
+    pub notifications: bool,
 }
 
 /// Client-safe opaque outbound delivery target id.
@@ -953,6 +958,41 @@ pub struct RebornNotificationChannel {
 pub struct RebornNotificationChannelsResponse {
     #[serde(default)]
     pub channels: Vec<RebornNotificationChannel>,
+}
+
+/// Browser query naming the channel one notification-setup read is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebornNotificationSetupRequest {
+    pub extension_id: String,
+}
+
+/// Browser body for the generic notification-setup enable/disable commands.
+/// `payload` is a channel-opaque document only the channel's adapter (and
+/// its own client) interpret — generic code passes it through verbatim.
+/// `extension_id` is defaulted because the ROUTE path is its canonical
+/// source: the handler overwrites whatever the body carries, so a body may
+/// omit it entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebornNotificationSetupMutationRequest {
+    #[serde(default)]
+    pub extension_id: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub payload: serde_json::Value,
+}
+
+/// One channel's per-user notification-setup state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornNotificationSetupStatusResponse {
+    pub extension_id: String,
+    /// Whether this channel needs per-user enrollment at all (from its
+    /// manifest declaration). Channels without setup report `enabled: true`.
+    pub requires_setup: bool,
+    /// Whether notification delivery is enabled for the caller right now.
+    pub enabled: bool,
+    /// Channel-opaque detail for the channel's own client. Never
+    /// interpreted by generic code.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub detail: serde_json::Value,
 }
 
 /// Allowlisted terminal status exposed by automation list projections.
@@ -1377,6 +1417,12 @@ pub enum RebornExtensionCredentialSetup {
     /// Channel pairing: the setup card routes to the channel's pairing panel
     /// (host-issued code + deep link), never a token-submit form.
     Pairing,
+    /// Device link: the setup card routes to the multi-step device-link panel,
+    /// never a token-submit form. There is no secret for the user to paste —
+    /// the vendor issues the payload and the host takes custody of the
+    /// resulting session — so a card that fell back to the manual-token form
+    /// here would ask for a value that does not exist.
+    DeviceLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1818,6 +1864,31 @@ pub struct RebornRunArtifactRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornThreadArtifactRequest {
     pub thread_id: String,
+}
+
+/// Admin-authorized, read-only thread collection request for one tenant user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeListRequest {
+    pub user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Admin-authorized request for an existing full-thread artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeArtifactRequest {
+    pub user_id: UserId,
+    pub thread_id: String,
+}
+
+/// Admin-authorized request for an existing single-run artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminThreadScrapeRunArtifactRequest {
+    pub user_id: UserId,
+    pub thread_id: String,
+    pub run_id: String,
 }
 
 // --- Operator settings vocabulary --------------------------------------------

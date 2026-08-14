@@ -15,7 +15,7 @@ use crate::path::ScopedPath;
 /// `mime_type` against the attachment format registry by the landing routine —
 /// the authoritative source — so callers cannot drift them out of sync with
 /// the MIME type they pass.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InboundAttachment {
     /// Stable identifier for this attachment within its message.
     pub id: String,

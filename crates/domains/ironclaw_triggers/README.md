@@ -82,4 +82,4 @@ cargo test -p ironclaw_triggers --test repository_contract   # backend parity; I
 - Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: `families/domains.md`, PROPOSAL §6.4.3;
-  `docs/reborn/contracts/triggers.md`.
+  `docs/internal/reborn/contracts/triggers.md`.

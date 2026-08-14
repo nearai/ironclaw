@@ -75,4 +75,4 @@ cargo test -p ironclaw_architecture_tests
   `CLAUDE.md` points here).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.3.4;
-  `docs/reborn/target-architecture/families/events.md`.
+  `docs/internal/reborn/target-architecture/families/events.md`.

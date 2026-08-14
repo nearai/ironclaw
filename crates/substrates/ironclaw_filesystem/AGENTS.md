@@ -10,10 +10,10 @@ Canonical guidance for this crate lives in:
 - [`../AGENTS.md`](../AGENTS.md) — the `substrates/` family boundary and its
   gates.
 
-Contracts of record: `docs/reborn/contracts/filesystem.md`,
-`docs/reborn/contracts/storage-placement.md`,
-`docs/reborn/contracts/kernel-boundary.md`.
+Contracts of record: `docs/internal/reborn/contracts/filesystem.md`,
+`docs/internal/reborn/contracts/storage-placement.md`,
+`docs/internal/reborn/contracts/kernel-boundary.md`.
 
-Consolidated 2026-08-05 per `docs/reborn/guidance-conventions.md` rule 1 (one
+Consolidated 2026-08-05 per `docs/internal/reborn/guidance-conventions.md` rule 1 (one
 canonical home per fact); this file previously duplicated the spec's ownership
 and validation content.

@@ -12,10 +12,16 @@
 //!
 //! `ratchet_support` itself cannot hold them: it is a `mod` compiled into ~37
 //! separate integration-test binaries, so a `#[test]` there would be collected
-//! and run 37 times and would report a helper regression 37 times over. One
-//! binary, named `reborn_*` so `code_style.yml`'s `cargo test -p
-//! ironclaw_architecture_tests reborn` name filter sees it (CHECKLIST WS10's
-//! loud-inventory row, defect 6).
+//! and run 37 times and would report a helper regression 37 times over.
+//!
+//! (An earlier version of this comment claimed the `reborn_*` FILE name puts
+//! this binary in `code_style.yml`'s `cargo test -p ironclaw_architecture_tests
+//! reborn` smoke lane. It does not: that argument is a TEST-NAME filter — the
+//! sibling `reborn_contracts_vendor_census.rs` documents the measurement — and
+//! none of this file's `#[test]` fns carries the substring, so the smoke lane
+//! runs 0 of them. These fixtures run in the reborn-tests full plan, which is
+//! the lane that matters; noted here so nobody trusts the file name for lane
+//! coverage again.)
 //!
 //! **Two `#[cfg(test)]` strippers, deliberately.** The measurement that
 //! motivated splitting them is in `ratchet_support`'s own module comment; what

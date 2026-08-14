@@ -14,9 +14,10 @@
 //! Declaring [`LlmConfigService`] and [`ActiveModelReader`] here rather than in
 //! `ironclaw_assistant` is what un-inverts the ownership: `ironclaw_operator` is a
 //! *sibling* of product, not a consumer of it, so the port it satisfies belongs
-//! at the boundary. Product keeps the frozen `llm_config` view descriptor, the
-//! "no service wired" fail-closed error, and the `RebornServices` wiring that
-//! calls through this port.
+//! at the boundary. The user model catalog and policy mutation descriptors also
+//! live here because transports consume them without depending on the product
+//! implementation. Product keeps the frozen `llm_config` view descriptor, the
+//! "no service wired" fail-closed error, and the `RebornServices` wiring.
 //!
 //! Wire-safety: inbound API-key values are typed as [`SecretString`] so they
 //! never land in `Debug`/logs and are deserialize-only (a request carrying a key
@@ -28,7 +29,25 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+use crate::descriptors::ProductCapabilityDescriptor;
 use crate::surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode};
+use crate::views::RebornViewDescriptor;
+
+pub const LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID: &str = "builtin.llm_user_model_policy_set";
+pub const LLM_USER_MODEL_POLICY_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID);
+pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID: &str =
+    "builtin.llm_user_model_preference_set";
+pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID);
+pub const USER_MODEL_CATALOG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "user_model_catalog",
+    paginated: false,
+};
+pub const USER_MODEL_PREFERENCE_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "user_model_preference",
+    paginated: false,
+};
 
 /// Read-only port exposing the runtime's current active/default model id.
 ///
@@ -95,6 +114,63 @@ pub trait LlmConfigService: Send + Sync {
         caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError>;
+
+    /// Return the user-safe model catalog for the caller's tenant.
+    ///
+    /// Implementations must not expose provider endpoints, credential metadata,
+    /// environment-variable names, or any provider other than the currently
+    /// active one. The default keeps older/unwired deployments compatible: user
+    /// selection is disabled and explicit model hints retain their historical
+    /// pass-through behavior through [`Self::resolve_user_model`].
+    async fn user_model_catalog(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        Ok(UserModelCatalog::disabled())
+    }
+
+    /// Replace the tenant-scoped allowlist and workspace default for the
+    /// currently active provider.
+    async fn set_user_model_policy(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: SetUserModelPolicyRequest,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    /// Return the caller's durable model preference.
+    ///
+    /// `model: None` means the user follows the workspace default. The default
+    /// keeps deployments without a preference store backward compatible.
+    async fn user_model_preference(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Ok(UserModelPreference { model: None })
+    }
+
+    /// Replace the caller's durable model preference.
+    async fn set_user_model_preference(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    /// Resolve an optional user-requested model through the tenant policy.
+    ///
+    /// A configured policy resolves explicit request, user preference, then
+    /// workspace default, validating the selected model against the policy.
+    /// An unconfigured policy preserves the legacy explicit hint.
+    async fn resolve_user_model(
+        &self,
+        _caller: ProductSurfaceCaller,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        Ok(requested_model)
+    }
 
     /// Begin a NEAR AI browser login (GitHub/Google SSO). Returns the provider
     /// authorization URL for the frontend to open; NEAR AI redirects the browser
@@ -343,6 +419,10 @@ pub struct LlmConfigSnapshot {
     pub providers: Vec<LlmProviderView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<LlmActiveSelection>,
+    /// Tenant policy for the active provider. This is operator-visible only;
+    /// ordinary users receive [`UserModelCatalog`] instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_model_policy: Option<ModelSelectionPolicy>,
 }
 
 /// One provider in the merged catalog, annotated for the settings UI.
@@ -442,6 +522,103 @@ pub struct LlmModelsResult {
     #[serde(default)]
     pub models: Vec<String>,
     pub message: String,
+}
+
+/// Tenant/workspace-scoped model-selection policy bound to one provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelectionPolicy {
+    pub provider_id: String,
+    pub workspace_default: String,
+    pub allowed_models: Vec<String>,
+}
+
+/// User-safe projection of the effective policy for the active provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserModelCatalog {
+    pub selection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_default: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+impl UserModelCatalog {
+    pub fn disabled() -> Self {
+        Self {
+            selection_enabled: false,
+            workspace_default: None,
+            models: Vec::new(),
+        }
+    }
+}
+
+/// Operator request replacing the tenant policy for the active provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetUserModelPolicyRequest {
+    pub workspace_default: String,
+    pub allowed_models: Vec<String>,
+}
+
+/// Caller-scoped model preference. `None` follows the workspace default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserModelPreference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// User request replacing their caller-scoped model preference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetUserModelPreferenceRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Persistence port for tenant-scoped model policies.
+///
+/// The filesystem-backed implementation belongs to composition, which owns
+/// the concrete backend and tenant-aware mount resolver. The operator service
+/// owns validation and active-provider binding.
+#[async_trait]
+pub trait ModelSelectionPolicyStore: Send + Sync {
+    async fn read(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<Option<ModelSelectionPolicy>, ModelSelectionPolicyStoreError>;
+
+    async fn write(
+        &self,
+        caller: &ProductSurfaceCaller,
+        policy: &ModelSelectionPolicy,
+    ) -> Result<(), ModelSelectionPolicyStoreError>;
+}
+
+/// Opaque store failure; backend details remain on the implementing side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSelectionPolicyStoreError {
+    Unavailable,
+    InvalidData,
+}
+
+/// Persistence port for caller-scoped model preferences.
+#[async_trait]
+pub trait UserModelPreferenceStore: Send + Sync {
+    async fn read(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<Option<UserModelPreference>, UserModelPreferenceStoreError>;
+
+    async fn write(
+        &self,
+        caller: &ProductSurfaceCaller,
+        preference: &UserModelPreference,
+    ) -> Result<(), UserModelPreferenceStoreError>;
+}
+
+/// Opaque preference-store failure; backend details remain private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserModelPreferenceStoreError {
+    Unavailable,
+    InvalidData,
 }
 
 /// Port-level error surface. The service maps this to the sanitized
@@ -585,6 +762,7 @@ mod tests {
                     provider_id: caller.user_id.as_str().to_string(),
                     model: None,
                 }),
+                user_model_policy: None,
             })
         }
 
@@ -610,6 +788,7 @@ mod tests {
                     can_list_models: false,
                 }],
                 active: None,
+                user_model_policy: None,
             })
         }
 
@@ -635,6 +814,7 @@ mod tests {
                     provider_id: request.provider_id,
                     model: request.model,
                 }),
+                user_model_policy: None,
             })
         }
 

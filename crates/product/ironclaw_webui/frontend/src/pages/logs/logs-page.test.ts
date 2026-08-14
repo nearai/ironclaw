@@ -47,8 +47,10 @@ function createLogsPageHarness(overrides = {}) {
   const hookValues = [];
   let hookCursor = 0;
   function ConfirmDialog() {}
+  function SelectMenu() {}
   const context = {
     ConfirmDialog,
+    SelectMenu,
     globalThis: {},
     React: {
       useRef: (initial) => {
@@ -89,6 +91,7 @@ function createLogsPageHarness(overrides = {}) {
   vm.runInNewContext(logsPageSourceForTest(), context);
   return {
     ConfirmDialog,
+    SelectMenu,
     render() {
       hookCursor = 0;
       return context.globalThis.__testExports.LogsPage();
@@ -320,6 +323,58 @@ test("LogsPage keeps the scrollable log output container", () => {
   const markup = flattenMarkup(renderLogsPage());
   // The inner output region is the actual scroll surface.
   assert.match(markup, /min-h-0 flex-1 overflow-y-auto/);
+});
+
+test("LogsPage changes the log level through the compact shared SelectMenu", () => {
+  const changes = [];
+  const harness = createLogsPageHarness({
+    levelFilter: "all",
+    setLevelFilter: (value) => changes.push(value),
+    targetFilter: "ironclaw::agent",
+    scope: {
+      active: [
+        { param: "thread_id", labelKey: "logs.scope.thread", value: "thread-1" },
+      ],
+    },
+  });
+
+  const rendered = harness.render();
+  const [levelSelect] = componentProps(rendered, harness.SelectMenu);
+  assert.equal(levelSelect.value, "all");
+  assert.equal(levelSelect.size, "sm");
+  assert.equal(levelSelect.align, "left");
+  assert.equal(levelSelect["data-testid"], "logs-level-filter");
+  assert.equal(
+    Array.from(levelSelect.options, (option) => option.value).join(","),
+    "all,trace,debug,info,warn,error",
+  );
+  assert.match(flattenMarkup(rendered), /ironclaw::agent/);
+  assert.match(flattenMarkup(rendered), /thread-1/);
+
+  levelSelect.onChange("warn");
+  assert.deepEqual(changes, ["warn"]);
+});
+
+test("LogsPage changes the server level through the compact shared SelectMenu", () => {
+  const changes = [];
+  const harness = createLogsPageHarness({
+    serverLevel: "info",
+    changeServerLevel: (value) => changes.push(value),
+  });
+
+  const selects = componentProps(harness.render(), harness.SelectMenu);
+  assert.equal(selects.length, 2);
+  const serverSelect = selects[1];
+  assert.equal(serverSelect.value, "info");
+  assert.equal(serverSelect.size, "sm");
+  assert.equal(serverSelect["data-testid"], "logs-server-level");
+  assert.equal(
+    Array.from(serverSelect.options, (option) => option.value).join(","),
+    "trace,debug,info,warn,error",
+  );
+
+  serverSelect.onChange("error");
+  assert.deepEqual(changes, ["error"]);
 });
 
 test("LogsPage renders the load-older action while a cursor is available", () => {

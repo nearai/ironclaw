@@ -56,12 +56,15 @@ structural rather than effort:
   keeps both; five and seven host modules respectively consume them. Only the
   product *projection* over channel config moved.
 - **`admin_configuration_service` / `admin_configuration_store`** — consumed by
-  `channel_host.rs` and `channel_subject_routes.rs`. §6.8.3 assigns the
-  *capability handlers* to the manager, not the store.
+  the host's `ChannelConfigService` core (`channel_config.rs`), which
+  `channel_shared_admission.rs` reads per-request (that module was
+  `channel_subject_routes.rs` until shared-route subjects retired — a run acts
+  as its invoker, and the module now answers admission only). §6.8.3 assigns
+  the *capability handlers* to the manager, not the store.
 
 ## The `ironclaw_assistant` dependency is residue, not the design
 
-`docs/reborn/target-architecture/families/extensions.md` gives this crate
+`docs/internal/reborn/target-architecture/families/extensions.md` gives this crate
 `product_contracts` + `extension_contracts` + `extension_registry` +
 `extension_host`. It also depends on `ironclaw_assistant` today, in exactly seven
 files, and every one is a **product DTO, a capability-id constant, or one of

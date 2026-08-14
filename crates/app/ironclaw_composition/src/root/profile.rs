@@ -14,6 +14,8 @@ pub enum RebornCompositionProfile {
     StandaloneUnrestricted,
     HostedSingleTenant,
     HostedSingleTenantVolume,
+    HostedSingleTenantVolumeSandboxed,
+    HostedSingleTenantVolumeSandboxedRailway,
     Production,
     MigrationDryRun,
 }
@@ -26,6 +28,10 @@ impl RebornCompositionProfile {
             Self::StandaloneUnrestricted => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::HostedSingleTenantVolumeSandboxed => "hosted-single-tenant-volume-sandboxed",
+            Self::HostedSingleTenantVolumeSandboxedRailway => {
+                "hosted-single-tenant-volume-sandboxed-railway"
+            }
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
@@ -83,6 +89,10 @@ impl FromStr for RebornCompositionProfile {
             "local-dev-yolo" => Ok(Self::StandaloneUnrestricted),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
+            "hosted-single-tenant-volume-sandboxed" => Ok(Self::HostedSingleTenantVolumeSandboxed),
+            "hosted-single-tenant-volume-sandboxed-railway" => {
+                Ok(Self::HostedSingleTenantVolumeSandboxedRailway)
+            }
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             _ => Err(RebornCompositionProfileParseError { value: normalized }),

@@ -9,7 +9,7 @@
 //!
 //! It contains no concrete product name, protocol route, or behavior branch:
 //! concrete extensions implement the [`ironclaw_extension_contracts::tool_adapter::ToolAdapter`] and
-//! [`ironclaw_extension_contracts::channel_adapter::ChannelAdapter`] traits and are supplied by the binary.
+//! [`ironclaw_extension_contracts::channel_adapter::ChannelDelivery`] traits and are supplied by the binary.
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
 
@@ -39,9 +39,12 @@ pub mod channel_identity_store;
 pub mod channel_lifecycle;
 pub mod channel_outbound_targets;
 pub mod channel_pairing;
-pub mod channel_subject_routes;
+pub mod channel_shared_admission;
 pub mod channel_triggered_delivery;
+mod channel_vendor_calls;
 pub mod deployment_channels;
+pub mod device_link_channel_identity;
+pub mod device_link_driver;
 pub mod egress;
 pub mod entrypoint;
 pub mod extension_activation_credentials;
@@ -62,6 +65,8 @@ pub mod install_policy;
 pub mod lifecycle;
 pub mod lifecycle_restore;
 pub mod lifecycle_vocabulary;
+pub mod linked_account_resolution;
+pub mod linked_session_custody;
 pub mod loaders;
 pub mod mcp;
 pub mod mcp_catalog_safety;
@@ -75,6 +80,7 @@ pub mod removal_cleanup;
 pub mod reply_contexts;
 pub mod resolver;
 pub mod run_delivery_ports;
+pub mod session_ingress;
 pub mod skill_learning;
 pub mod skill_listing;
 pub mod store;
@@ -109,8 +115,8 @@ pub use activation_credentials::{
     missing_activation_credentials_error,
 };
 pub use active::{
-    ActiveExtension, ActiveSnapshot, BoundExtension, Generation, ResolvedToolBinding,
-    SnapshotConflict,
+    ActiveExtension, ActiveSnapshot, BoundExtension, Generation, ResolvedDeviceLinkBinding,
+    ResolvedToolBinding, SnapshotConflict,
 };
 pub use active_publication::{ActiveExtensionPublisher, extension_trust_policy_input};
 pub use admin_configuration_service::{
@@ -149,22 +155,25 @@ pub use channel_identity::{
     discover_channel_extensions, handle_declares_claim,
 };
 pub use channel_identity_store::{
-    FilesystemChannelIdentityStore, channel_identity_mount_view,
+    FilesystemChannelIdentityStore, IdentityBindingTransaction, channel_identity_mount_view,
     path_segment as channel_identity_path_segment,
 };
 pub use channel_lifecycle::{
     channel_connect_strategy, channel_connection_requirement,
     package_declares_inbound_product_adapter,
 };
-pub use channel_subject_routes::{
-    ChannelConfigSubjectRouteResolver, SharedChannelAdmissionHandles, handle_declares_field,
-    managed_channel_subject_user_id, shared_channel_admission_handles,
-};
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,
 };
+pub use device_link_channel_identity::{
+    DeviceLinkChannelIdentityBinder, DeviceLinkChannelIdentityError,
+};
+pub use device_link_driver::{
+    DeviceLinkLimits, DeviceLinkLimitsError, DeviceLinkRequest, SnapshotDeviceLinkDriver,
+};
 pub use entrypoint::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, check_binding,
+    declared_device_link_recipe,
 };
 pub use extension_bundle::{
     ExtensionBundleError, MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
@@ -211,7 +220,18 @@ pub use lifecycle_restore::{
     restore_extension_lifecycle_state,
 };
 pub use lifecycle_vocabulary::ActiveExtensionCapability;
-pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
+pub use linked_account_resolution::{
+    CredentialLinkedAccountResolution, LinkedAccountResolution, UnavailableLinkedAccountResolution,
+};
+pub use linked_session_custody::{
+    CredentialServiceLinkedSessionMaterial, LinkedSessionKey, LinkedSessionMaterialKey,
+    LinkedSessionMaterialStore, LinkedSessionStore, UnavailableLinkedAccountResolver,
+    UnavailableLinkedSessionMaterial,
+};
+pub use loaders::{
+    ExtensionLoader, LoadContext, LoadTimeAdminSecrets, LoadedExtension, NativeExtensionFactory,
+    UnavailableLoadTimeAdminSecrets,
+};
 pub use mcp::{RegistryMcpEgressPlanner, hosted_http_mcp_runtime};
 pub use mcp_catalog_safety::{
     McpCatalogAdmission, McpCatalogAdmissionPolicy, McpCatalogField, McpCatalogFinding,

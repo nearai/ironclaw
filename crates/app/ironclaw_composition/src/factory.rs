@@ -11,7 +11,6 @@ use crate::backend_store_assembly::{
     filesystem_resource_governor, resolve_explicit_or_keychain_master_key,
     trigger_repository_for_durable_backend,
 };
-#[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, capability_authorizer};
@@ -38,10 +37,7 @@ use crate::input::{
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
-use crate::runtime_mounts::{
-    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
-    workspace_mount_view,
-};
+use crate::runtime_mounts::{memory_mount_view, workspace_mount_view};
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
 #[cfg(test)]
@@ -206,11 +202,13 @@ use auth_engine_assembly::{
     ProductAuthServicesCompositionInput, compose_product_auth_services, compose_provider_client,
 };
 mod trigger_creation_assembly;
-pub(crate) use trigger_creation_assembly::LateBoundAgentTurnRuntime;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
-mod production_backend_assembly;
+pub(crate) use trigger_creation_assembly::{
+    LateBoundAgentTurnRuntime, TriggerExecutionPolicyPreflight,
+};
+pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
@@ -261,6 +259,8 @@ pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<Compos
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    pub(crate) user_sandbox_process_port:
+        Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
@@ -275,9 +275,13 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) capability_policy: Arc<BuiltinCapabilityPolicy>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Host-owned per-user delivery registrations (channel contract §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes each channel's non-secret client-bootstrap document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
@@ -326,7 +330,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
-    pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -340,6 +343,10 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
+    /// The bound memory provider's own memory guidance for the model (#7185),
+    /// resolved from its bundle at the same point `memory_lifecycle` is.
+    /// `None` when unbound or the provider declares no `guidance_doc`.
+    pub(crate) memory_guidance: Option<String>,
     /// The deployment's single workspace scoping decision, read by every
     /// workspace write lane (grants, approval leases, attachment handles).
     pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -353,6 +360,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) trigger_create_hook: Arc<TriggerCreatorPairingHook>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
@@ -703,6 +711,47 @@ pub(super) use with_shared_host_runtime_wiring;
 /// here, at build time, from declarative connection config — construction no
 /// longer performs database I/O. The `Prebuilt` arm is the caller-supplied
 /// test escape hatch and is preferred verbatim when present.
+/// Connections the process journal opens for itself.
+///
+/// The journal issues one heartbeat per running turn plus its group-commit
+/// flusher's writes, and nothing else uses this pool — which is exactly why two
+/// connections are enough. The point is not capacity, it is that a heartbeat
+/// never waits behind event-store, trigger, or result-read traffic.
+const PROCESS_JOURNAL_POOL_MAX_SIZE: usize = 2;
+
+/// The pools a PostgreSQL deployment runs on: the shared data plane, and a small
+/// dedicated one for the process journal.
+pub(crate) struct PostgresPools {
+    pub(crate) data_plane: deadpool_postgres::Pool,
+    /// `None` when the caller handed in an already-opened pool and there is no
+    /// connection config to open a second one from; the journal then shares the
+    /// data-plane pool, as it always did.
+    pub(crate) process_journal: Option<deadpool_postgres::Pool>,
+}
+
+fn open_postgres_pools_from_source(
+    source: PostgresPoolSource,
+) -> Result<PostgresPools, RebornBuildError> {
+    match source {
+        PostgresPoolSource::Prebuilt(pool) => Ok(PostgresPools {
+            data_plane: pool,
+            process_journal: None,
+        }),
+        PostgresPoolSource::Config(connection) => {
+            let process_journal = ironclaw_event_store::open_postgres_pool_with_tls_options(
+                connection.url.clone(),
+                PROCESS_JOURNAL_POOL_MAX_SIZE,
+                connection.tls_options,
+            )?
+            .into_driver();
+            Ok(PostgresPools {
+                data_plane: open_postgres_pool_from_source(PostgresPoolSource::Config(connection))?,
+                process_journal: Some(process_journal),
+            })
+        }
+    }
+}
+
 fn open_postgres_pool_from_source(
     source: PostgresPoolSource,
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
@@ -1181,23 +1230,29 @@ fn manifest_channel_account_setup_descriptors(
         .filter_map(|manifest| {
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
-            if connection.strategy
-                != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode
-            {
-                return None;
-            }
+            let (account_setup, connect_strategy) = match connection.strategy {
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                ),
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink,
+                    ironclaw_assistant::RebornChannelConnectStrategy::DeviceLink,
+                ),
+                _ => return None,
+            };
             Some(ExtensionAccountSetupDescriptor {
                 extension_id: manifest.id.clone(),
                 auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
                     provider: connection.provider.clone(),
-                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    setup: account_setup,
                     requester_extension: manifest.id.clone(),
                     provider_scopes: Vec::new(),
                 },
                 connection_requirement: ChannelConnectionRequirement {
                     channel: manifest.id.as_str().to_string(),
                     display_name: manifest.name.clone(),
-                    strategy: ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                    strategy: connect_strategy,
                     instructions: connection.instructions.clone(),
                     input_placeholder: connection.input_placeholder.clone(),
                     submit_label: connection.submit_label.clone(),

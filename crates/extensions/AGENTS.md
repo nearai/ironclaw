@@ -1,6 +1,6 @@
 # `crates/extensions/` — everything "installable package"
 
-**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, both channel packages) · **Crates:** 8 (re-derive: `ls -d crates/extensions/*/` for the family crates, `ls -d crates/extensions/packages/*/` for the 14 packages, of which 4 carry crates) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
+**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 10 (re-derive: `ls -d crates/extensions/*/` for the family crates, `ls -d crates/extensions/packages/*/` for the 15 packages, of which 5 carry crates) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
 
 ## What this family is
 
@@ -53,7 +53,7 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 
 | Concern | Home |
 |---|---|
-| Surface/adapter *vocabulary*: `ChannelAdapter`, `ToolAdapter`, `CapabilitySurfaceKind`, the exported conformance suite | `crates/contracts/ironclaw_extension_contracts` — outside this family, so every layer shares one vocabulary |
+| Surface/adapter *vocabulary*: `ChannelIngress`, `ChannelReply`, `ChannelDelivery`, `ToolAdapter`, `CapabilitySurfaceKind`, the exported conformance suite | `crates/contracts/ironclaw_extension_contracts` — outside this family, so every layer shares one vocabulary |
 | Manifest schema + durable installation/membership/credential-binding/definition records | `ironclaw_extension_registry` |
 | Generic hosting: lifecycle authority, loaders, activation, the vendor-blind ingress verifier, egress, hosted-MCP registration | `ironclaw_extension_host` |
 | Product face: catalog UX, lifecycle commands/capabilities, credential views, the extension hub | `ironclaw_extension_manager` |
@@ -67,8 +67,9 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 | [`ironclaw_extension_host`](./ironclaw_extension_host) | The generic host: lifecycle writer + active snapshot, loaders (native/WASM/MCP), activation/removal transactions, the manifest-recipe ingress verifier, egress transports, channel identity/pairing/config service cores, hosted-MCP registration pipeline | you change how *any* extension is installed, verified, bound, activated, or delivered — never for one vendor |
 | [`ironclaw_extension_manager`](./ironclaw_extension_manager) | The product face: lifecycle commands/capabilities, the lifecycle product service, admin/operator capability handlers, credential views, the extension hub | you change what a user or operator sees or does to manage extensions |
 | [`ironclaw_extension_support`](./ironclaw_extension_support) | Shared support for the bundled packages: the `PACKAGES` inventory and the native tool *executors* (gsuite, web-access, coding, skills) — not itself a package | you add native, non-WASM tool logic for a data-only package |
-| [`packages/slack`](./packages/slack) (`ironclaw_slack_extension`) | Protocol-only Slack `ChannelAdapter`: payload parsing, mrkdwn rendering, delivery | Slack-shaped bytes only |
-| [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Protocol-only Telegram `ChannelAdapter`: Bot API normalization + rendering | Telegram-shaped bytes only |
+| [`packages/slack`](./packages/slack) (`ironclaw_slack_extension`) | Protocol-only Slack channel capabilities: complete webhook ingress, message replies, and target-resolved delivery | Slack-shaped bytes only |
+| [`packages/telegram`](./packages/telegram) (`ironclaw_telegram_extension`) | Telegram Bot API channel capabilities plus the linked-account MTProto device flow and 15 personal-account tools | Telegram-shaped bytes and linked-account provider behavior only |
+| [`packages/web-app`](./packages/web-app) (`ironclaw_web_app_extension`) | Delivery-only browser-push translator; authenticated-session ingress and stream replies are host-owned | Web Push-shaped bytes only |
 | [`packages/memory-native`](./packages/memory-native) (`ironclaw_memory_native`) | The default `[memory]` provider: filesystem-backed `MemoryService` implementation | the bundled memory backend's behavior |
 | [`packages/mem0`](./packages/mem0) (`ironclaw_memory_mem0`) | The alternative `[memory]` provider over an external mem0 REST service | the mem0 mapping or its hardened transport |
 
@@ -76,7 +77,7 @@ This is the most misunderstood area of the codebase. The model, in five rules:
 
 Every installable extension is one self-contained directory under `packages/`,
 whether or not it carries a crate. Two rules from the family spec
-(`docs/reborn/target-architecture/families/extensions.md`, "What belongs here"),
+(`docs/internal/reborn/target-architecture/families/extensions.md`, "What belongs here"),
 restated because "does this need a crate?" must be answered the same way every
 time:
 
@@ -118,8 +119,9 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `memory-native/` | `ironclaw.memory` | 5 memory tools + `[memory]` provider | — | first_party | crate `ironclaw_memory_native` |
 | `nearai-mcp/` | `nearai` | `[mcp]` hosted server + 1 pinned tool | `nearai` (api_key) | mcp | data-only |
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
-| `slack/` | `slack` | 8 tools + channel | `slack` | wasm (tools) + first-party adapter | crate `ironclaw_slack_extension` + `wasm/` |
-| `telegram/` | `telegram` | channel only (no tools, no auth recipe — deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
+| `slack/` | `slack` | 16 tools (all 16 core standard messaging ops) + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`) | `slack` | wasm (tools) + first-party channel capabilities | crate `ironclaw_slack_extension` + `wasm/` |
+| `telegram/` | `telegram` | 15 linked-account tools + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`; device-link requirement on tools, deployment credentials via `[admin_configuration]`) | `telegram` (device_link) | first_party | crate `ironclaw_telegram_extension` |
+| `web-app/` | `web-app` | channel only (host-owned `authenticated_session` ingress + host-owned stream reply + push `[channel.delivery]`; package binds delivery only, VAPID auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_app_extension` |
 | `web-access/` | `web-access` | 2 tools | — | first_party | data-only (executor: `extension_support::web_access`) |
 
 Data-only packages ship through the `PACKAGES` inventory in
@@ -171,6 +173,7 @@ unless noted; each is named so you can run it alone.
 | `extension_support`'s `runtimes` demotion cannot silently widen its consumer set | `DowngradePin` in `crates/app/ironclaw_architecture_tests/tests/reborn_same_layer_edge_inventory.rs` |
 | Extension-vocabulary types live in contracts, not re-derived locally | `crates/app/ironclaw_architecture_tests/tests/reborn_extension_contract_location_scan.rs` |
 | Telegram keeps dependency-set parity with Slack | `crates/app/ironclaw_architecture_tests/tests/telegram_extension_gates.rs` |
+| The linked-device MTProto stack (`grammers-*`) stays exact-pinned by version **and** `.crate` checksum, keeps its resolved feature set frozen under both the default and `--all-features` resolution, never enables the socks5 `proxy` feature, and stays off the automated-bump path | `crates/app/ironclaw_architecture_tests/tests/reborn_linked_device_supply_chain_pin.rs` — a **security** gate, not dependency hygiene: that dependency runs in-process with full process authority and `=0.10.0` is the last release whose `update_config` discards server-pushed datacenter addresses, which is what makes the package's DC-address validation cover 100% of dials. Read the file's module docs before bumping anything |
 | Committed WASM artifacts match their `wasm-src/` source | `python3 scripts/ci/check-wasm-artifact-freshness.py` |
 | Adapter behavior conforms to the contract | `ironclaw_extension_contracts::test_support::conformance`, run by `cargo test -p ironclaw_slack_extension` / `-p ironclaw_telegram_extension` (`crates/extensions/packages/slack/tests/channel_conformance.rs` and the telegram twin) |
 
@@ -205,11 +208,11 @@ Verify any edge with `cargo metadata`, not by reading this file.
 
 ## Sources
 
-`docs/reborn/target-architecture/families/extensions.md` (the family spec —
+`docs/internal/reborn/target-architecture/families/extensions.md` (the family spec —
 charter, per-crate dispositions, security posture) · PROPOSAL §6.8.1–§6.8.4
 (dispositions + amendments), §8.1–§8.2 (layer/forbidden-edge matrix, vendor
-rule) · `docs/reborn/extension-runtime/overview.md` (manifest/adapters/flows) ·
-`docs/reborn/guidance-conventions.md` (this file's shape) · the
+rule) · `docs/internal/reborn/extension-runtime/overview.md` (manifest/adapters/flows) ·
+`docs/internal/reborn/guidance-conventions.md` (this file's shape) · the
 `reborn-extension-surfaces` skill (authoring walkthrough). Where this file and
 the design record disagree, the code and its gates win — file a dated
 correction both places.

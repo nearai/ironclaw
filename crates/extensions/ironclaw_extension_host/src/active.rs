@@ -8,14 +8,17 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
+use ironclaw_extension_contracts::device_link::DeviceLinkAdapter;
 use ironclaw_extension_contracts::extension::{
     Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
 };
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_registry::{ResolvedExtensionManifest, composed_capability_description};
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor, ids::CapabilityId, runtime::TrustClass,
+    capability::CapabilityDescriptor,
+    ids::{CapabilityId, ExtensionId},
+    runtime::TrustClass,
     trust::RequestedTrustClass,
 };
 
@@ -26,14 +29,23 @@ pub struct ActiveExtension {
     pub resolved: Arc<ResolvedExtensionManifest>,
     pub extension: Arc<dyn Extension>,
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    pub channel: Option<Arc<dyn ChannelAdapter>>,
+    pub channel: ChannelSurfaces,
+    /// The device-link adapter, present iff the contract declares that auth
+    /// surface. Deliberately not on the [`Extension`] contract: auth mechanics
+    /// are reached by the host's device-link driver, never by a capability
+    /// dispatch or a channel delivery.
+    pub device_link: Option<Arc<dyn DeviceLinkAdapter>>,
+    /// The extension's non-secret operator config, as bound. Carried on the
+    /// snapshot so a host-side driver can build an adapter context without a
+    /// store read on a live flow.
+    pub config: Arc<BTreeMap<String, String>>,
 }
 
 /// Default live-extension wrapper published by the active snapshot.
 pub struct BoundExtension {
     contract: ExtensionContract,
     tools: Option<Arc<dyn ToolAdapter>>,
-    channel: Option<Arc<dyn ChannelAdapter>>,
+    channel: ChannelSurfaces,
 }
 
 impl BoundExtension {
@@ -41,7 +53,7 @@ impl BoundExtension {
         resolved: &ResolvedExtensionManifest,
         installation_id: &str,
         tools: Option<Arc<dyn ToolAdapter>>,
-        channel: Option<Arc<dyn ChannelAdapter>>,
+        channel: ChannelSurfaces,
     ) -> Result<Self, ironclaw_host_api::error::HostApiError> {
         Ok(Self {
             contract: ExtensionContract {
@@ -104,7 +116,7 @@ impl Extension for BoundExtension {
         self.tools.clone()
     }
 
-    fn channel_adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
+    fn channel_surfaces(&self) -> ChannelSurfaces {
         self.channel.clone()
     }
 }
@@ -130,6 +142,15 @@ pub struct ActiveSnapshot {
 pub struct ResolvedToolBinding {
     pub adapter: Arc<dyn ToolAdapter>,
     pub declaration: Arc<ResolvedExtensionManifest>,
+    pub generation: Generation,
+}
+
+/// One prebound device-link binding the host's device-link driver returns.
+pub struct ResolvedDeviceLinkBinding {
+    pub adapter: Arc<dyn DeviceLinkAdapter>,
+    pub declaration: Arc<ResolvedExtensionManifest>,
+    pub installation_id: String,
+    pub config: Arc<BTreeMap<String, String>>,
     pub generation: Generation,
 }
 
@@ -169,8 +190,9 @@ impl ActiveSnapshot {
             }
             if let Some(channel) = &extension.resolved.channel
                 && let Some(ingress) = &channel.ingress
+                && let Some(route_suffix) = &ingress.route_suffix
             {
-                let suffix = ingress.route_suffix.as_str().to_string();
+                let suffix = route_suffix.as_str().to_string();
                 if let Some(existing) =
                     route_owner.insert(suffix.clone(), extension.extension_id.clone())
                 {
@@ -208,6 +230,26 @@ impl ActiveSnapshot {
         })
     }
 
+    /// Resolve a prebound device-link adapter by extension id.
+    ///
+    /// Keyed on the extension rather than a capability id because a device-link
+    /// flow is not a capability: it is reached by the auth engine through the
+    /// host's driver, and an extension declares at most one such surface.
+    pub fn resolve_device_link(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Option<ResolvedDeviceLinkBinding> {
+        let extension = self.extensions.get(extension_id.as_str())?;
+        let adapter = extension.device_link.clone()?;
+        Some(ResolvedDeviceLinkBinding {
+            adapter,
+            declaration: Arc::clone(&extension.resolved),
+            installation_id: extension.installation_id.clone(),
+            config: Arc::clone(&extension.config),
+            generation: self.generation,
+        })
+    }
+
     /// Resolve the active extension serving
     /// `/webhooks/extensions/{extension_id}/{route_suffix}` — the extension
     /// must be active, declare an inbound channel, and declare exactly this
@@ -220,7 +262,10 @@ impl ActiveSnapshot {
         let extension = self.extensions.get(extension_id)?;
         let channel = extension.resolved.channel.as_ref()?;
         let ingress = channel.ingress.as_ref()?;
-        if !channel.inbound || ingress.route_suffix.as_str() != route_suffix {
+        // authenticated_session ingress carries no route_suffix, so it never
+        // matches a mounted webhook route — the `?` fails closed here.
+        let declared_suffix = ingress.route_suffix.as_ref()?;
+        if !channel.supports_inbound() || declared_suffix.as_str() != route_suffix {
             return None;
         }
         Some(Arc::clone(extension))
@@ -252,8 +297,9 @@ impl ActiveSnapshot {
         }
         if let Some(channel) = &candidate.resolved.channel
             && let Some(ingress) = &channel.ingress
+            && let Some(route_suffix) = &ingress.route_suffix
         {
-            let suffix = ingress.route_suffix.as_str();
+            let suffix = route_suffix.as_str();
             if let Some(existing) = self.route_owner.get(suffix)
                 && existing != &candidate.extension_id
             {

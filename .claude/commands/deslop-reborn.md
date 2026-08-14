@@ -1,7 +1,7 @@
 ---
 description: One iteration of the IronClaw Reborn de-slop loop — take ONE Reborn crate, fan out parallel review sub-agents (thermo-nuclear quality, paranoid architect, interface/contract/invariants, test-coverage/wiring), synthesize, apply fixes/refactors/missing tests, open a PR. Stop.
 disable-model-invocation: true
-allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo build:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(rg:*), Bash(ls:*), Bash(wc:*), Bash(scripts/check-boundaries.sh:*), Bash(scripts/reborn-e2e-rust.sh:*), Read, Grep, Glob, Edit, Write, Agent
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo build:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(rg:*), Bash(ls:*), Bash(wc:*), Bash(scripts/reborn-e2e-rust.sh:*), Read, Grep, Glob, Edit, Write, Agent
 argument-hint: "[crate name, e.g. ironclaw_turns]"
 ---
 
@@ -105,7 +105,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
 - Read the crate's guidance in order: `crates/<crate>/AGENTS.md`, then `CLAUDE.md`, `CONTRACT.md`,
   `README.md` (note the absence of an expected one as a finding), then `Cargo.toml` (deps, features,
   `pub` surface) and `src/lib.rs`/`src/main.rs` to map the module tree. Pull the matching
-  `docs/reborn/contracts/*.md` if the crate has a cross-crate contract.
+  `docs/internal/reborn/contracts/*.md` if the crate has a cross-crate contract.
 - **Small crate (`src` < ~2k lines): read every source file in full** so the review is complete, not
   sampled. **Large crate: read the guidance, the public API (`lib.rs` re-exports), the `CONTRACT.md`,
   and the largest / hottest modules**, and scope the PR to the slice you fully understand (§2).

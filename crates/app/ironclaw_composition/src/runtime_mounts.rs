@@ -16,6 +16,7 @@ use ironclaw_memory::MemoryDocumentScope;
 pub(crate) use ironclaw_attachments::WORKSPACE_ALIAS;
 
 const WORKSPACE_TARGET: &str = "/projects/workspace";
+
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";
 const MEMORY_ALIAS: &str = "/memory";
@@ -63,66 +64,68 @@ pub(crate) fn ambient_workspace_mount_view(
     MountView::new(mounts)
 }
 
-pub(crate) fn scoped_skill_context_mount_view(
+/// The single decision about where skills live. Every skill mount view derives from this.
+///
+/// nearai/ironclaw#7168 was three views over two trees: the agent's in-run port and discovery
+/// resolved `/skills` to host disk while Settings → Skills resolved it to the database. So an
+/// install reported success, showed in `skill_list` for that turn, never appeared in Settings, and
+/// could not be activated again. Anything built from this function agrees by construction.
+///
+/// `/system/skills` is alias-equals-target on purpose: the composite decides which world it lands
+/// in, so the bundle is reachable whether it was seeded to a host disk (local-dev, single-tenant)
+/// or into Postgres (multi-tenant, where no tenant disk exists), and neither reader nor writer has
+/// to know which.
+fn db_backed_skill_grants(
     scope: &ResourceScope,
-) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
+    user_skill_permissions: MountPermissions,
+) -> Result<Vec<MountGrant>, HostApiError> {
+    Ok(vec![
         grant(
             "/skills",
             &format!(
-                "/projects/tenants/{}/users/{}/skills",
+                "/tenants/{}/users/{}/skills",
                 scope.tenant_id.as_str(),
                 scope.user_id.as_str()
             ),
-            MountPermissions::read_only(),
-        )?,
-        grant(
-            "/tenant-shared/skills",
-            "/projects/tenant-shared/skills",
-            MountPermissions::read_only(),
+            user_skill_permissions,
         )?,
         grant(
             "/system/skills",
-            "/projects/system/skills",
+            "/system/skills",
             MountPermissions::read_only(),
         )?,
     ])
 }
 
-pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        grant(
-            "/skills",
-            "/projects/skills",
-            MountPermissions::read_write_list_delete(),
-        )?,
-        grant(
-            "/system/skills",
-            "/projects/system/skills",
-            MountPermissions::read_only(),
-        )?,
-    ])
-}
-
-pub(crate) fn scoped_skill_management_mount_view(
+/// Read-side skill mounts: discovery, listing, and activation.
+///
+/// Adds the tenant-shared root, which has no writer. Its target is `/tenants/<t>/shared/skills`,
+/// matching where `invocation_mount_view` puts every other tenant-shared root; repeating the alias
+/// inside the target instead pointed at a subtree nothing populates. Pinned by
+/// `tenant_shared_skills_resolve_under_the_canonical_shared_subtree`.
+pub(crate) fn db_backed_skill_context_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        grant(
-            "/skills",
-            &format!(
-                "/projects/tenants/{}/users/{}/skills",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str()
-            ),
-            MountPermissions::read_write_list_delete(),
-        )?,
-        grant(
-            "/system/skills",
-            "/projects/system/skills",
-            MountPermissions::read_only(),
-        )?,
-    ])
+    let mut grants = db_backed_skill_grants(scope, MountPermissions::read_only())?;
+    grants.push(grant(
+        "/tenant-shared/skills",
+        &format!("/tenants/{}/shared/skills", scope.tenant_id.as_str()),
+        MountPermissions::read_only(),
+    )?);
+    MountView::new(grants)
+}
+
+/// Write-side skill mounts: `skill_install`, `skill_update`, `skill_remove`.
+///
+/// Resolves `/skills` to the same target as [`db_backed_skill_context_mount_view`]; a test pins
+/// that, because divergence means a skill that exists and can never be found.
+pub(crate) fn db_backed_skill_management_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    MountView::new(db_backed_skill_grants(
+        scope,
+        MountPermissions::read_write_list_delete(),
+    )?)
 }
 
 pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountView, HostApiError> {

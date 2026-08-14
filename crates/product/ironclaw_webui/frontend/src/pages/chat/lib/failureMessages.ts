@@ -6,6 +6,7 @@ import {
 } from "./message-types";
 
 export const CONNECTION_LOST_RUN_FAILURE_KEY = "chat.failure.connectionLost";
+export const NO_PROGRESS_RUN_FAILURE_KEY = "chat.failure.noProgress";
 const REQUEST_FAILURE_FALLBACK_KEY = "chat.failure.request";
 
 type Translate = (
@@ -68,6 +69,9 @@ export function failureMessageForRunStatus({
   }
   if (typeof failureSummary === "string" && failureSummary.trim()) {
     return failureSummary.trim();
+  }
+  if (normalizeLowerText(failureCategory) === "no_progress_detected") {
+    return t(NO_PROGRESS_RUN_FAILURE_KEY);
   }
   if (typeof failureCategory === "string" && failureCategory.trim()) {
     return t("chat.failure.runCategory", {

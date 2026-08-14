@@ -613,6 +613,7 @@ fn accepted_ack(message_ref: &str) -> ProductInboundAck {
     ProductInboundAck::Accepted {
         accepted_message_ref: AcceptedMessageRef::new(message_ref).expect("valid accepted ref"),
         submitted_run_id: TurnRunId::new(),
+        submission: None,
     }
 }
 

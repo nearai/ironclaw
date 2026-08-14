@@ -1,4 +1,4 @@
-//! The host auth engine (`docs/reborn/extension-runtime/overview.md` §4.3).
+//! The host auth engine (`docs/internal/reborn/extension-runtime/overview.md` §4.3).
 //!
 //! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
 //! registration for vendors whose recipe carries no deployment client
@@ -377,7 +377,14 @@ impl AuthEngine {
                 resolved.token_exchange_resource,
                 resolved.protected_resource_metadata_url,
             )),
-            VendorAuthRecipe::ApiKey(_) => Err(AuthProductError::MalformedConfig),
+            // Neither is an OAuth authorization-code recipe. `device_link`
+            // additionally has no engine-executable half at all — its
+            // mechanics live behind the extension's `DeviceLinkAdapter` — so
+            // asking this resolver for one is a configuration error, not a
+            // vendor failure.
+            VendorAuthRecipe::ApiKey(_) | VendorAuthRecipe::DeviceLink(_) => {
+                Err(AuthProductError::MalformedConfig)
+            }
         }
     }
 

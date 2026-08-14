@@ -12,6 +12,7 @@
 //! manifest's `[runtime].service`; no connection or credential material lives
 //! here (that is compose-time configuration).
 
+use ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef;
 use serde::{Deserialize, Serialize};
 
 /// Reserved capability-id namespace for the always-on memory adapter tools.
@@ -80,6 +81,23 @@ pub struct MemoryDescriptor {
     /// subset, including empty. An undeclared hook is NEVER called.
     #[serde(default)]
     pub lifecycle: Vec<MemoryLifecycleHook>,
+    /// Bundled asset holding the provider's memory guidance for the model —
+    /// when to save a durable fact, how to phrase it, what never to save — to
+    /// be appended to the system prompt while this provider is the bound one
+    /// (#7185).
+    ///
+    /// Provider-owned on purpose. The guidance names this provider's own tools
+    /// and describes its own recall behavior, so it belongs beside the manifest
+    /// that declares them, not in the loop tier: a backend whose recall is
+    /// search-first needs to tell the model something different from one that
+    /// serves a standing document, and neither should have to edit host code to
+    /// say it.
+    ///
+    /// Optional and fail-quiet: absent means this provider ships no guidance
+    /// and nothing is appended. It is NOT a lifecycle hook — guidance is static
+    /// text, not a call — so it is declared here rather than in `lifecycle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_doc: Option<CapabilityProfileSchemaRef>,
 }
 
 impl MemoryDescriptor {
@@ -135,6 +153,43 @@ mod tests {
         assert!(descriptor.declares(MemoryLifecycleHook::ProfileRead));
         assert!(!descriptor.declares(MemoryLifecycleHook::ReadShortTerm));
         assert!(!descriptor.declares(MemoryLifecycleHook::RecordInteraction));
+    }
+
+    /// Guidance is optional and absent by default. A provider that ships none
+    /// must not be treated as declaring an empty one: the host appends nothing
+    /// rather than an empty section, so the distinction has to survive parsing.
+    #[test]
+    fn guidance_doc_is_absent_unless_declared() {
+        let without: MemoryDescriptor =
+            serde_json::from_str(r#"{"lifecycle": ["read_long_term"]}"#)
+                .expect("descriptor parses");
+        assert!(without.guidance_doc.is_none());
+
+        let with: MemoryDescriptor =
+            serde_json::from_str(r#"{"guidance_doc": "prompts/memory-guidance.md"}"#)
+                .expect("descriptor parses");
+        assert_eq!(
+            with.guidance_doc.as_ref().map(|doc| doc.as_str()),
+            Some("prompts/memory-guidance.md")
+        );
+        assert!(
+            with.lifecycle.is_empty(),
+            "guidance is static text, not a hook: declaring it must not imply any lifecycle"
+        );
+    }
+
+    /// The ref is a validated bundled-asset path, the same type the tool
+    /// surface uses for `prompt_doc_ref`. An absolute or escaping path must
+    /// fail the manifest parse rather than reach an asset lookup.
+    #[test]
+    fn guidance_doc_rejects_a_path_outside_the_package() {
+        for bad in ["/etc/passwd", "../../secrets.md"] {
+            let raw = format!(r#"{{"guidance_doc": "{bad}"}}"#);
+            assert!(
+                serde_json::from_str::<MemoryDescriptor>(&raw).is_err(),
+                "{bad:?} must not parse as a bundled asset ref"
+            );
+        }
     }
 
     #[test]

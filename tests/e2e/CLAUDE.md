@@ -122,9 +122,9 @@ from `tests/e2e/` for the full, current set.
 
 | File | What it tests |
 |------|--------------|
-| `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_webui_v2_smoke.py` | Canonical WebUI smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, an admin publishes the active provider's model allowlist/default through Settings, one non-admin member's long-name Settings model preference stacks at narrow width and right-aligns at wide width without overflow before reaching later provider requests without changing a second member's workspace-default routing, debug inspector session activation/header toggle/prompt/activity/statistics/background observation/multi-turn navigation/visibility reconnect, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
 | `test_reborn_webui_v2_sso.py` | Google-shaped SSO login through a local mock OIDC provider, one-time ticket exchange, two-user thread/timeline isolation, and logout revocation against the standalone `ironclaw serve` binary |
-| `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
+| `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, inspector detail with a visible 50 KiB output bound, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
 | `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
@@ -329,10 +329,12 @@ routing, tool execution, and provider mutation together.
 The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
 Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
 GraphQL review threads, and seeded Actions workflows used by the provider
-contract catalog. All 123 shipped static provider capabilities are classified
-and named in the inventory, and `github.handle_webhook`, `nearai.web_search`,
-`web-access.get_content`, and `web-access.search` use Reborn integration tests
-at their actual local-WASM or hosted-MCP seams. The inventory records the exact
+contract catalog. Every shipped static provider capability is classified and
+named in the inventory (the generated product-surface report carries the
+current count — 131 as of the Slack standard-op completion), and
+`github.handle_webhook`, `nearai.web_search`, `web-access.get_content`, and
+`web-access.search` use Reborn integration tests at their actual local-WASM
+or hosted-MCP seams. The inventory records the exact
 Cargo target, source, and test for those non-Emulate cases and fails if that
 evidence stops being executable. Manual QA rows that mention Telegram or
 Twitter/X remain model-replay-only unless paired with their own provider

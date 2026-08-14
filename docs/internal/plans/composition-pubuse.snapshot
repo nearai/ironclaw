@@ -12,11 +12,17 @@ pub use factory::production_first_party_trust_policy;
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
 pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+pub use channel_initialization::{
+    FirstPartyChannelInitializationContext, FirstPartyChannelInitializationError,
+    FirstPartyChannelInitializer,
+};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
 pub use ironclaw_assistant::LifecycleProductResponse;
-pub use ironclaw_turn_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use ironclaw_turn_runner::{
+    runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT, turn_scheduler::MAX_HEARTBEAT_INTERVAL_WITHIN_LEASE,
+};
 pub use ironclaw_skills::{
     SkillSummary as RebornSkillSummary, skill_summary_json as reborn_skill_summary_json,
 };
@@ -28,14 +34,16 @@ pub use memory_provider_factory::{
     memory_lifecycle_consumers, resolve_memory_provider,
 };
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
+pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 pub use deployment::{
     RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
+    hosted_single_tenant_volume_runtime_policy,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options, standalone_runtime_policy,
     standalone_unrestricted_runtime_policy,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::local_filesystem_build_input;
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironhub_link_serve::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
 };

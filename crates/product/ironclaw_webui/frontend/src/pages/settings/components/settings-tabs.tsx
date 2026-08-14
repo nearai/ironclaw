@@ -3,12 +3,13 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { SETTINGS_TABS } from "../lib/settings-schema";
 
+export function visibleSettingsTabs(isAdmin) {
+  return SETTINGS_TABS.filter((tab) => isAdmin || tab.id !== "users");
+}
+
 function useVisibleTabs(isAdmin) {
   return React.useMemo(
-    () =>
-      SETTINGS_TABS.filter(
-        (tab) => isAdmin || (tab.id !== "users" && tab.id !== "inference")
-      ),
+    () => visibleSettingsTabs(isAdmin),
     [isAdmin]
   );
 }

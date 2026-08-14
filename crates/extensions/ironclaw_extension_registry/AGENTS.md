@@ -1,15 +1,15 @@
 # Agent Map — ironclaw_extension_registry
 
 Canonical working-rules file for this crate (`CLAUDE.md` here is a pointer;
-consolidated 2026-08-05 per `docs/reborn/guidance-conventions.md` rule 1).
+consolidated 2026-08-05 per `docs/internal/reborn/guidance-conventions.md` rule 1).
 
 ## Start Here
 
 - Read `README.md` for orientation, `Cargo.toml` for actual dependencies.
 - Use these Reborn contracts as the source of truth before changing behavior:
-  - `docs/reborn/contracts/extensions.md`
-  - `docs/reborn/contracts/kernel-boundary.md`
-  - `docs/reborn/contracts/capability-access.md`
+  - `docs/internal/reborn/contracts/extensions.md`
+  - `docs/internal/reborn/contracts/kernel-boundary.md`
+  - `docs/internal/reborn/contracts/capability-access.md`
 
 ## What This Crate Owns
 

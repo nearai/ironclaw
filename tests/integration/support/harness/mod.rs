@@ -110,6 +110,41 @@ fn write_system_skill_fixture(
     Ok(())
 }
 
+/// Write a USER-scoped skill into the local-dev store, at the path the boot import migrates from.
+///
+/// Same layout `seed_user_skill_for_test` writes, extracted so it can run BEFORE the runtime is
+/// built. That ordering is the point: skills are read from the database tree, and the host-disk
+/// store is migrated into it at boot, so a user skill written afterwards is never seen by the run.
+fn write_user_skill_fixture(
+    storage_root: &std::path::Path,
+    tenant: &TenantId,
+    user: &ironclaw_host_api::ids::UserId,
+    name: &str,
+    description: &str,
+    prompt: &str,
+    installed: bool,
+) -> HarnessResult<()> {
+    let dir = storage_root
+        .join("tenants")
+        .join(tenant.as_str())
+        .join("users")
+        .join(user.as_str())
+        .join("skills")
+        .join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    if installed {
+        std::fs::write(
+            dir.join(".ironclaw-install.json"),
+            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -455,6 +490,15 @@ impl HostRuntimeCapabilityHarness {
         .await
     }
 
+    /// The composed product-auth bundle — the same `Arc` production assembly
+    /// attached the device-link driver to, so an integration scenario drives
+    /// the real seam rather than a harness-built twin.
+    pub(crate) fn product_auth_for_test(&self) -> HarnessResult<Arc<RebornProductAuthServices>> {
+        self.product_auth.clone().ok_or_else(|| {
+            "harness missing local-dev product auth (not built via new_with_options)".into()
+        })
+    }
+
     /// [`Self::seed_credential_account_with_material`] with the token material
     /// chosen by the caller.
     ///
@@ -689,6 +733,8 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_credentials,
             skill_activation_tenant,
             system_skill_fixtures,
+            user_skill_fixtures,
+            skill_activation_user,
             outbound_target_service,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
@@ -698,11 +744,19 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
+            extra_first_party_bundles,
             recording_network_egress,
             google_oauth_backend_for_test,
+            sandboxed_shell,
             workspace_scoped_per_caller,
         } = options;
-        let root = Arc::new(tempfile::tempdir()?);
+        let root = Arc::new(if sandboxed_shell {
+            // macOS Docker VMs can bind-mount the checkout but not the default
+            // `/var/folders` tempfile root.
+            tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?
+        } else {
+            tempfile::tempdir()?
+        });
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
@@ -713,6 +767,25 @@ impl HostRuntimeCapabilityHarness {
                 &fixture.description,
                 &fixture.prompt,
             )?;
+        }
+        if !user_skill_fixtures.is_empty() {
+            let tenant = skill_activation_tenant
+                .as_ref()
+                .ok_or("user skill fixtures require with_skill_activation_tenant")?;
+            let user = skill_activation_user
+                .as_ref()
+                .ok_or("user skill fixtures require with_skill_activation_user")?;
+            for fixture in &user_skill_fixtures {
+                write_user_skill_fixture(
+                    &storage_root,
+                    tenant,
+                    user,
+                    &fixture.name,
+                    &fixture.description,
+                    &fixture.prompt,
+                    fixture.installed,
+                )?;
+            }
         }
         let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {
@@ -735,6 +808,17 @@ impl HostRuntimeCapabilityHarness {
                 },
             )?
             .with_local_runtime_confirmed_host_home_root(host_home_root)
+        } else if sandboxed_shell {
+            let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
+                storage_root.join("sandbox-workspaces"),
+            )
+            .await?;
+            ironclaw_composition::local_filesystem_build_input_with_profile(
+                ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                service_label,
+                storage_root,
+            )
+            .with_runtime_process_binding(user_sandbox)
         } else {
             ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
         };
@@ -745,6 +829,15 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_runtime_policy(runtime_policy);
         }
         input = input.with_bundled_first_party_for_test();
+        if !extra_first_party_bundles.is_empty() {
+            // Mirror the binary: inventory bundles first, binary-table
+            // extras (web-app) appended. `with_first_party_bundles`
+            // replaces, so rebuild the full list.
+            let mut bundles =
+                ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
+            bundles.extend(extra_first_party_bundles);
+            input = input.with_first_party_bundles(bundles);
+        }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }

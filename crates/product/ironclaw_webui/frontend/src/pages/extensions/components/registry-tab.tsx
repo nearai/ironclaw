@@ -1,6 +1,8 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
+import { SearchField } from "../../../design-system/search-field";
+import { useFilePicker } from "../../../hooks/useFilePicker";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
   ConfigureFocusHandler,
@@ -17,35 +19,30 @@ function catalogItem(entry) {
 
 function ImportButton({ onImport, isImporting, isBusy }) {
   const t = useT();
-  const fileInputRef = React.useRef(null);
-
-  const handleFileChange = React.useCallback(
-    (e) => {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file || !onImport) return;
-      onImport(file);
-    },
+  const disabled = isBusy || isImporting;
+  const handleImportSelection = React.useCallback(
+    ([file]) => onImport?.(file),
     [onImport]
   );
+  const [openFilePicker, importInputProps] = useFilePicker({
+    accept: ".zip,application/zip",
+    disabled,
+    onSelect: handleImportSelection,
+  });
 
   return (
     <div>
       <button
         type="button"
-        onClick={() => fileInputRef.current?.click()}
-        disabled={isBusy || isImporting}
+        onClick={openFilePicker}
+        disabled={disabled}
         className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] disabled:opacity-50"
       >
         <Icon name="upload" className="h-3 w-3" />
         {isImporting ? t("ext.registry.importing") : t("ext.registry.import")}
       </button>
       <input
-        ref={fileInputRef}
-        type="file"
-        accept=".zip,application/zip"
-        className="hidden"
-        onChange={handleFileChange}
+        {...importInputProps}
       />
     </div>
   );
@@ -124,12 +121,14 @@ export function RegistryTab({
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <input
-          type="text"
+        <SearchField
           value={filter}
-          onChange={(e) => setFilter(e.currentTarget.value)}
+          onChange={setFilter}
+          onClear={() => setFilter("")}
           placeholder={t("ext.registry.searchPlaceholder")}
-          className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          aria-label={t("ext.registry.searchPlaceholder")}
+          clearLabel={t("settings.clearSearch")}
+          className="flex-1"
         />
         <span className="font-mono text-[11px] text-iron-700">
           {filtered.length} / {catalogEntries.length}

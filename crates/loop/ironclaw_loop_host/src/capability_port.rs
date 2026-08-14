@@ -34,10 +34,10 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
-    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ConcurrencyHint,
-    ContentDigest, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-    LoopHostMilestoneSink, LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext,
-    LoopSafeSummary, ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
+    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ContentDigest,
+    LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+    LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary,
+    ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
     resolution::{self, GatedResolution},
@@ -1775,6 +1775,10 @@ impl HostRuntimeLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+        false
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.validate_visible_request_scope()?;
         let Some((_, snapshot)) = self.current_snapshot()? else {
@@ -1866,7 +1870,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
                     description_trust: capability.description_trust,
-                    concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
                 })
             })
@@ -3151,20 +3154,6 @@ fn provider_tool_name_base(capability_id: &str) -> String {
     }
 }
 
-pub fn concurrency_hint_from_effects(effects: &[EffectKind]) -> ConcurrencyHint {
-    if effects.is_empty() {
-        return ConcurrencyHint::Exclusive;
-    }
-    if effects
-        .iter()
-        .all(|effect| matches!(effect, EffectKind::ReadFilesystem | EffectKind::UseSecret))
-    {
-        ConcurrencyHint::SafeForParallel
-    } else {
-        ConcurrencyHint::Exclusive
-    }
-}
-
 fn should_retry_result_write(
     outcome: &RuntimeCapabilityOutcome,
     result: &Result<GatedResolution, AgentLoopHostError>,
@@ -4151,49 +4140,6 @@ mod tests {
     use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
     use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
-
-    #[test]
-    fn concurrency_hint_treats_empty_effects_as_exclusive() {
-        assert_eq!(
-            concurrency_hint_from_effects(&[]),
-            ConcurrencyHint::Exclusive
-        );
-    }
-
-    #[test]
-    fn concurrency_hint_treats_read_and_secret_effects_as_parallel_safe() {
-        let effects = vec![EffectKind::ReadFilesystem, EffectKind::UseSecret];
-
-        assert_eq!(
-            concurrency_hint_from_effects(&effects),
-            ConcurrencyHint::SafeForParallel
-        );
-    }
-
-    #[test]
-    fn concurrency_hint_treats_any_mutating_effect_as_exclusive() {
-        let exclusive_effects = [
-            EffectKind::WriteFilesystem,
-            EffectKind::DeleteFilesystem,
-            EffectKind::Network,
-            EffectKind::ExecuteCode,
-            EffectKind::SpawnProcess,
-            EffectKind::DispatchCapability,
-            EffectKind::ModifyExtension,
-            EffectKind::ModifyApproval,
-            EffectKind::ModifyBudget,
-            EffectKind::ExternalWrite,
-            EffectKind::Financial,
-        ];
-
-        for effect in exclusive_effects {
-            assert_eq!(
-                concurrency_hint_from_effects(&[effect]),
-                ConcurrencyHint::Exclusive,
-                "{effect:?}"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn decorating_factory_with_no_decorators_delegates_to_inner() {
@@ -10116,6 +10062,96 @@ mod tests {
             store.saved().len(),
             1,
             "the replay must persist exactly one gate record after the cancelled attempt"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_duplicate_gate_invocations_share_one_persisted_resolution() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let gate = ironclaw_host_runtime::RuntimeApprovalGate {
+            approval_request_id: ironclaw_host_api::ids::ApprovalRequestId::new(),
+            capability_id: capability_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        };
+        let store = Arc::new(BlockingGateRecordStore::new());
+        let port = Arc::new(
+            runtime_capability_port_with_gate_store(
+                &capability_id,
+                &provider_id,
+                Arc::new(QueuedHostRuntime::new(
+                    vec![visible_capability(
+                        capability_id.clone(),
+                        provider_id.clone(),
+                    )],
+                    vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(gate))],
+                )),
+                Arc::new(RecordingResultWriter::default()),
+                dummy_milestone_sink(),
+                store.clone(),
+                "thread-concurrent-gate-persist",
+            )
+            .await,
+        );
+        let invocation = visible_runtime_invocation(&port).await;
+
+        let owner_port = Arc::clone(&port);
+        let owner_invocation = invocation.clone();
+        let owner =
+            tokio::spawn(async move { owner_port.invoke_capability(owner_invocation).await });
+        store
+            .entered
+            .acquire()
+            .await
+            .expect("owner save entered")
+            .forget();
+
+        let waiter_port = Arc::clone(&port);
+        let waiter = tokio::spawn(async move { waiter_port.invoke_capability(invocation).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiter_holds_reservation = port
+                    .persisted_gate_resolutions
+                    .lock()
+                    .expect("gate resolution reservations lock")
+                    .values()
+                    .any(|state| {
+                        matches!(
+                            state,
+                            GateResolutionState::InFlight(notify)
+                                if Arc::strong_count(notify) >= 3
+                        )
+                    });
+                if waiter_holds_reservation {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter must park on the in-flight reservation");
+        store.release.notify_one();
+
+        let owner_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), owner)
+            .await
+            .expect("owner must finish")
+            .expect("owner task")
+            .expect("owner resolution");
+        let waiter_resolution = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must finish")
+            .expect("waiter task")
+            .expect("waiter resolution");
+
+        assert_eq!(
+            gate_ref_for_resolution(&owner_resolution),
+            gate_ref_for_resolution(&waiter_resolution),
+            "the waiter must receive the owner's persisted gate resolution"
+        );
+        assert_eq!(
+            store.saved().len(),
+            1,
+            "concurrent duplicates must persist one gate record"
         );
     }
 

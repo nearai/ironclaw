@@ -536,6 +536,11 @@ impl RootFilesystem for PostgresRootFilesystem {
                 .vector_nearest_query(path, key, embedding, *limit)
                 .await;
         }
+        // Ranked full-text search needs an ORDER BY over `ts_rank`, which no
+        // WHERE fragment can carry — same top-level treatment as vector search.
+        if let Filter::FtsRanked { key, query, limit } = filter {
+            return self.fts_ranked_query(path, key, query, *limit).await;
+        }
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
         let path_str = path.as_str().to_string();
         let (prefix_lower, prefix_upper) = descendant_path_range(path);
@@ -579,25 +584,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             .query(&statement, &params_ref[..])
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
-        rows.into_iter()
-            .map(|row| {
-                let row_path: String = row.get("path");
-                let row_path = VirtualPath::new(row_path)?;
-                let body: Vec<u8> = row.get("contents");
-                let content_type_raw: String = row.get("content_type");
-                let kind_raw: Option<String> = row.get("kind");
-                let indexed_value: serde_json::Value = row.get("indexed");
-                let version_raw: i64 = row.get("version");
-                let entry =
-                    build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
-                let version = record_version_from_i64(&row_path, version_raw)?;
-                Ok(VersionedEntry {
-                    path: row_path,
-                    entry,
-                    version,
-                })
-            })
-            .collect()
+        rows.iter().map(record_row_to_versioned_entry).collect()
     }
 
     async fn query_ordered(
@@ -1233,6 +1220,63 @@ impl PostgresRootFilesystem {
         .await
         .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
         Ok(row.is_some())
+    }
+
+    /// Ranked full-text search: `ts_rank` over an OR `tsquery`.
+    ///
+    /// The query's content terms come from the shared `plain_fts_terms` parser
+    /// (so PostgreSQL, libSQL, and the in-memory reference agree on which words
+    /// are required matches) and are joined with `|`. Because that parser
+    /// returns Unicode-alphanumeric strings only, the joined expression is
+    /// bound as a parameter to `to_tsquery` and can never carry caller
+    /// punctuation into the tsquery grammar. Ordering is by descending
+    /// `ts_rank`, tie-broken by path so the result is deterministic. A query
+    /// with no content terms matches nothing without touching the database.
+    async fn fts_ranked_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let terms = crate::index::plain_fts_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tsquery = terms.join(" | ");
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        let params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = vec![
+            Box::new(path.as_str().to_string()),
+            Box::new(prefix_lower),
+            Box::new(prefix_upper),
+            Box::new(tsquery),
+            Box::new(i64::from(limit.min(Page::MAX_LIMIT))),
+        ];
+        // `key` is validated as `[A-Za-z_][A-Za-z0-9_]*` by `IndexKey`, so
+        // splicing it into the JSON path is safe — the same rule the
+        // predicate translator relies on.
+        let sql = format!(
+            "SELECT path, contents, content_type, kind, indexed, version \
+             FROM root_filesystem_entries, to_tsquery('english', $4) AS ranked_query \
+             WHERE is_dir = FALSE AND (path = $1 OR (path >= $2 AND path < $3)) \
+             AND to_tsvector('english', COALESCE(indexed->>'{}', '')) @@ ranked_query \
+             ORDER BY ts_rank(to_tsvector('english', COALESCE(indexed->>'{}', '')), ranked_query) \
+             DESC, path ASC LIMIT $5",
+            key.as_str(),
+            key.as_str(),
+        );
+        let client = self.client().await?;
+        let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref() as _).collect();
+        let statement = client
+            .prepare_cached(sql.as_str())
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let rows = client
+            .query(&statement, &params_ref[..])
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        rows.iter().map(record_row_to_versioned_entry).collect()
     }
 
     /// Brute-force cosine ranker over candidate rows in this prefix whose
@@ -2464,17 +2508,41 @@ fn translate_filter(
             ));
             Ok(())
         }
-        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
-            // Same reason as libsql: VectorNearest is a ranking operation
-            // and is evaluated at the top-level `query` method, not as a
-            // WHERE-clause predicate. Nested usage is unsupported.
-            path: path.clone(),
-            operation: FilesystemOperation::Query,
-        }),
+        Filter::VectorNearest { .. } | Filter::FtsRanked { .. } => {
+            Err(FilesystemError::Unsupported {
+                // Same reason as libsql: VectorNearest and FtsRanked are ranking
+                // operations evaluated at the top-level `query` method, not as a
+                // WHERE-clause predicate. Nested usage is unsupported.
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            })
+        }
         Filter::And(children) => translate_compound(path, children, " AND ", "TRUE", out, params),
         Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
     }
 }
+/// Map one `(path, contents, content_type, kind, indexed, version)` row onto a
+/// [`VersionedEntry`]. Shared by the predicate query path and the ranked
+/// full-text path; both select the same named columns.
+fn record_row_to_versioned_entry(
+    row: &tokio_postgres::Row,
+) -> Result<VersionedEntry, FilesystemError> {
+    let row_path: String = row.get("path");
+    let row_path = VirtualPath::new(row_path)?;
+    let body: Vec<u8> = row.get("contents");
+    let content_type_raw: String = row.get("content_type");
+    let kind_raw: Option<String> = row.get("kind");
+    let indexed_value: serde_json::Value = row.get("indexed");
+    let version_raw: i64 = row.get("version");
+    let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
+    let version = record_version_from_i64(&row_path, version_raw)?;
+    Ok(VersionedEntry {
+        path: row_path,
+        entry,
+        version,
+    })
+}
+
 fn translate_compound(
     path: &VirtualPath,
     children: &[Filter],

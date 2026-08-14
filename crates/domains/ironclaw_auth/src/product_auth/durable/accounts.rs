@@ -1,6 +1,13 @@
 use async_trait::async_trait;
+// Imported through base64's own `prelude` rather than its `engine::` module
+// path: the crate's module-charter probe is a substring scan for `engine::`,
+// which would read `base64::engine::…` as product-auth reaching into the
+// vendor-handshake engine. Same symbols, no false positive.
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chrono::Utc;
+use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
 use ironclaw_filesystem::{CasExpectation, RootFilesystem};
+use ironclaw_secrets::{SecretCasExpectation, SecretCasWriteOutcome, SecretVersion};
 
 use super::domain::{
     account_is_authorized_for_requester, recovery_projection_for_single_account,
@@ -245,6 +252,189 @@ where
     ) -> Result<CredentialRefreshReport, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
     }
+
+    /// One durable compare-and-swap on the account record. Never a
+    /// caller-supplied value: the bump is what invalidates every handle and
+    /// pooled client bound to the previous revision, so a caller that could
+    /// *set* it could also replay one.
+    async fn bump_link_revision(
+        &self,
+        scope: &crate::AuthProductScope,
+        account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let (mut account, version) = self
+            .read_account(scope, account_id)
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        // The ownership pin (PROPOSAL §4.5). Refusing here is what stops a
+        // reusable account — reachable by EVERY installed extension, and
+        // deliberately not deleted by ownership-aware cleanup — from acquiring
+        // a live vendor device authorization.
+        if !account.linked_device_ownership_is_pinned() {
+            return Err(AuthProductError::invalid_request(
+                "a linked-device account must be extension-owned by exactly one \
+                 extension and carry no grants",
+            ));
+        }
+        account.link_revision = account.link_revision.saturating_add(1);
+        account.updated_at = Utc::now();
+        self.write_account(&account, CasExpectation::Version(version))
+            .await?;
+        Ok(account)
+    }
+
+    /// Load the linked-device session blob behind one account, gated on the
+    /// account's scope, requester authorization, and `link_revision`.
+    ///
+    /// The blob is opaque: this store decodes transport base64 and nothing
+    /// else. The semantic merge on a conflict belongs to the vendor package,
+    /// the only code that can read the format.
+    async fn load_opaque_material(
+        &self,
+        request: crate::OpaqueMaterialRequest,
+    ) -> Result<Option<crate::OpaqueMaterialSnapshot>, AuthProductError> {
+        let account = self.authorize_opaque_material(&request).await?;
+        let Some(handle) = &account.access_secret else {
+            return Ok(None);
+        };
+        let Some(stored) = self
+            .secret_store
+            .read_versioned(&account.scope.resource, handle)
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "linked-session material read failed");
+                AuthProductError::BackendUnavailable
+            })?
+        else {
+            return Ok(None);
+        };
+        use secrecy::ExposeSecret as _;
+        let bytes = BASE64_STANDARD
+            .decode(stored.material.expose_secret())
+            .map_err(|error| {
+                tracing::debug!(%error, "linked-session material is not valid transport base64");
+                AuthProductError::BackendUnavailable
+            })?;
+        let material = SessionBytes::new(bytes).map_err(|error| {
+            tracing::debug!(%error, "stored linked-session material violates its bounds");
+            AuthProductError::BackendUnavailable
+        })?;
+        Ok(Some(crate::OpaqueMaterialSnapshot {
+            material,
+            version: material_version_token(stored.version)?,
+        }))
+    }
+
+    /// Compare-and-swap the linked-device session blob. A lost race is an
+    /// outcome carrying the current version — never last-writer-wins, and
+    /// never an unconditional retry: a clobbered vendor auth key is a silently
+    /// dead link.
+    async fn store_opaque_material(
+        &self,
+        write: crate::OpaqueMaterialWrite,
+    ) -> Result<crate::OpaqueMaterialWriteOutcome, AuthProductError> {
+        let account = self.authorize_opaque_material(&write.target).await?;
+        let Some(handle) = account.access_secret.clone() else {
+            return Err(AuthProductError::invalid_request(
+                "linked account carries no session secret handle",
+            ));
+        };
+        let expected = match write.expected.as_str() {
+            None => SecretCasExpectation::Absent,
+            Some(token) => SecretCasExpectation::Version(parse_material_version(token)?),
+        };
+        let encoded = BASE64_STANDARD.encode(write.material.expose());
+        let outcome = self
+            .secret_store
+            .put_versioned(
+                account.scope.resource.clone(),
+                handle,
+                ironclaw_secrets::SecretMaterial::from(encoded),
+                None,
+                expected,
+            )
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "linked-session material write failed");
+                AuthProductError::BackendUnavailable
+            })?;
+        match outcome {
+            SecretCasWriteOutcome::Stored { version, .. } => {
+                Ok(crate::OpaqueMaterialWriteOutcome::Stored {
+                    version: material_version_token(version)?,
+                })
+            }
+            SecretCasWriteOutcome::Conflict { current } => {
+                Ok(crate::OpaqueMaterialWriteOutcome::Conflict {
+                    current: match current {
+                        Some(version) => material_version_token(version)?,
+                        None => LinkedSessionVersion::absent(),
+                    },
+                })
+            }
+        }
+    }
+}
+
+impl<F> FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    /// The shared gate in front of both opaque-material operations: the
+    /// account must exist in the caller's scope, authorize the requesting
+    /// extension, and be addressed at its **current** `link_revision` — a
+    /// stale revision is refused with the current one, so a handle from
+    /// before an unlink cannot read or clobber the credential that replaced
+    /// it. Mirrors the in-memory fake's `authorize_opaque_material` exactly;
+    /// the two are pinned together by the durable and contract test tiers.
+    async fn authorize_opaque_material(
+        &self,
+        request: &crate::OpaqueMaterialRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let (account, _version) = self
+            .read_account(&request.scope, request.account_id)
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(&request.scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account.is_authorized_for_requester(request.requester_extension.as_ref()) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.link_revision != request.link_revision {
+            return Err(AuthProductError::LinkRevisionStale {
+                current: account.link_revision,
+            });
+        }
+        Ok(account)
+    }
+}
+
+/// Render a substrate version as the opaque token the custody port carries.
+fn material_version_token(
+    version: SecretVersion,
+) -> Result<LinkedSessionVersion, AuthProductError> {
+    LinkedSessionVersion::new(version.get().to_string()).map_err(|error| {
+        tracing::debug!(%error, "secret version does not form a linked-session token");
+        AuthProductError::BackendUnavailable
+    })
+}
+
+/// Parse a caller-presented token back into the substrate version it named.
+///
+/// A token this store never minted (wrong shape, another implementation's
+/// format) is an invalid request, not a conflict: refusing it is what stops a
+/// forged or stale-format token from expressing a write expectation at all.
+fn parse_material_version(token: &str) -> Result<SecretVersion, AuthProductError> {
+    token
+        .parse::<u64>()
+        .map(SecretVersion::from_backend)
+        .map_err(|_| AuthProductError::invalid_request("unrecognized linked-session version token"))
 }
 
 #[async_trait]

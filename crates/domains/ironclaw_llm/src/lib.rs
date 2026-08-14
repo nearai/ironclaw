@@ -504,15 +504,27 @@ fn create_anthropic_from_registry(
         reason: format!("Failed to create Anthropic client: {e}"),
     })?;
 
-    let cache_retention = config.cache_retention;
+    // Downgrade retention up front for models without prompt-cache support so
+    // the rig `prompt_caching` flag below agrees with the adapter's own
+    // `with_cache_retention` validation.
+    let cache_retention =
+        rig_adapter::effective_cache_retention(config.cache_retention, &config.model);
 
-    let model = client.completion_model(&config.model);
+    let mut model = client.completion_model(&config.model);
+
+    // Short retention: rig's typed breakpoints (system prompt + last message
+    // block, plain 5m ephemeral) complement the request-level automatic
+    // marker and the last-tool marker added in `build_rig_request`. Long
+    // retention must NOT set this — rig's markers cannot carry a TTL, and a
+    // 5m block marker alongside a 1h automatic marker is an API error
+    // (TTL conflict on the last block). See issue #6984.
+    model.prompt_caching = cache_retention == CacheRetention::Short;
 
     if cache_retention != CacheRetention::None {
         tracing::debug!(
             model = %config.model,
             retention = %cache_retention,
-            "Anthropic automatic prompt caching enabled"
+            "Anthropic prompt caching enabled (explicit breakpoints + automatic marker)"
         );
     }
 
@@ -2233,5 +2245,32 @@ mod tests {
              (60 s) is being used, `create_registry_provider_inner` is not \
              forwarding `request_timeout_secs` to `provider_http_client`.",
         );
+    }
+
+    /// Construction-path coverage for the Anthropic cache wiring (#6984):
+    /// every retention mode builds the rig provider, including the
+    /// unsupported-model downgrade that disables rig's typed breakpoints.
+    #[test]
+    fn anthropic_registry_provider_builds_for_every_cache_retention() {
+        use crate::config::CacheRetention;
+
+        for (model, retention) in [
+            ("claude-opus-4-6", CacheRetention::Short),
+            ("claude-opus-4-6", CacheRetention::Long),
+            ("claude-opus-4-6", CacheRetention::None),
+            ("claude-2.1", CacheRetention::Short),
+        ] {
+            let mut config = RegistryProviderConfig::generic(
+                crate::registry::ProviderProtocol::Anthropic,
+                "anthropic",
+                Some(secrecy::SecretString::from("sk-test".to_string())),
+                "http://127.0.0.1:9",
+                model,
+            );
+            config.cache_retention = retention;
+            let provider = create_anthropic_from_registry(&config, 5)
+                .expect("anthropic provider construction");
+            assert_eq!(provider.model_name(), model);
+        }
     }
 }

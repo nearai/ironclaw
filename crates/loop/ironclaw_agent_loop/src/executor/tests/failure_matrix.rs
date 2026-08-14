@@ -5,8 +5,9 @@ use super::{
     LoopExecutionState, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, LoopSafeSummary,
     MockHost, TerminalWarningObservation, active_task_preserving_compaction_index, calls_response,
     empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
-    family_with_iteration_limit, family_with_reply_admission, final_staged_state,
-    provider_calls_response, reply_response, reply_response_with_text, resolution,
+    family_with_iteration_limit, family_with_reply_admission,
+    family_with_stop_kind_after_observed_turns, final_staged_state, provider_calls_response,
+    reply_response, reply_response_with_text, resolution,
 };
 use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
@@ -158,7 +159,7 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: false,
     },
     MatrixRow {
-        label: "NoProgressDetected <- repeated identical no-change calls",
+        label: "NoProgressDetected <- explicit stop strategy",
         setup: FailureSetup::NoProgressDetected,
         expected_kind: ExpectedTerminal::Failed {
             kind: LoopFailureKind::NoProgressDetected,
@@ -402,20 +403,15 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .await
         }
         FailureSetup::NoProgressDetected => {
-            // The 4th scripted response feeds the failure-explanation model
-            // call that fires after the no-progress stop (nudges are disabled
-            // in this profile, so the nudge path declines without a model call).
+            // Default repetition detection is advisory-only. This row preserves
+            // coverage for an explicit strategy-authored no-progress failure.
             let host = MockHost::new(vec![
-                calls_response(),
-                calls_response(),
                 calls_response(),
                 reply_response_with_text("no progress explanation"),
             ])
-            .with_batch_outcomes(vec![
-                batch_outcome(no_change_result("result:no-progress-1")),
-                batch_outcome(no_change_result("result:no-progress-2")),
-                batch_outcome(no_change_result("result:no-progress-3")),
-            ]);
+            .with_batch_outcomes(vec![batch_outcome(no_change_result(
+                "result:no-progress-1",
+            ))]);
             let mut state = LoopExecutionState::initial_for_run(host.run_context());
             assert!(
                 state
@@ -424,7 +420,15 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             );
             state.terminal_warning_state.mark_delivered();
             state.terminal_warning_state.clear_active();
-            run_local(crate::families::default(), host, Some(state)).await
+            run_local(
+                family_with_stop_kind_after_observed_turns(
+                    1,
+                    crate::strategies::StopKind::NoProgressDetected,
+                ),
+                host,
+                Some(state),
+            )
+            .await
         }
         FailureSetup::PolicyDenied => {
             let host = MockHost::new(vec![

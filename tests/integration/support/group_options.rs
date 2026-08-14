@@ -1,8 +1,9 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
-//! `with_narrowed_capability_surface_policy_for_bridged_test`, `budget_accounting`,
-//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! `with_narrowed_capability_surface_policy_for_bridged_test`,
+//! `budget_accounting`, `communication_context_provider`,
+//! `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -90,6 +91,12 @@ impl RebornIntegrationGroupBuilder {
     /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
         self.tool_disclosure = ToolDisclosureMode::Bridged;
+        self
+    }
+
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
         self
     }
 

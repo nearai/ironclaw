@@ -1,7 +1,7 @@
 //! In-memory-backed capability-lease store constructor for tests.
 //!
 //! The Reborn architecture-simplification note
-//! (`docs/reborn/contracts/capability-access.md`)
+//! (`docs/internal/reborn/contracts/capability-access.md`)
 //! replaces the hand-written `InMemory*Store` parallel implementations with the
 //! one production `Filesystem*Store<F>` exercised over an in-memory backend:
 //! "in-memory" stops being a store and becomes a filesystem backend

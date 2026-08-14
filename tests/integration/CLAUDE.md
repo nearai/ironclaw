@@ -77,10 +77,12 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
    façade removes.
 3. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
    gateway or stub internals.
-4. **Zero setup.** Must pass offline via a plain `cargo test --test reborn_<name>`
-   — no services, no API keys, no `integration` feature, no Docker, no special
-   linker. Hermetic env (keychain off, `TZ=UTC`, passthrough LLM config) is baked
-   into `build()`.
+4. **Zero setup by default.** Ordinary bins pass offline via a plain
+   `cargo test --test reborn_integration_<name>` — no services, API keys, Docker, or special
+   linker. The sole exception is `reborn_integration_sandbox_shell_turn`, a backend/runtime
+   integration test selected by a dedicated Docker CI lane; locally it skips
+   visibly unless Docker and the worker image are available, and CI sets
+   `IRONCLAW_REQUIRE_DOCKER_TESTS=1` so those prerequisites fail closed.
 5. **Minimal, inert edges.** The harness defaults every network/IO boundary to
    captured or inert — no real network, process, or channel. Wire only the
    boundaries your scenario actually crosses; a text-only turn needs no
@@ -115,7 +117,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   (`HarnessCapabilityRecorder`, `RecordedCapabilityResult`), and
   `harness/profiles/<domain>.rs` — one file per capability domain (`attachment`,
   `coding_read`, `core_builtin`, `extension`, `file`, `github`, `mock_mcp`,
-  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `skill`,
+  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `sandbox_shell`, `skill`,
   `trace_commons`, `trigger`, `web_access`) — each returning a `ToolsProfile` via
   a constructor like `profiles::file::file_tools_requiring_approval()` or
   `profiles::core_builtin::core_builtin_tools(CoreBuiltinOptions)`.
@@ -254,7 +256,7 @@ needs a different scripted body, install keyed responses via
 - `ScriptedHttpResponse::for_url(url_substr, body)` — matches any request whose URL contains the substring; defaults to a `200` body.
 - `.with_method(method)` — narrow to a specific HTTP method (lowercase, e.g. `"post"`).
 - `.with_capability(capability_id)` — narrow to a specific capability id (e.g. `"builtin.http"`).
-- `.with_status(status)` — override the status of a `for_url` body response (e.g. `404`, `500`). Still a successful egress call — `builtin.http` surfaces it as a Completed tool result carrying that status. Panics if called on an `egress_error` response (mutually exclusive outcomes).
+- `.with_status(status)` — override the status of a `for_url` body response (e.g. `404`, `500`). 4xx/5xx responses classify as a model-visible `Failed` tool outcome (`operation_failed`) carrying the sanitized response as diagnostic context (see `docs/internal/reborn/contracts/host-runtime.md`); other statuses remain a Completed tool result carrying that status. Panics if called on an `egress_error` response (mutually exclusive outcomes).
 - `ScriptedHttpResponse::egress_error(url_substr, error)` — scripts a runtime egress failure (`Err(RuntimeHttpEgressError)` from `execute`) instead of a body, driving `builtin.http`'s error-mapping paths (e.g. `policy_denied` → `Denied`, `response_body_limit_exceeded` → `Failed{OutputTooLarge}`). Prefer the two named wrappers below so test bodies select the scenario by name instead of hand-building the nested error struct:
   - `ScriptedHttpResponse::network_error(url_substr, reason)` — a `RuntimeHttpEgressError::Network` with `reason` (e.g. `"policy_denied"` → `Denied`).
   - `ScriptedHttpResponse::response_error(url_substr, reason)` — a `RuntimeHttpEgressError::Response` with `reason` (e.g. `RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED` → `Failed{OutputTooLarge}`).
@@ -275,6 +277,12 @@ spawning any OS process.
 `HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
+
+**`.with_sandbox_shell_tools()`** — dedicated runtime-integration opt-in. It
+builds the explicit local-Docker sandbox profile through production composition
+and dispatches `builtin.shell` into the hardened Python worker. Only
+`reborn_sandbox_shell_turn.rs` selects it; the Docker availability gate remains
+owned by that test.
 
 ### MCP
 

@@ -25,7 +25,7 @@ use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, AssistantReply, CancellationPolicy, CapabilityCallCandidate,
     CapabilityDescriptorView, CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress,
     CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
-    ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
+    ConcurrencyClass, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
     LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
     LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest,
@@ -60,6 +60,7 @@ pub struct MockAgentLoopDriverHost {
     visible_capabilities: Vec<CapabilityDescriptorView>,
     prompt_compaction_indexes: Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>,
     staged_iterations: Mutex<VecDeque<u32>>,
+    staged_checkpoint_payloads: Mutex<Vec<Vec<u8>>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_transcript_with: Mutex<Option<AgentLoopHostErrorKind>>,
@@ -83,6 +84,11 @@ impl MockAgentLoopDriverHost {
     /// Returns the ordered host call log captured so far.
     pub fn call_log(&self) -> Vec<MockHostCall> {
         clone_mutex_vec(&self.call_log)
+    }
+
+    /// Returns checkpoint payloads in the order they were staged.
+    pub fn staged_checkpoint_payloads(&self) -> Vec<Vec<u8>> {
+        clone_mutex_vec(&self.staged_checkpoint_payloads)
     }
 
     /// Returns how many model stream calls the executor made.
@@ -149,10 +155,7 @@ impl MockAgentLoopDriverHostBuilder {
         Self {
             run_context: test_run_context("agent-loop-test"),
             script: ScenarioScript::reply_only("ok"),
-            visible_capabilities: vec![capability_descriptor(
-                capability_id("demo.echo"),
-                ConcurrencyHint::SafeForParallel,
-            )],
+            visible_capabilities: vec![capability_descriptor(capability_id("demo.echo"))],
             prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
@@ -256,6 +259,7 @@ impl MockAgentLoopDriverHostBuilder {
                 visible_capabilities: self.visible_capabilities,
                 prompt_compaction_indexes: Mutex::new(self.prompt_compaction_indexes),
                 staged_iterations: Mutex::new(VecDeque::new()),
+                staged_checkpoint_payloads: Mutex::new(Vec::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
                 fail_transcript_with: Mutex::new(self.fail_transcript_with),
@@ -734,6 +738,7 @@ impl ironclaw_loop_contracts::LoopContextPort for MockAgentLoopDriverHost {
             identity_messages: Vec::new(),
             messages: Vec::new(),
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         })
@@ -762,6 +767,7 @@ impl ironclaw_loop_contracts::LoopPromptPort for MockAgentLoopDriverHost {
             compaction_message_index: lock_or_panic(&self.prompt_compaction_indexes)
                 .pop_front()
                 .unwrap_or_default(),
+            recent_window_truncation: None,
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -837,6 +843,10 @@ impl ironclaw_loop_contracts::LoopModelPort for MockAgentLoopDriverHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockAgentLoopDriverHost {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+        false
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -949,6 +959,7 @@ impl ironclaw_loop_contracts::LoopCheckpointPort for MockAgentLoopDriverHost {
         let iteration = serde_json::from_slice::<LoopExecutionState>(&request.payload)
             .map(|state| state.iteration)
             .unwrap_or_default();
+        lock_or_panic(&self.staged_checkpoint_payloads).push(request.payload.clone());
         lock_or_panic(&self.staged_iterations).push_back(iteration);
         let ordinal = self.checkpoints.sequence().len();
         LoopCheckpointStateRef::for_run(&self.run_context, format!("state-{ordinal}"))
@@ -1071,10 +1082,7 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
 }
 
 /// Builds a capability descriptor for the mock visible surface.
-pub fn capability_descriptor(
-    id: CapabilityId,
-    concurrency_hint: ConcurrencyHint,
-) -> CapabilityDescriptorView {
+pub fn capability_descriptor(id: CapabilityId) -> CapabilityDescriptorView {
     CapabilityDescriptorView {
         capability_id: id,
         provider: None,
@@ -1082,7 +1090,6 @@ pub fn capability_descriptor(
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
         description_trust: Default::default(),
-        concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }
 }

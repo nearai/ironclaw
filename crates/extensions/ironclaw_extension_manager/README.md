@@ -31,7 +31,7 @@ frozen shrink-only; direct `auth`, `host_runtime`, `secrets`, `skills`, and
 optional fixture deps). The target set is four crates
 (`product_contracts`, `extension_contracts`, `extension_registry`,
 `extension_host`); the gap list is honest in
-`docs/reborn/target-architecture/families/extensions.md` §"ironclaw_extension_manager".
+`docs/internal/reborn/target-architecture/families/extensions.md` §"ironclaw_extension_manager".
 Consumed by `ironclaw_composition`, `ironclaw_cli`, and the root
 integration-test package (dev). Re-derive with
 `rg -l 'ironclaw_extension_manager = ' Cargo.toml crates/*/*/Cargo.toml`.

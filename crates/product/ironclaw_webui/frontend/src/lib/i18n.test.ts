@@ -71,24 +71,53 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", "zh-CN"];
 
-function loadLocalePack(locale) {
-  let registeredId = null;
-  let registeredPack = null;
-  let source = readFileSync(new URL(`../i18n/${locale}.ts`, import.meta.url), "utf8");
-  source = source
+// English copy that a lazily loaded route registers instead of `src/i18n/en.ts`.
+//
+// `en.ts` is bundled eagerly as the fallback pack, so every key in it is paid
+// for on /chat. The inspector's ~110 operator-only strings measurably exceed
+// that budget from en.ts (217.4 KB vs the 217.0 KB gzip ceiling), so their
+// English copy ships inside the lazy inspector chunk. Listing the sidecar here
+// keeps those keys inside the all-locale parity gate below: the English key set
+// is the union of en.ts and these files, and every non-English locale must
+// still carry the whole union in its own `src/i18n/<locale>.ts`.
+//
+// A new sidecar must be added here, or its keys silently fall back to English
+// in all ten other locales.
+const ENGLISH_SIDECAR_PACKS = ["../pages/chat/inspector/inspector-translations.ts"];
+
+function runPackSource(specifier, onRegister) {
+  const source = readFileSync(new URL(specifier, import.meta.url), "utf8")
     .split("\n")
     .filter((line) => !line.startsWith("import "))
     .join("\n");
+  vm.runInNewContext(source, { registerPack: onRegister });
+}
 
-  vm.runInNewContext(source, {
-    registerPack: (id, pack) => {
-      registeredId = id;
-      registeredPack = { ...(registeredPack || {}), ...pack };
-    },
-  });
+function loadLocalePack(locale) {
+  let registeredId = null;
+  let registeredPack = null;
+  const collect = (id, pack) => {
+    registeredId = id;
+    registeredPack = { ...(registeredPack || {}), ...pack };
+  };
+
+  runPackSource(`../i18n/${locale}.ts`, collect);
 
   assert.equal(registeredId, locale);
   assert.ok(registeredPack, `${locale} pack should register`);
+
+  if (locale === "en") {
+    for (const specifier of ENGLISH_SIDECAR_PACKS) {
+      let sidecarKeys = 0;
+      runPackSource(specifier, (id, pack) => {
+        assert.equal(id, "en", `${specifier} should register English copy`);
+        sidecarKeys = Object.keys(pack).length;
+        collect(id, pack);
+      });
+      assert.ok(sidecarKeys > 0, `${specifier} should register at least one key`);
+    }
+  }
+
   return registeredPack;
 }
 
@@ -126,6 +155,12 @@ test("non-English locale packs localize exposed workflow copy", () => {
       !technicalTerms.has(key) &&
       (key === "chat.downloadRunArtifact" ||
         key === "chat.downloadThreadArtifact" ||
+        key === "chat.processWorking" ||
+        key === "chat.workedFor" ||
+        key === "chat.reloadHistory" ||
+        key === "chat.busyRejectedResend" ||
+        key === "authGate.popupClosed" ||
+        key.startsWith("admin.configuration.") ||
         key.startsWith("pairing.web.") ||
         key === "extensions.tools" ||
         key === "tools.installed" ||
@@ -144,6 +179,37 @@ test("non-English locale packs localize exposed workflow copy", () => {
         false,
         `${locale} must localize ${key}`,
       );
+    }
+  }
+});
+
+test("non-English locale packs localize model-selection settings", () => {
+  const english = loadLocalePack("en");
+  const keys = [
+    "llm.modelPreference",
+    "llm.modelPreferenceDesc",
+    "llm.policyTitle",
+    "llm.policyDesc",
+    "llm.policyAllowedModels",
+    "llm.policyWorkspaceDefault",
+    "llm.policyModelPlaceholder",
+    "llm.policyAddModel",
+    "llm.policyEnabled",
+    "llm.policyDisabled",
+    "llm.policyNoActiveProvider",
+    "llm.policyInvalidModel",
+    "llm.policyTooManyModels",
+    "llm.policySelectModels",
+    "llm.followWorkspaceDefault",
+    "llm.unavailableModel",
+    "llm.selectionUnavailable",
+    "llm.preferenceSaving",
+  ];
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    for (const key of keys) {
+      assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
     }
   }
 });
@@ -343,6 +409,7 @@ test("locale packs include client-generated chat failure copy", () => {
     "chat.failure.request",
     "chat.failure.requestDetail",
     "chat.failure.runCategory",
+    "chat.failure.noProgress",
     "chat.failure.recoveryRequired",
     "chat.failure.run",
     "chat.failure.streamRetryable",

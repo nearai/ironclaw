@@ -50,7 +50,13 @@ pub(super) async fn read_file(
         .stat(&resolved.virtual_path)
         .await
         .map_err(|error| {
-            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+            // Same ordering hint as `list_dir`: `.skills/<name>` exists only after activation.
+            match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
+                Some(hint) => operation_error_with_summary(hint),
+                None => {
+                    filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+                }
+            }
         })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
@@ -74,6 +80,52 @@ pub(super) async fn read_file(
         .map_err(|error| {
             filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
         })?;
+
+    // An OOXML document reads as its ADDRESSABLE STRUCTURE, not flattened text.
+    // Flat extraction shows a redline's deleted text as though it were still in
+    // the document — a model reviewing a contract that way reads the wrong
+    // agreement — and gives back no ids to edit against. This is folded into
+    // `read_file` rather than offered as a separate tool because a model
+    // reaches for `read_file` on whatever path it is handed; a tool it must
+    // know to prefer would mostly go unused.
+    if let Some(format) =
+        ironclaw_documents::DocumentFormat::from_path(resolved.scoped_path.as_str())
+    {
+        let view = super::document::structured_document_view(format, &bytes).map_err(|error| {
+            super::document::document_error("read_file", resolved.scoped_path.as_str(), error)
+        })?;
+        let rendered = serde_json::to_string_pretty(&view).map_err(|error| {
+            CodingCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::OperationFailed,
+                format!(
+                    "read_file failed for {}: {error}",
+                    safe_summary_path(resolved.scoped_path.as_str())
+                ),
+            )
+        })?;
+        let output = read_file_text_output(
+            &rendered,
+            resolved.scoped_path.as_str(),
+            offset,
+            limit,
+            has_explicit_range,
+        );
+        if read_output_truncated(&output) {
+            return Err(operation_error_with_summary(format!(
+                "read_file failed for {}: the structured document view exceeds the response limit and cannot be edited safely",
+                safe_summary_path(resolved.scoped_path.as_str())
+            )));
+        }
+        if !has_explicit_range && !read_output_truncated(&output) {
+            read_states.record(
+                &read_scope_key(request),
+                resolved.virtual_path.as_str(),
+                content_fingerprint(&bytes),
+                ReadRepresentation::Structured,
+            );
+        }
+        return Ok(output);
+    }
 
     let (content, representation) =
         if should_extract_document_before_text(&bytes, resolved.scoped_path.as_str()) {
@@ -516,7 +568,7 @@ fn lower_path_extension(scoped_path: &str) -> Option<String> {
 fn is_opaque_binary_document_path(scoped_path: &str) -> bool {
     matches!(
         lower_path_extension(scoped_path).as_deref(),
-        Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx")
+        Some("doc" | "docx" | "docm" | "xls" | "xlsx" | "xlsm" | "ppt" | "pptx" | "pptm")
     )
 }
 
@@ -531,14 +583,14 @@ fn binary_document_write_error(operation: &str, scoped_path: &str) -> CodingCapa
     ))
 }
 
-fn read_before_edit_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
+pub(super) fn read_before_edit_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
     operation_error_with_summary(format!(
         "{operation} failed for {}: read it in full with read_file before editing it. Ranged reads (offset or limit) and default reads truncated at the line or byte cap do not count as having seen the whole file; a file too large to read in full cannot be edited with this tool",
         safe_summary_path(scoped_path)
     ))
 }
 
-fn stale_read_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
+pub(super) fn stale_read_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
     operation_error_with_summary(format!(
         "{operation} failed for {}: the file changed since it was last read; read it again with read_file before editing it",
         safe_summary_path(scoped_path)
@@ -548,6 +600,24 @@ fn stale_read_error(operation: &str, scoped_path: &str) -> CodingCapabilityError
 pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
+    // `list_dir "/"` is an agent asking what the filesystem contains. It used to fail with
+    // `path  is not under an available scoped root` -- blank, because the safe-summary encoder maps
+    // `/` to a space -- when the roots it was asking for were right there in the mount view.
+    if let Some(path) = request.input.get("path").and_then(Value::as_str)
+        && super::paths::is_filesystem_root_request(path)
+    {
+        let mounts = request.mounts.ok_or_else(|| {
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        })?;
+        let entries = super::paths::root_alias_entries(mounts);
+        let count = entries.len();
+        return Ok(json!({
+            "path": "/",
+            "entries": entries,
+            "count": count,
+            "truncated": false
+        }));
+    }
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
     // A missing mount ROOT lists as empty (the grant names it; nothing has
     // been written under it yet), so the sensitive-stat guard tolerates its
@@ -560,7 +630,17 @@ pub(super) async fn list_dir(
         }
         Some(_) => {}
         None if resolved.is_mount_root() => {}
-        None => return Err(operation_error()),
+        None => {
+            // A miss under `.skills/<name>` is an ordering mistake, not a missing file: activation is
+            // what stages a bundle into the workspace. Saying so costs one line and saved an agent two
+            // failed calls spent discovering it.
+            return Err(
+                match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
+                    Some(hint) => operation_error_with_summary(hint),
+                    None => operation_error(),
+                },
+            );
+        }
     }
     let recursive = request
         .input

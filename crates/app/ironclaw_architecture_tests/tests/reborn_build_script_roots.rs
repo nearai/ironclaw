@@ -63,7 +63,7 @@ fn reborn_build_scripts_do_not_derive_the_repo_root_by_counted_parent_hops() {
         scripts.len() >= 2,
         "expected to find the workspace's build scripts, found {scripts:?}. A build-script \
          scan that discovers nothing passes while checking nothing \
-         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+         (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
     );
 
     let mut violations = Vec::new();

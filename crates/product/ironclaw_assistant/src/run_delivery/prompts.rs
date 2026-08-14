@@ -12,7 +12,42 @@ use ironclaw_product_contracts::outbound::{ApprovalPromptContextView, GatePrompt
 
 use crate::is_approval_gate_ref;
 
-pub(crate) const WORKING_MESSAGE: &str = "Ironclaw is thinking...";
+/// A small rotation of warm "on it" notices posted while a run works, so a
+/// shared channel with several runs in flight does not fill with identical
+/// lines. Picked deterministically from a per-run seed (see [`working_message`])
+/// so a single run keeps one voice while concurrent runs vary.
+pub(crate) const WORKING_MESSAGES: &[&str] = &[
+    "On it!",
+    "Let me look into that…",
+    "Working on it…",
+    "Give me a sec…",
+    "Digging in…",
+    "Let me take care of that…",
+    "Looking into it…",
+    "Got it — on this now…",
+];
+
+/// Pick a working notice deterministically from `seed` (the run id), so the
+/// same run always shows the same line and two concurrent runs usually differ.
+pub(crate) fn working_message(seed: u64) -> &'static str {
+    WORKING_MESSAGES[(seed % WORKING_MESSAGES.len() as u64) as usize]
+}
+
+/// Escalated "still working" notices that replace the initial indicator when a
+/// run runs long, so the user knows it hasn't stalled. Picked by `(seed, nudge)`
+/// so successive nudges on one run vary their wording (see [`long_running_message`]).
+pub(crate) const LONG_RUNNING_MESSAGES: &[&str] = &[
+    "Still on it — this one's taking a little longer than usual…",
+    "Hang tight, I haven't forgotten you — still working through this…",
+    "This is taking a bit longer than expected, but I'm still on it…",
+    "Bear with me — still crunching through this one…",
+];
+
+/// Pick an escalated "still working" notice for the `nudge`-th update of a run,
+/// varying the wording each time while staying deterministic for replays.
+pub(crate) fn long_running_message(seed: u64, nudge: u64) -> &'static str {
+    LONG_RUNNING_MESSAGES[(seed.wrapping_add(nudge) % LONG_RUNNING_MESSAGES.len() as u64) as usize]
+}
 pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run has no channel-serviceable auth challenge. This stays
 /// deliberately generic because missing/unknown challenge metadata cannot
@@ -21,6 +56,16 @@ pub(crate) const AUTH_UNAVAILABLE_MESSAGE: &str = "This authentication step can'
 /// Posted for a typed credential-entry challenge. It explicitly redirects
 /// secret entry to the private WebUI surface without echoing prompt material.
 pub(crate) const MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
+/// Posted for a device-link challenge, on every surface. Unlike OAuth (one
+/// link the user follows away from chat) and pairing (one host-issued code the
+/// user carries to the vendor), a device link is a multi-round exchange that
+/// asks for secrets — a one-time code, an account password — so there is no
+/// private-DM variant that would make it safe here. It is authored in
+/// `prompts/device_link_auth_unavailable.md` because it runs to a paragraph;
+/// `trim_ascii_end` drops the file's trailing newline so the copy is not
+/// delivered with a dangling blank line.
+pub(crate) const DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE: &str =
+    include_str!("../../prompts/device_link_auth_unavailable.md").trim_ascii_end();
 /// Posted when a pairing challenge reaches a non-private target: the pairing
 /// code itself is a bearer secret and must not be echoed into a shared thread.
 pub(crate) const PAIRING_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to connect or pair this extension in a private setup surface, then ask me again here.";
@@ -41,6 +86,18 @@ pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
+/// Posted when an interactive channel run reaches a terminal *failed* state
+/// (as opposed to a self-authored error reply): the working indicator is
+/// replaced with this so the user gets closure instead of a stuck "thinking"
+/// line. Channel-neutral and diagnostic-free — details stay in the web app.
+pub(crate) const RUN_FAILED_MESSAGE: &str =
+    "That run didn't finish — open the Ironclaw web app for details.";
+/// Posted as the terminal reply for a triggered run that ended in
+/// `Cancelled` (host cancel: auth-auto-deny, policy, supersession, or an
+/// operator action). A scheduled run has no user in the channel to act on a
+/// cancel, so this is informational only — it closes the loop on a fire that
+/// would otherwise vanish (#6896).
+pub(crate) const TRIGGERED_RUN_CANCELED_MESSAGE: &str = "This scheduled run was canceled before it could finish. Open the Ironclaw web app for details.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
@@ -70,9 +127,41 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::ModelDelivery => "model-delivery",
     };
     match discriminator {
-        Some(discriminator) => format!("run-notification:{suffix}:{discriminator}:{run_id}"),
+        Some(discriminator) => {
+            let discriminator = bounded_discriminator(discriminator);
+            format!("run-notification:{suffix}:{discriminator}:{run_id}")
+        }
         None => format!("run-notification:{suffix}:{run_id}"),
     }
+}
+
+/// Longest discriminator embedded verbatim in a projection id. The composed
+/// id must fit `ProjectionUpdateRef`'s 256-byte cap for ANY legal input — a
+/// `TurnGateRef` may itself be up to 256 bytes — or the notice becomes
+/// undeliverable at the ref constructor. Production gate refs are far shorter
+/// (`gate:approval-<uuid>`), so this bound never changes their id shape.
+const DISCRIMINATOR_VERBATIM_MAX: usize = 96;
+
+/// Over-long discriminators keep a readable prefix plus a stable FNV-1a 64
+/// content hash: still one id per distinct gate, never truncation-collided.
+/// FNV-1a is implemented inline because these ids are DURABLE delivery
+/// identities — a std hasher whose output can change across releases would
+/// silently re-key them.
+fn bounded_discriminator(discriminator: &str) -> std::borrow::Cow<'_, str> {
+    if discriminator.len() <= DISCRIMINATOR_VERBATIM_MAX {
+        return std::borrow::Cow::Borrowed(discriminator);
+    }
+    // Room for the ':' + 16 hex digits inside the verbatim budget.
+    let mut end = DISCRIMINATOR_VERBATIM_MAX - 17;
+    while !discriminator.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in discriminator.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    std::borrow::Cow::Owned(format!("{}:{hash:016x}", &discriminator[..end]))
 }
 
 /// Build the approval-gate prompt view. The body carries only the semantic
@@ -156,6 +245,9 @@ pub(crate) fn actionable_auth_prompt_body(view: &AuthPromptView) -> String {
             .as_ref()
             .map(|pairing| pairing.instructions.clone())
             .unwrap_or_else(|| PAIRING_PRIVATE_SETUP_MESSAGE.to_string()),
+        Some(AuthPromptChallengeKind::DeviceLink) => {
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.to_string()
+        }
         Some(AuthPromptChallengeKind::Other) => AUTH_UNAVAILABLE_MESSAGE.to_string(),
         Some(AuthPromptChallengeKind::OAuthUrl) | None => view.body.clone(),
     }
@@ -180,7 +272,16 @@ pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
                 && !pairing.instructions.trim().is_empty()
                 && !pairing.code.trim().is_empty()
         }),
-        Some(AuthPromptChallengeKind::ManualToken | AuthPromptChallengeKind::Other) => false,
+        // A device link never is, and for a stronger reason than manual-token:
+        // the flow is a multi-round conversation the host drives through a
+        // card (display a payload, poll, ask for a code, ask for a password).
+        // A chat surface has nowhere to put that, and two of its steps are
+        // secrets. It is completed in the web app or not at all.
+        Some(
+            AuthPromptChallengeKind::ManualToken
+            | AuthPromptChallengeKind::DeviceLink
+            | AuthPromptChallengeKind::Other,
+        ) => false,
         // Compatibility for prompt rows created before challenge_kind became
         // part of the additive wire contract.
         None => view
@@ -196,6 +297,7 @@ pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
 pub(crate) fn unserviceable_auth_prompt_message(view: Option<&AuthPromptView>) -> &'static str {
     match view.and_then(|view| view.challenge_kind) {
         Some(AuthPromptChallengeKind::ManualToken) => MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
+        Some(AuthPromptChallengeKind::DeviceLink) => DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE,
         _ => AUTH_UNAVAILABLE_MESSAGE,
     }
 }
@@ -250,6 +352,24 @@ mod tests {
     use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
     use ironclaw_host_api::turn::TurnRunId;
 
+    #[test]
+    fn working_message_is_always_a_member_and_varies_by_seed() {
+        // Every seed maps to one of the rotation lines.
+        for seed in 0u64..32 {
+            assert!(WORKING_MESSAGES.contains(&working_message(seed)));
+        }
+        // Deterministic for a given seed (one run keeps one voice).
+        assert_eq!(working_message(3), working_message(3));
+        // The rotation actually varies across runs (not one hardcoded line).
+        let distinct: std::collections::HashSet<&str> = (0u64..WORKING_MESSAGES.len() as u64)
+            .map(working_message)
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "the working notice should vary across runs, got {distinct:?}"
+        );
+    }
+
     /// The delivery id is derived from this ref, so two notices that share a
     /// string share a durable delivery identity — the second comes back
     /// `AlreadyDelivered` and is silently never sent while still recorded as
@@ -296,6 +416,61 @@ mod tests {
             run_notification_projection_id(run_id, RunNotificationEventKind::AuthRequired, None),
             format!("run-notification:auth:{run_id}")
         );
+        // FinalReplyReady is the kind production always sends refless: its
+        // suffix keys the in-flight final-reply delivery identities, so a
+        // rename would double-post final replies across a deploy.
+        assert_eq!(
+            run_notification_projection_id(run_id, RunNotificationEventKind::FinalReplyReady, None),
+            format!("run-notification:final:{run_id}")
+        );
+    }
+
+    #[test]
+    fn discriminated_projection_ids_embed_short_gate_refs_verbatim() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::ApprovalNeeded,
+                Some("gate:approval-1234"),
+            ),
+            format!("run-notification:approval:gate:approval-1234:{run_id}")
+        );
+    }
+
+    /// A legal `TurnGateRef` can be up to 256 bytes while `ProjectionUpdateRef`
+    /// caps at 256: over-long discriminators must compress rather than make
+    /// the gate notice undeliverable, without colliding distinct gates.
+    #[test]
+    fn over_long_discriminators_stay_deliverable_and_distinct() {
+        let run_id = TurnRunId::new();
+        let shared_prefix = "g".repeat(240);
+        let ref_a = format!("{shared_prefix}-a");
+        let ref_b = format!("{shared_prefix}-b");
+        let id_a = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(&ref_a),
+        );
+        let id_b = run_notification_projection_id(
+            run_id,
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(&ref_b),
+        );
+        assert!(
+            id_a.len() <= 256,
+            "composed id must fit the ref cap: {id_a}"
+        );
+        assert_ne!(id_a, id_b, "prefix-sharing gates must not collide");
+        // Deterministic: the same gate re-announced computes the same id.
+        assert_eq!(
+            id_a,
+            run_notification_projection_id(
+                run_id,
+                RunNotificationEventKind::ApprovalNeeded,
+                Some(&ref_a),
+            )
+        );
     }
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
@@ -312,6 +487,7 @@ mod tests {
             expires_at: None,
             connection: None,
             pairing: None,
+            device_link: None,
         }
     }
 
@@ -413,6 +589,44 @@ mod tests {
         assert_eq!(
             unserviceable_auth_prompt_message(Some(&token_view)),
             MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE
+        );
+    }
+
+    /// A device link is a multi-round exchange that asks for a one-time code
+    /// and an account password, so it can never be completed from a chat
+    /// surface — not even a private DM, unlike OAuth and pairing. It also must
+    /// not inherit the manual-token copy: telling a device-link user to go find
+    /// an API key names a credential that does not exist for this method, and
+    /// the generic dead-end copy does not say where to finish instead.
+    #[test]
+    fn device_link_challenge_is_never_serviceable_and_points_at_the_web_app() {
+        let link_view = view(Some(AuthPromptChallengeKind::DeviceLink));
+
+        assert!(
+            !auth_prompt_is_serviceable(&link_view),
+            "a device link cannot be driven from a chat surface"
+        );
+        assert_eq!(
+            unserviceable_auth_prompt_message(Some(&link_view)),
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE
+        );
+        assert_eq!(
+            actionable_auth_prompt_body(&link_view),
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE,
+            "the body must never fall through to the raw gate text"
+        );
+        assert_ne!(
+            unserviceable_auth_prompt_message(Some(&link_view)),
+            MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
+            "a device-link user has no API key to go and find"
+        );
+        assert!(
+            DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.contains("web app"),
+            "the copy has to name where the link CAN be completed"
+        );
+        assert!(
+            !DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.ends_with('\n'),
+            "the prompt file's trailing newline must be trimmed before delivery"
         );
     }
 

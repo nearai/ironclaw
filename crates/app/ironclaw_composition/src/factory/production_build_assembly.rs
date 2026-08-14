@@ -125,6 +125,7 @@ pub(super) async fn build_production_shaped(
                     workspace_root,
                     host_home_root,
                     storage_backend_input: DurableStorageInput::EmbeddedLibsql,
+                    process_journal_pool: None,
                     explicit_secret_master_key: None,
                     runtime_policy_for_local_process,
                     postgres_resource_governor_singleton: None,
@@ -140,7 +141,7 @@ pub(super) async fn build_production_shaped(
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
-            let pool = open_postgres_pool_from_source(pool_source)?;
+            let pools = open_postgres_pools_from_source(pool_source)?;
             let scheduler_wake_wiring =
                 ironclaw_turn_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
@@ -158,7 +159,8 @@ pub(super) async fn build_production_shaped(
                     root,
                     workspace_root,
                     host_home_root,
-                    storage_backend_input: DurableStorageInput::Postgres(pool),
+                    storage_backend_input: DurableStorageInput::Postgres(pools.data_plane),
+                    process_journal_pool: pools.process_journal,
                     explicit_secret_master_key: Some(secret_master_key),
                     runtime_policy_for_local_process,
                     postgres_resource_governor_singleton: Some(
@@ -200,7 +202,7 @@ pub(super) async fn build_production_shaped(
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
-            let pool = open_postgres_pool_from_source(pool_source)?;
+            let pools = open_postgres_pools_from_source(pool_source)?;
             let scheduler_wake_wiring =
                 ironclaw_turn_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
@@ -214,7 +216,8 @@ pub(super) async fn build_production_shaped(
             let context = build_context(production_wiring, scheduler_wake_wiring);
             build_postgres_production(
                 context,
-                pool,
+                pools.data_plane,
+                pools.process_journal,
                 secret_master_key,
                 process_local_resource_governor_singleton,
             )
@@ -236,6 +239,9 @@ struct LocalStorageProductionInput {
     workspace_root: Option<PathBuf>,
     host_home_root: Option<PathBuf>,
     storage_backend_input: DurableStorageInput,
+    /// Dedicated Postgres pool for the process journal, when the deployment has
+    /// one. `None` leaves the journal on the shared data-plane handle.
+    process_journal_pool: Option<deadpool_postgres::Pool>,
     explicit_secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     runtime_policy_for_local_process: Option<EffectiveRuntimePolicy>,
     postgres_resource_governor_singleton: Option<bool>,
@@ -250,6 +256,7 @@ async fn build_local_storage_production_shaped(
         workspace_root,
         host_home_root,
         storage_backend_input,
+        process_journal_pool,
         explicit_secret_master_key,
         runtime_policy_for_local_process,
         postgres_resource_governor_singleton,
@@ -259,6 +266,9 @@ async fn build_local_storage_production_shaped(
         workspace_root,
         host_home_root,
         runtime_policy_for_local_process,
+        // The shell must scope `/workspace` exactly as the file tools do, or one alias names two
+        // directories and a file written by one is invisible to the other.
+        context.workspace_scoped_per_caller,
     )?;
     let root = &host_access.storage_root;
     let workspace_root = &host_access.workspace_root;
@@ -291,6 +301,10 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
+    // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
+    // agent install) left on the host disk has to be brought across or it is silently lost.
+    crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(root, &filesystem)
+        .await?;
     context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,
@@ -310,13 +324,21 @@ async fn build_local_storage_production_shaped(
     if let Some(singleton) = postgres_resource_governor_singleton {
         ensure_postgres_resource_governor_authority_for_build(singleton)?;
     }
+    let process_journal_filesystem = process_journal_pool
+        .map(|pool| {
+            crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+                ironclaw_filesystem::PostgresRootFilesystem::new(pool),
+            ))
+        })
+        .transpose()?;
     let stores = ProductionStoreBundle::with_secret_credentials(
         filesystem,
         resource_governor,
         secret_credentials,
         event_store,
     )
-    .await?;
+    .await?
+    .with_process_journal_filesystem(process_journal_filesystem);
     build_backend_production(
         context,
         stores,

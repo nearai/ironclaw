@@ -29,7 +29,7 @@ use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
     append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
+    capability_is_visible, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, gate_tool_result_summary,
     model_visible_capability_failure_observation, pending_approval_resume_candidate,
     pending_auth_resume_candidate, pending_external_tool_resume_candidate,
@@ -47,9 +47,11 @@ use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, G
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
+#[cfg(test)]
+use loop_exit::reply_trailed_off;
 use loop_exit::{
     COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
-    reply_trailed_off,
+    reply_completion_signals, scheduled_trigger_run,
 };
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_failure_category,
@@ -155,7 +157,7 @@ fn debug_host_unavailable(stage: HostStage, error: &AgentLoopHostError) {
         Err(validation_error) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            validation_error = %validation_error,
+            invalid_summary_error = %validation_error,
             "agent loop host call unavailable with invalid safe summary"
         ),
     }

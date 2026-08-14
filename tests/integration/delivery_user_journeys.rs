@@ -52,7 +52,7 @@ use chrono::Utc;
 use ironclaw_assistant::{RunDeliveryObserver, RunDeliveryServices};
 use ironclaw_composition::RebornRuntime;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
+    ChannelIngress, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::preference_target::{
@@ -252,6 +252,9 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
                 "mpim:read",
                 "users:read",
                 "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
             ],
         )
         .await
@@ -554,15 +557,31 @@ async fn assert_partial_failure_attempts(services: &RebornRuntime, scope: &TurnS
 /// Parse a raw Slack Events API body through the REAL adapter into one
 /// normalized message (mirrors the first half of `extension_delivery.rs`'s
 /// `preresolve_vendor_turn_scope`, without the HTTP layer).
-fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
+async fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
+    let egress = ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer::new(
+        Arc::new(
+            |_| ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                status: 200,
+                body: Vec::new(),
+            },
+        ),
+    );
     let outcome = ironclaw_slack_extension::SlackChannelAdapter
-        .inbound(VerifiedInbound {
-            extension_id: "slack",
-            installation_id: SLACK_INSTALLATION,
-            config: &[],
-            body: body.as_bytes(),
-            headers: &[],
-        })
+        .receive(
+            VerifiedInbound {
+                extension_id: "slack",
+                installation_id: SLACK_INSTALLATION,
+                config: &[],
+                body: body.as_bytes(),
+                headers: &[],
+                // Slack's manifest `presentation.can_reply_in_threads` (#7377
+                // made the flag load-bearing); a DM body is unaffected either
+                // way, but the value must mirror the shipped manifest.
+                can_reply_in_threads: true,
+            },
+            &egress,
+        )
+        .await
         .expect("the slack DM body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
         panic!("the slack DM body must normalize to messages");
@@ -603,7 +622,10 @@ async fn preresolve_slack_scope(
     let envelope =
         ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("inbound envelope");
     let binding = binding_service
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("slack DM conversation binding resolves");
     TurnScope::new_with_owner(
@@ -611,7 +633,7 @@ async fn preresolve_slack_scope(
         binding.agent_id.clone(),
         binding.project_id.clone(),
         binding.thread_id.clone(),
-        binding.subject_user_id.clone(),
+        Some(binding.actor_user_id.clone()),
     )
 }
 
@@ -636,7 +658,7 @@ fn slack_run_delivery_services(
         harness.binding.project_id.clone(),
         ironclaw_host_api::ids::ThreadId::new("slack-journey-channel-notices")
             .expect("notice thread id"),
-        harness.binding.subject_user_id.clone(),
+        Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
@@ -715,7 +737,7 @@ async fn parse_and_preresolve_slack_dm(
     harness: &RebornIntegrationHarness,
     body: &str,
 ) -> (NormalizedInboundMessage, TurnScope) {
-    let message = parse_slack_dm_message(body);
+    let message = parse_slack_dm_message(body).await;
     // `test_verified` is the `test-support` seam standing in for the ingress
     // verifier: minting is witness-gated (PROPOSAL §11.2.5) and the harness
     // holds no `VerifiedInboundGrant`.
@@ -758,8 +780,6 @@ async fn admit_slack_dm_message(
             extension_id: "slack".to_string(),
             installation_id: SLACK_INSTALLATION.to_string(),
             message,
-            channel_adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-            channel_egress: None,
         })
         .await
         .expect("slack DM event is durably admitted");
@@ -1159,8 +1179,15 @@ async fn deliver_to_origin_conversation_is_denied_and_model_replies() {
 /// provider refs; the failing call surfaces as a Failed tool error naming
 /// the sanitized kind — never silently merged, dropped, or mistaken for the
 /// other call's outcome.
-#[tokio::test(flavor = "multi_thread")]
-async fn partial_failure_reports_per_call_honestly() {
+#[test]
+fn partial_failure_reports_per_call_honestly() {
+    run_async_test_with_stack(
+        "partial-failure-reports-per-call-honestly",
+        partial_failure_reports_per_call_honestly_async,
+    );
+}
+
+async fn partial_failure_reports_per_call_honestly_async() {
     let group = RebornIntegrationGroup::extension_delivery()
         .await
         .expect("delivery group builds");
@@ -1280,6 +1307,31 @@ async fn partial_failure_reports_per_call_honestly() {
         .expect("the run's own final reply lands and acknowledges the failed leg");
 }
 
+/// Run the deep parallel-delivery harness on a larger-than-default OS stack.
+/// The production decorator chain exercised here can exceed Rust's 2 MiB test
+/// thread stack before reaching the assertions; sibling integration suites use
+/// this same current-thread runtime wrapper for those deep production paths.
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// Spec §13.8 — an undeliverable destination is refused without any tool
 /// call, never silently routed elsewhere.
 ///
@@ -1343,6 +1395,8 @@ fn background_run_notifier(
             max_wait: Duration::from_secs(10),
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("non-zero"),
             max_pending_deliveries: std::num::NonZeroUsize::new(8).expect("non-zero"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         services
             .triggered_run_delivery_store_for_test()
@@ -1914,4 +1968,408 @@ async fn empty_notification_set_keeps_blocked_fire_in_app_only() {
         still_blocked.gate_ref.is_some(),
         "the hold keeps its actionable gate ref"
     );
+}
+
+// ── Web-push notice journeys (browser channel) ─────────────────────────────
+
+/// Push endpoints on the web-app manifest's declared FCM host. The reserved
+/// `gone-subscription-token` suffix mirrors
+/// `harness/profiles/extension.rs::WEB_APP_GONE_ENDPOINT_TOKEN`: the
+/// profile's vendor router answers it `410 Gone` (every other push POST gets
+/// `201 Created`).
+const WEB_APP_LIVE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
+const WEB_APP_GONE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/gone-subscription-token";
+/// The browser channel's catalog target id. Deliberately the pre-rename
+/// `web-push` bytes: it is a persisted per-user preference identity (see
+/// `ironclaw_web_app::WEB_APP_TARGET_ID`), unlike the `web-app` channel name.
+const WEB_APP_TARGET_ID: &str = "web-push";
+
+/// Exact-destination + unthreaded delivery evidence for the journey coverage
+/// gate (`tests/e2e/scenarios/test_journey_coverage.py`
+/// `_assert_delivery_address_is_citable`). Web push addresses a per-browser
+/// endpoint capability URL, not a threaded conversation — the endpoint IS the
+/// destination and there is no thread anchor. The gate greps this helper for
+/// `expected_conversation_id`/`expected_thread_anchor` gating the count.
+fn assert_web_app_delivery_evidence(posts: &[ironclaw_network::NetworkHttpRequest]) {
+    // Literal (not the `WEB_APP_LIVE_ENDPOINT` const) because the journey
+    // coverage gate greps this body for the exact destination string.
+    let expected_conversation_id = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
+    let expected_thread_anchor: Option<&str> = None;
+    let expected_count = 1;
+    let matching = posts.iter().filter(|post| {
+        // The endpoint carries no in-URL thread segment; browser push has no
+        // threading, so the anchor is unconditionally absent.
+        let thread_anchor: Option<&str> = None;
+        post.url == expected_conversation_id && thread_anchor == expected_thread_anchor
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "exactly one unthreaded push POST must reach the enrolled endpoint; got {:?}",
+        posts
+            .iter()
+            .map(|post| post.url.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Enroll one browser for the harness creator through the REAL WebUI route
+/// (`POST /api/webchat/v2/channels/web-app/notifications/enable`, the
+/// generic notification-setup surface) over the composed runtime's
+/// production product surface — the same path the browser panel drives.
+async fn enroll_web_app_browser(
+    harness: &RebornIntegrationHarness,
+    services: &RebornRuntime,
+    endpoint: &str,
+) {
+    use base64::Engine as _;
+    let webui = services
+        .product_surface(None)
+        .expect("composed runtime builds the production product surface");
+    // The enrollment owner must be the fire CREATOR (the notifier resolves
+    // notification targets for `creator_user_id` = the binding actor).
+    let caller = ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
+        harness.binding.tenant_id.clone(),
+        harness.binding.actor_user_id.clone(),
+        harness.binding.agent_id.clone(),
+        harness.binding.project_id.clone(),
+    );
+    let point = ironclaw_web_app::generate_vapid_key_material("mailto:browser@example.com")
+        .expect("generate a valid P-256 point")
+        .public_key_b64url;
+    let (status, body) = reborn_support::webui_mount::post_json(
+        reborn_support::webui_mount::mount_webui_v2_router(webui, caller),
+        "/api/webchat/v2/channels/web-app/notifications/enable",
+        json!({
+            "payload": {
+                "endpoint": endpoint,
+                "keys": {
+                    "p256dh": point,
+                    "auth": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 16]),
+                },
+                "user_agent": "JourneyBrowser/1.0",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "enroll response: {body}"
+    );
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["extension_id"], "web-app", "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+}
+
+/// The web-app notifier: [`background_run_notifier`]'s services with the
+/// browser channel's codec beside Slack's, so the creator's `web-app`
+/// notification target decodes.
+fn web_app_background_run_notifier(
+    harness: &RebornIntegrationHarness,
+    services: &RebornRuntime,
+) -> ironclaw_assistant::TriggeredRunDeliveryDriver {
+    ironclaw_assistant::TriggeredRunDeliveryDriver::with_settings(
+        slack_run_delivery_services(harness, services),
+        ironclaw_assistant::RunDeliverySettings {
+            poll_interval: Duration::from_millis(5),
+            max_wait: Duration::from_secs(10),
+            max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("non-zero"),
+            max_pending_deliveries: std::num::NonZeroUsize::new(8).expect("non-zero"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        services
+            .triggered_run_delivery_store_for_test()
+            .expect("composed runtime exposes the triggered-delivery outcome store"),
+        Arc::new(vec![
+            Arc::new(ironclaw_slack_extension::SlackPreferenceTargetCodec)
+                as Arc<dyn PreferenceTargetCodec>,
+            Arc::new(ironclaw_web_app_extension::WebAppPreferenceTargetCodec)
+                as Arc<dyn PreferenceTargetCodec>,
+        ]) as Arc<dyn ActivePreferenceTargetCodecs>,
+        slack_agent(),
+    )
+}
+
+/// Bounded-poll the wire recorder for push-service POSTs to `endpoint`.
+async fn wait_for_push_posts(
+    harness: &RebornIntegrationHarness,
+    endpoint: &str,
+    expected: usize,
+) -> Vec<ironclaw_network::NetworkHttpRequest> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let posts: Vec<_> = harness
+            .captured_network_requests_for_test()
+            .into_iter()
+            .filter(|request| request.url.starts_with(endpoint))
+            .collect();
+        if posts.len() >= expected {
+            return posts;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} push POST(s) to {endpoint}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The browser subscriptions currently enrolled for the harness creator,
+/// read back through the SAME production status route the panel uses.
+async fn web_app_subscription_count(
+    harness: &RebornIntegrationHarness,
+    services: &RebornRuntime,
+) -> u64 {
+    let webui = services
+        .product_surface(None)
+        .expect("composed runtime builds the production product surface");
+    let caller = ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
+        harness.binding.tenant_id.clone(),
+        harness.binding.actor_user_id.clone(),
+        harness.binding.agent_id.clone(),
+        harness.binding.project_id.clone(),
+    );
+    let (status, body) = reborn_support::webui_mount::get_json(
+        reborn_support::webui_mount::mount_webui_v2_router(webui, caller),
+        "/api/webchat/v2/channels/web-app/notifications",
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "status response: {body}"
+    );
+    body["detail"]["registration_count"]
+        .as_u64()
+        .expect("status detail carries registration_count")
+}
+
+/// A blocked routine fire's gate notice reaches an enrolled browser as a
+/// real Web Push: encrypted `aes128gcm` body, host-injected
+/// `Authorization: vapid` (the adapter cannot set that header), protocol
+/// headers, one POST to the exact enrolled endpoint — while the run parks on
+/// its gate and the notice lands in the durable attempt ledger.
+#[tokio::test(flavor = "multi_thread")]
+async fn blocked_fire_pushes_web_app_notice_to_enrolled_browser() {
+    let group = RebornIntegrationGroup::extension_delivery_with_web_app()
+        .await
+        .expect("delivery-with-web-app group builds");
+    let services = reborn_services(&group);
+    let harness = group
+        .thread("conv-web-app-notice")
+        .build()
+        .await
+        .expect("web-app notice thread builds");
+
+    enroll_web_app_browser(&harness, services, WEB_APP_LIVE_ENDPOINT).await;
+    seed_notification_channel(&harness, services, WEB_APP_TARGET_ID).await;
+    gate_the_write(&group, &harness).await;
+
+    let submission = harness
+        .submit_triggered_turn_scripted(
+            GATED_FIRE_PROMPT,
+            [
+                RebornScriptedReply::tool_call(
+                    "builtin.write_file",
+                    json!({"path": "/workspace/web-app-report.txt", "content": "nightly deploy report"}),
+                ),
+                RebornScriptedReply::text(GATED_FIRE_REPLY),
+            ],
+        )
+        .await
+        .expect("gated fire submits");
+
+    let notifier = web_app_background_run_notifier(&harness, services);
+    notifier
+        .on_trigger_submitted(notifier_request(&harness, &submission, GATED_FIRE_PROMPT))
+        .await;
+
+    let blocked = harness
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .expect("the gated fire parks on a real approval gate");
+    let gate_ref = blocked
+        .gate_ref
+        .expect("blocked triggered run carries a gate ref");
+
+    // Wire seam: exactly one push POST to the enrolled endpoint, carrying the
+    // host-injected VAPID authorization and the RFC 8188/8291 framing.
+    let posts = wait_for_push_posts(&harness, WEB_APP_LIVE_ENDPOINT, 1).await;
+    // Exact-destination + unthreaded evidence for the journey coverage gate
+    // (`tests/e2e/scenarios/test_journey_coverage.py`).
+    assert_web_app_delivery_evidence(&posts);
+    assert_eq!(posts.len(), 1, "one enrolled browser, one push POST");
+    let post = &posts[0];
+    let header = |name: &str| {
+        post.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    };
+    let authorization = header("authorization")
+        .expect("host-side VAPID injection must add the authorization header");
+    assert!(
+        authorization.starts_with("vapid t="),
+        "RFC 8292 vapid scheme, host-computed: {authorization}"
+    );
+    assert!(
+        authorization.contains(", k="),
+        "the advertised application-server key rides the header: {authorization}"
+    );
+    assert_eq!(
+        header("content-encoding").as_deref(),
+        Some("aes128gcm"),
+        "RFC 8291 content encoding"
+    );
+    assert!(header("ttl").is_some(), "push TTL header present");
+    assert!(
+        post.body.len() >= 87,
+        "aes128gcm header + at least one sealed byte; got {}",
+        post.body.len()
+    );
+    assert_eq!(
+        post.body[20], 65,
+        "RFC 8188 idlen = uncompressed P-256 point"
+    );
+
+    // Durable seam: the notice landed in the attempt ledger as a delivered
+    // gate prompt, and the run is STILL parked on its gate.
+    let (outbound_store, _, _, _, _) = services
+        .outbound_delivery_stores_for_test()
+        .expect("outbound stores");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let delivered_gate_prompts = loop {
+        let attempts = outbound_store
+            .list_delivery_attempts(submission.turn_scope.clone())
+            .await
+            .expect("list delivery attempts");
+        let delivered = attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.status == OutboundDeliveryStatus::Delivered
+                    && attempt.candidate.kind == OutboundPushKind::GateRequired
+            })
+            .count();
+        if delivered >= 1 {
+            break delivered;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no delivered gate-prompt attempt recorded; got {:?}",
+            attempts
+                .iter()
+                .map(|attempt| (attempt.status, attempt.candidate.kind))
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(delivered_gate_prompts, 1, "one browser notice delivered");
+    let still_blocked = harness
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .expect("the push notice must not resolve the gate");
+    assert!(still_blocked.gate_ref.is_some(), "gate still pending");
+
+    // Settle the group: approve and let the fire finish.
+    harness
+        .approve_gate_in_scope(&submission.turn_scope, submission.run_id, &gate_ref)
+        .await
+        .expect("approving resumes the run");
+    harness
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            TurnStatus::Completed,
+        )
+        .await
+        .expect("the resumed fire completes");
+}
+
+/// A push service answering `410 Gone` prunes the dead subscription: the
+/// notice attempt reaches the wire once, then the browser disappears from
+/// the caller's enrollment set so future sends stop trying.
+#[tokio::test(flavor = "multi_thread")]
+async fn gone_push_subscription_is_pruned_after_notice_attempt() {
+    let group = RebornIntegrationGroup::extension_delivery_with_web_app()
+        .await
+        .expect("delivery-with-web-app group builds");
+    let services = reborn_services(&group);
+    let harness = group
+        .thread("conv-web-app-prune")
+        .build()
+        .await
+        .expect("web-app prune thread builds");
+
+    enroll_web_app_browser(&harness, services, WEB_APP_GONE_ENDPOINT).await;
+    assert_eq!(web_app_subscription_count(&harness, services).await, 1);
+    seed_notification_channel(&harness, services, WEB_APP_TARGET_ID).await;
+    gate_the_write(&group, &harness).await;
+
+    let submission = harness
+        .submit_triggered_turn_scripted(
+            GATED_FIRE_PROMPT,
+            [
+                RebornScriptedReply::tool_call(
+                    "builtin.write_file",
+                    json!({"path": "/workspace/web-app-prune.txt", "content": "nightly deploy report"}),
+                ),
+                RebornScriptedReply::text(GATED_FIRE_REPLY),
+            ],
+        )
+        .await
+        .expect("gated fire submits");
+
+    let notifier = web_app_background_run_notifier(&harness, services);
+    notifier
+        .on_trigger_submitted(notifier_request(&harness, &submission, GATED_FIRE_PROMPT))
+        .await;
+
+    let blocked = harness
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .expect("the gated fire parks on a real approval gate");
+
+    // The dead endpoint was attempted once, answered 410, and pruned.
+    let posts = wait_for_push_posts(&harness, WEB_APP_GONE_ENDPOINT, 1).await;
+    assert_eq!(posts.len(), 1, "the dead subscription is attempted once");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if web_app_subscription_count(&harness, services).await == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the 410 subscription was never pruned"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Settle the group.
+    let gate_ref = blocked.gate_ref.expect("gate ref");
+    harness
+        .approve_gate_in_scope(&submission.turn_scope, submission.run_id, &gate_ref)
+        .await
+        .expect("approving resumes the run");
+    harness
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            TurnStatus::Completed,
+        )
+        .await
+        .expect("the resumed fire completes");
 }

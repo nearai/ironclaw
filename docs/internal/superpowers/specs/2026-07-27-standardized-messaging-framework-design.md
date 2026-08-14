@@ -408,7 +408,7 @@ No WebUI changes → no frontend/e2e gate triggered.
 
 ## 12. Documentation
 
-- New normative page `docs/reborn/extension-runtime/standard-operations.md`
+- New normative page `docs/internal/reborn/extension-runtime/standard-operations.md`
   (vocabulary, binding rules, contract principles, error taxonomy) + a short §3.4
   pointer in `overview.md`. `openwiki/` untouched (auto-generated).
 - `.claude/skills/reborn-extension-surfaces`: new subsection on binding standard
@@ -417,7 +417,7 @@ No WebUI changes → no frontend/e2e gate triggered.
   `crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`). The sibling
   project flagged the same lines; whoever lands second takes a trivial doc rebase.
 - This spec's Appendix A/B pin the canonical contracts; the durable normative copy
-  lands in `docs/reborn/extension-runtime/` with the implementation.
+  lands in `docs/internal/reborn/extension-runtime/` with the implementation.
 
 ## 13. Deliberately not built
 

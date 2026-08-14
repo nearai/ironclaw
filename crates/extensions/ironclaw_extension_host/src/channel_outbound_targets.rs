@@ -5,11 +5,17 @@
 //! registered a [`PreferenceTargetCodec`] in the assembly extras. Targets
 //! come from generic state only:
 //!
-//! - **Shared conversations** — the extension's `*_subject_routes`
-//!   `[channel.config]` value: entries whose subject is the caller become
-//!   the caller's shared-conversation targets.
 //! - **Personal direct messages** — the generic per-(extension, user)
 //!   DM-target store seeded by post-bind provisioning (and the H.4 fold).
+//!
+//! Shared conversations are deliberately NOT offered as per-user delivery
+//! targets any more: their per-user ownership came from the retired
+//! `*_subject_routes` subject binding (a run acts as the user who invoked
+//! it, and no configured subject owns a channel). A stored preference that
+//! still references a shared-conversation target fails closed at
+//! resolution. Re-introducing channel targets under a participation rule
+//! (the caller holds a conversation binding in the channel) is follow-up
+//! work.
 //!
 //! Binding refs are encoded through the vendor codec with the DURABLE
 //! installation id from the active snapshot. Resolution of a STORED
@@ -19,7 +25,6 @@
 //! so saved targets keep resolving across the setup→durable-id migration
 //! (each resolve returns a freshly encoded ref carrying the durable id).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,16 +37,17 @@ use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
+use ironclaw_host_api::user_identity::RebornUserIdentityLookup;
 use ironclaw_outbound::OutboundError;
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::channel_host::GenericChannelHostAssembly;
 use ironclaw_extension_host::ChannelConfigService;
+use ironclaw_extension_host::channel_shared_admission::handle_declares_field;
 use ironclaw_extension_host::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
 };
-use ironclaw_extension_host::{handle_declares_field, shared_channel_admission_handles};
 use ironclaw_outbound::{
     DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
@@ -78,6 +84,7 @@ pub struct GenericChannelOutboundTargetDeps {
     pub assembly: Arc<GenericChannelHostAssembly>,
     pub channel_config: Arc<ChannelConfigService>,
     pub dm_targets: Arc<FilesystemChannelDmTargetStore>,
+    pub identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     pub identity: ChannelOutboundTargetIdentity,
 }
 
@@ -93,12 +100,14 @@ struct ChannelTargetContext {
     display_name: String,
     installation_id: AdapterInstallationId,
     codec: Arc<dyn PreferenceTargetCodec>,
+    /// The manifest-declared connection authority. A retained DM record is
+    /// offered only while this exact external actor remains bound to the
+    /// caller in the strategy's identity namespace.
+    identity_provider: Option<String>,
+    identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     /// The `*_team_id` connection-scoping claim value — the space every
     /// encoded conversation binds under. `None` until configured.
     space_id: Option<String>,
-    /// Explicit subject routes (`*_subject_routes`): conversation id → the
-    /// subject user id delivery in that conversation belongs to.
-    subject_routes: BTreeMap<String, String>,
 }
 
 impl GenericChannelOutboundTargetProvider {
@@ -130,7 +139,7 @@ impl GenericChannelOutboundTargetProvider {
         let Some(channel) = active.resolved.channel.as_ref() else {
             return Ok(None);
         };
-        if !channel.outbound {
+        if !channel.supports_outbound() {
             return Ok(None);
         }
         let Some(codec) = self
@@ -168,33 +177,23 @@ impl GenericChannelOutboundTargetProvider {
                 .filter(|value| !value.trim().is_empty());
         }
 
-        let mut subject_routes = BTreeMap::new();
-        let handles = shared_channel_admission_handles(&fields);
-        if let Some(handle) = handles.subject_routes.as_deref()
-            && let Some(raw) = self.config_value(&extension_id, handle).await?
-        {
-            match serde_json::from_str::<BTreeMap<String, String>>(&raw) {
-                Ok(routes) => subject_routes = routes,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "ironclaw::reborn::channel_outbound_targets",
-                        extension_id = %active.extension_id,
-                        handle,
-                        %error,
-                        "subject-route config value is not a JSON object; \
-                         treating as no routes"
-                    );
-                }
-            }
-        }
-
         Ok(Some(ChannelTargetContext {
             extension_id: active.extension_id.clone(),
             display_name: active.resolved.name.clone(),
             installation_id,
             codec,
+            identity_provider: channel.connection.as_ref().and_then(|connection| {
+                (connection.strategy
+                    != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::AdminManagedChannels)
+                    .then(|| connection.provider.as_str().to_string())
+            }),
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
+                channel
+                    .connection
+                    .as_ref()
+                    .map(|connection| connection.strategy),
+            ),
             space_id,
-            subject_routes,
         }))
     }
 
@@ -230,55 +229,6 @@ impl GenericChannelOutboundTargetProvider {
             project_id: self.deps.identity.project_id.as_ref(),
             conversation,
         }
-    }
-
-    /// Build the caller's shared-conversation entry for one routed
-    /// conversation. `None` when the vendor codec cannot encode it (for
-    /// example the space claim is not configured yet) — fail closed.
-    fn shared_entry(
-        &self,
-        context: &ChannelTargetContext,
-        conversation_id: &str,
-    ) -> Option<OutboundDeliveryTargetEntry> {
-        // The owner is derived from the route's subject (the resolved
-        // resource), never echoed from the caller, so the registry's
-        // caller-scoping filter stays genuine defense in depth.
-        let subject = context.subject_routes.get(conversation_id)?;
-        let owner_user = UserId::new(subject.clone()).ok()?;
-        let conversation =
-            ExternalConversationRef::new(context.space_id.as_deref(), conversation_id, None, None)
-                .ok()?;
-        let reply_target_binding_ref = context
-            .codec
-            .encode_shared_conversation_target(self.encode_request(context, &conversation))?;
-        let target_id = OutboundDeliveryTargetId::new(format!(
-            "{}:shared-channel:{}:{}",
-            context.extension_id,
-            context.space_id.as_deref().unwrap_or_default(),
-            conversation_id
-        ))
-        .ok()?;
-        let summary = OutboundDeliveryTargetSummary::new(
-            target_id,
-            context.extension_id.as_str(),
-            format!("{} channel {}", context.display_name, conversation_id),
-            Some(format!(
-                "{} channel {} in {}",
-                context.display_name,
-                conversation_id,
-                context.space_id.as_deref().unwrap_or("this workspace")
-            )),
-        )
-        .ok()?;
-        Some(OutboundDeliveryTargetEntry {
-            summary,
-            capabilities: full_capabilities(),
-            destination: reply_target_binding_ref,
-            owner: OutboundDeliveryTargetOwner::new(
-                self.deps.identity.tenant_id.clone(),
-                owner_user,
-            ),
-        })
     }
 
     /// Build the caller's personal-DM entry from the provisioned record.
@@ -333,7 +283,8 @@ impl GenericChannelOutboundTargetProvider {
         context: &ChannelTargetContext,
         caller: &OutboundDeliveryTargetScope,
     ) -> Result<Option<ChannelDmTargetRecord>, OutboundError> {
-        self.deps
+        let record = self
+            .deps
             .dm_targets
             .load(&context.extension_id, &caller.user_id)
             .await
@@ -345,23 +296,38 @@ impl GenericChannelOutboundTargetProvider {
                     "channel DM-target store unavailable while resolving outbound targets"
                 );
                 OutboundError::Backend
-            })
+            })?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let Some(provider) = context.identity_provider.as_deref() else {
+            return Ok(Some(record));
+        };
+        let provider_user_id = context
+            .identity_keyspace
+            .provider_user_id(&context.installation_id, &record.external_actor_id);
+        let bound_user = self
+            .deps
+            .identity_lookup
+            .resolve_user_identity(provider, &provider_user_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "ironclaw::reborn::channel_outbound_targets",
+                    extension_id = %context.extension_id,
+                    %error,
+                    "channel identity unavailable while validating outbound target"
+                );
+                OutboundError::Backend
+            })?;
+        if bound_user.as_ref() == Some(&caller.user_id) {
+            return Ok(Some(record));
+        }
+        Ok(None)
     }
 
     fn caller_in_scope(&self, caller: &OutboundDeliveryTargetScope) -> bool {
         caller.tenant_id == self.deps.identity.tenant_id
-    }
-
-    /// Whether the routed subject for one conversation is the caller.
-    fn conversation_routed_to_caller(
-        context: &ChannelTargetContext,
-        conversation_id: &str,
-        caller: &OutboundDeliveryTargetScope,
-    ) -> bool {
-        context
-            .subject_routes
-            .get(conversation_id)
-            .is_some_and(|subject| subject == caller.user_id.as_str())
     }
 }
 
@@ -376,14 +342,6 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
         }
         let mut entries = Vec::new();
         for context in self.contexts().await? {
-            for (conversation_id, subject) in &context.subject_routes {
-                if subject != caller.user_id.as_str() {
-                    continue;
-                }
-                if let Some(entry) = self.shared_entry(&context, conversation_id) {
-                    entries.push(entry);
-                }
-            }
             if let Some(record) = self.dm_record(&context, caller).await?
                 && let Some(entry) = self.dm_entry(&context, caller, &record)
             {
@@ -403,16 +361,11 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
         }
         for context in self.contexts().await? {
             let space = context.space_id.as_deref().unwrap_or_default();
+            // Stored shared-conversation target ids from the retired subject
+            // model fail closed: no per-user owner exists for them any more.
             let shared_prefix = format!("{}:shared-channel:{}:", context.extension_id, space);
-            if let Some(conversation_id) = target_id
-                .as_str()
-                .strip_prefix(&shared_prefix)
-                .filter(|conversation_id| !conversation_id.is_empty())
-            {
-                if !Self::conversation_routed_to_caller(&context, conversation_id, caller) {
-                    return Ok(None);
-                }
-                return Ok(self.shared_entry(&context, conversation_id));
+            if target_id.as_str().strip_prefix(&shared_prefix).is_some() {
+                return Ok(None);
             }
             let personal_prefix = format!("{}:personal-dm:{}:", context.extension_id, space);
             if let Some(user_id) = target_id.as_str().strip_prefix(&personal_prefix) {
@@ -426,6 +379,18 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
             }
         }
         Ok(None)
+    }
+
+    async fn resolve_notification_target(
+        &self,
+        caller: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+        // A channel DM is both a final-reply and a notification target; id
+        // resolution is identical, and the registry applies the `notifications`
+        // capability post-filter.
+        self.resolve_outbound_delivery_target(caller, target_id)
+            .await
     }
 
     async fn resolve_reply_target_binding(
@@ -466,10 +431,9 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
                 }
                 return Ok(self.dm_entry(&context, caller, &record));
             }
-            if !Self::conversation_routed_to_caller(&context, decoded.conversation_id(), caller) {
-                return Ok(None);
-            }
-            return Ok(self.shared_entry(&context, decoded.conversation_id()));
+            // A stored shared-conversation preference ref from the retired
+            // subject model fails closed: no per-user owner exists for it.
+            return Ok(None);
         }
         Ok(None)
     }
@@ -508,6 +472,7 @@ fn full_capabilities() -> DeliveryTargetCapabilities {
         progress: false,
         gate_prompts: true,
         auth_prompts: true,
+        notifications: true,
         modalities: Vec::new(),
     }
 }

@@ -70,6 +70,19 @@ mod tests {
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
+    #[derive(Default)]
+    struct RecordingToolDiagnosticSink {
+        result: std::sync::Mutex<Option<HostManagedToolResultDiagnosticCapture>>,
+    }
+
+    impl HostManagedPromptDiagnosticSink for RecordingToolDiagnosticSink {
+        fn record_prompt(&self, _capture: ironclaw_loop_host::HostManagedPromptDiagnosticCapture) {}
+
+        fn record_tool_result(&self, capture: HostManagedToolResultDiagnosticCapture) {
+            *self.result.lock().expect("diagnostic result lock") = Some(capture);
+        }
+    }
+
     impl StagedCapabilityIo {
         fn latest_result_output(
             &self,
@@ -191,6 +204,28 @@ mod tests {
         policy
     }
 
+    #[derive(Debug)]
+    struct UnusedSandboxTransport;
+
+    #[async_trait::async_trait]
+    impl ironclaw_host_api::process::SandboxCommandTransport for UnusedSandboxTransport {
+        async fn run_command(
+            &self,
+            _request: ironclaw_host_api::process::CommandExecutionRequest,
+        ) -> Result<
+            ironclaw_host_api::process::CommandExecutionOutput,
+            ironclaw_host_api::process::RuntimeProcessError,
+        > {
+            panic!("filesystem-only extension lifecycle calls must not start a sandbox process")
+        }
+    }
+
+    /// A multi-user WebChat run carries an actor but NO explicit thread owner
+    /// (`ActorFallback`): its runtime scope — grants, mounts, gate dance — must
+    /// follow that actor (the authenticated caller), never the host fallback.
+    /// The actor-first rung of `LoopRunContext::acting_user_id` is what keeps a
+    /// caller's grants scoped to the caller and not the operator; this is
+    /// legitimate run-user resolution, not owner-vs-actor divergence.
     #[tokio::test]
     async fn visible_capability_request_uses_run_actor_for_runtime_scope() {
         let run_context = run_context("actor-runtime-scope")
@@ -205,29 +240,12 @@ mod tests {
         assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
     }
 
-    #[tokio::test]
-    async fn visible_capability_request_uses_explicit_subject_for_runtime_scope() {
-        let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
-        let run_context = run_context_with_scope(TurnScope::new_with_owner(
-            TenantId::new("tenant-subject").expect("tenant id"),
-            Some(AgentId::new("agent-subject").expect("agent id")),
-            Some(ProjectId::new("project-subject").expect("project id")),
-            ThreadId::new("thread-subject").expect("thread id"),
-            Some(subject_user_id),
-        ))
-        .await
-        .with_actor(TurnActor::new(
-            UserId::new("slack-sender").expect("actor user id"),
-        ));
-        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
-        let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
-
-        assert_eq!(request.context.user_id.as_str(), "team-agent-user");
-        assert_eq!(
-            request.context.resource_scope.user_id.as_str(),
-            "team-agent-user"
-        );
-    }
+    // Note: `visible_capability_request_uses_acting_user_for_runtime_scope`
+    // retired with the ephemeral-per-ping remodel (#7377). Its whole point was
+    // that the runtime scope followed the ACTOR over a DIFFERENT explicit
+    // thread owner (owner ≠ actor); that divergence can no longer occur. The
+    // legitimate actor-derived case is covered by
+    // `visible_capability_request_uses_run_actor_for_runtime_scope` above.
 
     #[tokio::test]
     async fn visible_capability_request_keeps_fallback_user_without_actor() {
@@ -242,8 +260,19 @@ mod tests {
         );
     }
 
+    /// `thread_scope_for_run` resolves the run's user for durable thread I/O:
+    /// an explicit-owner run (host/trigger creator) uses its explicit owner, a
+    /// multi-user WebChat run (actor, no explicit owner) uses its actor, and an
+    /// ownerless run falls back to the host owner. Owner == actor since the
+    /// ephemeral-per-ping remodel, so the explicit-owner and actor paths yield
+    /// the same user for a normal run — they differ only for triggers (explicit
+    /// creator, no actor) and system runs (fallback).
     #[tokio::test]
-    async fn standalone_durable_thread_scope_preserves_owner_resolution_precedence() {
+    async fn standalone_durable_thread_scope_resolves_the_runs_user() {
+        let fallback_user_id = UserId::new("durable-fallback-owner").expect("fallback user id");
+
+        // Explicit-owner run (host/trigger creator, no TurnActor): the thread
+        // uses the explicit owner.
         let explicit_owner = UserId::new("durable-explicit-owner").expect("explicit owner");
         let explicit_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-durable-scope").expect("tenant id"),
@@ -252,18 +281,14 @@ mod tests {
             ThreadId::new("thread-durable-scope").expect("thread id"),
             Some(explicit_owner.clone()),
         ))
-        .await
-        .with_actor(TurnActor::new(
-            UserId::new("durable-run-actor").expect("actor user id"),
-        ));
-        let fallback_user_id = UserId::new("durable-fallback-owner").expect("fallback user id");
-
+        .await;
         let scope = thread_scope_for_run(&explicit_context, &fallback_user_id)
             .expect("agent-scoped run produces a thread scope");
-
         assert_eq!(scope.owner_user_id, Some(explicit_owner));
 
-        let actor_owner = UserId::new("durable-run-actor-only").expect("actor user id");
+        // Multi-user WebChat run (actor, no explicit owner): the thread uses
+        // the actor.
+        let actor_owner = UserId::new("durable-run-actor").expect("actor user id");
         let actor_context = run_context("durable-actor-scope")
             .await
             .with_actor(TurnActor::new(actor_owner.clone()));
@@ -271,6 +296,7 @@ mod tests {
             .expect("agent-scoped run produces a thread scope");
         assert_eq!(actor_scope.owner_user_id, Some(actor_owner));
 
+        // No actor, no explicit owner: fall back to the host owner.
         let fallback_context = run_context("durable-fallback-scope").await;
         let fallback_scope = thread_scope_for_run(&fallback_context, &fallback_user_id)
             .expect("agent-scoped run produces a thread scope");
@@ -541,6 +567,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
 
@@ -669,6 +696,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -886,6 +914,7 @@ mod tests {
                 refresh_secret: None,
                 scopes: Vec::new(),
                 provider_identity: None,
+                link_revision: 0,
                 created_at: now,
                 updated_at: now,
             })
@@ -917,6 +946,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1013,6 +1043,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             unrelated_fallback,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1093,6 +1124,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             runtime_owner_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1153,6 +1185,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1206,6 +1239,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1286,6 +1320,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1388,6 +1423,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1483,6 +1519,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -1683,6 +1720,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
+            None,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1830,6 +1868,7 @@ mod tests {
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -2072,6 +2111,74 @@ mod tests {
         assert!(store.total_bytes <= CAPABILITY_IO_MAX_STAGED_BYTES);
     }
 
+    #[tokio::test]
+    async fn capability_io_sends_only_bounded_output_to_the_diagnostic_sink() {
+        let sink = Arc::new(RecordingToolDiagnosticSink::default());
+        let capability_io = StagedCapabilityIo {
+            tool_diagnostics: HostManagedToolDiagnosticEmitter::new(Some(
+                Arc::clone(&sink) as Arc<dyn HostManagedPromptDiagnosticSink>
+            )),
+            ..StagedCapabilityIo::default()
+        };
+        let run_context = run_context("bounded-tool-diagnostic").await;
+        let input_ref = CapabilityInputRef::new(format!(
+            "input:{}:bounded-tool-diagnostic",
+            run_context.run_id
+        ))
+        .expect("input ref");
+        let secret = format!("Bearer {}", "s".repeat(80));
+        let retained_prefix =
+            "x".repeat(ironclaw_product_contracts::inspector::TOOL_RESULT_MAX_BYTES - secret.len());
+        let output = serde_json::Value::String(format!(
+            "{retained_prefix}{secret}{}",
+            "y".repeat(TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES * 2)
+        ));
+        let serialized_bytes = serialized_result_output(&output)
+            .expect("result serializes")
+            .len();
+        let invocation_id = InvocationId::new();
+        capability_io.record_running_invocation(&run_context, invocation_id, &input_ref);
+
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &CapabilityId::new("builtin.echo").expect("capability id"),
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::InlineOnly,
+            })
+            .await
+            .expect("result writes");
+
+        let capture = sink
+            .result
+            .lock()
+            .expect("diagnostic result lock")
+            .take()
+            .expect("tool diagnostic captured");
+        let retained = capture
+            .result
+            .expect("successful result has diagnostic text");
+        assert_eq!(retained.len(), TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
+        assert!(retained.contains(&secret));
+        assert!(
+            ironclaw_safety::LeakDetector::new()
+                .redact_all_secrets(&retained)
+                .1,
+            "boundary-crossing secret must remain detectable"
+        );
+        assert_eq!(
+            capture.result_original_bytes,
+            Some(u64::try_from(serialized_bytes).expect("serialized size fits u64"))
+        );
+        assert!(
+            capture.duration_ms.is_some(),
+            "the capability writer must forward the measured invocation duration"
+        );
+    }
+
     #[test]
     fn standalone_builtin_surface_grants_capability_classes() {
         let policy =
@@ -2128,8 +2235,14 @@ mod tests {
         let workspace_mounts =
             crate::runtime_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
                 .expect("workspace mounts build");
-        let skill_mounts =
-            crate::runtime_mounts::skill_management_mount_view().expect("skill mounts build");
+        let skill_mounts = crate::runtime_mounts::db_backed_skill_management_mount_view(
+            &ironclaw_host_api::resource::ResourceScope::local_default(
+                ironclaw_host_api::ids::UserId::new("grant-coverage-user").expect("user id"),
+                ironclaw_host_api::ids::InvocationId::new(),
+            )
+            .expect("scope"),
+        )
+        .expect("skill mounts build");
         let memory_mounts =
             crate::runtime_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
                 .expect("memory mounts build");
@@ -2414,19 +2527,20 @@ mod tests {
         )
         .await
         .expect("standalone services build");
-        let skill_path = storage_root.join(
-            "tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
-        );
-        std::fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill dir");
-        std::fs::write(
-            &skill_path,
+        // Seeded into the DATABASE, which is where the runtime reads skills. A disk-seeded skill is
+        // correctly invisible now, so seeding to disk would make this test pass on nothing
+        // (nearai/ironclaw#7168).
+        crate::filesystem_assembly::write_database_file_for_test(
+            &storage_root,
+            "/tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
             skill_md(
                 "unit-activate-helper",
                 "Unit activation helper",
                 "UNIT_ACTIVATE_SENTINEL",
-            ),
+            )
+            .as_bytes(),
         )
-        .expect("skill file");
+        .await;
         let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .local_runtime_for_test()
@@ -2498,47 +2612,77 @@ mod tests {
         assert!(
             descriptor
                 .safe_description
-                .contains("Call this before answering when a listed skill could help"),
+                .contains("When the task at hand is one a listed skill covers, call this FIRST"),
             "skill_activate description must tell the model when to use the capability"
         );
+        // The clause that actually moved the metric. With only a statement of what the tool
+        // does, the model solved tasks with `shell` and never activated: measured 0% correct
+        // activation over a 227-skill catalog, with refusals at 0% -- it was not blocked, it
+        // had no reason to ask. Telling it that a skill SUPERSEDES its own plan took that to
+        // 50%, matching claude-code's precision exactly.
         assert!(
             descriptor
                 .safe_description
-                .contains("Ambiguous names fail without loading a skill"),
+                .contains("instead of your own default approach"),
+            "skill_activate description must say a skill replaces the model's default approach"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("An ambiguous name fails without loading anything"),
             "skill_activate description must not imply every visible bare name is actionable"
         );
+        // Per-skill relevance gate. Telling the model to activate FIRST lifts activation and
+        // over-reach together: measured, the ported build activated `docx` for a task whose only
+        // deliverable is an .xlsx file. The old guard said "do not activate skills unrelated to
+        // the task", which is too vague to stop an adjacent guess. This makes the test concrete
+        // and evidence-based -- does the task EXPLICITLY involve what the description names --
+        // and it gates each skill individually rather than capping the set size, which is what
+        // the reverted "smallest relevant set" wording did wrong.
         assert!(
             descriptor
                 .safe_description
-                .contains("at most four active skills total per run"),
+                .contains("only when the task EXPLICITLY involves what its description names"),
+            "skill_activate description must gate each skill on explicit task relevance"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("at most eight active per run"),
             "skill_activate description must advertise the selector's activation limit"
         );
+        // One skill per call, which is claude-code's `Skill` tool shape. The array form invited
+        // over-reach: measured over 29 runs, single-skill calls were 12 correct and 0 wrong while
+        // multi-skill calls were 10 correct and 1 wrong -- every wrong activation came from a
+        // submitted list. Several skills stay reachable by calling again, so this bounds
+        // commitment per call, not the total.
+        assert!(
+            descriptor.safe_description.contains("one skill per call"),
+            "skill_activate must ask for one skill per call, as claude-code's Skill tool does"
+        );
+        assert_eq!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|p| p.get("skill"))
+                .and_then(|sk| sk.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("string"),
+            "the advertised input must be a single skill name, not an array"
+        );
+        // `names` must NOT be advertised. `parse_skill_activate_names` still ACCEPTS a legacy
+        // `names` array so an in-flight caller or a recorded trace does not hard-fail, but
+        // advertising it is what invited the multi-skill calls the measurement above counted.
+        // This assertion previously required the opposite and contradicted the `skill`-is-a-string
+        // one directly above it -- a leftover from before the schema was narrowed.
         assert!(
             descriptor
                 .parameters_schema
                 .get("properties")
                 .and_then(|properties| properties.get("names"))
-                .is_some()
-        );
-        assert_eq!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .and_then(|names| names.get("description"))
-                .and_then(serde_json::Value::as_str),
-            Some(
-                "Exact skill names copied from the available-skills list; at most four total per run"
-            )
-        );
-        assert_eq!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .and_then(|names| names.get("maxItems"))
-                .and_then(serde_json::Value::as_u64),
-            Some(4)
+                .is_none(),
+            "a legacy `names` array is accepted but must not be advertised, or the model is \
+             invited back into the shape that produced every wrong activation"
         );
         let tool_definition = port
             .tool_definitions()
@@ -2633,6 +2777,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             Some(skill_context.activation_source),
+            None,
             None,
             None,
         )
@@ -2979,6 +3124,7 @@ mod tests {
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -3747,6 +3893,7 @@ mod tests {
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
+            None,
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -3847,6 +3994,7 @@ mod tests {
             progress: false,
             gate_prompts: false,
             auth_prompts: false,
+            notifications: true,
             modalities: Vec::new(),
         };
         let slack_reply_target =
@@ -3935,8 +4083,9 @@ mod tests {
             ),
         };
 
-        let owner_user_id = UserId::new("outbound-delivery-owner").expect("user id");
-        let actor_user_id = UserId::new("outbound-delivery-actor").expect("user id");
+        // owner == actor since the ephemeral-per-ping remodel: one run user.
+        let owner_user_id = UserId::new("outbound-delivery-user").expect("user id");
+        let actor_user_id = owner_user_id.clone();
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-outbound-delivery").expect("tenant id"),
             Some(AgentId::new("agent-outbound-delivery").expect("agent id")),
@@ -3947,13 +4096,8 @@ mod tests {
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
         let expected_provider_caller =
-            // The outbound capabilities resolve as the ACTING user, not the
-            // thread owner: on a shared-route conversation the owner is the
-            // route's configured subject (the operator by default) while the
-            // actor is whoever posted, and owner-resolution let a participant
-            // reach the subject's own destinations. This assertion previously
-            // pinned the owner; that pin predates operator-defaulted subjects
-            // and is reversed deliberately here.
+            // owner == actor since the ephemeral-per-ping remodel, so the
+            // outbound capabilities resolve as the single run user.
             expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         let port = factory
@@ -4054,7 +4198,7 @@ mod tests {
             observed_provider_callers
                 .iter()
                 .all(|caller| caller == &expected_provider_caller),
-            "outbound target provider should be scoped to the acting caller: {observed_provider_callers:?}"
+            "outbound target provider should be scoped to the run-user caller: {observed_provider_callers:?}"
         );
         assert!(
             !observed_provider_callers.is_empty(),
@@ -4096,6 +4240,7 @@ mod tests {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 destination: slack_reply_target.clone(),
@@ -4117,8 +4262,9 @@ mod tests {
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
-        let owner_user_id = UserId::new("local-yolo-outbound-owner").expect("user id");
-        let actor_user_id = UserId::new("local-yolo-outbound-actor").expect("user id");
+        // owner == actor since the ephemeral-per-ping remodel: one run user.
+        let owner_user_id = UserId::new("local-yolo-outbound-user").expect("user id");
+        let actor_user_id = owner_user_id.clone();
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-local-yolo-outbound").expect("tenant id"),
             Some(AgentId::new("agent-local-yolo-outbound").expect("agent id")),
@@ -4129,13 +4275,8 @@ mod tests {
         .await
         .with_actor(TurnActor::new(actor_user_id.clone()));
         let expected_provider_caller =
-            // The outbound capabilities resolve as the ACTING user, not the
-            // thread owner: on a shared-route conversation the owner is the
-            // route's configured subject (the operator by default) while the
-            // actor is whoever posted, and owner-resolution let a participant
-            // reach the subject's own destinations. This assertion previously
-            // pinned the owner; that pin predates operator-defaulted subjects
-            // and is reversed deliberately here.
+            // owner == actor since the ephemeral-per-ping remodel, so the
+            // outbound capabilities resolve as the single run user.
             expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
         let fallback_user_id = UserId::new("local-yolo-outbound-fallback").expect("user id");
@@ -4151,6 +4292,7 @@ mod tests {
             None,
             Some(outbound_preferences_service),
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -4159,10 +4301,6 @@ mod tests {
             .await
             .expect("capability port");
 
-        let owner_preference_key = CommunicationPreferenceKey::personal(
-            run_context.scope.tenant_id.clone(),
-            owner_user_id.clone(),
-        );
         let actor_preference_key = CommunicationPreferenceKey::personal(
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
@@ -4205,7 +4343,7 @@ mod tests {
                 .outbound_preferences_for_test()
                 .load_communication_preference(actor_preference_key.clone())
                 .await
-                .expect("acting-user preference read after missing-target set")
+                .expect("run-user preference read after missing-target set")
                 .is_none()
         );
 
@@ -4235,18 +4373,18 @@ mod tests {
             observed_provider_callers
                 .iter()
                 .all(|caller| caller == &expected_provider_caller),
-            "outbound target provider should be scoped to owner caller: {observed_provider_callers:?}"
+            "outbound target provider should be scoped to the run-user caller: {observed_provider_callers:?}"
         );
-        let acting_preference = runtime_surfaces
+        let run_preference = runtime_surfaces
             .outbound_preferences_for_test()
             .load_communication_preference(actor_preference_key)
             .await
-            .expect("acting-user preference read after direct set")
-            .expect("acting-user preference persisted");
+            .expect("run-user preference read after direct set")
+            .expect("run-user preference persisted");
         // The bypassed-gate dispatch writes the notification-channel set, not a
         // final-reply route: `notification_channels_set` replaces the whole set.
         assert_eq!(
-            acting_preference
+            run_preference
                 .record
                 .notification_targets
                 .iter()
@@ -4254,13 +4392,339 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![slack_target_id.as_str()]
         );
+        // Note: the retired owner-does-not-see-it isolation assertion is gone —
+        // owner == actor since the ephemeral-per-ping remodel, so there is no
+        // separate owner key to prove empty.
+    }
+
+    /// The full `builtin.notification_channels_set` approval-gate dance —
+    /// raise → replay payload → user approve (store + lease mint) → approved
+    /// resume → lease claim → dispatch → lease consume — on an ordinary run.
+    /// Since the ephemeral-per-ping remodel a run has a single user (owner ==
+    /// actor), so the value here is that the raise and resume halves agree on
+    /// the scope, not any owner-vs-actor split.
+    ///
+    /// Two properties are pinned:
+    ///
+    /// 1. **Raise and resume derive the same scope.** Every store the dance
+    ///    touches (approval request, replay payload, gate record, lease) is
+    ///    scope-keyed; if the raise persists under one identity and the resume
+    ///    recomputes another, the resume finds nothing and the approved
+    ///    capability never runs. This test drives both halves through the real
+    ///    port, so any half-unified derivation change fails it.
+    /// 2. **Whose identity that scope carries.** Deliberately asserted so a
+    ///    derivation change is a recorded decision, not drift — and that the
+    ///    gate is isolated from unrelated identities.
+    ///
+    /// Tier note: this lives at the capability-host tier rather than
+    /// `tests/integration/` so it can drive the raise and resume halves
+    /// directly against the real port and pin that both derive the gate scope
+    /// the SAME way. The approve-applies-channels flow stays covered end-to-end
+    /// at the integration tier
+    /// (`outbound_target.rs::notification_channels_set_approval_gate_approve_applies_channels`).
+    #[tokio::test]
+    async fn notification_channels_set_approval_raise_and_resume_stay_scope_matched() {
+        use ironclaw_approvals::ApprovalRequestStorePort as _;
+        use ironclaw_authorization::CapabilityLeaseStorePort as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Default standalone policy — NOT the yolo/minimal override the
+        // sibling test uses — so the ExternalWrite effect requires approval
+        // and the first invoke raises a real gate.
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input(
+                "local-outbound-gate-scope",
+                dir.path().join("standalone"),
+            ),
+        )
+        .await
+        .expect("standalone services build");
+        let runtime_surfaces = services
+            .local_runtime_for_test()
+            .expect("local runtime substrate");
+        let slack_target_id =
+            RebornOutboundDeliveryTargetId::new("slack:gate-scope-dm").expect("target id");
+        let slack_target_summary = OutboundDeliveryTargetSummary::new(
+            OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
+            "slack",
+            "Slack DM",
+            Some("Personal Slack direct message".to_string()),
+        )
+        .expect("target summary");
+        let slack_reply_target =
+            ReplyTargetBindingRef::new("reply:test:gate-scope-dm").expect("reply target");
+        let slack_provider = Arc::new(StaticOutboundDeliveryTargetProvider::new(
+            OutboundDeliveryTargetEntry {
+                summary: slack_target_summary,
+                capabilities: DeliveryTargetCapabilities {
+                    final_replies: true,
+                    progress: false,
+                    gate_prompts: false,
+                    auth_prompts: false,
+                    notifications: true,
+                    modalities: Vec::new(),
+                },
+                destination: slack_reply_target,
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-gate-scope").expect("tenant id"),
+                    UserId::new("gate-scope-placeholder").expect("user id"),
+                ),
+            },
+        ));
+        let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
+            slack_provider.clone();
+        let target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+            Arc::new(OutboundDeliveryTargetRegistry::new(vec![
+                slack_provider_delegate,
+            ]));
+        let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+            Arc::new(RebornOutboundPreferencesService::new(
+                Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
+                target_provider,
+            ));
+        // Owner == actor since the ephemeral-per-ping remodel: one run user,
+        // bound as both the scope owner and the actor. `other_user_id` is an
+        // unrelated identity, used only to prove the raised gate is isolated
+        // from users it was not raised for.
+        let owner_user_id = UserId::new("gate-scope-user").expect("user id");
+        let actor_user_id = owner_user_id.clone();
+        let other_user_id = UserId::new("gate-scope-other").expect("user id");
+        let fallback_user_id = UserId::new("gate-scope-fallback").expect("user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            TenantId::new("tenant-gate-scope").expect("tenant id"),
+            Some(AgentId::new("agent-gate-scope").expect("agent id")),
+            Some(ProjectId::new("project-gate-scope").expect("project id")),
+            ThreadId::new("thread-gate-scope").expect("thread id"),
+            Some(owner_user_id.clone()),
+        ))
+        .await
+        .with_actor(TurnActor::new(actor_user_id.clone()));
+        // The authorization identity is the run user: the target provider must
+        // be queried as that user on both the raise-side validation and the
+        // post-approval dispatch.
+        let expected_provider_caller =
+            expected_outbound_delivery_caller(&run_context, actor_user_id.clone());
+        slack_provider.expect_caller(expected_provider_caller.clone());
+        // Local-dev defaults global auto-approve ON, which would bypass the
+        // gate. Disable it for the run user (whom the settings-scope derivation
+        // follows) and the unrelated `other_user_id`, so the gate raises and
+        // the isolation check below is not confounded by a stray auto-approve.
+        for settings_user in [&owner_user_id, &other_user_id] {
+            let mut settings_scope = run_context.scope.to_resource_scope();
+            settings_scope.user_id = (*settings_user).clone();
+            ironclaw_approvals::AutoApproveSettingStorePort::set(
+                runtime_surfaces.auto_approve_settings_for_test().as_ref(),
+                ironclaw_approvals::AutoApproveSettingInput {
+                    updated_by: ironclaw_host_api::scope::Principal::User((*settings_user).clone()),
+                    scope: settings_scope,
+                    enabled: false,
+                },
+            )
+            .await
+            .expect("disabling global auto-approve should succeed");
+        }
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        ensure_thread_for_run(thread_service.as_ref(), &run_context, &fallback_user_id).await;
+        let wiring = capability_wiring(
+            &services,
+            thread_service,
+            fallback_user_id.clone(),
+            Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            Some(outbound_preferences_service),
+            None,
+            None,
+        )
+        .expect("capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+
+        let set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__notification_channels_set",
+                    serde_json::json!({ "target_ids": [slack_target_id.as_str()] }),
+                ),
+            ))
+            .await
+            .expect("set call stages");
+        let raise_outcome = port
+            .invoke_capability(invocation_for_candidate(&set_candidate))
+            .await
+            .expect("gated set call returns a capability outcome");
+        let waypoint = match raise_outcome {
+            Resolution::Blocked(ironclaw_host_api::resolution::Blocked::Approval(waypoint)) => {
+                waypoint
+            }
+            other => panic!("default policy must raise an approval gate, got {other:?}"),
+        };
+        let origin_gate_ref = waypoint
+            .origin
+            .as_ref()
+            .expect("approval waypoint preserves the loop gate ref")
+            .as_str()
+            .to_string();
+        let approval_request_id = origin_gate_ref
+            .strip_prefix("gate:approval-")
+            .expect("loop gate ref has the approval prefix")
+            .parse::<uuid::Uuid>()
+            .map(ironclaw_host_api::ids::ApprovalRequestId::from_uuid)
+            .expect("approval request id parses");
+        let resume_token = ironclaw_loop_contracts::CapabilityResumeToken::new(
+            waypoint
+                .resume
+                .as_ref()
+                .expect("approval waypoint carries the resume token")
+                .as_str(),
+        )
+        .expect("resume token converts");
+        let raise_invocation_id =
+            super::super::outbound_delivery::invocation_id_from_resume_token(&resume_token)
+                .expect("resume token encodes the raise invocation id");
+        // Recompute the raise scope EXACTLY as the production raise did.
+        let raise_scope = super::super::outbound_delivery::resource_scope_for_run(
+            &run_context,
+            &fallback_user_id,
+            raise_invocation_id,
+        );
+        // PINNED IDENTITY: a run acts as its user, so the approval-gate raise
+        // (and therefore the lease) is scoped to that user — who sees and
+        // approves the gate. Raise and resume derive this identity the same
+        // way; the test drives both halves so a one-sided change fails it.
+        assert_eq!(
+            raise_scope.user_id, owner_user_id,
+            "the approval-gate scope follows the run user"
+        );
+        let approval_requests = runtime_surfaces.approval_requests_for_test();
+        let raise_record = approval_requests
+            .get(&raise_scope, approval_request_id)
+            .await
+            .expect("approval store read succeeds")
+            .expect("the raise persisted the approval request under the raise scope");
+        assert_eq!(
+            raise_record.status,
+            ironclaw_approvals::ApprovalStatus::Pending
+        );
+        let fingerprint = raise_record
+            .request
+            .invocation_fingerprint
+            .clone()
+            .expect("the raise fingerprints the invocation");
+        // Scope isolation: an unrelated identity must not see the gate.
+        let mut other_scope = raise_scope.clone();
+        other_scope.user_id = other_user_id.clone();
         assert!(
-            runtime_surfaces
-                .outbound_preferences_for_test()
-                .load_communication_preference(owner_preference_key)
+            approval_requests
+                .get(&other_scope, approval_request_id)
                 .await
-                .expect("owner preference read after direct set")
-                .is_none()
+                .expect("approval store read succeeds")
+                .is_none(),
+            "the gate must be visible only under the identity it was raised for"
+        );
+
+        // The user approves: mark the stored request approved and mint the
+        // single-use lease FROM THE STORED ROW (its scope, its grantee, its
+        // fingerprint) — the same material the production click-approval
+        // resolution uses, never a re-derivation.
+        approval_requests
+            .approve(&raise_scope, approval_request_id)
+            .await
+            .expect("approval request approves");
+        let capability_leases = runtime_surfaces.capability_leases_for_test();
+        let lease = ironclaw_authorization::CapabilityLease {
+            scope: raise_scope.clone(),
+            grant: ironclaw_host_api::capability::CapabilityGrant {
+                id: ironclaw_host_api::ids::CapabilityGrantId::new(),
+                capability: CapabilityId::new(OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID)
+                    .expect("capability id"),
+                grantee: raise_record.request.requested_by.clone(),
+                issued_by: ironclaw_host_api::scope::Principal::HostRuntime,
+                constraints: ironclaw_host_api::capability::GrantConstraints {
+                    allowed_effects: vec![EffectKind::ExternalWrite],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+            invocation_fingerprint: Some(fingerprint),
+            status: ironclaw_authorization::CapabilityLeaseStatus::Active,
+        };
+        let lease_id = lease.grant.id;
+        capability_leases
+            .issue(lease)
+            .await
+            .expect("approval lease issues");
+
+        // Resume exactly as the executor reconstructs it from the waypoint.
+        let resume_request = LoopRequest {
+            activity_id: set_candidate.activity_id,
+            surface_version: set_candidate.surface_version.clone(),
+            capability_id: set_candidate.capability_id.clone(),
+            input_ref: set_candidate.input_ref.clone(),
+            approval_resume: Some(ironclaw_loop_contracts::CapabilityApprovalResume {
+                approval_request_id,
+                resume_token,
+                correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
+                input_ref: set_candidate.input_ref.clone(),
+            }),
+            auth_resume: None,
+        };
+        let resume_outcome = port
+            .invoke_capability(resume_request)
+            .await
+            .expect("approved resume returns a capability outcome");
+        assert!(
+            matches!(resume_outcome, Resolution::Done(_)),
+            "an approved resume must complete the set, got {resume_outcome:?}"
+        );
+
+        // The applied set persisted under the run user's preference key.
+        let actor_preference = runtime_surfaces
+            .outbound_preferences_for_test()
+            .load_communication_preference(CommunicationPreferenceKey::personal(
+                run_context.scope.tenant_id.clone(),
+                actor_user_id.clone(),
+            ))
+            .await
+            .expect("run-user preference read")
+            .expect("run-user preference persisted after the approved resume");
+        assert_eq!(
+            actor_preference
+                .record
+                .notification_targets
+                .iter()
+                .map(|target| target.as_str())
+                .collect::<Vec<_>>(),
+            vec![slack_target_id.as_str()]
+        );
+        // The provider was queried as the run user on every leg.
+        let observed_provider_callers = slack_provider.observed_callers();
+        assert!(
+            !observed_provider_callers.is_empty()
+                && observed_provider_callers
+                    .iter()
+                    .all(|caller| caller == &expected_provider_caller),
+            "the outbound target provider must be queried as the run user: {observed_provider_callers:?}"
+        );
+        // The lease was claimed and consumed under the raise scope: the dance
+        // closed on the same identity it opened on.
+        let consumed_lease = capability_leases
+            .get(&raise_scope, lease_id)
+            .await
+            .expect("the consumed lease remains readable under the raise scope");
+        assert_eq!(
+            consumed_lease.status,
+            ironclaw_authorization::CapabilityLeaseStatus::Consumed,
+            "the single-use approval lease must be consumed by the resumed dispatch"
         );
     }
 
@@ -4724,12 +5188,26 @@ mod tests {
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
         assert_eq!(output["installed"], serde_json::json!(true));
+        // The agent's own in-run skill port must write into the DATABASE, the tree discovery and
+        // Settings read. It used to write to the host disk while everything else read the database,
+        // so an agent-installed skill was invisible after the turn that created it
+        // (nearai/ironclaw#7168).
         assert!(
-            storage_root
+            crate::filesystem_assembly::database_file_bytes(
+                &storage_root,
+                "/tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md",
+            )
+            .await
+            .is_some(),
+            "the agent's skill_install must write into the database-backed skill tree"
+        );
+        assert!(
+            !storage_root
                 .join(
                     "tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md"
                 )
-                .exists()
+                .exists(),
+            "nothing may be left on the host disk: a skill written there is invisible to discovery"
         );
     }
 
@@ -4951,6 +5429,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("standalone capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -4979,6 +5458,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -5064,16 +5544,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_extension_search_makes_every_bundled_result_model_visible() {
+    async fn hosted_sandbox_extension_search_and_registration_use_tenant_workspace() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let network = Arc::new(
+            ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name(
+                "calendar-search",
+            ),
+        );
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
-                "standalone-extension-search-owner",
+                "hosted-sandbox-extension-search-owner",
                 dir.path().join("standalone"),
-            ),
+            )
+            .with_runtime_policy(
+                crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
+                    .expect("hosted sandbox runtime policy resolves"),
+            )
+            .with_runtime_process_binding(crate::RebornRuntimeProcessBinding::user_sandbox(
+                Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
+                    Arc::new(UnusedSandboxTransport),
+                )),
+            ))
+            .with_network_http_egress_for_test(network),
         )
         .await
-        .expect("standalone services build");
+        .expect("hosted sandbox services build");
         let run_context = run_context("extension-search-loop-port").await;
         enable_global_auto_approve_for_run(
             &services,
@@ -5094,6 +5589,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -5154,6 +5650,64 @@ mod tests {
                 "the model-visible result must contain the {extension_id} catalog entry: {preview}"
             );
         }
+
+        let register_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| {
+                definition.capability_id.as_str() == EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID
+            })
+            .expect("extension_register_hosted_mcp tool definition");
+        let mut register_call = provider_tool_call_with_name(
+            register_definition.name.as_str(),
+            serde_json::json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_type": "no_auth"
+            }),
+        );
+        register_call.turn_id = Some("hosted-register-turn".to_string());
+        register_call.id = "hosted-register-call".to_string();
+        let register_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(register_call))
+            .await
+            .expect("hosted registration tool call stages");
+        let register_outcome = port
+            .invoke_capability(invocation_for_candidate(&register_candidate))
+            .await
+            .expect("hosted registration invocation");
+        assert!(
+            matches!(register_outcome, Resolution::Done(_)),
+            "hosted registration should persist through the tenant-workspace mount: {register_outcome:?}"
+        );
+
+        let mut read_back_call = provider_tool_call_with_name(
+            tool_definition.name.as_str(),
+            serde_json::json!({"query": "mcp-calendar"}),
+        );
+        read_back_call.turn_id = Some("hosted-register-read-back-turn".to_string());
+        read_back_call.id = "hosted-register-read-back-call".to_string();
+        let read_back_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(read_back_call))
+            .await
+            .expect("registration read-back tool call stages");
+        let read_back = port
+            .invoke_capability(invocation_for_candidate(&read_back_candidate))
+            .await
+            .expect("registration read-back invocation");
+        let Resolution::Done(read_back) = read_back else {
+            panic!("registered hosted MCP should be discoverable, got {read_back:?}");
+        };
+        let preview = read_back
+            .refs
+            .preview
+            .expect("registered hosted MCP is model-visible");
+        assert!(
+            preview.as_str().contains("\"id\":\"mcp-calendar\""),
+            "registration read-back must contain the durable package: {preview}"
+        );
     }
 
     #[tokio::test]
@@ -5186,6 +5740,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,

@@ -34,6 +34,16 @@ use parity_qa_support::{
     },
 };
 
+fn trigger_execution_contract(goal: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
+
 const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     ECHO_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
@@ -83,6 +93,14 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     // `runtime::tests::outbound_delivery::
     // production_reply_attachment_capability_registers_durable_run_intent`.
     ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    // #6898 item 3. Both are driven end-to-end by
+    // `reborn_integration_document_edit`: the redline journey reads a .docx
+    // structurally and resolves its tracked changes into a new document, the
+    // spreadsheet journey sets a formula under a named column, the deck journey
+    // clones a slide with its layout, and the PDF journey authors HTML and
+    // renders it.
+    ironclaw_host_runtime::DOCUMENT_EDIT_CAPABILITY_ID,
+    ironclaw_host_runtime::HTML_TO_PDF_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -451,7 +469,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                 "call_trigger_create_first_party",
                 serde_json::json!({
                     "name": "Daily trace summary",
-                    "prompt": "Summarize trace state",
+                    "execution_contract": trigger_execution_contract("Summarize trace state"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "0 8 * * *",

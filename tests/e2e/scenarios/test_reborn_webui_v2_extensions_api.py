@@ -90,11 +90,17 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
             # Installation state and the compatibility readiness fields must
             # describe the same setup-free active extension.
             assert installed["installation_state"] == "active"
-            assert installed["authenticated"] is True
-            assert installed["active"] is True
-            assert installed["needs_setup"] is False
-            assert installed["has_auth"] is False
-            assert installed.get("onboarding_state") is None
+            # The retired compatibility booleans are gone from the wire: the
+            # installation state is the single caller-visible lifecycle field
+            # (restored to the #6520 contract shape).
+            for retired in (
+                "authenticated",
+                "active",
+                "needs_setup",
+                "has_auth",
+                "onboarding_state",
+            ):
+                assert retired not in installed
 
             setup = await client.get(
                 f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/setup",

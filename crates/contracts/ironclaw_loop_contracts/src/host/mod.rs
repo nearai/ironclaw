@@ -20,7 +20,7 @@ pub use capability::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptionTrust,
     CapabilityDescriptorView, CapabilityFailure, CapabilityProgress, CapabilityResultMessage,
-    ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
+    LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
@@ -33,7 +33,7 @@ pub use context::{
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
     LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-    LoopContextSnippetMetadata, LoopInputCursor,
+    LoopContextSnippetMetadata, LoopContextWindowTruncation, LoopInputCursor,
 };
 pub use error::{AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 pub use input::{

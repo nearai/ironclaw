@@ -26,6 +26,8 @@ const paths = {
       d="M12 7.5v5l3.2 2"
     /></>),
 
+  code: (<><path d="m9 7-5 5 5 5" /><path d="m15 7 5 5-5 5" /></>),
+
   download: (<><path d="M12 3.8v10" /><path d="m8 10 4 4 4-4" /><path
       d="M5 17.5v2.7h14v-2.7"
     /></>),
@@ -129,6 +131,10 @@ const paths = {
   arrowDown: (<><path d="M12 5v14" /><path d="m6 13 6 6 6-6" /></>),
 
   retry: (<><path d="M3.5 12a8.5 8.5 0 1 1 2.6 6.1" /><path d="M3.2 18.5v-5h5" /></>),
+
+  alert: (<><path d="M12 5 3.5 19.5h17L12 5Z" /><path d="M12 10.5v3.6" /><path
+      d="M12 16.9h.01"
+    /></>),
 };
 
 export function Icon({ name, className = "", strokeWidth = 1.7 }) {

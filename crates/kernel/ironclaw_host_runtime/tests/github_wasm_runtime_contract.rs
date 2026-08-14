@@ -29,8 +29,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver, RuntimeInvocation,
 };
 use ironclaw_network::{
@@ -2292,9 +2292,22 @@ fn slack_user_scopes() -> Vec<String> {
 
 /// The scope set `slack.send_message` requests: the read scopes plus
 /// chat:write, in lockstep with its manifest runtime_credentials entry.
+/// `edit_message` and `delete_message` bind the same set — `chat.update` and
+/// `chat.delete` ride the existing chat:write grant.
 fn slack_user_write_scopes() -> Vec<String> {
     let mut scopes = slack_user_scopes();
     scopes.push("chat:write".to_string());
+    scopes
+}
+
+/// The read scopes plus one tool's write-family additions, in lockstep with
+/// that tool's manifest `[[tools.credentials]]` entry: `add_reaction` adds
+/// reactions:write alone, `remove_reaction` adds reactions:read +
+/// reactions:write (the omit-emoji variant reads the message's reactions
+/// first), and `open_dm` adds im:write.
+fn slack_user_scopes_plus(extra: &[&str]) -> Vec<String> {
+    let mut scopes = slack_user_scopes();
+    scopes.extend(extra.iter().map(|scope| (*scope).to_string()));
     scopes
 }
 
@@ -4176,8 +4189,9 @@ async fn slack_history_name_resolution_is_capped_per_call() {
 
 /// Drive one Slack standard op through the real bundled WASM module and
 /// return its output on success — the shared harness the conformance sweep
-/// below uses for all 8 ops instead of repeating the ~15-line
-/// registry/network/secret-store setup per op.
+/// below uses for every bound op (all 16 core standard messaging ops today)
+/// instead of repeating the ~15-line registry/network/secret-store setup
+/// per op.
 async fn dispatch_slack_standard_op_for_conformance(
     capability_name: &str,
     scopes: Vec<String>,
@@ -4266,7 +4280,7 @@ async fn slack_standard_ops_satisfy_canonical_contracts() {
 
     let send_message_output = dispatch_slack_standard_op_for_conformance(
         "slack.send_message",
-        write_scopes,
+        write_scopes.clone(),
         vec![(
             "chat.postMessage",
             200,
@@ -4393,7 +4407,7 @@ async fn slack_standard_ops_satisfy_canonical_contracts() {
 
     let whoami_output = dispatch_slack_standard_op_for_conformance(
         "slack.whoami",
-        read_scopes,
+        read_scopes.clone(),
         vec![
             ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
             ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
@@ -4402,6 +4416,150 @@ async fn slack_standard_ops_satisfy_canonical_contracts() {
     )
     .await;
     assert_canonical_output(StandardMessagingOp::Whoami, &whoami_output);
+
+    // ── The eight ops the scope-widening wave added (edit/delete/reactions/
+    //    open_dm/get_message/people). Same seam, same pass condition.
+
+    let edit_message_output = dispatch_slack_standard_op_for_conformance(
+        "slack.edit_message",
+        write_scopes.clone(),
+        vec![(
+            "chat.update",
+            200,
+            r#"{"ok":true,"channel":"C0GENERAL","ts":"1751970099.000100"}"#,
+        )],
+        json!({
+            "message_ref": {"conversation": "C0GENERAL", "message_id": "1751970099.000100"},
+            "text": "edited body"
+        }),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::EditMessage, &edit_message_output);
+
+    let delete_message_output = dispatch_slack_standard_op_for_conformance(
+        "slack.delete_message",
+        write_scopes,
+        vec![(
+            "chat.delete",
+            200,
+            r#"{"ok":true,"channel":"C0GENERAL","ts":"1751970099.000100"}"#,
+        )],
+        json!({
+            "message_ref": {"conversation": "C0GENERAL", "message_id": "1751970099.000100"}
+        }),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::DeleteMessage, &delete_message_output);
+    assert_eq!(
+        delete_message_output["deleted"],
+        json!(true),
+        "a delete that happened reports deleted: true: {delete_message_output}"
+    );
+
+    let add_reaction_output = dispatch_slack_standard_op_for_conformance(
+        "slack.add_reaction",
+        slack_user_scopes_plus(&["reactions:write"]),
+        vec![("reactions.add", 200, r#"{"ok":true}"#)],
+        json!({
+            "message_ref": {"conversation": "C0GENERAL", "message_id": "1751970001.000100"},
+            "emoji": ":thumbsup:"
+        }),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::AddReaction, &add_reaction_output);
+    assert_eq!(
+        add_reaction_output["emoji"],
+        json!("thumbsup"),
+        "wrapping colons are normalized away before Slack sees the name: {add_reaction_output}"
+    );
+
+    let remove_reaction_output = dispatch_slack_standard_op_for_conformance(
+        "slack.remove_reaction",
+        slack_user_scopes_plus(&["reactions:read", "reactions:write"]),
+        vec![("reactions.remove", 200, r#"{"ok":true}"#)],
+        json!({
+            "message_ref": {"conversation": "C0GENERAL", "message_id": "1751970001.000100"},
+            "emoji": "thumbsup"
+        }),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::RemoveReaction, &remove_reaction_output);
+    assert_eq!(
+        remove_reaction_output["emoji"],
+        json!("thumbsup"),
+        "the named-emoji variant echoes what it removed: {remove_reaction_output}"
+    );
+
+    let open_dm_output = dispatch_slack_standard_op_for_conformance(
+        "slack.open_dm",
+        slack_user_scopes_plus(&["im:write"]),
+        vec![(
+            "conversations.open",
+            200,
+            r#"{"ok":true,"channel":{"id":"D0NEWDM"}}"#,
+        )],
+        json!({"user_ref": "U0BBB"}),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::OpenDm, &open_dm_output);
+    assert_eq!(
+        open_dm_output["conversation"],
+        json!("D0NEWDM"),
+        "open_dm returns the provider-issued DM conversation: {open_dm_output}"
+    );
+
+    let get_message_output = dispatch_slack_standard_op_for_conformance(
+        "slack.get_message",
+        read_scopes.clone(),
+        vec![
+            (
+                "conversations.history",
+                200,
+                r#"{"ok":true,"messages":[{"type":"message","user":"U0AAA","text":"hi","ts":"1751970001.000100"}]}"#,
+            ),
+            ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+            ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+        ],
+        json!({
+            "message_ref": {"conversation": "C0GENERAL", "message_id": "1751970001.000100"}
+        }),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::GetMessage, &get_message_output);
+
+    let resolve_user_output = dispatch_slack_standard_op_for_conformance(
+        "slack.resolve_user",
+        read_scopes.clone(),
+        vec![(
+            "users.list",
+            200,
+            r#"{"ok":true,"members":[{"id":"U0BBB","name":"bob","profile":{"real_name":"Bob Example","display_name":"Bob"}}],"response_metadata":{"next_cursor":""}}"#,
+        )],
+        json!({"query": "bob"}),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::ResolveUser, &resolve_user_output);
+    assert_eq!(
+        resolve_user_output["matches"][0]["user_ref"],
+        json!("U0BBB"),
+        "a directory match carries the mentionable user id: {resolve_user_output}"
+    );
+
+    let list_members_output = dispatch_slack_standard_op_for_conformance(
+        "slack.list_members",
+        read_scopes,
+        vec![
+            (
+                "conversations.members",
+                200,
+                r#"{"ok":true,"members":["U0AAA"],"response_metadata":{"next_cursor":""}}"#,
+            ),
+            ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ],
+        json!({"conversation": "C0GENERAL"}),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::ListMembers, &list_members_output);
 }
 
 /// One vendor-error case (brief step 6): a scripted Slack `not_in_channel`
@@ -4448,5 +4606,672 @@ async fn slack_standard_op_vendor_error_surfaces_not_a_member() {
     assert!(
         !message.contains("not_in_channel"),
         "the raw vendor code must never leak into the model-visible message: {message:?}"
+    );
+}
+
+// ─── Behavioral contracts of the eight scope-widening ops ──────────────────
+//
+// Everything below drives the REAL bundled `slack_user_tool.wasm` through
+// `invoke_capability`, exactly like the conformance sweep — these tests pin
+// the orchestration each op performs (which vendor calls, in what order,
+// with which query parameters) and the model-visible failures, which the
+// output-schema sweep cannot see.
+
+/// The message every reaction/get test addresses.
+fn general_message_ref() -> serde_json::Value {
+    json!({"conversation": "C0GENERAL", "message_id": "1751970001.000100"})
+}
+
+/// The failure-path sibling of [`dispatch_slack_standard_op_for_conformance`]:
+/// drive one Slack standard op expecting a model-visible failure, returning
+/// that failure PLUS the recorded egress so callers can assert exactly which
+/// vendor calls happened — including none at all, the contract for inputs the
+/// guest must reject before Slack is ever asked.
+async fn dispatch_slack_standard_op_expecting_failure(
+    capability_name: &str,
+    scopes: Vec<String>,
+    scripted: Vec<(&'static str, u16, &'static str)>,
+    input: serde_json::Value,
+) -> (RuntimeCapabilityFailure, UrlKeyedSlackEgress) {
+    let capability_id = CapabilityId::new(capability_name).unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(scripted);
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        scopes.clone()
+    );
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(capability_id, scope, input))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => (failure, network),
+        other => panic!("{capability_name}: expected failed outcome, got {other:?}"),
+    }
+}
+
+/// Slack-side scope drift surfaces as the model-visible standard denial,
+/// never as an auth-required re-auth gate.
+///
+/// Two layers gate a scope shortfall, and this test pins the second one:
+///
+/// 1. An account whose STORED grant lacks a tool's manifest scopes (the
+///    pre-widening account) never reaches Slack at all — production account
+///    selection applies the provider-scope gate
+///    (`AccountSelectionPurpose::Runtime` in
+///    `ironclaw_auth::product_auth::credentials::runtime_credentials`), maps
+///    the empty selection to `CredentialStageError::AuthRequired`, and the
+///    re-auth gate reconnects the SAME account with the widened manifest
+///    scopes (binding deliberately skips the scope gate).
+/// 2. An account that PASSED staging can still be refused by Slack with
+///    `missing_scope` (server-side drift: a scope revoked after connect, an
+///    org policy). Re-running OAuth would request the exact scopes the
+///    account already claims to hold, so the guest maps this to
+///    `messaging.permission_denied` — a model-visible denial the model can
+///    explain — instead of a re-auth loop (`slack_error_requires_reauth`).
+#[tokio::test]
+async fn slack_missing_scope_surfaces_permission_denied_not_auth_required() {
+    let (failure, network) = dispatch_slack_standard_op_expecting_failure(
+        "slack.add_reaction",
+        // The token staged WITH its manifest scopes — staging passes and the
+        // shortfall comes from Slack itself.
+        slack_user_scopes_plus(&["reactions:write"]),
+        vec![(
+            "reactions.add",
+            200,
+            r#"{"ok":false,"error":"missing_scope"}"#,
+        )],
+        json!({"message_ref": general_message_ref(), "emoji": "thumbsup"}),
+    )
+    .await;
+    // Reaching here at all proves the outcome was Failed — the helper panics
+    // on RuntimeCapabilityOutcome::AuthRequired, the wrong-answer this test
+    // exists to rule out.
+    assert_eq!(
+        failure.kind,
+        FailureKind::OperationFailed,
+        "a scope shortfall is a model-visible vendor denial: {failure:?}"
+    );
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("messaging.permission_denied"),
+        "missing_scope must surface the standard taxonomy code, got: {message:?}"
+    );
+    assert!(
+        !message.contains("missing_scope"),
+        "the raw vendor code must never leak into the model-visible message: {message:?}"
+    );
+    assert_eq!(
+        network.requests().len(),
+        1,
+        "exactly one vendor call answers a scope shortfall"
+    );
+}
+
+/// The idempotent end-state arms through dispatch: Slack's "already reacted" /
+/// "that reaction is not there" answers mean the requested end state holds,
+/// so both complete successfully instead of pushing the model into retrying
+/// a call that cannot change anything.
+#[tokio::test]
+async fn slack_reaction_end_state_codes_complete_successfully() {
+    use ironclaw_host_api::messaging::StandardMessagingOp;
+    use ironclaw_host_api::test_support::messaging_conformance::assert_canonical_output;
+
+    let already_reacted_output = dispatch_slack_standard_op_for_conformance(
+        "slack.add_reaction",
+        slack_user_scopes_plus(&["reactions:write"]),
+        vec![(
+            "reactions.add",
+            200,
+            r#"{"ok":false,"error":"already_reacted"}"#,
+        )],
+        json!({"message_ref": general_message_ref(), "emoji": "thumbsup"}),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::AddReaction, &already_reacted_output);
+
+    let no_reaction_output = dispatch_slack_standard_op_for_conformance(
+        "slack.remove_reaction",
+        slack_user_scopes_plus(&["reactions:read", "reactions:write"]),
+        vec![(
+            "reactions.remove",
+            200,
+            r#"{"ok":false,"error":"no_reaction"}"#,
+        )],
+        json!({"message_ref": general_message_ref(), "emoji": "thumbsup"}),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::RemoveReaction, &no_reaction_output);
+}
+
+/// The omit-emoji `remove_reaction` orchestration, end to end: resolve the
+/// connected identity (`auth.test`), read the message's reactions with the
+/// COMPLETE user lists (`reactions.get?...&full=true` — without `full=true`
+/// Slack truncates each reaction's `users` array on popular messages and a
+/// reaction that IS ours would be silently skipped as a false success), then
+/// remove exactly the connected account's reactions and nobody else's.
+#[tokio::test]
+async fn slack_remove_reaction_without_emoji_removes_only_the_connected_accounts_reactions() {
+    use ironclaw_host_api::messaging::StandardMessagingOp;
+    use ironclaw_host_api::test_support::messaging_conformance::assert_canonical_output;
+
+    let capability_id = CapabilityId::new("slack.remove_reaction").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+        (
+            "reactions.get",
+            200,
+            r#"{"ok":true,"message":{"reactions":[
+                {"name":"thumbsup","users":["U0AAA","U0BBB"]},
+                {"name":"tada","users":["U0BBB"]},
+                {"name":"eyes","users":["U0AAA"]}
+            ]}}"#,
+        ),
+        ("reactions.remove", 200, r#"{"ok":true}"#),
+    ]);
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        slack_user_scopes_plus(&["reactions:read", "reactions:write"])
+    );
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"message_ref": general_message_ref()}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_canonical_output(StandardMessagingOp::RemoveReaction, &output);
+    assert!(
+        output.get("emoji").is_none(),
+        "the omit-emoji variant names no single emoji on the way out: {output}"
+    );
+
+    let requests = network.requests();
+    let urls: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+    let auth_index = urls
+        .iter()
+        .position(|u| u.contains("auth.test"))
+        .expect("identity is resolved first");
+    let get_index = urls
+        .iter()
+        .position(|u| u.contains("reactions.get"))
+        .expect("the message's reactions are read");
+    assert!(
+        auth_index < get_index,
+        "identity before the reactions read: {urls:?}"
+    );
+    assert!(
+        urls[get_index].contains("full=true"),
+        "reactions.get must request the complete, untruncated user lists: {}",
+        urls[get_index]
+    );
+
+    let removed_names: Vec<String> = requests
+        .iter()
+        .filter(|r| r.url.contains("reactions.remove"))
+        .map(|r| {
+            serde_json::from_slice::<serde_json::Value>(&r.body).expect("remove body is JSON")
+                ["name"]
+                .as_str()
+                .expect("remove body names its emoji")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        removed_names,
+        vec!["thumbsup".to_string(), "eyes".to_string()],
+        "exactly the connected account's reactions are removed, never anyone else's"
+    );
+}
+
+/// The identity lookup in the omit-emoji variant is fatal, not best-effort:
+/// without knowing who "we" are, the ownership filter could remove someone
+/// else's reaction — the one outcome this operation must never produce. A
+/// failed `auth.test` therefore aborts before reactions.get or any removal.
+#[tokio::test]
+async fn slack_remove_reaction_without_emoji_fails_closed_when_identity_lookup_fails() {
+    let (failure, network) = dispatch_slack_standard_op_expecting_failure(
+        "slack.remove_reaction",
+        slack_user_scopes_plus(&["reactions:read", "reactions:write"]),
+        vec![(
+            "auth.test",
+            200,
+            r#"{"ok":false,"error":"unexpected_glitch"}"#,
+        )],
+        json!({"message_ref": general_message_ref()}),
+    )
+    .await;
+    assert_eq!(
+        failure.kind,
+        FailureKind::OperationFailed,
+        "a degraded identity fails the call instead of degrading the filter: {failure:?}"
+    );
+    let requests = network.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the identity failure must abort before reactions.get or any removal: {requests:?}"
+    );
+    assert!(
+        requests[0].url.contains("auth.test"),
+        "the one call made is the identity probe: {}",
+        requests[0].url
+    );
+}
+
+/// `conversations.history`'s `latest` is a RANGE bound: for a ts that no
+/// longer resolves it hands back whichever message sits just before it. The
+/// near miss must never be returned as though it were the message asked for —
+/// the guest falls back to the thread lookup and, when that also misses,
+/// reports `messaging.unknown_message`. The fallback pinches the range to
+/// exactly the target ts (`oldest=latest=ts&inclusive=true`) so a reply is
+/// found at any thread depth without scanning pages.
+#[tokio::test]
+async fn slack_get_message_returns_unknown_message_for_a_near_miss_instead_of_a_neighbour() {
+    let (failure, network) = dispatch_slack_standard_op_expecting_failure(
+        "slack.get_message",
+        slack_user_scopes(),
+        vec![
+            (
+                "conversations.history",
+                200,
+                r#"{"ok":true,"messages":[{"type":"message","user":"U0AAA","text":"neighbour","ts":"1751970001.000999"}]}"#,
+            ),
+            (
+                "conversations.replies",
+                200,
+                r#"{"ok":false,"error":"thread_not_found"}"#,
+            ),
+        ],
+        json!({"message_ref": {"conversation": "C0GENERAL", "message_id": "1751970002.000100"}}),
+    )
+    .await;
+    assert_eq!(
+        failure.kind,
+        FailureKind::InputEncode,
+        "an unresolvable message ref is model-fixable input: {failure:?}"
+    );
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("messaging.unknown_message"),
+        "a near miss surfaces the standard miss code, got: {message:?}"
+    );
+    assert!(
+        !message.contains("thread_not_found"),
+        "the raw vendor code must never leak: {message:?}"
+    );
+
+    let urls: Vec<String> = network.requests().iter().map(|r| r.url.clone()).collect();
+    assert!(
+        urls.iter().any(|u| u.contains("conversations.history")),
+        "the history leg runs first: {urls:?}"
+    );
+    let replies_url = urls
+        .iter()
+        .find(|u| u.contains("conversations.replies"))
+        .expect("a history miss falls back to the thread lookup");
+    assert!(
+        replies_url.contains("oldest=1751970002.000100")
+            && replies_url.contains("latest=1751970002.000100")
+            && replies_url.contains("inclusive=true"),
+        "the fallback pinches the range to exactly the target ts instead of \
+         scanning a fixed page: {replies_url}"
+    );
+}
+
+/// A threaded REPLY is not on the conversation timeline: the history leg
+/// misses and the thread fallback finds the exact ts. Only that exact match
+/// is returned — enriched like every other read.
+#[tokio::test]
+async fn slack_get_message_falls_back_to_thread_replies_for_a_threaded_reply() {
+    use ironclaw_host_api::messaging::StandardMessagingOp;
+    use ironclaw_host_api::test_support::messaging_conformance::assert_canonical_output;
+
+    let capability_id = CapabilityId::new("slack.get_message").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "conversations.history",
+            200,
+            r#"{"ok":true,"messages":[{"type":"message","user":"U0AAA","text":"thread root","ts":"1751970001.000100"}]}"#,
+        ),
+        (
+            "conversations.replies",
+            200,
+            r#"{"ok":true,"messages":[{"type":"message","user":"U0AAA","text":"deep reply","ts":"1751970005.000500","thread_ts":"1751970001.000100"}]}"#,
+        ),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"message_ref": {"conversation": "C0GENERAL", "message_id": "1751970005.000500"}}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_canonical_output(StandardMessagingOp::GetMessage, &output);
+    assert_eq!(
+        output["message"]["message_ref"]["message_id"],
+        json!("1751970005.000500"),
+        "the exact requested reply is returned, never a neighbour: {output}"
+    );
+}
+
+/// Inputs the guest must reject before Slack is ever asked: a blank
+/// resolve_user query, an emoji that normalizes to nothing, and — the 1:1-DM
+/// contract — an open_dm `user_ref` that is not a single well-formed Slack
+/// user id. Slack's `conversations.open` takes a comma-separated LIST in its
+/// `users` field, so an unvalidated "U1,U2" would silently open a group DM
+/// while every contract layer promises the DM with one person. Zero egress in
+/// every case, mirroring the garbled-cursor sibling above.
+#[tokio::test]
+async fn slack_invalid_inputs_are_rejected_before_any_vendor_call() {
+    let (failure, network) = dispatch_slack_standard_op_expecting_failure(
+        "slack.resolve_user",
+        slack_user_scopes(),
+        vec![],
+        json!({"query": "   "}),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::InputEncode, "{failure:?}");
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("messaging.unsupported_content"),
+        "a blank query is unsupported content: {message:?}"
+    );
+    assert!(network.requests().is_empty(), "a blank query scans nothing");
+
+    for capability in ["slack.add_reaction", "slack.remove_reaction"] {
+        let (failure, network) = dispatch_slack_standard_op_expecting_failure(
+            capability,
+            slack_user_scopes_plus(&["reactions:read", "reactions:write"]),
+            vec![],
+            json!({"message_ref": general_message_ref(), "emoji": ":::"}),
+        )
+        .await;
+        assert_eq!(
+            failure.kind,
+            FailureKind::InputEncode,
+            "{capability}: {failure:?}"
+        );
+        let message = failure.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("messaging.unsupported_content"),
+            "{capability}: an emoji that normalizes to nothing is rejected, got: {message:?}"
+        );
+        assert!(
+            network.requests().is_empty(),
+            "{capability}: no vendor call for an empty emoji"
+        );
+    }
+
+    for bad_user_ref in ["U0AAA,U0ATTACKER", "u0aaa", "C0GENERAL"] {
+        let (failure, network) = dispatch_slack_standard_op_expecting_failure(
+            "slack.open_dm",
+            slack_user_scopes_plus(&["im:write"]),
+            vec![],
+            json!({"user_ref": bad_user_ref}),
+        )
+        .await;
+        assert_eq!(
+            failure.kind,
+            FailureKind::InputEncode,
+            "{bad_user_ref}: {failure:?}"
+        );
+        let message = failure.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("messaging.unknown_user"),
+            "{bad_user_ref}: a malformed user id is rejected as unknown_user, got: {message:?}"
+        );
+        assert!(
+            network.requests().is_empty(),
+            "{bad_user_ref}: the malformed id must never reach conversations.open"
+        );
+    }
+}
+
+/// Provider evidence is never fabricated: a write whose response omits the
+/// evidence the canonical output requires fails as a vendor anomaly rather
+/// than returning a ref with an empty id (`tool-evidence.md`: cover missing
+/// evidence and malformed provider responses).
+#[tokio::test]
+async fn slack_write_ops_without_provider_evidence_fail_instead_of_fabricating_refs() {
+    let (failure, _network) = dispatch_slack_standard_op_expecting_failure(
+        "slack.open_dm",
+        slack_user_scopes_plus(&["im:write"]),
+        vec![("conversations.open", 200, r#"{"ok":true,"channel":{}}"#)],
+        json!({"user_ref": "U0BBB"}),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed, "{failure:?}");
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("messaging.vendor_error"),
+        "ok:true without a conversation id is a vendor anomaly: {message:?}"
+    );
+
+    let (failure, _network) = dispatch_slack_standard_op_expecting_failure(
+        "slack.edit_message",
+        slack_user_write_scopes(),
+        vec![("chat.update", 200, r#"{"ok":true,"channel":"C0GENERAL"}"#)],
+        json!({
+            "message_ref": general_message_ref(),
+            "text": "edited body"
+        }),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed, "{failure:?}");
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("messaging.vendor_error"),
+        "ok:true without a ts never becomes a message_ref with an empty id: {message:?}"
+    );
+}
+
+/// `list_members` clamps its page size to Slack's real maximum (999 —
+/// Slack rejects 1000), mirroring the history/list_conversations clamp pins.
+/// The canonical schema caps `limit` at 1000, so 1000 is the largest value
+/// that can reach the guest at all.
+#[tokio::test]
+async fn slack_list_members_limit_is_clamped_to_slack_maximum() {
+    let capability_id = CapabilityId::new("slack.list_members").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "conversations.members",
+            200,
+            r#"{"ok":true,"members":["U0AAA"],"response_metadata":{"next_cursor":""}}"#,
+        ),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"conversation": "C0GENERAL", "limit": 1000}),
+        ))
+        .await
+        .unwrap();
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(_) => {}
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+
+    let members_url = network
+        .requests()
+        .iter()
+        .find(|r| r.url.contains("conversations.members"))
+        .expect("conversations.members was called")
+        .url
+        .clone();
+    assert!(
+        members_url.contains("limit=999"),
+        "limit 1000 must be clamped to Slack's real maximum: {members_url}"
+    );
+}
+
+/// `resolve_user` scans exactly the page it was asked for: the requested
+/// `users.list` page size IS the match cap, so the returned `next_cursor`
+/// (page-granular on Slack) can never skip a match this call withheld — the
+/// regression where a mid-page break dropped matches between the cap and the
+/// cursor. Default (no `limit`) scans the full 200-entry page.
+#[tokio::test]
+async fn slack_resolve_user_scans_exactly_the_requested_page_so_cursors_never_skip_matches() {
+    // Default: the full 200-entry page is requested.
+    let default_capability_id = CapabilityId::new("slack.resolve_user").unwrap();
+    let default_scope = sample_scope(InvocationId::new());
+    let default_network = UrlKeyedSlackEgress::new(vec![(
+        "users.list",
+        200,
+        r#"{"ok":true,"members":[{"id":"U0BBB","name":"bob","profile":{"real_name":"Bob Example","display_name":"Bob"}}],"response_metadata":{"next_cursor":""}}"#,
+    )]);
+    let default_secret_store = Arc::new(SecretStore::ephemeral());
+    let default_services = slack_enrichment_services_for_test!(
+        default_network.clone(),
+        Arc::clone(&default_secret_store)
+    );
+    seed_slack_user_token(&default_secret_store, &default_scope).await;
+    let default_outcome = default_services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            default_capability_id,
+            default_scope,
+            json!({"query": "bob"}),
+        ))
+        .await
+        .unwrap();
+    match default_outcome {
+        RuntimeCapabilityOutcome::Completed(_) => {}
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let default_url = default_network
+        .requests()
+        .iter()
+        .find(|r| r.url.contains("users.list"))
+        .expect("users.list was called")
+        .url
+        .clone();
+    assert!(
+        default_url.contains("limit=200"),
+        "an omitted limit scans the full 200-entry page: {default_url}"
+    );
+
+    // Explicit limit: page == limit, and even a page Slack overshoots never
+    // yields more than `limit` matches; the cursor is passed through so the
+    // caller resumes at the NEXT page with nothing withheld in between.
+    let capability_id = CapabilityId::new("slack.resolve_user").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "users.list",
+        200,
+        r#"{"ok":true,"members":[
+            {"id":"U0AAA","name":"bob-one","profile":{"real_name":"Bob One","display_name":"Bob One"}},
+            {"id":"U0BBB","name":"bob-two","profile":{"real_name":"Bob Two","display_name":"Bob Two"}},
+            {"id":"U0CCC","name":"bob-three","profile":{"real_name":"Bob Three","display_name":"Bob Three"}}
+        ],"response_metadata":{"next_cursor":"cur9"}}"#,
+    )]);
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"query": "bob", "limit": 2}),
+        ))
+        .await
+        .unwrap();
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_eq!(
+        output["matches"].as_array().map(Vec::len),
+        Some(2),
+        "an overshot page never yields more than `limit` matches: {output}"
+    );
+    assert_eq!(
+        output["next_cursor"],
+        json!("cur9"),
+        "the page cursor is passed through for loss-free resumption: {output}"
+    );
+
+    let list_url = network
+        .requests()
+        .iter()
+        .find(|r| r.url.contains("users.list"))
+        .expect("users.list was called")
+        .url
+        .clone();
+    assert!(
+        list_url.contains("limit=2"),
+        "the scanned page IS the requested limit: {list_url}"
+    );
+}
+
+/// An empty conversation is an honest empty result — `members: []`, no
+/// cursor — never an error and never a fabricated member.
+#[tokio::test]
+async fn slack_list_members_reports_an_empty_conversation_honestly() {
+    use ironclaw_host_api::messaging::StandardMessagingOp;
+    use ironclaw_host_api::test_support::messaging_conformance::assert_canonical_output;
+
+    let output = dispatch_slack_standard_op_for_conformance(
+        "slack.list_members",
+        slack_user_scopes(),
+        vec![(
+            "conversations.members",
+            200,
+            r#"{"ok":true,"members":[],"response_metadata":{"next_cursor":""}}"#,
+        )],
+        json!({"conversation": "C0QUIET"}),
+    )
+    .await;
+    assert_canonical_output(StandardMessagingOp::ListMembers, &output);
+    assert_eq!(
+        output["members"],
+        json!([]),
+        "an empty conversation reads back as an empty member list: {output}"
+    );
+    assert!(
+        output.get("next_cursor").is_none(),
+        "no cursor is reported when Slack signals the last page: {output}"
     );
 }

@@ -14,6 +14,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::test_support::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_session_channel};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
@@ -140,8 +141,17 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: None,
+        outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }]);
     let input =
         RebornRuntimeInput::from_build_input(build_input).with_identity(RebornRuntimeIdentity {
@@ -212,7 +222,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         Some("A-RUNTIME".to_string()),
     )
     .expect("proven Slack identity");
-    let rollback =
+    let transaction =
         ironclaw_extension_host::channel_identity_binding::bind_channel_identities_for_callback(
             &binding_config,
             "slack",
@@ -222,7 +232,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("bind Slack identity before activation")
         .expect("Slack callback maps to the installed channel extension");
-    drop(rollback);
+    transaction.commit().await;
 
     let dm_targets = &runtime.channel_dm_target_store;
 
@@ -324,18 +334,30 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
         false,
         ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert!(
         !cfg.regex_activation_enabled,
         "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
     );
-    // Standalone uses criteria selection so a learned skill auto-activates on
-    // a keyword/pattern match (the learn→reuse loop), not only on an
-    // explicit `$name` mention. A revert to `ExplicitOnly` would silently
-    // break auto-reuse, so lock it here.
+    // Selection is the MODEL's decision, so this must be `ExplicitOnly`.
+    //
+    // This assertion previously locked `ExplicitAndCriteria`, on the reasoning that
+    // criteria selection is what closes the learn→reuse loop -- a learned skill
+    // auto-activating on a keyword match rather than only on an explicit `$name`.
+    // That reasoning does not survive contact with the corpus: **0 of 30
+    // agent-authored skills declare an `activation:` block**, so the scorer could
+    // never select a learned skill and the loop it was protecting did not exist.
+    // What actually closes the loop is the skill appearing in the listing, which is
+    // why this PR makes the listing complete.
+    //
+    // Kept as an assertion rather than deleted, with the polarity flipped: a revert
+    // to `ExplicitAndCriteria` reinstates host-side keyword matching on the model's
+    // behalf, which is the #5417 class.
     assert!(matches!(
         cfg.selection_mode,
-        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitOnly
     ));
 }
 
@@ -345,6 +367,8 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
         true,
         ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert!(
         cfg.regex_activation_enabled,
@@ -402,6 +426,8 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
         true,
         ironclaw_loop_host::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -421,10 +447,44 @@ fn standalone_selector_config_propagates_injection_mode() {
         ironclaw_loop_host::SkillInjectionMode::Listing,
         ironclaw_loop_host::SkillInjectionMode::Full,
     ] {
-        let cfg =
-            super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
+        let cfg = super::skill_activation_selector_config(
+            true,
+            mode,
+            super::DEFAULT_SKILL_ACTIVATION,
+            true,
+        );
         assert_eq!(cfg.injection_mode, mode);
     }
+}
+
+/// Skill selection on the Reborn path must be the model's decision, not a host-side
+/// keyword guess.
+///
+/// This exists because changing the default in `activation.rs` was, on its own, a
+/// no-op here: `skill_activation_selector_config` used to pin
+/// `ExplicitAndCriteria` at the call site, so no real Reborn user could ever see
+/// `ExplicitOnly` however the default was written. The bug was invisible to every
+/// test in `ironclaw_loop_host`, because those construct their own
+/// config — only a test at the composition layer, on the value this function
+/// actually returns, can catch it.
+///
+/// If a later change re-pins the mode here, this fails rather than silently
+/// reinstating host-side matching.
+#[test]
+fn reborn_skill_selection_is_model_decided() {
+    let cfg = super::skill_activation_selector_config(
+        true,
+        ironclaw_loop_host::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
+    );
+    assert_eq!(
+        cfg.selection_mode,
+        ironclaw_loop_host::SkillActivationSelectionMode::ExplicitOnly,
+        "Reborn must let the model choose the skill from the listing; pinning \
+         ExplicitAndCriteria here makes the host keyword-match on the model's behalf"
+    );
 }
 
 /// Guards the injection default.
@@ -692,6 +752,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
     ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::operator_llm::{
+    LlmConfigService, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
+};
 use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
@@ -725,6 +788,7 @@ use super::{RebornSkillActivationSource, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const PRODUCTION_SHAPED_BUILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
     runtime.turn_scheduler.stop_for_test().await;
@@ -765,6 +829,11 @@ struct ToolCallingGateway {
     calls: StdMutex<usize>,
     stream_model_calls: StdMutex<usize>,
     requests: StdMutex<Vec<HostManagedModelRequest>>,
+}
+
+#[derive(Debug, Default)]
+struct SandboxShellCallingGateway {
+    calls: StdMutex<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -863,6 +932,109 @@ impl HostManagedModelGateway for RecordingGateway {
             self.reply.clone(),
         ))
     }
+}
+
+#[tokio::test]
+async fn standalone_cli_send_uses_saved_user_model_preference() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let standalone_root = root.path().join("standalone");
+    std::fs::create_dir_all(&standalone_root).expect("standalone root");
+    std::fs::write(
+        standalone_root.join(crate::factory::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        format!(
+            "{}\n",
+            ironclaw_secrets::keychain::generate_master_key_hex()
+        ),
+    )
+    .expect("seed standalone secrets master key");
+    let config_home_dir = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home_dir).expect("config home dir");
+    let home = RebornHome::resolve_from_env_parts(
+        Some(config_home_dir.as_os_str().to_os_string()),
+        None,
+        None,
+    )
+    .expect("valid reborn home");
+    std::fs::write(
+        home.config_file_path(),
+        "[llm.default]\nprovider_id = \"ollama\"\nmodel = \"workspace-default\"\n",
+    )
+    .expect("write config.toml");
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let gateway = Arc::new(RecordingGateway {
+        reply: "preferred model reply".to_string(),
+        requests: Arc::clone(&requests),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input("runtime-cli-model-owner", standalone_root)
+            .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_boot_config(RebornBootConfig::new(home, RebornProfile::Standalone))
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-cli-model-tenant".to_string(),
+        agent_id: "runtime-cli-model-agent".to_string(),
+        source_binding_id: "runtime-cli-model-source".to_string(),
+        reply_target_binding_id: "runtime-cli-model-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new("runtime-cli-model-tenant").expect("tenant"),
+        UserId::new("runtime-cli-model-owner").expect("user"),
+        Some(AgentId::new("runtime-cli-model-agent").expect("agent")),
+        None,
+    );
+    let llm_config = runtime
+        .llm_config_service
+        .as_ref()
+        .expect("boot config wires model selection");
+    llm_config
+        .set_user_model_policy(
+            caller.clone().with_operator_config(true),
+            SetUserModelPolicyRequest {
+                workspace_default: "workspace-default".to_string(),
+                allowed_models: vec![
+                    "workspace-default".to_string(),
+                    "preferred-model".to_string(),
+                ],
+            },
+        )
+        .await
+        .expect("model policy is stored");
+    llm_config
+        .set_user_model_preference(
+            caller,
+            SetUserModelPreferenceRequest {
+                model: Some("preferred-model".to_string()),
+            },
+        )
+        .await
+        .expect("model preference is stored");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .send_user_message(&conversation, "use my saved model")
+        .await
+        .expect("CLI message sends");
+
+    {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1, "one model call should be made");
+        let request = &requests[0];
+        let route = request
+            .resolved_model_route
+            .as_ref()
+            .expect("saved preference should reach the model gateway");
+        assert!(route.is_advisory());
+        assert_eq!(route.model_id(), "preferred-model");
+    }
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[async_trait]
@@ -970,6 +1142,97 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 id: "call-1".to_string(),
                 name: echo_tool.name,
                 arguments: serde_json::json!({"message": "hello from tool"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_capability_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for SandboxShellCallingGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "expected capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("shell gateway lock poisoned");
+            let call_index = *calls;
+            *calls += 1;
+            call_index
+        };
+        if call_index == 1 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                .expect("second model call should include shell result");
+            assert!(
+                tool_result.content.contains("railway-sandbox-marker"),
+                "shell result should come from the configured sandbox transport: {}",
+                tool_result.content
+            );
+            let envelope: serde_json::Value = serde_json::from_str(&tool_result.content)
+                .expect("tool result should be a structured reference envelope");
+            let preview = envelope["model_observation"]["detail"]["preview"]
+                .as_str()
+                .expect("tool result should include an inline preview");
+            let shell_output: serde_json::Value =
+                serde_json::from_str(preview).expect("shell preview should be structured JSON");
+            assert_eq!(
+                shell_output["sandboxed"],
+                serde_json::json!(true),
+                "model-visible shell result must report sandbox execution"
+            );
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "sandbox shell ok",
+            ));
+        }
+
+        let surface = capabilities
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .map_err(model_capability_error)?;
+        let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
+            .expect("shell capability id");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id == shell_id),
+            "builtin shell must be visible for a sandboxed hosted profile"
+        );
+        let shell_tool = capabilities
+            .tool_definitions()
+            .map_err(model_capability_error)?
+            .into_iter()
+            .find(|definition| definition.capability_id == shell_id)
+            .expect("shell provider tool definition");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("provider-turn-shell".to_string()),
+                id: "shell-call-1".to_string(),
+                name: shell_tool.name,
+                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
@@ -1856,19 +2119,76 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
     )
 }
 
-fn user_skill_dir(
+/// Seed a skill where the runtime actually reads one: the DB-backed virtual filesystem.
+///
+/// Seeding the host disk instead is now testing nothing — every skill mount derives from
+/// `db_backed_skill_grants`, so a disk-seeded skill is correctly invisible (nearai/ironclaw#7168).
+/// Migrations are idempotent, so this runs before the runtime is built.
+async fn seed_db_skill(
+    storage_root: &std::path::Path,
+    virtual_dir: &str,
+    files: &[(&str, String)],
+) {
+    std::fs::create_dir_all(storage_root).expect("storage root");
+    let db_path = crate::filesystem_assembly::standalone_db_path(storage_root);
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .expect("open libsql database"),
+    );
+    let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(db).expect("libsql root filesystem");
+    vfs.run_migrations().await.expect("libsql migrations");
+    for (relative_path, contents) in files {
+        let path =
+            ironclaw_host_api::path::VirtualPath::new(format!("{virtual_dir}/{relative_path}"))
+                .expect("virtual path");
+        ironclaw_filesystem::RootFilesystem::write_file(&vfs, &path, contents.as_bytes())
+            .await
+            .expect("write seeded skill file");
+    }
+}
+
+async fn seed_user_skill(
     storage_root: &std::path::Path,
     tenant_id: &str,
     user_id: &str,
     name: &str,
-) -> std::path::PathBuf {
-    storage_root
-        .join("tenants")
-        .join(tenant_id)
-        .join("users")
-        .join(user_id)
-        .join("skills")
-        .join(name)
+    skill_md: String,
+) {
+    seed_user_skill_with_files(storage_root, tenant_id, user_id, name, skill_md, &[]).await
+}
+
+async fn seed_user_skill_with_files(
+    storage_root: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    name: &str,
+    skill_md: String,
+    extra_files: &[(&str, String)],
+) {
+    let mut files = vec![("SKILL.md", skill_md)];
+    files.extend(extra_files.iter().map(|(p, c)| (*p, c.clone())));
+    seed_db_skill(
+        storage_root,
+        &format!("/tenants/{tenant_id}/users/{user_id}/skills/{name}"),
+        &files,
+    )
+    .await
+}
+
+async fn seed_tenant_shared_skill(
+    storage_root: &std::path::Path,
+    tenant_id: &str,
+    name: &str,
+    skill_md: String,
+) {
+    seed_db_skill(
+        storage_root,
+        &format!("/tenants/{tenant_id}/tenant-shared/skills/{name}"),
+        &[("SKILL.md", skill_md)],
+    )
+    .await
 }
 
 fn skill_md_with_setup_marker(name: &str, description: &str, marker: &str, prompt: &str) -> String {
@@ -2820,16 +3140,14 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2882,16 +3200,14 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2955,16 +3271,14 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_tool_disclosure(ToolDisclosureMode::Off)
@@ -3048,6 +3362,126 @@ impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTra
             duration: Duration::ZERO,
         })
     }
+}
+
+#[derive(Debug, Default)]
+struct ShellRecordingSandboxTransport {
+    requests: StdMutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
+    shutdown_calls: AtomicUsize,
+}
+
+#[test]
+fn user_sandbox_shutdown_error_preserves_runtime_process_source() {
+    use std::error::Error as _;
+
+    let source = ironclaw_host_api::process::RuntimeProcessError::ExecutionFailed(
+        "sanitized checkpoint failure".to_string(),
+    );
+    let error = super::RebornRuntimeError::UserSandboxShutdown(source.clone());
+
+    assert_eq!(
+        error.source().map(ToString::to_string),
+        Some(source.to_string())
+    );
+}
+
+#[async_trait]
+impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        request: ironclaw_host_api::process::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
+    > {
+        self.requests
+            .lock()
+            .expect("sandbox request lock poisoned")
+            .push(request);
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
+            output: "railway-sandbox-marker".to_string(),
+            saved_output: None,
+            exit_code: 0,
+            // The trusted process adapter, rather than a provider transport,
+            // owns this provenance bit and must normalize it to true.
+            sandboxed: false,
+            duration: Duration::ZERO,
+        })
+    }
+
+    async fn shutdown(&self) -> Result<(), ironclaw_host_api::process::RuntimeProcessError> {
+        self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(SandboxShellCallingGateway::default());
+    let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+            "runtime-railway-shell-owner",
+            root.path().join("sandboxed"),
+        )
+        .with_runtime_policy(
+            crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
+                .expect("hosted sandbox policy resolves"),
+        )
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(sandbox_transport.clone()),
+        ))),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-railway-shell-tenant".to_string(),
+        agent_id: "runtime-railway-shell-agent".to_string(),
+        source_binding_id: "runtime-railway-shell-source".to_string(),
+        reply_target_binding_id: "runtime-railway-shell-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime =
+        tokio::time::timeout(PRODUCTION_SHAPED_BUILD_TIMEOUT, build_reborn_runtime(input))
+            .await
+            .expect("sandboxed Railway runtime build should finish")
+            .expect("sandboxed Railway runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
+    let reply = tokio::time::timeout(
+        RUNTIME_SEND_TIMEOUT,
+        runtime.send_user_message(&conversation, "run the shell marker"),
+    )
+    .await
+    .expect("sandbox shell turn should finish")
+    .expect("sandbox shell turn succeeds");
+
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("sandbox shell ok"));
+    {
+        let requests = sandbox_transport
+            .requests
+            .lock()
+            .expect("sandbox request lock poisoned");
+        assert_eq!(
+            requests.len(),
+            1,
+            "shell must use the sandbox transport once"
+        );
+        assert_eq!(requests[0].command, "printf railway-sandbox-marker");
+    }
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, runtime.shutdown())
+        .await
+        .expect("runtime shutdown should finish")
+        .expect("runtime shutdown");
+    assert_eq!(sandbox_transport.shutdown_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -4459,33 +4893,29 @@ async fn standalone_runtime_wires_filesystem_skills_by_default_to_model_calls() 
         ),
     )
     .expect("write system skill");
-    let local_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-filesystem-skill-tenant",
         "runtime-filesystem-skill-owner",
         "local-helper",
-    );
-    std::fs::create_dir_all(&local_helper_dir).expect("user skill dir");
-    std::fs::write(
-        local_helper_dir.join("SKILL.md"),
         skill_md(
             "local-helper",
             "local helper description",
             "USER_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write user skill");
-    std::fs::create_dir_all(storage_root.join("tenant-shared/skills/shared-helper"))
-        .expect("tenant shared skill dir");
-    std::fs::write(
-        storage_root.join("tenant-shared/skills/shared-helper/SKILL.md"),
+    .await;
+    seed_tenant_shared_skill(
+        &storage_root,
+        "runtime-filesystem-skill-tenant",
+        "shared-helper",
         skill_md(
             "shared-helper",
             "tenant shared helper description",
             "TENANT_SHARED_PROMPT_SENTINEL",
         ),
     )
-    .expect("write tenant shared skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "filesystem skill context ok".to_string(),
@@ -4590,12 +5020,26 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
 
     assert_eq!(result.plan.activations().len(), 1);
     assert_eq!(result.plan.activations()[0].name, "legacy-helper");
+    // The legacy tree is migrated onto the host disk and then imported into the DATABASE, which is
+    // the only tree skills are read from. Both are asserted: the disk copy is deliberately left in
+    // place so a downgrade is not destructive, and the database copy is what makes the skill usable.
     assert!(
         storage_root
             .join(
                 "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
             )
-            .exists()
+            .exists(),
+        "the on-disk legacy migration must still run, so a downgrade keeps the skill"
+    );
+    assert!(
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md",
+        )
+        .await
+        .is_some(),
+        "a legacy skill must be imported into the database-backed tree, or upgrading silently loses \
+         every skill the user already had (nearai/ironclaw#7168)"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -4605,28 +5049,19 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
 async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let asset_helper_dir = user_skill_dir(
+    seed_user_skill_with_files(
         &storage_root,
         "runtime-skill-exec-tenant",
         "runtime-skill-exec-owner",
         "asset-helper",
-    );
-    std::fs::create_dir_all(asset_helper_dir.join("references"))
-        .expect("asset skill references dir");
-    std::fs::write(
-        asset_helper_dir.join("SKILL.md"),
         skill_md(
             "asset-helper",
             "asset helper description",
             "ASSET_HELPER_PROMPT_SENTINEL",
         ),
+        &[("references/policy.md", "asset helper policy".to_string())],
     )
-    .expect("write asset helper skill");
-    std::fs::write(
-        asset_helper_dir.join("references/policy.md"),
-        "asset helper policy",
-    )
-    .expect("write asset helper policy");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "asset helper ok".to_string(),
@@ -4725,22 +5160,18 @@ async fn standalone_runtime_fails_closed_for_ambiguous_explicit_skill_before_mod
         ),
     )
     .expect("write system skill");
-    let user_code_review_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-ambiguous-skill-tenant",
         "runtime-ambiguous-skill-owner",
         "code-review",
-    );
-    std::fs::create_dir_all(&user_code_review_dir).expect("user skill dir");
-    std::fs::write(
-        user_code_review_dir.join("SKILL.md"),
         skill_md(
             "code-review",
             "user review description",
             "USER_REVIEW_PROMPT_SENTINEL",
         ),
     )
-    .expect("write user skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "should not reach model".to_string(),
@@ -4791,16 +5222,12 @@ async fn standalone_runtime_fails_closed_for_ambiguous_explicit_skill_before_mod
 async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let marker_helper_dir = user_skill_dir(
+    std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
+    seed_user_skill(
         &storage_root,
         "runtime-setup-marker-tenant",
         "runtime-setup-marker-owner",
         "marker-helper",
-    );
-    std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
-    std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
-    std::fs::write(
-        marker_helper_dir.join("SKILL.md"),
         skill_md_with_setup_marker(
             "marker-helper",
             "marker helper description",
@@ -4808,7 +5235,7 @@ async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marke
             "MARKER_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write marker helper skill");
+    .await;
     std::fs::write(
         storage_root.join("workspace/markers/marker-helper.done"),
         "done",
@@ -4882,15 +5309,11 @@ async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marke
 async fn standalone_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let marker_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-setup-marker-absent-tenant",
         "runtime-setup-marker-absent-owner",
         "marker-helper",
-    );
-    std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
-    std::fs::write(
-        marker_helper_dir.join("SKILL.md"),
         skill_md_with_setup_marker(
             "marker-helper",
             "marker helper description",
@@ -4898,7 +5321,7 @@ async fn standalone_runtime_activates_setup_skill_when_workspace_marker_is_absen
             "MARKER_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write marker helper skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "setup marker absent ok".to_string(),
@@ -5001,24 +5424,25 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
 
 #[tokio::test]
 async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
+    // This exercises a complete filesystem-backed runtime bootstrap. Under the
+    // crate's parallel test load that can exceed the short poll budget used by
+    // smaller scenarios, even though the model path itself completes promptly.
+    const INVALID_SKILL_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let bad_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-bad-skill-tenant",
         "runtime-bad-skill-owner",
         "bad-helper",
-    );
-    std::fs::create_dir_all(&bad_helper_dir).expect("bad skill dir");
-    std::fs::write(
-        bad_helper_dir.join("SKILL.md"),
         skill_md(
             "different-name",
             "bad helper description",
             "BAD_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write bad skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "invalid skill skipped".to_string(),
@@ -5036,7 +5460,7 @@ async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: INVALID_SKILL_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway);
 
@@ -5134,13 +5558,13 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         reply: "webui projection ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input(
             "runtime-webui-owner",
             root.path().join("standalone"),
         )
         .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-tenant".to_string(),
         agent_id: "runtime-webui-agent".to_string(),
@@ -5179,6 +5603,7 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-webui-stream-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("hello webui stream".to_string()),
@@ -6297,31 +6722,27 @@ async fn standalone_webui_bundle_routes_auth_gates_into_interaction_service() {
 async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let webui_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-webui-skill-tenant",
         "runtime-webui-skill-user",
         "webui-helper",
-    );
-    std::fs::create_dir_all(&webui_helper_dir).expect("user skill dir");
-    std::fs::write(
-        webui_helper_dir.join("SKILL.md"),
         skill_md(
             "webui-helper",
             "webui helper description",
             "WEBUI_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write user skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "webui skill context ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input("runtime-webui-skill-owner", storage_root)
             .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-skill-tenant".to_string(),
         agent_id: "runtime-webui-skill-agent".to_string(),
@@ -6360,6 +6781,7 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
         caller,
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-webui-skill-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("$webui-helper please help".to_string()),
@@ -6442,6 +6864,13 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
+
+    // This scenario performs a complete libSQL-backed runtime bootstrap and an
+    // extension lifecycle transition while the crate's other runtime tests run
+    // in parallel. Keep the timeout large enough to measure the behavior under
+    // test rather than host scheduling contention; the generic 10-second poll
+    // budget is intentionally tighter for smaller runtime scenarios.
+    const SURFACE_CHANGE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
@@ -6604,7 +7033,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: RUNTIME_POLL_TIMEOUT,
+        max_total: SURFACE_CHANGE_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway_for_runtime);
 
@@ -6626,7 +7055,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         .enable_global_auto_approve_for_test(&conversation)
         .await;
     let reply = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
+        SURFACE_CHANGE_TEST_TIMEOUT,
         runtime.send_user_message(&conversation, "use echo tool twice"),
     )
     .await
@@ -6668,13 +7097,13 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         reply: "busy-drain ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input(
             "runtime-rejected-busy-owner",
             root.path().join("standalone"),
         )
         .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-rejected-busy-tenant".to_string(),
         agent_id: "runtime-rejected-busy-agent".to_string(),
@@ -6744,6 +7173,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-rejected-busy-b".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message B while thread is busy".to_string()),
@@ -6865,6 +7295,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-rejected-busy-c".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message C after thread is free".to_string()),
@@ -6923,6 +7354,7 @@ impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfig
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: now,
             updated_at: now,
         })
@@ -7170,3 +7602,431 @@ async fn scheduler_stopped_rejects_send_user_message() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 // arch-exempt: large_file, runtime composition contract coverage remains centralized, plan #6175
+
+// Two-thread skill fixtures: thread 1 authors a skill carrying a script, thread 2 runs it.
+//
+// Distilled from ten live demo runs, each of which failed somewhere in this chain and none of which
+// a hermetic test caught: the install vanished (#7168); a missing `description:` made the skill
+// invisible to discovery forever; the staged script could not be executed because the bundle lives
+// in the database; and once staging landed, the path the model was TOLD still missed. So these
+// assert the whole chain rather than a layer -- a layer-at-a-time test passed through all ten.
+/// The skill an agent writes when asked for eGFR — the exact shape every demo produced.
+const SKILL_MD: &str = "---\nname: egfr-calc\ndescription: Compute eGFR from serum creatinine with the 2021 race-free CKD-EPI equation and assign a KDIGO stage.\n---\n\n# eGFR\n\nRun the bundled script:\n\n```bash\npython3 scripts/egfr.py --scr 1.3 --age 62 --female\n```\n";
+
+/// A real script, so \"it ran\" means the process produced this output and not the model's arithmetic.
+const SKILL_SCRIPT: &str = r#"#!/usr/bin/env python3
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--scr", type=float, required=True)
+parser.add_argument("--age", type=float, required=True)
+parser.add_argument("--female", action="store_true")
+args = parser.parse_args()
+
+kappa = 0.7 if args.female else 0.9
+alpha = -0.241 if args.female else -0.302
+factor = 1.012 if args.female else 1.0
+ratio = args.scr / kappa
+egfr = 142 * (min(ratio, 1) ** alpha) * (max(ratio, 1) ** -1.200) * (0.9938 ** args.age) * factor
+egfr = round(egfr, 1)
+stage = (
+    "G1" if egfr >= 90 else
+    "G2" if egfr >= 60 else
+    "G3a" if egfr >= 45 else
+    "G3b" if egfr >= 30 else
+    "G4" if egfr >= 15 else "G5"
+)
+print(f"FIXTURE-OK eGFR={egfr} stage={stage}")
+"#;
+
+const TENANT: &str = "two-thread-tenant";
+const OWNER: &str = "two-thread-owner";
+const AGENT: &str = "two-thread-agent";
+
+/// A mocked model doing what the demo's second thread does: read the activated body, take the
+/// workdir it ADVERTISES, and run the skill's command there through the real `builtin.shell`.
+///
+/// The point is path provenance. The sibling fixture walks the workspace and runs the script with
+/// `std::process::Command`, which proves the bytes landed but says nothing about the string handed
+/// to the model — and a wrong string is what shipped once. Parsed from the body, so a wrong
+/// advertised path fails this test.
+#[derive(Debug, Default)]
+struct SkillShellGateway {
+    calls: StdMutex<usize>,
+    /// The workdir the body advertised, as the model read it.
+    advertised_workdir: StdMutex<Option<String>>,
+    /// The shell's own stdout, replayed back to the model on the following call.
+    shell_output: StdMutex<Option<String>>,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for SkillShellGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "expected capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("skill shell gateway lock");
+            let index = *calls;
+            *calls += 1;
+            index
+        };
+
+        if call_index > 0 {
+            // Second call: the shell has run, so capture what it returned for the assertions.
+            if let Some(tool_result) = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+            {
+                *self.shell_output.lock().expect("shell output lock") =
+                    Some(tool_result.content.clone());
+            }
+            return Ok(HostManagedModelResponse::assistant_reply("done"));
+        }
+
+        // First call: find the staged-files note in whatever the model was actually given.
+        let corpus = request
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let workdir = staged_workdir_from_body(&corpus).unwrap_or_else(|| {
+            panic!("the activated skill body must advertise a staged workdir; got:\n{corpus}")
+        });
+        *self.advertised_workdir.lock().expect("workdir lock") = Some(workdir.clone());
+
+        let shell_id = CapabilityId::new("builtin.shell").expect("shell id");
+        let shell_tool = capabilities
+            .tool_definitions()
+            .map_err(model_capability_error)?
+            .into_iter()
+            .find(|definition| definition.capability_id == shell_id)
+            .expect("builtin.shell must be offered under a policy with a process backend");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("skill-shell-turn".to_string()),
+                id: "call-skill-shell".to_string(),
+                name: shell_tool.name,
+                // Exactly the shape the note tells the model to use.
+                arguments: serde_json::json!({
+                    "command": "python3 scripts/egfr.py --scr 1.3 --age 62 --female",
+                    "workdir": workdir,
+                }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_capability_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+/// Pull the advertised directory out of the staged-files note, the way a model reading it would.
+///
+/// Parsed rather than reconstructed: reconstructing it here would assert the fixture's own idea of
+/// the path instead of the one the body carries.
+fn staged_workdir_from_body(body: &str) -> Option<String> {
+    let marker = "This skill's files are staged at `";
+    let start = body.find(marker)? + marker.len();
+    let rest = &body[start..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
+fn two_thread_caller() -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
+        TenantId::new(TENANT).expect("tenant"),
+        UserId::new(OWNER).expect("user"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        None,
+    )
+}
+
+fn two_thread_runtime_input(storage_root: std::path::PathBuf) -> RebornRuntimeInput {
+    let gateway = Arc::new(RecordingGateway {
+        reply: "fixture reply".to_string(),
+        requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input(OWNER, storage_root)
+            .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: TENANT.to_string(),
+        agent_id: AGENT.to_string(),
+        source_binding_id: "two-thread-source".to_string(),
+        reply_target_binding_id: "two-thread-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(5),
+    })
+    .with_model_gateway_override(gateway)
+}
+
+/// Thread 1 installs a skill carrying a script; thread 2 activates it and the script RUNS.
+///
+/// The assertion that matters is the last one: the staged path handed to the model is fed to a real
+/// process, and the process prints the script's own marker. Every previous version of this flow
+/// satisfied "the skill exists" and still could not run.
+#[tokio::test]
+async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+
+    // ── Thread 1: author ────────────────────────────────────────────────────────────────────────
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root.clone()))
+        .await
+        .expect("runtime builds");
+    let bundle = runtime.product_surface(None).expect("product surface");
+
+    let installed = invoke_product_capability(
+        bundle.as_ref(),
+        two_thread_caller(),
+        ironclaw_assistant::SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": "egfr-calc",
+            "content": SKILL_MD,
+            // `text` is the schema's field name for a UTF-8 bundle file; `bytes_base64` is the binary form.
+            "files": [{"path": "scripts/egfr.py", "text": SKILL_SCRIPT}],
+        }),
+    )
+    .await
+    .expect("skill install dispatches");
+    assert!(
+        matches!(&installed, ironclaw_host_api::resolution::Resolution::Done(outcome) if outcome.verdict.is_success()),
+        "installing a skill with a bundled script must succeed, got {installed:?}"
+    );
+
+    runtime.shutdown().await.expect("thread one shutdown");
+
+    // ── Thread 2: a NEW runtime over the SAME store, i.e. a later conversation ──────────────────
+    // Rebuilt rather than reused on purpose: the reported bug was that a skill survived its own
+    // session and nothing else, so a fixture that keeps one runtime alive cannot see it.
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root.clone()))
+        .await
+        .expect("runtime rebuilds over the same store");
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("thread two opens a conversation");
+
+    let result = runtime
+        .execute_skill_message(&conversation, "$egfr-calc")
+        .await
+        .expect("thread two executes a skill message");
+    let activated: Vec<String> = result
+        .plan
+        .activations()
+        .iter()
+        .map(|activation| activation.name.to_string())
+        .collect();
+    assert!(
+        activated.iter().any(|name| name == "egfr-calc"),
+        "a skill authored in thread one must activate in thread two; got {activated:?}"
+    );
+
+    // ── The payoff: the staged bundle must be a real, runnable path ─────────────────────────────
+    //
+    // Located by search rather than by assuming a layout: `/workspace` resolves to the shared root
+    // under the standalone policy and to `<root>/tenants/<t>/users/<u>` under a per-caller one, and a
+    // fixture that hardcodes either spelling tests the spelling instead of the mechanism.
+    fn find_staged_script(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                find_staged_script(&path, out);
+            } else if path.ends_with(".skills/egfr-calc/scripts/egfr.py") {
+                out.push(path);
+            }
+        }
+    }
+    // NOTE: this fixture cannot catch a wrong ADVERTISED path. Staging writes through the caller's
+    // own view, so the bytes land correctly even when the string handed to the model is wrong -- which
+    // is exactly what shipped once (`/workspace/tenants/<t>/users/<u>/.skills/<name>`, resolved a
+    // second time beneath the per-caller root, a directory that does not exist). That string is pinned
+    // where it is produced, by `runnable_dir_tests` in ironclaw_first_party_extension_ports.
+    let mut staged = Vec::new();
+    find_staged_script(&storage_root.join("workspace"), &mut staged);
+    assert_eq!(
+        staged.len(),
+        1,
+        "activation must stage the bundle exactly once somewhere a process can open it; found \
+         {staged:?} under {}",
+        storage_root.join("workspace").display()
+    );
+    let staged_script = staged.remove(0);
+    let staged_dir = staged_script
+        .parent()
+        .and_then(|scripts| scripts.parent())
+        .expect("staged script sits at <skill>/scripts/egfr.py")
+        .to_path_buf();
+
+    // Run it exactly as the skill body says, from the staged directory. If this fails, an agent
+    // following its own skill's instructions fails too -- which is what ten demo runs did.
+    let output = std::process::Command::new("python3")
+        .arg("scripts/egfr.py")
+        .args(["--scr", "1.3", "--age", "62", "--female"])
+        .current_dir(&staged_dir)
+        .output()
+        .expect("python3 must be available to run the staged script");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the staged script must execute: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("FIXTURE-OK") && stdout.contains("stage=G3a"),
+        "the answer must come from the script itself, not re-derived arithmetic; got {stdout:?}"
+    );
+
+    runtime.shutdown().await.expect("thread two shutdown");
+}
+
+/// The demo end to end, with the model mocked and everything around it real.
+///
+/// Thread 1 installs a skill carrying a script; thread 2 is a NEW runtime over the same store whose
+/// mocked model reads the advertised workdir and runs the command through the real `builtin.shell`.
+/// Closes the half the sibling fixture cannot see: the path the model is TOLD. When that string was
+/// wrong, every command failed with `Failed to spawn command` and nothing noticed.
+#[tokio::test]
+async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+
+    // ── Thread 1: author the skill, script and all ─────────────────────────────────────────────
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root.clone()))
+        .await
+        .expect("runtime builds");
+    let bundle = runtime.product_surface(None).expect("product surface");
+    invoke_product_capability(
+        bundle.as_ref(),
+        two_thread_caller(),
+        ironclaw_assistant::SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": "egfr-calc",
+            "content": SKILL_MD,
+            "files": [{"path": "scripts/egfr.py", "text": SKILL_SCRIPT}],
+        }),
+    )
+    .await
+    .expect("skill install dispatches");
+    runtime.shutdown().await.expect("thread one shutdown");
+
+    // ── Thread 2: a later conversation, driven by the mocked model ─────────────────────────────
+    let gateway = Arc::new(SkillShellGateway::default());
+    let runtime = build_reborn_runtime(
+        two_thread_runtime_input(storage_root.clone()).with_model_gateway_override(gateway.clone()),
+    )
+    .await
+    .expect("runtime rebuilds over the same store");
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("thread two opens a conversation");
+    runtime
+        .execute_skill_message(&conversation, "$egfr-calc")
+        .await
+        .expect("thread two executes a skill message");
+
+    let workdir = gateway
+        .advertised_workdir
+        .lock()
+        .expect("workdir lock")
+        .clone()
+        .expect("the model must have been given a staged workdir");
+    assert_eq!(
+        workdir, "/workspace/.skills/egfr-calc",
+        "the body must advertise the plain workspace spelling; any per-caller segment here is \
+         resolved a second time by the shell and the directory does not exist"
+    );
+
+    let shell_output = gateway
+        .shell_output
+        .lock()
+        .expect("shell output lock")
+        .clone()
+        .expect("the shell call must have produced a result the model could read");
+    assert!(
+        !shell_output.contains("Failed to spawn command")
+            && !shell_output.contains("No such file or directory"),
+        "the shell must resolve the advertised workdir; got {shell_output}"
+    );
+    assert!(
+        shell_output.contains("FIXTURE-OK") && shell_output.contains("stage=G3a"),
+        "the answer must come from the staged script itself, through the shell the model called, \
+         not from re-derived arithmetic; got {shell_output}"
+    );
+
+    runtime.shutdown().await.expect("thread two shutdown");
+}
+
+/// A manifest with no `description:` must not become an invisible skill.
+///
+/// Measured with a real model: asked to save a reusable skill, it wrote frontmatter carrying `name:`
+/// alone. The install succeeded, Settings listed it, and every later discovery pass skipped it with
+/// only a `warn!` — so the skill existed and could never be used again.
+#[tokio::test]
+async fn a_skill_installed_without_a_description_is_still_discoverable() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root))
+        .await
+        .expect("runtime builds");
+    let bundle = runtime.product_surface(None).expect("product surface");
+
+    invoke_product_capability(
+        bundle.as_ref(),
+        two_thread_caller(),
+        ironclaw_assistant::SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": "no-description",
+            "content": "---\nname: no-description\n---\n\nConvert lab values between conventional and SI units.\n",
+        }),
+    )
+    .await
+    .expect("install dispatches");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let result = runtime
+        .execute_skill_message(&conversation, "$no-description")
+        .await
+        .expect("execute skill message");
+    let activated: Vec<String> = result
+        .plan
+        .activations()
+        .iter()
+        .map(|activation| activation.name.to_string())
+        .collect();
+    assert!(
+        activated.iter().any(|name| name == "no-description"),
+        "a description-less manifest must be repaired at the write, not silently skipped by \
+         discovery forever; activated {activated:?}"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}

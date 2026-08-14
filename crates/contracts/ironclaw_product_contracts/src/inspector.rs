@@ -30,6 +30,12 @@ pub const PROMPT_COMPONENT_TOTAL_MAX_BYTES: usize = 256 * 1024;
 pub const RECONSTRUCTED_PROMPT_MAX_BYTES: usize = 256 * 1024;
 pub const TOOL_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
 pub const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
+/// Bounded lookahead retained while scanning a tool-result prefix for secrets.
+/// This covers the leak detector's largest structurally validated candidate so
+/// a value crossing the visible retention boundary remains detectable.
+pub const TOOL_RESULT_REDACTION_CONTEXT_BYTES: usize = 64 * 1024;
+pub const TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES: usize =
+    TOOL_RESULT_MAX_BYTES + TOOL_RESULT_REDACTION_CONTEXT_BYTES;
 pub const DIAGNOSTIC_LABEL_MAX_BYTES: usize = 256;
 pub const DIAGNOSTIC_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const MAX_PROMPT_COMPONENTS: usize = 128;
@@ -39,7 +45,20 @@ pub const MAX_MODELS_IN_STATS: usize = 64;
 // may each contain both bounded arguments and a bounded result.
 pub const DEFAULT_MAX_ACTIVITY_ENTRIES: usize = 1_000;
 pub const DEFAULT_MAX_TRACKED_SESSIONS: usize = 8;
-pub const DEFAULT_MAX_RETAINED_RUNS_PER_SESSION: usize = 2;
+/// Retained runs per `(tenant, user, thread)`, and therefore how many turns
+/// back the inspector can actually answer for.
+///
+/// This is a hard ceiling as well as a default: `DiagnosticStoreLimits` may
+/// only shrink a limit, never raise it, so capture can never be inflated at
+/// runtime. Capture is unconditional — it runs whether or not an operator
+/// opened the inspector — so each increment is resident process memory, up to
+/// roughly 2.5 MiB per run once bounded prompt and tool payloads are counted.
+///
+/// The browser's turn-navigation window must not exceed this, or navigation
+/// offers turns the host cannot serve. `MAX_INSPECTOR_RUNS_PER_THREAD` in
+/// `crates/product/ironclaw_webui/frontend/src/pages/chat/inspector/inspector-activity.ts`
+/// mirrors it, pinned by `reborn_inspector_retention_alignment`.
+pub const DEFAULT_MAX_RETAINED_RUNS_PER_SESSION: usize = 4;
 pub const DEFAULT_MAX_LIVE_UPDATE_SCOPES: usize =
     DEFAULT_MAX_TRACKED_SESSIONS * DEFAULT_MAX_RETAINED_RUNS_PER_SESSION;
 pub const DEFAULT_MAX_MODEL_CALLS_PER_RUN: usize = 128;
@@ -282,6 +301,24 @@ impl BoundedDiagnosticText {
 
     pub fn tool_result(value: impl Into<String>) -> Self {
         Self::bounded(value.into(), TOOL_RESULT_MAX_BYTES)
+    }
+
+    pub fn retained_tool_result(
+        value: impl Into<String>,
+        original_bytes: u64,
+    ) -> Result<Self, &'static str> {
+        let value = value.into();
+        let source_bytes = u64::try_from(value.len())
+            .map_err(|_| "diagnostic text source byte length is not representable")?;
+        if original_bytes < source_bytes {
+            return Err("diagnostic text original byte length is smaller than source text");
+        }
+        let mut bounded = Self::bounded(value, TOOL_RESULT_MAX_BYTES);
+        let retained_bytes = u64::try_from(bounded.content.len())
+            .map_err(|_| "diagnostic text retained byte length is not representable")?;
+        bounded.original_bytes = original_bytes;
+        bounded.truncated = original_bytes > retained_bytes;
+        Ok(bounded)
     }
 
     pub fn content(&self) -> &str {
@@ -1489,6 +1526,10 @@ mod tests {
     #[test]
     fn tool_result_uses_its_original_length_over_caller_supplied_output_bytes() {
         assert_eq!(TOOL_RESULT_MAX_BYTES, 50 * 1024);
+        assert_eq!(
+            TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES,
+            TOOL_RESULT_MAX_BYTES + TOOL_RESULT_REDACTION_CONTEXT_BYTES
+        );
         let tool = ToolExecutionDiagnostic::new(
             CapabilityActivityId::new(),
             None,
@@ -1503,6 +1544,55 @@ mod tests {
         );
         assert!(tool.result_truncated());
         assert_eq!(tool.output_bytes, Some((TOOL_RESULT_MAX_BYTES + 1) as u64));
+    }
+
+    #[test]
+    fn retained_tool_result_rejects_original_size_smaller_than_source() {
+        let source = "x".repeat(TOOL_RESULT_MAX_BYTES + 100);
+        let error = BoundedDiagnosticText::retained_tool_result(
+            source,
+            u64::try_from(TOOL_RESULT_MAX_BYTES + 50).expect("size"),
+        )
+        .expect_err("source size cannot be understated after truncation");
+
+        assert_eq!(
+            error,
+            "diagnostic text original byte length is smaller than source text",
+        );
+    }
+
+    #[test]
+    fn streamed_tool_updates_never_serialize_arguments_or_results() {
+        let marker = "must-only-exist-in-the-dedicated-detail-response";
+        let detail = ToolExecutionDiagnostic::new(
+            CapabilityActivityId::new(),
+            None,
+            "builtin.echo",
+            Some(format!(r#"{{"secret":"{marker}"}}"#)),
+            Some(marker.to_string()),
+            ToolExecutionStatus::Succeeded,
+            Some(7),
+            None,
+            None,
+            None,
+        );
+        let result_truncated = detail.result_truncated();
+        let update = DiagnosticUpdateKind::ToolExecutionUpdated {
+            activity_id: detail.activity_id,
+            model_call_id: detail.model_call_id,
+            capability_name: detail.capability_name,
+            status: detail.status,
+            duration_ms: detail.duration_ms,
+            output_bytes: detail.output_bytes,
+            result_truncated,
+        };
+
+        let serialized = serde_json::to_string(&update).expect("serialize tool update");
+        assert!(!serialized.contains(marker));
+        assert!(!serialized.contains("arguments"));
+        assert!(!serialized.contains("result\""));
+        assert!(serialized.contains("output_bytes"));
+        assert!(serialized.contains("result_truncated"));
     }
 
     #[test]

@@ -17,8 +17,11 @@ import {
   queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
+  getNotificationSetupStatus,
   setNotificationChannels,
   setupExtension,
+  enableNotificationSetup,
+  disableNotificationSetup,
 } from "./api";
 
 const originalFetch = globalThis.fetch;
@@ -402,8 +405,8 @@ test("setNotificationChannels sends an explicit empty array as the intentional c
   };
 
   // An explicit `[]` stays the one supported way to clear the set (spec §7:
-  // "an empty list means notifications stay in the web app only") — the
-  // guard above rejects only the *absent* argument.
+  // an empty list clears every notification channel) — the guard above
+  // rejects only the *absent* argument.
   await setNotificationChannels({ targetIds: [] });
 
   assert.equal(calls.length, 1);
@@ -601,4 +604,111 @@ test("clientActionId falls back when global crypto is null", () => {
     assert.match(id, /^[0-9a-f]{32}$/);
     assert.notEqual(id, "0".repeat(32));
   });
+});
+
+test("getNotificationSetupStatus reads the channel's generic status route", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(
+      JSON.stringify({
+        extension_id: "some-channel",
+        requires_setup: true,
+        enabled: false,
+        detail: {
+          registration_count: 0,
+          registrations: [],
+          bootstrap: { vapid_public_key: "k" },
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const status = await getNotificationSetupStatus({ extensionId: "some-channel" });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/channels/some-channel/notifications");
+  assert.equal(status.requires_setup, true);
+  assert.equal(status.detail.bootstrap.vapid_public_key, "k");
+  await assert.rejects(getNotificationSetupStatus(), /extensionId is required/);
+  assert.equal(calls.length, 1, "a missing extension id must never reach fetch");
+});
+
+test("enableNotificationSetup posts the channel-opaque payload to the enable route", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ enabled: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await enableNotificationSetup({
+    extensionId: "some-channel",
+    payload: {
+      endpoint: "https://push.example/send/abc",
+      keys: { p256dh: "pk", auth: "as" },
+      user_agent: "TestBrowser/1.0",
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/channels/some-channel/notifications/enable",
+  );
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    payload: {
+      endpoint: "https://push.example/send/abc",
+      keys: { p256dh: "pk", auth: "as" },
+      user_agent: "TestBrowser/1.0",
+    },
+  });
+
+  await assert.rejects(enableNotificationSetup(), /extensionId is required/);
+  assert.equal(calls.length, 1, "invalid input must never reach fetch");
+});
+
+test("disableNotificationSetup posts the channel-opaque payload to the disable route", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ enabled: false }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await disableNotificationSetup({
+    extensionId: "some-channel",
+    payload: { endpoint: "https://push.example/send/abc" },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/channels/some-channel/notifications/disable",
+  );
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    payload: { endpoint: "https://push.example/send/abc" },
+  });
+  await assert.rejects(disableNotificationSetup({}), /extensionId is required/);
 });

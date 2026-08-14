@@ -42,10 +42,8 @@ pub struct ConnectedChannelSummary {
     pub name: String,
     pub authenticated: bool,
     pub active: bool,
-    /// The channel's declared presentation facts (`[channel.presentation]`:
-    /// markdown support, message length cap). `None` when the channel does not
-    /// declare presentation. Rendered as a compact per-channel hint so the
-    /// model formats replies within the channel's constraints (OUT-11).
+    /// How the model should format output for this channel. `None` when the
+    /// channel declares no presentation facts.
     pub presentation: Option<ChannelPresentation>,
 }
 
@@ -63,12 +61,32 @@ pub enum NotificationChannelsState {
     Known(usize),
 }
 
-/// Communication runtime context: live channel, notification-channel, and
-/// tool-visibility state.
+/// Per-caller authentication truth for installed, host-active extensions that
+/// declare required credentials (e.g. a tools-only integration extension).
+/// This is what stops the model claiming an integration is "already
+/// connected" when THIS caller has never authenticated it (#7247): host
+/// installation state ("installed", "active") is not evidence of the calling
+/// user's credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingExtensionAuthState {
+    /// Per-caller credential state could not be established. Renders nothing —
+    /// the slice claims neither connection nor disconnection.
+    Unknown,
+    /// Names of installed and host-active extensions whose required
+    /// credentials are NOT configured for the calling user. Empty means every
+    /// credentialed extension is authenticated for this caller.
+    Known(Vec<String>),
+}
+
+/// Communication runtime context: live channel, notification-channel,
+/// per-caller extension-auth, and tool-visibility state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationRuntimeContext {
     pub connected_channels: ConnectedChannelsState,
     pub notification_channels: NotificationChannelsState,
+    /// Installed extensions the calling user has NOT authenticated yet.
+    /// See [`PendingExtensionAuthState`].
+    pub pending_extension_auth: PendingExtensionAuthState,
     /// Whether outbound delivery tool names should appear in model guidance.
     pub delivery_tools_visible: bool,
 }
@@ -214,7 +232,7 @@ impl LoopRuntimeContext {
                         let presentation = channel
                             .presentation
                             .as_ref()
-                            .map(|p| format!(", {}", render_presentation_hint(p)))
+                            .map(|facts| format!(", {}", render_presentation_hint(facts)))
                             .unwrap_or_default();
                         let entry = format!(
                             "{} ({auth}, {active}{presentation})",
@@ -240,6 +258,45 @@ impl LoopRuntimeContext {
                 }
             };
             parts.push(channels_line);
+
+            // Per-caller extension-auth truth (#7247): name the installed,
+            // host-active extensions whose required credentials this caller
+            // has NOT configured, so the model cannot read tool visibility or
+            // "installed/active" catalog state as "already connected".
+            // `Unknown` and an empty `Known` render nothing — the line only
+            // appears when there is a truthful negative to state.
+            if let PendingExtensionAuthState::Known(names) = &comm.pending_extension_auth
+                && !names.is_empty()
+            {
+                const MAX_RENDERED_PENDING_AUTH: usize = 20;
+                const MAX_PENDING_AUTH_LINE_BYTES: usize = 512;
+                let render_count = names.len().min(MAX_RENDERED_PENDING_AUTH);
+                let mut joined = String::new();
+                let mut rendered = 0usize;
+                for name in &names[..render_count] {
+                    let entry = model_safe_label(name, "an installed extension");
+                    if !joined.is_empty()
+                        && joined.len() + 2 + entry.len() > MAX_PENDING_AUTH_LINE_BYTES
+                    {
+                        break;
+                    }
+                    if !joined.is_empty() {
+                        joined.push_str(", ");
+                    }
+                    joined.push_str(&entry);
+                    rendered += 1;
+                }
+                let remainder = names.len().saturating_sub(rendered);
+                if remainder > 0 {
+                    joined.push_str(&format!(" (+{remainder} more)"));
+                }
+                parts.push(format!(
+                    "Extensions installed but not authenticated for this user: {joined}. \
+                     Their capabilities are visible, but calls will require the user to \
+                     authenticate first - do not tell the user these are already \
+                     connected; offer to connect them instead.",
+                ));
+            }
 
             // Background-run notifications one-liner (replaces the retired
             // "default delivery target" line — see `delivery.md`: there is no
@@ -321,21 +378,14 @@ fn render_first_party_chat_origin_line(ctx: &ProductTurnContext) -> String {
     }
 }
 
-/// Compact model-visible hint for a channel's declared presentation
-/// (`[channel.presentation]`): markdown support and the per-message length cap.
-/// Rendered inside the connected-channels line so the model formats replies to
-/// fit the channel it is answering on (OUT-11). The values are host-declared
-/// manifest data (a bool and a bounded int), so no sanitization is needed.
+/// Compact model-visible hint for a channel's declared presentation.
 fn render_presentation_hint(presentation: &ChannelPresentation) -> String {
-    let format = if presentation.supports_markdown {
+    if presentation.supports_markdown {
         "markdown"
     } else {
         "plain text only"
-    };
-    match presentation.max_message_chars {
-        Some(max) => format!("{format}, \u{2264}{max} chars/message"),
-        None => format.to_string(),
     }
+    .to_string()
 }
 
 /// Sanitize a string for safe interpolation into model-visible prompt text.
@@ -482,6 +532,7 @@ impl CommunicationContextFetch {
                             Some(CommunicationRuntimeContext {
                                 connected_channels: ConnectedChannelsState::Unknown,
                                 notification_channels: NotificationChannelsState::Unknown,
+                                pending_extension_auth: PendingExtensionAuthState::Unknown,
                                 delivery_tools_visible: false,
                             })
                         } else {

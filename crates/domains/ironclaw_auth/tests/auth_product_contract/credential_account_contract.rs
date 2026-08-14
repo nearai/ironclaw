@@ -921,3 +921,214 @@ async fn shared_admin_managed_credentials_require_explicit_grants() {
         .expect("granted extension can bind shared account");
     assert_eq!(selected.id, shared.id);
 }
+
+/// Session custody: the compare-and-swap is the whole point.
+///
+/// `SecretStorePort::put` is last-writer-wins, and a rotating vendor auth key
+/// clobbered by a concurrent write leaves a session the vendor rejects — a
+/// silently dead link. So a losing write must be *rejected with the current
+/// version*, never applied, and the caller (which is the extension package,
+/// the only crate that may read the format) reloads and merges.
+#[tokio::test]
+async fn opaque_material_write_rejects_a_concurrent_conflict_with_the_current_version() {
+    use ironclaw_auth::{OpaqueMaterialRequest, OpaqueMaterialWrite, OpaqueMaterialWriteOutcome};
+    use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
+
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("custody");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "linked-device",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("account");
+
+    let target = || OpaqueMaterialRequest {
+        scope: owner.clone(),
+        account_id: account.id,
+        requester_extension: None,
+        link_revision: account.link_revision,
+    };
+
+    assert!(
+        services
+            .load_opaque_material(target())
+            .await
+            .expect("load")
+            .is_none(),
+        "nothing is stored before the first write"
+    );
+
+    let first = services
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target(),
+            expected: LinkedSessionVersion::absent(),
+            material: SessionBytes::new(b"session-v1".to_vec()).expect("bytes"),
+        })
+        .await
+        .expect("first write");
+    let OpaqueMaterialWriteOutcome::Stored { version } = first else {
+        panic!("a first write against `absent` must apply");
+    };
+
+    // A second writer that loaded the same "absent" version loses.
+    let conflict = services
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target(),
+            expected: LinkedSessionVersion::absent(),
+            material: SessionBytes::new(b"session-clobber".to_vec()).expect("bytes"),
+        })
+        .await
+        .expect("a lost CAS is an outcome, not an error");
+    let OpaqueMaterialWriteOutcome::Conflict { current } = conflict else {
+        panic!("last-writer-wins is exactly what this contract forbids");
+    };
+    assert_eq!(
+        current, version,
+        "the conflict must hand back the CURRENT version so the owner of the \
+         format can reload and merge"
+    );
+
+    let stored = services
+        .load_opaque_material(target())
+        .await
+        .expect("load")
+        .expect("material is stored");
+    assert_eq!(
+        stored.material.expose(),
+        b"session-v1",
+        "the losing write must not have landed"
+    );
+
+    // Presenting the version that was actually stored succeeds.
+    let second = services
+        .store_opaque_material(OpaqueMaterialWrite {
+            target: target(),
+            expected: stored.version,
+            material: SessionBytes::new(b"session-v2".to_vec()).expect("bytes"),
+        })
+        .await
+        .expect("second write");
+    assert!(matches!(second, OpaqueMaterialWriteOutcome::Stored { .. }));
+}
+
+/// Revision gating: a handle minted before a relink addresses an account that
+/// still exists, so without this check a stale holder would read — or clobber
+/// — the credential that replaced the one it was issued for.
+#[tokio::test]
+async fn opaque_material_access_is_gated_on_the_accounts_link_revision() {
+    use ironclaw_auth::{OpaqueMaterialRequest, OpaqueMaterialWrite};
+    use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
+
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("custody-revision");
+    let linking_extension = ExtensionId::new("acme-link").expect("valid extension id");
+    let account = services
+        .create_account(linked_device_account_request(
+            owner.clone(),
+            "linked-device",
+            &linking_extension,
+        ))
+        .await
+        .expect("account");
+    assert_eq!(
+        account.link_revision, 0,
+        "a newly minted account has never been linked as a device"
+    );
+
+    let relinked = services
+        .bump_link_revision(&owner, account.id)
+        .await
+        .expect("bump");
+    assert_eq!(relinked.link_revision, 1, "a (re)link bumps the revision");
+
+    let stale = OpaqueMaterialRequest {
+        scope: owner.clone(),
+        account_id: account.id,
+        requester_extension: Some(linking_extension),
+        link_revision: 0,
+    };
+    assert_eq!(
+        services
+            .load_opaque_material(stale.clone())
+            .await
+            .expect_err("a stale handle must not read"),
+        AuthProductError::LinkRevisionStale { current: 1 }
+    );
+    assert_eq!(
+        services
+            .store_opaque_material(OpaqueMaterialWrite {
+                target: stale,
+                expected: LinkedSessionVersion::absent(),
+                material: SessionBytes::new(b"stale-writer".to_vec()).expect("bytes"),
+            })
+            .await
+            .expect_err("and must not write"),
+        AuthProductError::LinkRevisionStale { current: 1 }
+    );
+}
+
+/// PROPOSAL §4.5: the ownership pin is a property of the *contract*, not of one
+/// implementation. `bump_link_revision` is the operation that makes an account
+/// a linked device, so every implementation must refuse it on an account whose
+/// ownership would leave the resulting device reachable by every installed
+/// extension (`UserReusable` authorizes any requester) or shared with one
+/// (`granted_extensions`).
+#[tokio::test]
+async fn bump_link_revision_refuses_an_account_that_is_not_pinned_to_one_owning_extension() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("ownership-pin");
+    let owning_extension = ExtensionId::new("acme-link").expect("valid extension id");
+
+    let reusable = services
+        .create_account(account_request(
+            owner.clone(),
+            "reusable",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("account");
+    let error = services
+        .bump_link_revision(&owner, reusable.id)
+        .await
+        .expect_err("a reusable account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a reusable account: {error:?}"
+    );
+
+    let mut shared = linked_device_account_request(owner.clone(), "shared", &owning_extension);
+    shared.granted_extensions = vec![ExtensionId::new("other-ext").expect("valid extension id")];
+    let shared = services.create_account(shared).await.expect("account");
+    let error = services
+        .bump_link_revision(&owner, shared.id)
+        .await
+        .expect_err("a granted account must never become a linked device");
+    assert!(
+        matches!(error, AuthProductError::InvalidRequest { .. }),
+        "unexpected error for a granted account: {error:?}"
+    );
+
+    let pinned = services
+        .create_account(linked_device_account_request(
+            owner.clone(),
+            "pinned",
+            &owning_extension,
+        ))
+        .await
+        .expect("account");
+    let linked = services
+        .bump_link_revision(&owner, pinned.id)
+        .await
+        .expect("the sanctioned mint shape links");
+    assert_eq!(linked.link_revision, 1);
+    assert!(linked.is_linked_device());
+    assert!(
+        !linked.is_authorized_for_requester(Some(
+            &ExtensionId::new("other-ext").expect("valid extension id")
+        )),
+        "the linked account must not be reachable by another installed extension"
+    );
+}

@@ -1,7 +1,7 @@
 # ironclaw_event_store — working rules
 
 Canonical crate guidance (the sibling `CLAUDE.md` is a symlink alias of this
-file, per `docs/reborn/guidance-conventions.md`). Orientation and public surface:
+file, per `docs/internal/reborn/guidance-conventions.md`). Orientation and public surface:
 [`README.md`](./README.md). Family boundary and the one-way pipeline rule:
 [`../AGENTS.md`](../AGENTS.md).
 
@@ -10,9 +10,9 @@ file, per `docs/reborn/guidance-conventions.md`). Orientation and public surface
 - Read `README.md` for what the crate is; read `Cargo.toml` for actual
   dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/events.md`
-- `docs/reborn/contracts/events-projections.md`
-- `docs/reborn/contracts/storage-placement.md`
+- `docs/internal/reborn/contracts/events.md`
+- `docs/internal/reborn/contracts/events-projections.md`
+- `docs/internal/reborn/contracts/storage-placement.md`
 
 ## What This Crate Owns
 
@@ -36,7 +36,7 @@ file, per `docs/reborn/guidance-conventions.md`). Orientation and public surface
   because a `{` on the continuation line of a literal used to stretch the exempt
   range past the module's real end and hide every driver mention after it
   (fail-open; found 2026-08-04, see the `event_store` row in
-  `docs/reborn/target-architecture/CHECKLIST.md`). An unterminated body panics
+  `docs/internal/reborn/target-architecture/CHECKLIST.md`). An unterminated body panics
   rather than exempting the rest of the file.
 
 ## Do Not Move In Here

@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{Args, compare, run_once, sweep};
+use crate::{Args, CliError, compare, run_once, sweep};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum RampAxis {
@@ -38,7 +38,7 @@ pub(crate) fn is_enabled(args: &Args) -> bool {
     args.ramp_concurrency.is_some() || args.ramp_users.is_some()
 }
 
-pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
+pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), CliError> {
     let (axis, max_value) = axis(args).ok_or_else(|| "ramp mode is not enabled".to_string())?;
     let start_value = match axis {
         RampAxis::Concurrency => args.concurrency,

@@ -1,0 +1,12 @@
+# Python-only PR1 worker for the local-Docker user-sandbox profile.
+# Keep the base digest aligned with RailwayPreviewSandboxConfig's default.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+RUN groupadd --gid 1000 sandbox \
+    && useradd --uid 1000 --gid sandbox --create-home --shell /bin/sh sandbox
+
+ENV HOME=/home/sandbox
+WORKDIR /workspace
+USER 1000:1000
+
+CMD ["python", "--version"]

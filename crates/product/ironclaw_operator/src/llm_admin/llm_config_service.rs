@@ -31,8 +31,11 @@ use ironclaw_llm::{
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    ModelSelectionPolicy, ModelSelectionPolicyStore, ModelSelectionPolicyStoreError,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    SetActiveLlmRequest, UpsertLlmProviderRequest,
+    SetActiveLlmRequest, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
+    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference, UserModelPreferenceStore,
+    UserModelPreferenceStoreError,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -46,6 +49,8 @@ const CODEX_LOGIN_ATTEMPT_TTL: Duration = Duration::from_secs(15 * 60);
 /// them; mirrors `LoginTicketStore::MAX_TICKETS` in
 /// `ironclaw_webui::cli_token_login`.
 const MAX_NEARAI_LOGIN_STATES: usize = 1024;
+const USER_MODEL_POLICY_MAX_MODELS: usize = 128;
+const USER_MODEL_ID_MAX_BYTES: usize = 256;
 
 /// In-memory CSRF state for NEAR AI browser redirects. The login start endpoint
 /// issues a state token, and the public callback must consume it before any
@@ -195,6 +200,8 @@ pub struct RebornLlmConfigService {
     boot: RebornBootConfig,
     repo: ProviderRepo,
     keys: LlmKeyStore,
+    model_policy_store: Option<Arc<dyn ModelSelectionPolicyStore>>,
+    user_model_preference_store: Option<Arc<dyn UserModelPreferenceStore>>,
     reload: Option<Arc<dyn LlmReloadTrigger>>,
     /// The runtime's NEAR AI session manager — the same instance the live
     /// provider reads its token from, so a completed login takes effect on
@@ -211,11 +218,28 @@ impl RebornLlmConfigService {
             boot,
             repo,
             keys,
+            model_policy_store: None,
+            user_model_preference_store: None,
             reload: None,
             nearai_session: None,
             nearai_login_states: Arc::new(NearAiLoginStateStore::new()),
             codex_login_attempts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attach tenant-scoped persistence for user-selectable model policy.
+    pub fn with_model_policy_store(mut self, store: Arc<dyn ModelSelectionPolicyStore>) -> Self {
+        self.model_policy_store = Some(store);
+        self
+    }
+
+    /// Attach caller-scoped persistence for user model preferences.
+    pub fn with_user_model_preference_store(
+        mut self,
+        store: Arc<dyn UserModelPreferenceStore>,
+    ) -> Self {
+        self.user_model_preference_store = Some(store);
+        self
     }
 
     /// Attach the live-reload trigger (from the runtime).
@@ -268,7 +292,7 @@ impl RebornLlmConfigService {
         }
     }
 
-    async fn build_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+    async fn build_provider_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let list = self.admin_list_async().await.map_err(map_admin_error)?;
         let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
             .map_err(|_| LlmConfigServiceError::Unavailable)?;
@@ -317,7 +341,66 @@ impl RebornLlmConfigService {
             });
         }
 
-        Ok(LlmConfigSnapshot { providers, active })
+        Ok(LlmConfigSnapshot {
+            providers,
+            active,
+            user_model_policy: None,
+        })
+    }
+
+    async fn read_model_policy(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<Option<ModelSelectionPolicy>, LlmConfigServiceError> {
+        let Some(store) = self.model_policy_store.as_ref() else {
+            // Backward compatibility for deployments assembled before the
+            // tenant policy store existed: explicit model hints retain their
+            // historical pass-through behavior.
+            return Ok(None);
+        };
+        store
+            .read(caller)
+            .await
+            .map_err(map_model_policy_store_error)
+    }
+
+    async fn read_user_model_preference(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let Some(store) = self.user_model_preference_store.as_ref() else {
+            return Ok(UserModelPreference { model: None });
+        };
+        store
+            .read(caller)
+            .await
+            .map(|preference| preference.unwrap_or(UserModelPreference { model: None }))
+            .map_err(map_user_model_preference_store_error)
+    }
+
+    async fn active_model_policy(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<Option<ModelSelectionPolicy>, LlmConfigServiceError> {
+        let Some(policy) = self.read_model_policy(caller).await? else {
+            return Ok(None);
+        };
+        let snapshot = self.build_provider_snapshot().await?;
+        Ok(matching_active_model_policy(
+            policy,
+            snapshot.active.as_ref(),
+        ))
+    }
+
+    async fn build_snapshot(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        let mut snapshot = self.build_provider_snapshot().await?;
+        let stored = self.read_model_policy(caller).await?;
+        snapshot.user_model_policy = stored
+            .and_then(|policy| matching_active_model_policy(policy, snapshot.active.as_ref()));
+        Ok(snapshot)
     }
 
     async fn stored_key_provider_ids_for_snapshot(
@@ -518,9 +601,9 @@ impl RebornLlmConfigService {
 impl LlmConfigService for RebornLlmConfigService {
     async fn snapshot(
         &self,
-        _caller: ProductSurfaceCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-        self.build_snapshot().await
+        self.build_snapshot(&caller).await
     }
 
     async fn upsert_provider(
@@ -737,6 +820,119 @@ impl LlmConfigService for RebornLlmConfigService {
                 })
             }
         }
+    }
+
+    async fn user_model_catalog(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        let snapshot = self.build_snapshot(&caller).await?;
+        Ok(snapshot
+            .user_model_policy
+            .map(catalog_from_policy)
+            .unwrap_or_else(UserModelCatalog::disabled))
+    }
+
+    async fn set_user_model_policy(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetUserModelPolicyRequest,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        if !caller.operator_config {
+            return Err(LlmConfigServiceError::InvalidRequest {
+                field: None,
+                reason: "operator configuration access is required".to_string(),
+            });
+        }
+        let store = self
+            .model_policy_store
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+        let snapshot = self.build_provider_snapshot().await?;
+        let active = snapshot.active.ok_or(LlmConfigServiceError::Unavailable)?;
+        let policy = validated_model_policy(active.provider_id, request)?;
+        store
+            .write(&caller, &policy)
+            .await
+            .map_err(map_model_policy_store_error)?;
+        Ok(catalog_from_policy(policy))
+    }
+
+    async fn user_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        self.read_user_model_preference(&caller).await
+    }
+
+    async fn set_user_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let store = self
+            .user_model_preference_store
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+        let model = match request.model {
+            Some(model) => {
+                let policy = self
+                    .active_model_policy(&caller)
+                    .await?
+                    .ok_or(LlmConfigServiceError::Unavailable)?;
+                let model = validated_model_id("model", &model)?;
+                if !policy
+                    .allowed_models
+                    .iter()
+                    .any(|allowed| allowed == &model)
+                {
+                    return Err(invalid_model("model is not allowed for this workspace"));
+                }
+                Some(model)
+            }
+            None => None,
+        };
+        let preference = UserModelPreference { model };
+        store
+            .write(&caller, &preference)
+            .await
+            .map_err(map_user_model_preference_store_error)?;
+        Ok(preference)
+    }
+
+    async fn resolve_user_model(
+        &self,
+        caller: ProductSurfaceCaller,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        let Some(policy) = self.read_model_policy(&caller).await? else {
+            return Ok(requested_model);
+        };
+        let snapshot = self.build_provider_snapshot().await?;
+        let Some(active) = snapshot.active else {
+            return Err(LlmConfigServiceError::Unavailable);
+        };
+        let Some(policy) = matching_active_model_policy(policy, Some(&active)) else {
+            return match requested_model {
+                Some(_) => Err(invalid_model(
+                    "the active provider's model policy is not configured",
+                )),
+                None => Ok(None),
+            };
+        };
+
+        let preference = if requested_model.is_none() {
+            self.read_user_model_preference(&caller).await?.model
+        } else {
+            None
+        };
+        let selected = requested_model
+            .or(preference)
+            .unwrap_or_else(|| policy.workspace_default.clone());
+        if !policy.allowed_models.iter().any(|model| model == &selected) {
+            return Err(invalid_model("model is not allowed for this workspace"));
+        }
+        Ok(Some(selected))
     }
 
     async fn start_nearai_login(
@@ -1316,6 +1512,100 @@ fn validate_provider_id(id: &str) -> Result<String, LlmConfigServiceError> {
     Ok(trimmed.to_string())
 }
 
+fn validated_model_policy(
+    provider_id: String,
+    request: SetUserModelPolicyRequest,
+) -> Result<ModelSelectionPolicy, LlmConfigServiceError> {
+    if request.allowed_models.is_empty()
+        || request.allowed_models.len() > USER_MODEL_POLICY_MAX_MODELS
+    {
+        return Err(invalid_policy_field(
+            "allowed_models",
+            "allowed_models must contain between 1 and 128 models",
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut allowed_models = Vec::with_capacity(request.allowed_models.len());
+    for model in request.allowed_models {
+        let model = validated_model_id("allowed_models", &model)?;
+        if seen.insert(model.clone()) {
+            allowed_models.push(model);
+        }
+    }
+    let workspace_default = validated_model_id("workspace_default", &request.workspace_default)?;
+    if !allowed_models
+        .iter()
+        .any(|model| model == &workspace_default)
+    {
+        return Err(invalid_policy_field(
+            "workspace_default",
+            "workspace_default must be included in allowed_models",
+        ));
+    }
+
+    Ok(ModelSelectionPolicy {
+        provider_id,
+        workspace_default,
+        allowed_models,
+    })
+}
+
+fn matching_active_model_policy(
+    policy: ModelSelectionPolicy,
+    active: Option<&LlmActiveSelection>,
+) -> Option<ModelSelectionPolicy> {
+    active
+        .is_some_and(|active| active.provider_id == policy.provider_id)
+        .then_some(policy)
+}
+
+fn validated_model_id(field: &'static str, model: &str) -> Result<String, LlmConfigServiceError> {
+    let model = model.trim();
+    if model.is_empty()
+        || model.len() > USER_MODEL_ID_MAX_BYTES
+        || model.chars().any(char::is_control)
+    {
+        return Err(invalid_policy_field(field, "model id is invalid"));
+    }
+    Ok(model.to_string())
+}
+
+fn invalid_policy_field(field: &'static str, reason: &'static str) -> LlmConfigServiceError {
+    LlmConfigServiceError::InvalidRequest {
+        field: Some(field.to_string()),
+        reason: reason.to_string(),
+    }
+}
+
+fn invalid_model(reason: &'static str) -> LlmConfigServiceError {
+    invalid_policy_field("model", reason)
+}
+
+fn catalog_from_policy(policy: ModelSelectionPolicy) -> UserModelCatalog {
+    UserModelCatalog {
+        selection_enabled: true,
+        workspace_default: Some(policy.workspace_default),
+        models: policy.allowed_models,
+    }
+}
+
+fn map_model_policy_store_error(error: ModelSelectionPolicyStoreError) -> LlmConfigServiceError {
+    match error {
+        ModelSelectionPolicyStoreError::Unavailable => LlmConfigServiceError::Unavailable,
+        ModelSelectionPolicyStoreError::InvalidData => LlmConfigServiceError::Internal,
+    }
+}
+
+fn map_user_model_preference_store_error(
+    error: UserModelPreferenceStoreError,
+) -> LlmConfigServiceError {
+    match error {
+        UserModelPreferenceStoreError::Unavailable => LlmConfigServiceError::Unavailable,
+        UserModelPreferenceStoreError::InvalidData => LlmConfigServiceError::Internal,
+    }
+}
+
 fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceError {
     use crate::RebornProviderAdminError as E;
     match error {
@@ -1337,6 +1627,10 @@ mod tests {
     use ironclaw_config::{RebornHome, RebornProfile};
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
+    use ironclaw_product_contracts::operator_llm::{
+        SetUserModelPreferenceRequest, UserModelPreference, UserModelPreferenceStore,
+        UserModelPreferenceStoreError,
+    };
     use ironclaw_product_contracts::test_support::fakes::{
         FakeOperatorSecretValueStore, OperatorSecretValueOp,
     };
@@ -1413,6 +1707,401 @@ mod tests {
             Some(AgentId::new("agent-alpha").expect("agent")),
             Some(ProjectId::new("project-alpha").expect("project")),
         )
+    }
+
+    #[derive(Default)]
+    struct InMemoryModelPolicyStore {
+        policies: std::sync::Mutex<HashMap<String, ModelSelectionPolicy>>,
+    }
+
+    #[derive(Default)]
+    struct InMemoryUserModelPreferenceStore {
+        preferences: std::sync::Mutex<HashMap<(String, String), UserModelPreference>>,
+    }
+
+    #[async_trait]
+    impl UserModelPreferenceStore for InMemoryUserModelPreferenceStore {
+        async fn read(
+            &self,
+            caller: &ProductSurfaceCaller,
+        ) -> Result<Option<UserModelPreference>, UserModelPreferenceStoreError> {
+            Ok(self
+                .preferences
+                .lock()
+                .expect("preference lock")
+                .get(&(
+                    caller.tenant_id.as_str().to_string(),
+                    caller.user_id.as_str().to_string(),
+                ))
+                .cloned())
+        }
+
+        async fn write(
+            &self,
+            caller: &ProductSurfaceCaller,
+            preference: &UserModelPreference,
+        ) -> Result<(), UserModelPreferenceStoreError> {
+            self.preferences.lock().expect("preference lock").insert(
+                (
+                    caller.tenant_id.as_str().to_string(),
+                    caller.user_id.as_str().to_string(),
+                ),
+                preference.clone(),
+            );
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ModelSelectionPolicyStore for InMemoryModelPolicyStore {
+        async fn read(
+            &self,
+            caller: &ProductSurfaceCaller,
+        ) -> Result<Option<ModelSelectionPolicy>, ModelSelectionPolicyStoreError> {
+            Ok(self
+                .policies
+                .lock()
+                .expect("policy lock")
+                .get(caller.tenant_id.as_str())
+                .cloned())
+        }
+
+        async fn write(
+            &self,
+            caller: &ProductSurfaceCaller,
+            policy: &ModelSelectionPolicy,
+        ) -> Result<(), ModelSelectionPolicyStoreError> {
+            self.policies
+                .lock()
+                .expect("policy lock")
+                .insert(caller.tenant_id.as_str().to_string(), policy.clone());
+            Ok(())
+        }
+    }
+
+    fn policy_request(default: &str, models: &[&str]) -> SetUserModelPolicyRequest {
+        SetUserModelPolicyRequest {
+            workspace_default: default.to_string(),
+            allowed_models: models.iter().map(|model| (*model).to_string()).collect(),
+        }
+    }
+
+    fn service_with_active_provider(
+        provider_id: &str,
+        model: &str,
+    ) -> (tempfile::TempDir, RebornLlmConfigService) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let boot = boot_for_home(&temp.path().join("reborn-home"));
+        RebornProviderAdmin::new(boot.clone())
+            .set_provider(provider_id, Some(model))
+            .expect("persist active provider");
+        let service = RebornLlmConfigService::new(boot, key_store())
+            .with_model_policy_store(Arc::new(InMemoryModelPolicyStore::default()))
+            .with_user_model_preference_store(
+                Arc::new(InMemoryUserModelPreferenceStore::default()),
+            );
+        (temp, service)
+    }
+
+    #[tokio::test]
+    async fn unconfigured_policy_preserves_legacy_requested_model_behavior() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+
+        assert_eq!(
+            service
+                .resolve_user_model(caller(), Some("model-any".to_string()))
+                .await
+                .expect("legacy model hint"),
+            Some("model-any".to_string()),
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(caller(), None)
+                .await
+                .expect("legacy default"),
+            None,
+        );
+        assert_eq!(
+            service.user_model_catalog(caller()).await.expect("catalog"),
+            UserModelCatalog::disabled(),
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_policy_resolves_default_and_rejects_disallowed_models() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let admin = caller().with_operator_config(true);
+        let catalog = service
+            .set_user_model_policy(
+                admin.clone(),
+                policy_request("model-a", &["model-a", "model-b", "model-a"]),
+            )
+            .await
+            .expect("set policy");
+
+        assert_eq!(
+            catalog,
+            UserModelCatalog {
+                selection_enabled: true,
+                workspace_default: Some("model-a".to_string()),
+                models: vec!["model-a".to_string(), "model-b".to_string()],
+            },
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(caller(), None)
+                .await
+                .expect("workspace default"),
+            Some("model-a".to_string()),
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(caller(), Some("model-b".to_string()))
+                .await
+                .expect("allowed model"),
+            Some("model-b".to_string()),
+        );
+        assert!(matches!(
+            service
+                .resolve_user_model(caller(), Some("model-c".to_string()))
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_preference_is_isolated_per_user_and_applies_to_new_turns() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let alice = caller();
+        let bob = ProductSurfaceCaller::new(
+            alice.tenant_id.clone(),
+            UserId::new("user-beta").expect("user"),
+            alice.agent_id.clone(),
+            alice.project_id.clone(),
+        );
+        service
+            .set_user_model_policy(
+                alice.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+
+        assert_eq!(
+            service
+                .set_user_model_preference(
+                    alice.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-b".to_string()),
+                    },
+                )
+                .await
+                .expect("set preference"),
+            UserModelPreference {
+                model: Some("model-b".to_string()),
+            },
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(alice.clone(), None)
+                .await
+                .expect("alice preference"),
+            Some("model-b".to_string()),
+        );
+        assert_eq!(
+            service
+                .resolve_user_model(bob.clone(), None)
+                .await
+                .expect("bob default"),
+            Some("model-a".to_string()),
+        );
+        assert_eq!(
+            service
+                .user_model_preference(bob)
+                .await
+                .expect("bob preference"),
+            UserModelPreference { model: None },
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_turn_model_overrides_preference_and_reset_restores_workspace_default() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        service
+            .set_user_model_policy(
+                user.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+
+        assert_eq!(
+            service
+                .resolve_user_model(user.clone(), Some("model-a".to_string()))
+                .await
+                .expect("explicit model"),
+            Some("model-a".to_string()),
+        );
+        service
+            .set_user_model_preference(user.clone(), SetUserModelPreferenceRequest { model: None })
+            .await
+            .expect("reset preference");
+        assert_eq!(
+            service
+                .resolve_user_model(user, None)
+                .await
+                .expect("workspace default"),
+            Some("model-a".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_preference_can_be_reset_after_the_active_provider_changes() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        service
+            .set_user_model_policy(
+                user.clone().with_operator_config(true),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+        service
+            .admin()
+            .set_provider("openai", Some("gpt-test"))
+            .expect("switch active provider");
+
+        assert!(matches!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-a".to_string()),
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::Unavailable)
+        ));
+        assert_eq!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest { model: None },
+                )
+                .await
+                .expect("clear stale preference"),
+            UserModelPreference { model: None },
+        );
+        assert_eq!(
+            service
+                .user_model_preference(user)
+                .await
+                .expect("read cleared preference"),
+            UserModelPreference { model: None },
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_model_cannot_be_saved_and_a_stale_preference_fails_closed() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let user = caller();
+        let admin = user.clone().with_operator_config(true);
+        service
+            .set_user_model_policy(
+                admin.clone(),
+                policy_request("model-a", &["model-a", "model-b"]),
+            )
+            .await
+            .expect("set policy");
+        assert!(matches!(
+            service
+                .set_user_model_preference(
+                    user.clone(),
+                    SetUserModelPreferenceRequest {
+                        model: Some("model-c".to_string()),
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+        service
+            .set_user_model_preference(
+                user.clone(),
+                SetUserModelPreferenceRequest {
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("set preference");
+        service
+            .set_user_model_policy(admin, policy_request("model-a", &["model-a"]))
+            .await
+            .expect("narrow policy");
+
+        assert!(matches!(
+            service.resolve_user_model(user, None).await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn policy_write_requires_operator_and_binds_to_active_provider() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        assert!(matches!(
+            service
+                .set_user_model_policy(caller(), policy_request("model-a", &["model-a"]))
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+
+        let admin = caller().with_operator_config(true);
+        service
+            .set_user_model_policy(admin.clone(), policy_request("model-a", &["model-a"]))
+            .await
+            .expect("set policy");
+        let snapshot = service.snapshot(admin).await.expect("snapshot");
+        assert_eq!(
+            snapshot
+                .user_model_policy
+                .as_ref()
+                .map(|policy| policy.provider_id.as_str()),
+            Some("nearai"),
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_default_must_be_in_the_allowlist() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let error = service
+            .set_user_model_policy(
+                caller().with_operator_config(true),
+                policy_request("model-b", &["model-a"]),
+            )
+            .await
+            .expect_err("invalid policy");
+        assert!(matches!(
+            error,
+            LlmConfigServiceError::InvalidRequest { .. }
+        ));
     }
 
     fn nearai_provider(snapshot: &LlmConfigSnapshot) -> &LlmProviderView {

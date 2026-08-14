@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the bounded, redacted result summary.
 //!
 //! Part of the capability-path result collapse
-//! (`docs/reborn/contracts/capability-access.md`):
+//! (`docs/internal/reborn/contracts/capability-access.md`):
 //! every result channel carries a `SafeSummary` — a short, model-visible string
 //! that is guaranteed to hold no raw payload, path, or credential material. Full
 //! output stays host-owned and is retrieved only through a result reference.

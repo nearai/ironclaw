@@ -39,6 +39,7 @@ export type ChatMessage = {
   isOptimistic?: boolean;
   status?: string;
   error?: string;
+  errorKey?: string;
   toolCalls?: unknown[];
   [key: string]: unknown;
 };
@@ -63,6 +64,10 @@ export type ErrorChatMessage = {
   failureStatus?: string | null;
   failureCategory?: string | null;
   failureSummary?: string | null;
+  // The failed run's id, when known — lets a terminal run-failure bubble
+  // offer the same run-artifact/trace download action as a completed
+  // assistant reply (#7369).
+  turnRunId?: string | null;
   [key: string]: unknown;
 };
 
@@ -73,6 +78,7 @@ export type ErrorChatMessageInput = {
   failureStatus?: string | null;
   failureCategory?: string | null;
   failureSummary?: string | null;
+  turnRunId?: string | null;
   [key: string]: unknown;
 };
 

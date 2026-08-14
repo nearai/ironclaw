@@ -134,6 +134,30 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
         .unwrap_or_default()
 }
 
+/// Return whether model discovery targets an official public NEAR AI catalog.
+///
+/// These catalogs intentionally allow unauthenticated model listing. All other
+/// endpoints are treated as private so custom deployments and `private.near.ai`
+/// retain their configured API-key or session authentication.
+fn is_public_nearai_model_catalog(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let path = url.path().trim_end_matches('/');
+
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.host_str(),
+            Some("cloud-api.near.ai" | "cloud-stg-api.near.ai")
+        )
+        && matches!(path, "" | "/v1")
+}
+
 /// Default NEAR AI model used when no model is configured.
 pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 
@@ -641,7 +665,10 @@ impl NearAiChatProvider {
     pub async fn list_models_full(&self) -> Result<Vec<ModelInfo>, LlmError> {
         match self.list_models_inner().await {
             Ok(models) => Ok(models),
-            Err(LlmError::SessionExpired { .. }) if !self.uses_api_key() => {
+            Err(LlmError::SessionExpired { .. })
+                if !is_public_nearai_model_catalog(&self.config.base_url)
+                    && !self.uses_api_key() =>
+            {
                 self.session.handle_auth_failure().await?;
                 self.list_models_inner().await
             }
@@ -651,20 +678,21 @@ impl NearAiChatProvider {
 
     async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = self.api_url("models");
-        let token = self.resolve_bearer_token().await?;
+        let requires_auth = !is_public_nearai_model_catalog(&self.config.base_url);
 
         tracing::debug!("Fetching models from: {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("Failed to fetch models: {}", e),
-            })?;
+        let request = self.client.get(&url);
+        let request = if requires_auth {
+            let token = self.resolve_bearer_token().await?;
+            request.header("Authorization", format!("Bearer {}", token))
+        } else {
+            request
+        };
+        let response = request.send().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to fetch models: {}", e),
+        })?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
@@ -673,7 +701,7 @@ impl NearAiChatProvider {
         })?;
 
         if !status.is_success() {
-            if status.as_u16() == 401 && !self.uses_api_key() {
+            if status.as_u16() == 401 && requires_auth && !self.uses_api_key() {
                 return Err(LlmError::SessionExpired {
                     provider: "nearai_chat".to_string(),
                 });
@@ -812,7 +840,9 @@ impl LlmProvider for NearAiChatProvider {
             tools: None,
             tool_choice: None,
             stream: true,
-            stream_options: None,
+            stream_options: Some(ChatCompletionStreamOptions {
+                include_usage: true,
+            }),
         };
 
         let response = self.send_streaming_request(&request, sink).await?;
@@ -984,7 +1014,9 @@ impl LlmProvider for NearAiChatProvider {
             req.tool_choice,
         );
         request.stream = true;
-        request.stream_options = None;
+        request.stream_options = Some(ChatCompletionStreamOptions {
+            include_usage: true,
+        });
 
         let response = self.send_streaming_request(&request, sink).await?;
         let provider_reasoning =
@@ -1779,6 +1811,37 @@ mod tests {
         assert!(parse_nearai_models("").is_empty());
     }
 
+    #[test]
+    fn public_model_catalog_auth_is_scoped_to_official_cloud_endpoints() {
+        for base_url in [
+            "https://cloud-api.near.ai",
+            "https://cloud-api.near.ai/",
+            "https://cloud-api.near.ai/v1",
+            "https://cloud-stg-api.near.ai/v1/",
+        ] {
+            assert!(
+                is_public_nearai_model_catalog(base_url),
+                "expected public catalog: {base_url}"
+            );
+        }
+
+        for base_url in [
+            "https://private.near.ai",
+            "http://cloud-api.near.ai",
+            "https://cloud-api.near.ai.example.com",
+            "https://cloud-api.near.ai:8443",
+            "https://user@cloud-api.near.ai",
+            "https://cloud-api.near.ai/v2",
+            "https://cloud-api.near.ai/v1?tenant=private",
+            "not-a-url",
+        ] {
+            assert!(
+                !is_public_nearai_model_catalog(base_url),
+                "expected authenticated catalog: {base_url}"
+            );
+        }
+    }
+
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
@@ -1800,6 +1863,62 @@ mod tests {
 
     fn test_session() -> Arc<SessionManager> {
         Arc::new(SessionManager::new(SessionConfig::default()))
+    }
+
+    #[tokio::test]
+    async fn private_model_discovery_uses_session_authentication() {
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut headers_tx = Some(headers_tx);
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept provider request");
+                let (headers, _) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("GET /v1/models ") {
+                    if let Some(headers_tx) = headers_tx.take() {
+                        headers_tx.send(headers).expect("capture request headers");
+                    }
+                    write_http_json_response(
+                        &mut socket,
+                        serde_json::json!({ "data": [{ "id": "nearai/test-model" }] }),
+                    )
+                    .await;
+                    break;
+                }
+                write_http_json_response(&mut socket, serde_json::json!({ "data": [] })).await;
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_nearai_config(&base_url);
+        config.api_key = None;
+        let session = Arc::new(SessionManager::new(SessionConfig {
+            auth_base_url: "http://127.0.0.1:1".to_string(),
+            session_path: temp.path().join("missing-session.json"),
+        }));
+        session
+            .set_token(secrecy::SecretString::from("session-token"))
+            .await;
+        let provider = NearAiChatProvider::new(config, session).expect("provider");
+
+        let models = provider
+            .list_models_full()
+            .await
+            .expect("private model discovery should use the session token");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "nearai/test-model");
+        let headers = headers_rx.await.expect("models request headers");
+        assert!(
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer session-token")),
+            "private model discovery must send the session token: {headers}"
+        );
     }
 
     async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> (String, String) {
@@ -1919,7 +2038,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
-            let (mut socket, _) = accept_chat_request(&listener).await;
+            let (mut socket, request) = accept_chat_request(&listener).await;
+            assert_eq!(request["stream"], true);
+            assert_eq!(request["stream_options"]["include_usage"], true);
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
@@ -1974,6 +2095,24 @@ data: [DONE]
     }
 
     #[tokio::test]
+    async fn complete_with_tools_streaming_requests_and_preserves_usage() {
+        let response = complete_search_tool_streaming_from_sse(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"near ai\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":13}}}
+
+data: [DONE]
+
+"#,
+        )
+        .await;
+
+        assert_eq!(response.input_tokens, 21);
+        assert_eq!(response.output_tokens, 8);
+        assert_eq!(response.cache_read_input_tokens, 13);
+    }
+
+    #[tokio::test]
     async fn complete_streaming_emits_delta_before_response_completes() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -1996,10 +2135,7 @@ data: [DONE]
                 let request_json: serde_json::Value =
                     serde_json::from_str(&body).expect("request json");
                 assert_eq!(request_json["stream"], true);
-                assert!(
-                    request_json.get("stream_options").is_none(),
-                    "NEAR streaming requests should use the documented stream=true shape"
-                );
+                assert_eq!(request_json["stream_options"]["include_usage"], true);
 
                 socket
                     .write_all(

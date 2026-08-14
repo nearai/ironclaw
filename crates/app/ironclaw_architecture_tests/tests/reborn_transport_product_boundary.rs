@@ -110,6 +110,13 @@ const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     // --- frozen inventory (§6.1.3) ----------------------------------------
     ("ADMIN_CONFIGURATION_REPLACE_CAPABILITY", "inventory"),
     ("ADMIN_CONFIGURATION_VIEW", "inventory"),
+    // Admin thread scraping (#7228): the three scrape views are part of the
+    // same frozen view inventory as ADMIN_USERS_VIEW / ADMIN_USER_SECRETS_VIEW;
+    // concrete descriptor constants stay in product per §6.1.3 (contracts
+    // crate holds only the ProductView shape, never concrete inventory).
+    ("ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW", "inventory"),
+    ("ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW", "inventory"),
+    ("ADMIN_THREAD_SCRAPE_THREADS_VIEW", "inventory"),
     ("ADMIN_USERS_VIEW", "inventory"),
     ("ADMIN_USER_CREATE_COMMAND", "inventory"),
     ("ADMIN_USER_DELETE_CAPABILITY", "inventory"),
@@ -216,7 +223,7 @@ const PRODUCT_SYMBOLS_OPENAI_COMPAT_STILL_NAMES: &[(&str, &str)] = &[
 // `product_attachment_capabilities` to `ironclaw_attachments` as
 // `AttachmentCapabilities` / `attachment_capabilities` — the two symbols this
 // list called out by name as that row's to own. Shrink-only.
-const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 100;
+const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 103;
 const OPENAI_COMPAT_PRODUCT_SYMBOL_BASELINE: usize = 3;
 
 /// Boundary vocabulary this row moved: declared in `ironclaw_product_contracts`
@@ -383,13 +390,57 @@ fn product_symbols_in(source: &str) -> BTreeSet<String> {
         };
         let tail = tail.trim_start();
         if let Some(group) = tail.strip_prefix('{') {
-            let Some(close) = group.find('}') else {
+            // Balanced walk, splitting elements only at depth-0 commas. The
+            // previous `group.find('}')` closed at the FIRST closing brace, so
+            // a nested group (`use ironclaw_assistant::{m::{X}};`) truncated
+            // mid-element and recorded NOTHING — a sabotage-verified fail-open
+            // (gate audit 2026-08): a brand-new product import spelled that
+            // way passed this gate silently.
+            let mut depth = 0usize;
+            let mut element_start = 0usize;
+            let mut elements = Vec::new();
+            let mut close = None;
+            for (index, ch) in group.char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        if depth == 0 {
+                            close = Some(index);
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    ',' if depth == 0 => {
+                        elements.push(&group[element_start..index]);
+                        element_start = index + 1;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
                 continue;
             };
-            for raw in group[..close].split(',') {
-                let name = raw.split(" as ").next().unwrap_or(raw).trim();
-                if is_rust_identifier(name) {
-                    names.insert(name.to_string());
+            elements.push(&group[element_start..close]);
+            for raw in elements {
+                let element = raw.trim();
+                let leading: String = element
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect();
+                let rest = element[leading.len()..].trim_start();
+                if rest.starts_with("::") {
+                    // Qualified or nested element (`module::X`, `module::{X}`):
+                    // record the leading path segment, the same key the
+                    // single-path branch below records for
+                    // `ironclaw_assistant::module::X`.
+                    if is_rust_identifier(&leading) {
+                        names.insert(leading);
+                    }
+                } else {
+                    let name = element.split(" as ").next().unwrap_or(element).trim();
+                    if is_rust_identifier(name) {
+                        names.insert(name.to_string());
+                    }
                 }
             }
         } else {
@@ -567,6 +618,8 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
         fn f(x: &ironclaw_assistant::Qualified) -> ironclaw_assistant::AlsoQualified { }
         use ironclaw_product_contracts::surface::NotProduct;
         use ironclaw_product_contracts::inbound_requests::{AlsoNotProduct};
+        use ironclaw_assistant::{nested_module::{NestedSymbol}};
+        use ironclaw_assistant::{qualified_module::QualifiedInGroup, FlatMate};
         use my_ironclaw_product::NotOurs;
         // use ironclaw_assistant::Commented;
         #[cfg(test)]
@@ -605,6 +658,24 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
     assert!(
         !found.contains("Renamed"),
         "the alias is local; the residue list is keyed by the exported name: {found:?}"
+    );
+    assert!(
+        found.contains("nested_module"),
+        "a nested use group names its module segment — the first-`}}` truncation \
+         recorded nothing here (sabotage-verified fail-open, gate audit 2026-08): {found:?}"
+    );
+    assert!(
+        !found.contains("NestedSymbol"),
+        "the leaf of a nested group is attributed to its module row, matching the \
+         single-path branch: {found:?}"
+    );
+    assert!(
+        found.contains("qualified_module") && !found.contains("QualifiedInGroup"),
+        "a qualified element inside a group records its leading segment: {found:?}"
+    );
+    assert!(
+        found.contains("FlatMate"),
+        "a flat member sharing a group with a qualified element is still recorded: {found:?}"
     );
 }
 

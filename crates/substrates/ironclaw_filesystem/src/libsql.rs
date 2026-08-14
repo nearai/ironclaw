@@ -803,6 +803,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 .vector_nearest_query(path, key, embedding, *limit)
                 .await;
         }
+        // Ranked full-text search is the second top-k ranking operation: it
+        // needs an ORDER BY over `bm25()`, which no WHERE fragment can carry.
+        if let Filter::FtsRanked { key, query, limit } = filter {
+            return self.fts_ranked_query(path, key, query, *limit).await;
+        }
         let fts_tables = self.discover_fts_tables_for_filter(path, filter).await?;
         let mut params: Vec<libsql::Value> = vec![libsql::Value::Text(path.as_str().to_string())];
         let (prefix_lower, prefix_upper) = descendant_path_range(path);
@@ -842,30 +847,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
         {
-            let row_path: String = row.get(0).map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let row_path = VirtualPath::new(row_path)?;
-            let body: Vec<u8> = row.get(1).map_err(|error| {
-                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let content_type_raw: String = row.get(2).map_err(|error| {
-                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let kind_raw: Option<String> = row.get(3).ok();
-            let indexed_raw: String = row.get(4).map_err(|error| {
-                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let version_raw: i64 = row.get(5).map_err(|error| {
-                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_raw)?;
-            let version = record_version_from_i64(&row_path, version_raw)?;
-            out.push(VersionedEntry {
-                path: row_path,
-                entry,
-                version,
-            });
+            out.push(record_row_to_versioned_entry(path, &row)?);
         }
         Ok(out)
     }
@@ -2392,6 +2374,84 @@ impl LibSqlRootFilesystem {
         Ok(out)
     }
 
+    /// Ranked full-text search over the FTS5 shadow table declared for `key`.
+    ///
+    /// The query's content terms are joined with FTS5's `OR` operator — a
+    /// record carrying ANY term is a hit — and results are ordered by
+    /// `bm25()`, whose score is more negative the more relevant the row, hence
+    /// `ORDER BY score ASC`. Terms come from the shared `plain_fts_terms`
+    /// parser and are quoted individually, so untrusted caller text can never
+    /// reach the MATCH grammar as syntax; only the `OR` joiner this method
+    /// writes is an operator. A query with no content terms matches nothing
+    /// without touching the database.
+    async fn fts_ranked_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let probe = Filter::FtsRanked {
+            key: key.clone(),
+            query: query.to_string(),
+            limit,
+        };
+        // Answer the empty-term query BEFORE looking for a declared index.
+        // `Filter::FtsRanked` documents that a query with no content terms
+        // matches nothing on every backend, and PostgreSQL returns an empty
+        // result without ever consulting an index. Resolving the FTS table
+        // first made libSQL alone answer `Unsupported` for a stop-words-only
+        // query against an undeclared prefix — a backend-dependent answer to a
+        // question whose answer does not depend on any index.
+        let terms = crate::index::plain_fts_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fts_tables = self.discover_fts_tables_for_filter(path, &probe).await?;
+        let Some(fts_table) = fts_tables.get(key.as_str()) else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let match_query = terms
+            .into_iter()
+            .map(|term| format!("\"{term}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        let params: Vec<libsql::Value> = vec![
+            libsql::Value::Text(path.as_str().to_string()),
+            libsql::Value::Text(prefix_lower),
+            libsql::Value::Text(prefix_upper),
+            libsql::Value::Text(match_query),
+            libsql::Value::Integer(i64::from(limit.min(crate::Page::MAX_LIMIT))),
+        ];
+        let sql = format!(
+            "SELECT r.path, r.contents, r.content_type, r.kind, r.indexed, r.version \
+             FROM root_filesystem_entries r \
+             JOIN (SELECT path AS ranked_path, bm25({fts_table}) AS score \
+                   FROM {fts_table} WHERE {fts_table} MATCH ?4) ranked \
+               ON ranked.ranked_path = r.path \
+             WHERE r.is_dir = 0 AND (r.path = ?1 OR (r.path >= ?2 AND r.path < ?3)) \
+             ORDER BY ranked.score ASC, r.path ASC LIMIT ?5"
+        );
+        let conn = self.read_connection().await?;
+        let mut rows = conn
+            .query(&sql, params)
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            out.push(record_row_to_versioned_entry(path, &row)?);
+        }
+        Ok(out)
+    }
+
     /// Brute-force cosine over candidates under `path` whose indexed
     /// projection has an `IndexValue::Bytes` value at `key` decoded as a
     /// little-endian f32 buffer of any non-zero length matching the query
@@ -2858,15 +2918,17 @@ fn translate_filter(
             ));
             Ok(())
         }
-        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
-            // VectorNearest is evaluated by the top-level `query` method,
-            // not inside the WHERE fragment. Reaching the translator
-            // means a caller composed it inside an And/Or — which would
-            // throw away the ranking. Surface as Unsupported so the
-            // caller restructures the query.
-            path: path.clone(),
-            operation: FilesystemOperation::Query,
-        }),
+        Filter::VectorNearest { .. } | Filter::FtsRanked { .. } => {
+            Err(FilesystemError::Unsupported {
+                // VectorNearest and FtsRanked are evaluated by the top-level
+                // `query` method, not inside the WHERE fragment. Reaching the
+                // translator means a caller composed one inside an And/Or — which
+                // would throw away the ranking. Surface as Unsupported so the
+                // caller restructures the query.
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            })
+        }
         Filter::And(children) => {
             translate_compound(path, children, " AND ", "TRUE", out, params, fts_tables)
         }
@@ -2901,9 +2963,43 @@ fn translate_compound(
     out.push(')');
     Ok(())
 }
+/// Map one `RECORD_QUERY_PREFIX_SQL`-shaped row (path, contents,
+/// content_type, kind, indexed, version) onto a [`VersionedEntry`]. Shared by
+/// the predicate query path and the ranked full-text path so both agree on
+/// column order and error attribution.
+fn record_row_to_versioned_entry(
+    path: &VirtualPath,
+    row: &libsql::Row,
+) -> Result<VersionedEntry, FilesystemError> {
+    let row_path: String = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+    let row_path = VirtualPath::new(row_path)?;
+    let body: Vec<u8> = row
+        .get(1)
+        .map_err(|error| libsql_db_error(row_path.clone(), FilesystemOperation::Query, error))?;
+    let content_type_raw: String = row
+        .get(2)
+        .map_err(|error| libsql_db_error(row_path.clone(), FilesystemOperation::Query, error))?;
+    let kind_raw: Option<String> = row.get(3).ok();
+    let indexed_raw: String = row
+        .get(4)
+        .map_err(|error| libsql_db_error(row_path.clone(), FilesystemOperation::Query, error))?;
+    let version_raw: i64 = row
+        .get(5)
+        .map_err(|error| libsql_db_error(row_path.clone(), FilesystemOperation::Query, error))?;
+    let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_raw)?;
+    let version = record_version_from_i64(&row_path, version_raw)?;
+    Ok(VersionedEntry {
+        path: row_path,
+        entry,
+        version,
+    })
+}
+
 fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
     match filter {
-        Filter::Fts { key, .. } => {
+        Filter::Fts { key, .. } | Filter::FtsRanked { key, .. } => {
             let k = key.as_str().to_string();
             if !out.contains(&k) {
                 out.push(k);

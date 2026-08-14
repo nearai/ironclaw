@@ -75,7 +75,7 @@ pub use provider::UnavailableAuthProviderClient;
 //     extension_id, method, url, expires_at, max_uses).
 //
 // They are deliberately separate stores (see
-// `docs/reborn/contracts/auth-product.md` → "Durable Production Slice")
+// `docs/internal/reborn/contracts/auth-product.md` → "Durable Production Slice")
 // because their consumers, lifecycles, and access patterns differ. The
 // missing link is a one-way projection product-auth → broker on flow
 // completion / account update / cleanup, so the two universes cannot
@@ -955,6 +955,9 @@ where
             refresh_secret: request.refresh_secret,
             scopes: request.scopes,
             provider_identity,
+            // A newly minted account has never been linked as a device; the
+            // revision is advanced by `bump_link_revision`, never set here.
+            link_revision: 0,
             created_at: now,
             updated_at: now,
         };

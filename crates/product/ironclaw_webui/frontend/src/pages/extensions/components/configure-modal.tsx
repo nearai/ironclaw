@@ -15,11 +15,13 @@ import {
 } from "../lib/extension-actions";
 import {
   channelConnection,
+  deviceLinkSetupSecret,
   hasChannelSurface,
   isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
 import { resolveFocusTarget } from "../lib/focus-target";
 import type { FocusTarget } from "../lib/focus-target";
+import { DeviceLinkPanel } from "../../../components/device-link-panel";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
 /**
@@ -60,6 +62,19 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
     );
     if (onSaved) onSaved();
   }, [onClose, onSaved, packageId, queryClient]);
+  // A completed device link mints the credential account host-side, exactly
+  // like the OAuth continuation does — the browser only refreshes the
+  // authoritative caller-scoped projection afterwards. The modal stays open so
+  // the user reads the "linked as …" confirmation, which is the only control
+  // that makes a substituted login visible (PROPOSAL §3.2).
+  const handleDeviceLinkCompleted = React.useCallback(async () => {
+    await Promise.all(
+      [["extensions"], ["extension-registry"], ["extension-setup", packageId]].map(
+        (queryKey) => queryClient.invalidateQueries({ queryKey }),
+      ),
+    );
+    if (onSaved) onSaved();
+  }, [onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -126,10 +141,33 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
     hasChannelSurface(extension) &&
     isWebGeneratedCodeConnection(connection);
 
+  // A device-link credential is linked, never pasted: route the connect
+  // affordance to the multi-step panel instead of a token form.
+  const deviceLinkSecret = deviceLinkSetupSecret(secrets);
+
   const canSave = manualSecrets.length > 0;
   const isActive = extensionIsActive(extension);
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
+  if (deviceLinkSecret && !hostedMcpAuthSelectionRequired) {
+    // Self-contained: the panel starts (or resumes) the flow, polls it, and
+    // stops on a terminal step. The modal only hosts it.
+    return (
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
+        <DeviceLinkPanel
+          provider={deviceLinkSecret.provider}
+          extensionName={packageId}
+          displayName={extensionName}
+          onCompleted={handleDeviceLinkCompleted}
+        />
+      </ModalShell>
+    );
+  }
+
   if (isWebCodeChannel && !hostedMcpAuthSelectionRequired) {
     // The panel is self-contained (mints/rotates codes, polls status,
     // broadcasts channel-connected on pairing), so the modal only hosts it.

@@ -15,6 +15,10 @@ tempfile = "3"
 # hand-authored first-party extension manifest assets. Not a production edge —
 # `ironclaw_architecture_tests` ships no runtime code.
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
+# Dev-only, same reason: the inspector retention-alignment gate compares the SPA's
+# turn-navigation window against the REAL DEFAULT_MAX_RETAINED_RUNS_PER_SESSION
+# rather than a transcribed copy that could drift with it.
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "3", features = ["full"] }
 toml = "1.1"

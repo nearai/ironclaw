@@ -52,4 +52,4 @@ cargo test -p ironclaw_architecture_tests     # boundary gates
 
 [`AGENTS.md`](./AGENTS.md) — the canonical working rules ·
 `crates/extensions/AGENTS.md` — the family model ·
-`docs/reborn/target-architecture/families/extensions.md` §"ironclaw_extension_registry".
+`docs/internal/reborn/target-architecture/families/extensions.md` §"ironclaw_extension_registry".

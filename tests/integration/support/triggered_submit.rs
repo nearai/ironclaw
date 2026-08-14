@@ -75,6 +75,7 @@ impl RebornIntegrationHarness {
             agent_id: self.binding.agent_id.clone(),
             project_id: self.binding.project_id.clone(),
             prompt: prompt.to_string(),
+            execution_policy: None,
         }
     }
 

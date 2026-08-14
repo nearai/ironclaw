@@ -7,8 +7,8 @@
 use super::*;
 use crate::{DeliveryRetryPolicy, NoReplyContext};
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
-    PartDeliveryOutcome, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelReply, DeliveryReport, OutboundEnvelope,
+    PartDeliveryOutcome,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::preference_target::PreferenceTargetEncodeRequest;
@@ -110,6 +110,7 @@ fn external_target_entry(id: &str, binding: &str) -> OutboundDeliveryTargetEntry
             progress: false,
             gate_prompts: false,
             auth_prompts: false,
+            notifications: true,
             modalities: Vec::new(),
         },
         destination: reply_ref(binding),
@@ -253,11 +254,20 @@ impl RecordingChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for RecordingChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-        Ok(InboundOutcome::Ignore)
+impl ChannelReply for RecordingChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        // Reply and delivery share one mechanism for this double, as they do
+        // for a conversational vendor; the axis is the coordinator\'s choice.
+        self.deliver(envelope, egress).await
     }
+}
 
+#[async_trait]
+impl ChannelDelivery for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
@@ -276,6 +286,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
             return Ok(report);
         }
         Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: envelope
                 .parts
                 .iter()
@@ -318,8 +329,12 @@ impl ChannelDeliveryResolver for StaticResolver {
                 "install-alpha",
             )
             .expect("installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+            declared_egress_hosts: Vec::new(),
         })
     }
 }
@@ -435,6 +450,7 @@ fn build_harness_with_parts(
         Arc::clone(&outbound_store),
         resolver,
         Arc::new(NoReplyContext),
+        Arc::new(crate::NoDeliveryRegistrations),
         retry,
     ));
     let run_state: Arc<dyn AgentTurnRuntimePort> = Arc::new(ScriptedRunStateStore { lookup });
@@ -707,7 +723,6 @@ async fn deliver_for_model_returns_provider_evidence() {
 
     let envelopes = harness.adapter.envelopes();
     assert_eq!(envelopes.len(), 1);
-    assert_eq!(envelopes[0].extension_id, "acme-chat");
     match &envelopes[0].parts[0] {
         OutboundPart::Text(text) => assert_eq!(text, "hello there"),
         other => panic!("expected text part, got {other:?}"),
@@ -799,6 +814,33 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         "provider evidence must survive while the failed terminal write stays explicit"
     );
 
+    for (outcome, durably_recorded) in [
+        (
+            CoordinatedDeliveryOutcome::StreamDelivered {
+                attempt: sample_attempt(),
+                cursor: "cursor-1".to_string(),
+            },
+            true,
+        ),
+        (
+            CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed {
+                attempt: sample_attempt(),
+                cursor: "cursor-2".to_string(),
+            },
+            false,
+        ),
+    ] {
+        assert_eq!(
+            classify_delivery_outcome(target.clone(), outcome),
+            Ok(ModelChannelDeliveryEvidence {
+                target: target.clone(),
+                provider_message_refs: Vec::new(),
+                durably_recorded,
+                already_delivered: false,
+            })
+        );
+    }
+
     // A replay of a durably confirmed delivery. The ledger row does not retain
     // provider refs, so the empty list is honest — but it must be flagged, or
     // the caller reads "no refs" as unverified and resends what was already
@@ -885,6 +927,7 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         vec![entry],
         ScriptedRunLookup::State(turn_run_state_with_reply_target(reply_ref("reply:origin"))),
         vec![DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Permanent {
                 reason: "vendor rejected the message".to_string(),
             }],
@@ -1150,16 +1193,17 @@ async fn codec_channel_target_resolver_decodes_or_fails_closed() {
     assert!(harness.adapter.envelopes().is_empty());
 }
 
-/// On a shared-route channel conversation the run's scope owner (the route's
-/// subject) and the authenticated actor (whoever sent the message) are
-/// different users. The catalog this tool may reach must follow the ACTOR.
+/// LEGACY kernel shape: threads created before run-acts-as-invoker could be
+/// owned by one user (the retired shared-route "subject") while a different
+/// authenticated actor drives the run, so owner ≠ actor rows still exist. The
+/// catalog this tool may reach must follow the ACTOR, never the stored owner.
 ///
-/// Otherwise any participant of a shared channel routed to some subject could
-/// name that subject's target ids and push bot-identity content into the
-/// subject's own destinations — their personal DM included — from a
-/// conversation the subject may never read.
+/// Otherwise any participant acting on such a legacy thread could name the
+/// legacy owner's target ids and push bot-identity content into that owner's
+/// own destinations — their personal DM included — from a conversation the
+/// owner may never read.
 #[tokio::test]
-async fn a_shared_route_participant_cannot_reach_the_route_subjects_targets() {
+async fn a_shared_route_participant_cannot_reach_a_legacy_owners_targets() {
     let subject = UserId::new("route-subject").expect("subject id");
     let participant = UserId::new("route-participant").expect("participant id");
 

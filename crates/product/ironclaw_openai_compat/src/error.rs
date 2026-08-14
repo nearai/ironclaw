@@ -161,6 +161,8 @@ impl OpenAiCompatHttpError {
             ProductSurfaceRejectionKind::Unauthorized => OpenAiCompatErrorKind::PermissionDenied,
             ProductSurfaceRejectionKind::InvalidRequest => OpenAiCompatErrorKind::Validation,
             ProductSurfaceRejectionKind::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
+            ProductSurfaceRejectionKind::DuplicateAction
+            | ProductSurfaceRejectionKind::ReplayUnavailable => OpenAiCompatErrorKind::Conflict,
             ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => {
                 OpenAiCompatErrorKind::Conflict
             }

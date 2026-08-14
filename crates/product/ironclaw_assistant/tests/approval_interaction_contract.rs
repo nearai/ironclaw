@@ -2956,3 +2956,9 @@ async fn run_state_read_model_uses_parked_turn_run_id_for_pending_approvals() {
         .expect("other user pending approvals");
     assert!(other_user_pending.is_empty());
 }
+
+// Note: the shared-thread joiner-resolve pin retired with the ephemeral-per-
+// ping remodel (#7377) — its whole point was owner != actor (a gate raised
+// under the acting user, resolved on a turn whose scope owner was the first
+// binder). Ephemeral-per-ping makes owner == actor universally, so the
+// scenario can no longer exist.

@@ -131,22 +131,28 @@ where
             }
             // Capture handles to purge before mutating the record so we can
             // delete from SecretStore after the account write.
+            // A linked device is deleted on deactivate too, not merely marked
+            // inactive (PROPOSAL §4.5). An inactive extension cannot make a
+            // vendor call, so a retained session blob is a live device
+            // authorization nothing in the product can any longer end — the
+            // opposite of what deactivating an extension is supposed to mean.
+            // The vendor logout that must precede this is ordered by
+            // `LinkedDeviceCleanupService`, which runs before this service.
+            let deletes_material =
+                request.action == SecretCleanupAction::Uninstall || current.is_linked_device();
             let (purge_access, purge_refresh) = if owns_extension_account || provider_selected {
-                match request.action {
-                    SecretCleanupAction::Deactivate => {
-                        current.status = CredentialAccountStatus::Inactive;
-                        report.retained_accounts.push(current.id);
-                        (None, None)
+                if deletes_material {
+                    let access = current.access_secret.take();
+                    let refresh = current.refresh_secret.take();
+                    if current.status != CredentialAccountStatus::Revoked {
+                        current.status = CredentialAccountStatus::Revoked;
+                        report.revoked_accounts.push(current.id);
                     }
-                    SecretCleanupAction::Uninstall => {
-                        let access = current.access_secret.take();
-                        let refresh = current.refresh_secret.take();
-                        if current.status != CredentialAccountStatus::Revoked {
-                            current.status = CredentialAccountStatus::Revoked;
-                            report.revoked_accounts.push(current.id);
-                        }
-                        (access, refresh)
-                    }
+                    (access, refresh)
+                } else {
+                    current.status = CredentialAccountStatus::Inactive;
+                    report.retained_accounts.push(current.id);
+                    (None, None)
                 }
             } else {
                 if had_grant {

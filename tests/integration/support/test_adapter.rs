@@ -19,8 +19,10 @@
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
 };
+use ironclaw_host_api::attachment::InboundAttachment;
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterError, ProductAdapterId,
@@ -123,11 +125,70 @@ impl RebornTestIngress {
         text: &str,
         trigger: ProductTriggerReason,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        self.verified_text_envelope_with_trigger_and_attachments(
+            event_id,
+            user_id,
+            thread_id,
+            text,
+            trigger,
+            &[],
+        )
+    }
+
+    /// Build the same descriptor-bearing, bytes-free product envelope that a
+    /// channel boundary projects from complete normalized attachments.
+    pub fn verified_text_envelope_with_trigger_and_attachments(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        text: &str,
+        trigger: ProductTriggerReason,
+        attachments: &[InboundAttachment],
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let descriptors = attachments
+            .iter()
+            .map(|attachment| {
+                let kind = match attachment.mime_type.split('/').next().unwrap_or_default() {
+                    "image" => ProductAttachmentKind::Image,
+                    "audio" => ProductAttachmentKind::Audio,
+                    "video" => ProductAttachmentKind::Video,
+                    _ => ProductAttachmentKind::Document,
+                };
+                ProductAttachmentDescriptor::new(
+                    attachment.id.clone(),
+                    attachment.mime_type.clone(),
+                    attachment.filename.clone(),
+                    Some(attachment.bytes.len() as u64),
+                    kind,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let payload = ProductInboundPayload::UserMessage(UserMessagePayload::new(
             text.to_string(),
-            Vec::new(),
+            descriptors,
             trigger,
         )?);
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
+    }
+
+    /// [`Self::verified_text_envelope_with_trigger`] carrying host-fetched
+    /// channel conversation history (`UserMessagePayload::channel_context`) —
+    /// the shape channel ingress hydration produces for a shared-channel ping.
+    pub fn verified_text_envelope_with_channel_context(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        text: &str,
+        trigger: ProductTriggerReason,
+        channel_context: &str,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let payload = ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(text.to_string(), Vec::new(), trigger)?
+                .with_channel_context(Some(channel_context.to_string())),
+        );
         let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
         self.envelope_from_parsed(user_id, parsed)
     }

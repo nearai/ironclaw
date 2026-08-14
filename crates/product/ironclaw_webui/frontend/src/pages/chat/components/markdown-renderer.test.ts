@@ -16,6 +16,10 @@ const highlighterSource = readFileSync(
   new URL("../../../lib/syntax-highlighting.ts", import.meta.url),
   "utf8",
 );
+const emojiStreamingRendererSource = readFileSync(
+  new URL("./emoji-streaming-markdown.tsx", import.meta.url),
+  "utf8",
+);
 
 function rendererEnhancerSourceForTest() {
   const lines = [];
@@ -200,12 +204,22 @@ test("markdown and syntax highlighting stay out of the synchronous chat chunk", 
 test("streaming markdown delegates accumulated text without a fixed render interval", () => {
   assert.match(
     rendererSource,
-    /import\("streamdown"\)/,
-    "streaming replies should use the streaming-optimized Markdown renderer",
+    /import\("\.\/emoji-streaming-markdown"\)/,
+    "streaming replies should lazy-load the gemoji-aware Markdown renderer",
+  );
+  assert.match(
+    emojiStreamingRendererSource,
+    /import \{ defaultRemarkPlugins, Streamdown \} from "streamdown";/,
+    "the lazy renderer should use Streamdown's streaming parser",
+  );
+  assert.match(
+    emojiStreamingRendererSource,
+    /import remarkGemoji from "remark-gemoji";/,
+    "the lazy renderer should translate gemoji shortcodes",
   );
   assert.match(
     rendererSource,
-    /<StreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode=\{streaming \? "streaming" : "static"\}/,
+    /<EmojiStreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode=\{streaming \? "streaming" : "static"\}/,
     "the renderer should animate active streams and hold their final snapshot statically",
   );
   assert.doesNotMatch(
@@ -220,7 +234,7 @@ test("streaming markdown delegates accumulated text without a fixed render inter
   );
   assert.match(
     rendererSource,
-    /if \(streaming \|\| keepStreamingRendererUntilFinalIsReady\) \{[\s\S]*<StreamingMarkdown[\s\S]*\{normalizedContent\}[\s\S]*if \(renderedHtml === null\)/,
+    /if \(streaming \|\| keepStreamingRendererUntilFinalIsReady\) \{[\s\S]*<EmojiStreamingMarkdown[\s\S]*\{normalizedContent\}[\s\S]*if \(renderedHtml === null\)/,
     "streaming content should bypass the completed-reply innerHTML path",
   );
   assert.match(

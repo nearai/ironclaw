@@ -3,7 +3,7 @@
 Canonical crate guidance (the crate's `CLAUDE.md` is a pointer here).
 Orientation and public surface: [`README.md`](./README.md). Family boundary
 and admission test: [`../AGENTS.md`](../AGENTS.md). Specified by PROPOSAL
-§6.1.4 and `docs/reborn/target-architecture/families/contracts.md`.
+§6.1.4 and `docs/internal/reborn/target-architecture/families/contracts.md`.
 
 This crate exists so `ironclaw_agent_loop` — the one artifact meant to be
 replaced wholesale without touching anything privileged — can satisfy its
@@ -37,7 +37,7 @@ exceptions. Every rule below serves that.
   exit applier, the coordinator, and the state store are turn-kernel
   authority. `Loop*Port` implementations live in `ironclaw_loop_host`,
   `ironclaw_turn_runner`, and `ironclaw_hooks` — the single declared decorator
-  chain (`docs/reborn/target-architecture/families/loop.md`).
+  chain (`docs/internal/reborn/target-architecture/families/loop.md`).
 - **No prompt content, no model-gateway implementation.** (Two inherited
   exceptions, recorded under "Known debt" below.)
 - Public/wire DTOs carry refs, bounded safe summaries, typed ids, versions,
