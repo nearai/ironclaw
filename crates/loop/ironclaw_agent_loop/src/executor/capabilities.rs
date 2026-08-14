@@ -206,10 +206,14 @@ fn resolution_stops_parallel_launch(resolution: &Resolution) -> bool {
 impl CapabilityStage {
     fn nothing_to_report_is_eligible(
         ctx: StageContext<'_>,
+        state: &LoopExecutionState,
         surface: &CapabilitySurfaceIndex<'_>,
         call: &CapabilityCallCandidate,
     ) -> bool {
-        capability_is_visible(surface, call)
+        state.pending_approval_resume.is_none()
+            && state.pending_auth_resume.is_none()
+            && state.pending_external_tool_resume.is_none()
+            && capability_is_visible(surface, call)
             && ctx
                 .host
                 .run_context()
@@ -347,7 +351,12 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let surface_index = CapabilitySurfaceIndex::new(&input.surface);
         if input.calls.len() == 1
             && input.calls[0].capability_id.as_str() == NOTHING_TO_REPORT_COMPLETION_CAPABILITY_ID
-            && Self::nothing_to_report_is_eligible(ctx, &surface_index, &input.calls[0])
+            && Self::nothing_to_report_is_eligible(
+                ctx,
+                &input.state,
+                &surface_index,
+                &input.calls[0],
+            )
         {
             return self.complete_nothing_to_report(ctx, input.state).await;
         }

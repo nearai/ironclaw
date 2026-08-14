@@ -30,8 +30,8 @@ use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
     LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
     ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
-    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
-    TerminalWarningObservation,
+    PendingExternalToolResume, PendingModelRetryDirective, RepeatedCallWarningPhase,
+    RepeatedCallWarningState, TerminalWarningObservation,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -3107,6 +3107,7 @@ async fn scheduled_no_result_control_terminalizes_without_capability_dispatch_or
     assert!(completed.reply_message_refs.is_empty());
     assert!(completed.result_refs.is_empty());
     assert!(completed.final_checkpoint_id.is_some());
+    assert!(host.finalized_assistant_messages().is_empty());
     assert!(host.single_invocations().is_empty());
     assert!(host.batch_invocations().is_empty());
 }
@@ -3190,6 +3191,57 @@ async fn no_result_control_rejects_non_empty_input() {
             if completed.completion_kind == LoopCompletionKind::FinalReply
     ));
     assert_eq!(host.finalized_assistant_messages().len(), 1);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
+async fn no_result_control_preserves_a_pending_external_tool_resume() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_external_tool_resume = Some(PendingExternalToolResume {
+        gate_ref: LoopGateRef::new("gate:pending-external-tool").expect("gate ref"),
+        capability_id: capability_id(),
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:pending-external-tool").expect("input ref"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+        disposition: None,
+    });
+    let calls = match no_result_completion_response(serde_json::json!({})).output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected completion call"),
+    };
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface,
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    let TurnCompletedStep::Continue { state, .. } = step else {
+        panic!("pending resume must prevent a nothing-to-report exit");
+    };
+    assert!(state.pending_external_tool_resume.is_some());
+    assert!(host.finalized_assistant_messages().is_empty());
     assert!(host.single_invocations().is_empty());
     assert!(host.batch_invocations().is_empty());
 }
