@@ -84,6 +84,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 fallback_index: 0,
                 iteration: 0,
                 capability_view: None,
+                tool_choice: None,
             })
             .await
             .map_err(|error| map_host_error(HostStage::Model, error))?;

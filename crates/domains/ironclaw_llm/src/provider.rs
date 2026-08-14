@@ -576,7 +576,11 @@ pub struct ToolCompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
-    /// How to handle tool use: "auto", "required", or "none".
+    /// How to handle tool use: `"auto"`, `"required"`, `"none"`, or the name
+    /// of one declared tool the model MUST call. Providers encode a named
+    /// tool in their own forcing vocabulary (OpenAI object form, Bedrock
+    /// `SpecificToolChoice`, Gemini `allowedFunctionNames`); providers with
+    /// no named forcing reject it loudly rather than silently downgrading.
     pub tool_choice: Option<String>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,

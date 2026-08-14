@@ -901,6 +901,7 @@ mod tests {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         }
     }
 

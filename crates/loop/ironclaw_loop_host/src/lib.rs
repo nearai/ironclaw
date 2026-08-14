@@ -1691,6 +1691,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            tool_choice: request.tool_choice.clone(),
         };
         let gateway_result = if let Some(capabilities) = self.capabilities.as_ref() {
             let capabilities: Arc<dyn LoopCapabilityPort> =
@@ -2531,6 +2532,11 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
+    /// Loop-strategy tool-choice constraint carried through to the provider.
+    /// Only valid on tool-capable calls whose visible surface contains the
+    /// forced capability; the gateway rejects anything else as caller misuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 /// Boundary alias for the route snapshot carried from turn/run state into

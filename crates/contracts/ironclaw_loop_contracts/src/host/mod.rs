@@ -42,9 +42,9 @@ pub use input::{
 pub use model::{
     AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,
     LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort, ModelStreamChunk,
-    ParentLoopOutput, PromptMode,
+    LoopModelToolChoice, LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority,
+    LoopPromptBundleGrant, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    ModelStreamChunk, ParentLoopOutput, PromptMode,
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,

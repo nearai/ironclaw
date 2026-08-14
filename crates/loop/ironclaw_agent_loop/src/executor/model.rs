@@ -67,6 +67,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
 
         let (model_preference, fallback_index) =
             model_preference_to_host(ctx.planner.model().preference(&state).await)?;
+        let tool_choice = ctx.planner.model().tool_choice(&state).await;
         state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -81,6 +82,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             fallback_index,
             iteration: state.iteration,
             capability_view: Some(capability_view.clone()),
+            tool_choice,
         };
         let visible_capability_count = capability_view.visible_capability_ids.len();
         debug!(

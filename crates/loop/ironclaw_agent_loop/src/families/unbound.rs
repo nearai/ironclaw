@@ -7,7 +7,8 @@ use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::{
-    GateNotSupportedStrategy, StructuredOutputReplyAdmissionStrategy, StructuredResultStopStrategy,
+    GateNotSupportedStrategy, StructuredOutputReplyAdmissionStrategy,
+    StructuredResultModelStrategy, StructuredResultStopStrategy,
 };
 
 #[cfg(test)]
@@ -41,7 +42,7 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
     "context:DefaultContextStrategy(max_messages=128),",
     "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),",
     "capability:DefaultCapabilityStrategy(all),",
-    "model:DefaultModelStrategy(primary_or_fallback_index),",
+    "model:StructuredResultModelStrategy(primary_or_fallback_index,force_result_tool_on_structured_repair),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
     "gate:GateNotSupportedStrategy(abort_gate_not_supported_except_external_tool),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
@@ -60,8 +61,8 @@ pub const UNBOUND_DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
 
 /// Stable digest: BLAKE3-256 of the unbound-structured family fingerprint.
 pub const UNBOUND_STRUCTURED_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xf4, 0x77, 0x87, 0x5c, 0x3e, 0x56, 0xb7, 0x1a, 0x82, 0x64, 0x93, 0x65, 0x82, 0x08, 0x54, 0x54,
-    0x53, 0x29, 0xe1, 0xd5, 0x33, 0xc3, 0xff, 0xc7, 0xe8, 0xac, 0xe8, 0x29, 0xe2, 0x8c, 0x9f, 0x64,
+    0xfe, 0x39, 0x55, 0x21, 0xc6, 0x82, 0x8f, 0x4f, 0xb9, 0xf5, 0x26, 0x6a, 0xa9, 0xa8, 0xb5, 0xa6,
+    0x46, 0x71, 0xed, 0xbe, 0x77, 0x06, 0x80, 0x38, 0x21, 0xb5, 0xd3, 0x2c, 0x1d, 0x10, 0x87, 0x68,
 ]);
 
 fn structured_result_capability() -> CapabilityId {
@@ -99,6 +100,9 @@ pub fn unbound_structured() -> LoopFamily {
             UNBOUND_STRUCTURED_FAMILY_DIGEST,
         ))
         .with_gate(Arc::new(GateNotSupportedStrategy))
+        .with_model(Arc::new(StructuredResultModelStrategy::new(
+            structured_result_capability(),
+        )))
         .with_reply_admission(Arc::new(StructuredOutputReplyAdmissionStrategy))
         .with_stop(Arc::new(StructuredResultStopStrategy::new(
             structured_result_capability(),

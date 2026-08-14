@@ -52,7 +52,9 @@ pub(crate) use gate::{
     DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateNotSupportedStrategy,
     GateOutcome, GateSummary,
 };
-pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
+pub(crate) use model::{
+    DefaultModelStrategy, ModelPreference, ModelStrategy, StructuredResultModelStrategy,
+};
 pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
     ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,

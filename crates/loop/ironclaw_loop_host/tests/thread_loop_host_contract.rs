@@ -386,6 +386,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -423,6 +424,7 @@ async fn model_port_empty_request_pins_the_run_accepted_task_on_cache_miss() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -493,6 +495,7 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         capability_view: Some(LoopModelCapabilityView {
             visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
         }),
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -559,6 +562,7 @@ async fn model_port_keeps_effective_model_unavailable_without_provider_evidence(
         fallback_index: 2,
         iteration: 7,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -607,6 +611,7 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect_err("model call fails");
@@ -656,6 +661,7 @@ async fn model_port_keeps_omitted_usage_unavailable() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model call succeeds");
@@ -702,6 +708,7 @@ async fn model_port_records_full_capability_surface_when_request_has_no_view() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -745,6 +752,7 @@ async fn model_port_continues_when_diagnostic_capability_lookup_fails() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("diagnostic failure must not fail the model request");
@@ -817,6 +825,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -873,6 +882,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -968,6 +978,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2053,6 +2064,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2097,6 +2109,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2139,6 +2152,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -2187,6 +2201,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2458,6 +2473,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2562,6 +2578,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2655,6 +2672,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2707,6 +2725,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -2909,6 +2928,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2979,6 +2999,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4357,6 +4378,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4404,6 +4426,7 @@ async fn model_port_rejects_mismatched_fallback_route_evidence() {
             fallback_index: 2,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4451,6 +4474,7 @@ async fn model_port_rejects_missing_fallback_route_evidence() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4488,6 +4512,7 @@ async fn model_port_accepts_matching_fallback_route_evidence() {
             fallback_index: 2,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4579,6 +4604,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4628,6 +4654,7 @@ async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
         capability_view: None,
         fallback_index: 0,
         iteration: 0,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4687,6 +4714,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4733,6 +4761,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4806,6 +4835,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4930,6 +4960,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4982,6 +5013,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("malformed tool result reference content should fail");
@@ -5027,6 +5059,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("missing tool result reference should fail before model call");
@@ -5072,6 +5105,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5132,6 +5166,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5192,6 +5227,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5235,6 +5271,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5276,6 +5313,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5307,6 +5345,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5344,6 +5383,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5405,6 +5445,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
