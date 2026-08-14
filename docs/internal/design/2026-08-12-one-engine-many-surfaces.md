@@ -63,7 +63,7 @@ flowchart TB
     end
 
     subgraph Engine["ENGINE — TurnCoordinator + shared runtime"]
-        AE["TurnCoordinator — ONE submission method: <br/>submit_turn (binding refs Option) · <br/>get_run_state · cancel_run · resume_turn"]
+        AE["TurnCoordinator — ONE submission method: <br/>submit_turn (no binding refs — routing is product-side) · <br/>get_run_state · cancel_run · resume_turn"]
         RT["turn admission (unchanged) → process journal · scheduler · leases · <br/>canonical loop · ONE thread-backed materialization path · <br/>capability host (action-time auth) · gates · checkpoints · events"]
         AE --> RT
     end
@@ -118,8 +118,9 @@ accept_prepared_context(PreparedContextRequest {
 submit_turn(SubmitTurnRequest {
     scope,                                       // the REQUIRED thread: the unit of work
     actor, accepted_message_ref,
-    source_binding_ref: Option<..>,              // Some = conversation,
-    reply_target_binding_ref: Option<..>,        //   None = unbound
+    // No binding refs at all: reply routing lives in product-side
+    // conversation state; conversation vs unbound is decided by the
+    // admission-time prepared-context probe.
     requested_model, requested_run_profile, idempotency_key,
 })
 ```
@@ -408,10 +409,10 @@ no vendor anything.
    implementation (no per-workflow mint-seed code, ever) — then submits
    coordinates with scope + actor as request fields (run-acts-as-invoker),
    and owns the association between its domain object and the run id.
-3. **The engine never *interprets* routing data.** `SubmitTurnRequest`
-   still carries binding refs today (the slimming follow-up moves them
-   workflow-side); the engine stores them as opaque pass-through and never
-   parses or routes. The unbound request carries none. Reply-routing
+3. **The engine never *carries* routing data.** ✎ Shipped stronger than
+   drafted: `SubmitTurnRequest` (and every other kernel request/state
+   shape) carries NO binding refs at all — the slimming follow-up landed
+   inside the unbound-turns implementation itself. Reply-routing data and
    *decisions* live in the conversation workflow, always.
 4. **Output leaves the engine exactly one way**: run observation —
    durable events plus terminal result, with live hints on the ephemeral
@@ -443,9 +444,10 @@ no vendor anything.
 
 **Phase 1 — the unbound lane** (the companion proposal, complete in one
 PR-sized change plus its tests). The one shared `accept_prepared_context`
-helper (mint-seed-journal; no new materialization path); binding refs on
-`Submit`/`ResumeTurnRequest` become `Option` (conversations wrap today's
-values in `Some` — their only diff); declaration-driven profile derivation;
+helper (mint-seed-journal; no new materialization path); binding refs
+deleted outright from `Submit`/`Resume`/`RetryTurnRequest` and run state
+(✎ shipped end-state-first — no `Option` stage; conversations simply stop
+passing them); declaration-driven profile derivation;
 the unbound profiles and their concurrency cap; `OutputContract` (schema
 in-request) + reply-admission enforcement; taxonomy tests (unbound threads
 never surface in conversation listings; the subagent precedent pinned as a
@@ -460,10 +462,10 @@ first consumer: the delivery observer stops polling `get_run_state` every
 a manifest presentation policy over the same events for channels that want
 it.
 
-**Named follow-up (independent of both phases): `SubmitTurnRequest`
-slimming.** The source/reply binding refs it carries are workflow routing
-data, not engine input; they can move to the conversation workflow's
-association state with a dual-read shim while pre-cutover runs drain. Two
+**✎ Landed with phase 1: `SubmitTurnRequest` slimming.** The source/reply
+binding refs were deleted from every kernel shape in the unbound-turns
+implementation (no dual-read shim needed — old rows rehydrate under
+ignore-unknown-keys, and product routing reads conversation state). Two
 questions stay open until someone schedules it: (a) where the origin/surface
 metadata the loop host consumes for origin-gated prompt assets ends up
 (binding *refs* are workflow-side; origin metadata is engine-relevant); (b)
