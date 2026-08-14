@@ -41,6 +41,16 @@ use reborn_support::{
     harness::RecordingTestCapabilityPort,
 };
 
+fn trigger_execution_contract(goal: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
+
 const COVERED_QA_SCENARIOS: &[&str] = &[
     "three_step_time_write_read_summary",
     "session_continuity_write_read_append",
@@ -212,7 +222,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 "qa_heartbeat_create",
                 serde_json::json!({
                     "name": "qa-reborn-heartbeat-smoke",
-                    "prompt": "reborn heartbeat smoke",
+                    "execution_contract": trigger_execution_contract("reborn heartbeat smoke"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "*/2 * * * *",
@@ -236,7 +246,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 "qa_cron_create",
                 serde_json::json!({
                     "name": "qa-reborn-cron-smoke",
-                    "prompt": "summarize repo status",
+                    "execution_contract": trigger_execution_contract("summarize repo status"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "0 9 * * 1",

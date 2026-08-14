@@ -60,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": INTERACTIVE_CONTROL_TRIGGER_NAME,
-                    "prompt": "remain scheduled",
+                    "execution_contract": super::support::trigger_execution_contract("remain scheduled"),
                     "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                 }),
             ),
@@ -88,7 +88,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "builtin.trigger_create",
                     json!({
                         "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-                        "prompt": "remind me again",
+                        "execution_contract": super::support::trigger_execution_contract("remind me again"),
                         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                     }),
                 ),
@@ -164,7 +164,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         "builtin.trigger_create",
         json!({
             "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-            "prompt": "remind me again",
+            "execution_contract": super::support::trigger_execution_contract("remind me again"),
             "schedule": {"kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC"},
         }),
     )

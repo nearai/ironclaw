@@ -879,23 +879,31 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("delivery_target_id"),
         "trigger_create description must not advertise the retired delivery_target_id input"
     );
-    let trigger_prompt_description = trigger_properties
-        .get("prompt")
+    assert!(
+        !trigger_properties.contains_key("prompt"),
+        "trigger_create schema must not advertise the retired raw prompt input"
+    );
+    let execution_contract = trigger_properties
+        .get("execution_contract")
+        .expect("structured execution contract should be present");
+    let trigger_goal_description = execution_contract
+        .get("properties")
+        .and_then(|properties| properties.get("goal"))
         .and_then(|property| property.get("description"))
         .and_then(serde_json::Value::as_str)
-        .expect("trigger prompt description should be present");
+        .expect("trigger execution goal description should be present");
     assert!(
-        trigger_prompt_description.contains("builtin__outbound_deliver"),
-        "trigger_create prompt schema should teach delivery as an explicit prompt step"
+        trigger_goal_description.contains("builtin__outbound_deliver"),
+        "trigger_create goal schema should teach delivery as an explicit execution step"
     );
     assert!(
-        trigger_prompt_description.contains("builtin__outbound_delivery_targets_list")
-            && trigger_prompt_description.contains("while the user is present"),
-        "trigger_create prompt schema should require the destination be picked at creation time"
+        trigger_goal_description.contains("builtin__outbound_delivery_targets_list")
+            && trigger_goal_description.contains("selected now"),
+        "trigger_create goal schema should require the destination be picked at creation time"
     );
     assert!(
-        !trigger_prompt_description.contains("delivery_target_id"),
-        "trigger_create prompt schema must not reference the retired stored delivery target"
+        !trigger_goal_description.contains("delivery_target_id"),
+        "trigger_create goal schema must not reference the retired stored delivery target"
     );
 
     let outbound_deliver = surface
