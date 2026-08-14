@@ -1278,6 +1278,8 @@ registerPack("ko", {
   "extensions.opening": "여는 중...",
   "extensions.authorize": "승인",
   "extensions.reauthorize": "재승인",
+  "extensions.updateAccess": "액세스 업데이트",
+  "extensions.updateAccessHint": "이 연결에 새로운 권한을 사용할 수 있습니다. 최신 기능을 사용하려면 액세스를 다시 승인하세요.",
   "extensions.reconnect": "다시 연결",
   "extensions.emptyInstalledTitle": "설치된 확장 프로그램 없음",
   "extensions.emptyInstalledDesc": "WASM 도구, 채널 및 MCP 서버를 검색하고 설치하려면 레지스트리 탭을 탐색하세요.",

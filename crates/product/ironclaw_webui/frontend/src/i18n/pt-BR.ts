@@ -1278,6 +1278,8 @@ registerPack("pt-BR", {
   "extensions.opening": "Abrindo...",
   "extensions.authorize": "Autorizar",
   "extensions.reauthorize": "Reautorizar",
+  "extensions.updateAccess": "Atualizar acesso",
+  "extensions.updateAccessHint": "Novas permissões estão disponíveis para esta conexão. Aprove o acesso novamente para ativar os recursos mais recentes.",
   "extensions.reconnect": "Reconectar",
   "extensions.emptyInstalledTitle": "Nenhuma extensão instalada",
   "extensions.emptyInstalledDesc": "Navegue pela guia Registro para descobrir e instalar ferramentas WASM, canais e servidores MCP.",

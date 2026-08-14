@@ -1279,6 +1279,8 @@ registerPack("es", {
   "extensions.opening": "Abriendo...",
   "extensions.authorize": "Autorizar",
   "extensions.reauthorize": "Reautorizar",
+  "extensions.updateAccess": "Actualizar acceso",
+  "extensions.updateAccessHint": "Hay nuevos permisos disponibles para esta conexión. Vuelve a aprobar el acceso para habilitar las últimas funciones.",
   "extensions.reconnect": "Reconectar",
   "extensions.emptyInstalledTitle": "No hay extensiones instaladas",
   "extensions.emptyInstalledDesc": "Explore la pestaña Registro para descubrir e instalar herramientas, canales y servidores WASM.",

@@ -103,10 +103,21 @@ fn preferred_provider_account_status<'a>(
     accounts: impl IntoIterator<Item = (&'a AuthProviderId, CredentialAccountStatus, Timestamp)>,
     provider: &AuthProviderId,
 ) -> Option<CredentialAccountStatus> {
+    // Status-aware, then recency: a live `Configured` account is the one the
+    // runtime selector will actually use, so it decides the card even when a
+    // terminal row (a stale revocation, an expired predecessor) is newer —
+    // #7660. Among rows of equal liveness, the most recently updated wins,
+    // which still lets a later unlink beat an older configured record once
+    // no configured row remains.
     accounts
         .into_iter()
         .filter(|(account_provider, _, _)| *account_provider == provider)
-        .max_by_key(|(_, _, updated_at)| *updated_at)
+        .max_by_key(|(_, status, updated_at)| {
+            (
+                matches!(status, CredentialAccountStatus::Configured),
+                *updated_at,
+            )
+        })
         .map(|(_, status, _)| status)
 }
 
@@ -765,6 +776,26 @@ mod tests {
             credential_cleanup.requests().len(),
             2,
             "the removal-retry repeat disconnect re-issues the (idempotent) credential cleanup"
+        );
+    }
+
+    /// #7660 latent hazard: the caller's card status must not be decided by
+    /// a stale terminal row that happens to be newer than the working one. A
+    /// user whose revocation lands after a reconnect has a live Configured
+    /// account — showing "revoked" over it contradicts every working surface.
+    #[test]
+    fn a_newer_terminal_row_does_not_mask_a_configured_account() {
+        let provider = AuthProviderId::new("slack").expect("provider");
+        let older = chrono::DateTime::from_timestamp(1_000, 0).expect("timestamp");
+        let newer = chrono::DateTime::from_timestamp(2_000, 0).expect("timestamp");
+        let rows = [
+            (&provider, CredentialAccountStatus::Configured, older),
+            (&provider, CredentialAccountStatus::Revoked, newer),
+        ];
+        assert_eq!(
+            preferred_provider_account_status(rows, &provider),
+            Some(CredentialAccountStatus::Configured),
+            "a live grant outranks a newer terminal row"
         );
     }
 

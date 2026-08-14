@@ -1278,6 +1278,8 @@ registerPack("uk", {
   "extensions.opening": "Відкриття...",
   "extensions.authorize": "Авторизувати",
   "extensions.reauthorize": "Повторно авторизувати",
+  "extensions.updateAccess": "Оновити доступ",
+  "extensions.updateAccessHint": "Для цього підключення доступні нові дозволи. Повторно підтвердьте доступ, щоб увімкнути найновіші можливості.",
   "extensions.reconnect": "Перепідключити",
   "extensions.emptyInstalledTitle": "Розширень не встановлено",
   "extensions.emptyInstalledDesc": "Перегляньте вкладку Реєстр, щоб знайти та встановити інструменти, канали та сервери WASM.",
