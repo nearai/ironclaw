@@ -13,10 +13,7 @@ mod tests {
         let path = PathBuf::from("measurement.db");
         let config = DbProbeConfig::libsql(path.clone(), true);
 
-        assert_eq!(
-            config.target(),
-            &DbProbeTarget::LibSql { path }
-        );
+        assert_eq!(config.target(), &DbProbeTarget::LibSql { path });
         assert!(config.reset_stats());
     }
 
