@@ -3113,6 +3113,24 @@ async fn exact_silent_reply_terminalizes_suppressed_schedule_without_finalizing_
 }
 
 #[tokio::test]
+async fn exact_silent_reply_honors_cancellation_after_final_checkpoint() {
+    let host = MockHost::new(vec![reply_response_with_text("[SILENT]")])
+        .with_suppressed_scheduled_context()
+        .cancel_after_checkpoint(LoopCheckpointKind::Final);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Cancelled(_)));
+    assert!(host.finalized_assistant_messages().is_empty());
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
 async fn exact_silent_reply_is_visible_outside_scheduled_suppression_context() {
     let host = MockHost::new(vec![reply_response_with_text("[SILENT]")]);
     let state = LoopExecutionState::initial_for_run(host.run_context());

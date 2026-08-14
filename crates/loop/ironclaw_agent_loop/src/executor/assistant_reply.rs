@@ -62,12 +62,15 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
             let checked = CheckpointStage
                 .write(ctx, state, CheckpointKind::Final)
                 .await?;
-            return nothing_to_report_completed_exit(
-                ctx.host,
-                checked.state,
-                checked.checkpoint_id,
-            )
-            .map(TurnCompletedStep::Exit);
+            let state = match CheckpointStage
+                .cancel_if_requested(ctx, checked.state)
+                .await?
+            {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+            };
+            return nothing_to_report_completed_exit(ctx.host, state, checked.checkpoint_id)
+                .map(TurnCompletedStep::Exit);
         }
         let mut state = input.state;
         // Record whether this reply trailed off without a real closing answer so
