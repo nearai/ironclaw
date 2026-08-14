@@ -1582,6 +1582,7 @@ fn stable_setup_token(
         Setup::ManualToken => "manual_token".to_string(),
         Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
         Setup::Pairing => "pairing".to_string(),
+        Setup::DeviceLink => "device_link".to_string(),
         Setup::Retired => "retired".to_string(),
     }
 }

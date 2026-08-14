@@ -1324,19 +1324,17 @@ mod tests {
             "model-visible search must still identify Telegram as a channel: {telegram}"
         );
         assert!(
-            telegram["channel_connection"]["instructions"]
-                .as_str()
-                .is_some_and(
-                    |instructions| instructions.contains("IronClaw pairing panel")
-                        && instructions.contains("/start")
-                        && instructions.contains("displayed code")
-                ),
-            "generated-code connection guidance must remain model-visible: {telegram}"
+            telegram.get("channel_connection").is_none(),
+            "model-visible search must strip device-link connection chrome: {telegram}"
         );
-        assert!(
-            telegram["channel_connection"]["error_message"] == "",
-            "generated-code connection failure copy must stay out of model-visible lifecycle output: {telegram}"
-        );
+        let telegram_wire = serde_json::to_string(&search).expect("search response serializes");
+        for retired_pairing_copy in ["IronClaw pairing panel", "/start", "displayed code"] {
+            assert!(
+                !telegram_wire.contains(retired_pairing_copy),
+                "device-link Telegram search must not revive retired proof-code copy \
+                 {retired_pairing_copy:?}: {telegram}"
+            );
+        }
     }
 
     #[test]

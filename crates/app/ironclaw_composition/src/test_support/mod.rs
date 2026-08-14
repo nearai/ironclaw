@@ -88,6 +88,7 @@ mod automation;
 mod budget_gateway;
 mod capability_io;
 #[cfg(feature = "test-support")]
+#[path = "channel_connection_tests.rs"]
 mod channel_connection;
 mod durable;
 mod libsql_host_bindings;

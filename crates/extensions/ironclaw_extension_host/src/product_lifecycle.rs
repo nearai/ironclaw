@@ -20,6 +20,7 @@ use ironclaw_extension_registry::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
+    capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, UserId, VendorId},
     resource::ResourceScope,
@@ -819,8 +820,12 @@ impl ExtensionLifecycleManager {
         // confirms a private credentialed install exists (#5525 review).
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
+        let device_link_channel_setup = self.device_link_channel_setup(&extension_id);
         let mut requirements = package_runtime_credential_auth_requirements(&package);
-        if let Some(setups) = self.account_setups.as_ref()
+        if let Some(setup) = device_link_channel_setup.as_ref() {
+            requirements
+                .retain(|requirement| !is_device_link_channel_requirement(setup, requirement));
+        } else if let Some(setups) = self.account_setups.as_ref()
             && let Some(requirement) = setups
                 .missing_requirement(&extension_id, caller)
                 .await
@@ -849,6 +854,21 @@ impl ExtensionLifecycleManager {
             return Err(ProductOperationFailure::ProviderInstanceNotConfigured { reason });
         }
         Ok(requirements)
+    }
+
+    fn device_link_channel_setup(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Option<ExtensionAccountSetupDescriptor> {
+        self.account_setups
+            .as_ref()?
+            .descriptor(extension_id)
+            .filter(|descriptor| {
+                descriptor.connection_requirement.strategy
+                    == RebornChannelConnectStrategy::DeviceLink
+                    && descriptor.auth_requirement.setup
+                        == RuntimeCredentialAccountSetup::DeviceLink
+            })
     }
 
     /// Redacted per-extension activation errors from the generic host's
@@ -1427,10 +1447,16 @@ impl ExtensionLifecycleManager {
                 },
             ));
         }
-        if let ExtensionActivationCredentialReadiness::Missing(missing) =
+        if let ExtensionActivationCredentialReadiness::Missing(mut missing) =
             credential_gate.credential_readiness(&package).await?
         {
-            return activation_credentials_incomplete_response(package_ref, missing);
+            if let Some(setup) = self.device_link_channel_setup(&extension_id) {
+                missing
+                    .retain(|requirement| !is_device_link_channel_requirement(&setup, requirement));
+            }
+            if !missing.is_empty() {
+                return activation_credentials_incomplete_response(package_ref, missing);
+            }
         }
         self.commit_activation(
             package_ref,
@@ -2835,6 +2861,22 @@ pub(crate) fn activation_credentials_incomplete_response(
     Ok(response)
 }
 
+/// A device-link channel must publish its adapter before the first user can
+/// authorize that device. Its own per-user linked session therefore gates
+/// tool dispatch and channel admission, but not package activation. Matching
+/// all three authority identifiers keeps this exception from suppressing an
+/// unrelated credential declared by the same package.
+fn is_device_link_channel_requirement(
+    setup: &ExtensionAccountSetupDescriptor,
+    requirement: &RuntimeCredentialAuthRequirement,
+) -> bool {
+    setup.connection_requirement.strategy == RebornChannelConnectStrategy::DeviceLink
+        && setup.auth_requirement.setup == RuntimeCredentialAccountSetup::DeviceLink
+        && requirement.setup == RuntimeCredentialAccountSetup::DeviceLink
+        && requirement.provider == setup.auth_requirement.provider
+        && requirement.requester_extension == setup.auth_requirement.requester_extension
+}
+
 fn activation_success_message(
     package_ref: &LifecyclePackageRef,
     package: &ExtensionPackage,
@@ -2858,6 +2900,12 @@ fn activation_success_message(
                  {display_name} via OAuth from the extension's configuration rather than \
                  pasting anything into normal chat. If the user's account is already \
                  connected, continue the user's original request."
+            ),
+            RebornChannelConnectStrategy::DeviceLink => format!(
+                "If WebChat shows an account connection panel, tell the user to link their \
+                 {display_name} account from the extension's configuration rather than \
+                 pasting anything into normal chat. If the user's account is already linked, \
+                 continue the user's original request."
             ),
             RebornChannelConnectStrategy::InboundProofCode
             | RebornChannelConnectStrategy::WebGeneratedCode
@@ -3320,6 +3368,76 @@ mod tests {
 
     use super::*;
     use crate::{AvailableExtensionAsset, AvailableExtensionAssetContent};
+
+    fn device_link_setup_descriptor(
+        extension_id: &str,
+        provider: &str,
+    ) -> ExtensionAccountSetupDescriptor {
+        let extension_id = ExtensionId::new(extension_id).expect("extension id");
+        ExtensionAccountSetupDescriptor {
+            extension_id: extension_id.clone(),
+            auth_requirement: RuntimeCredentialAuthRequirement {
+                provider: VendorId::new(provider).expect("provider id"),
+                setup: RuntimeCredentialAccountSetup::DeviceLink,
+                requester_extension: extension_id.clone(),
+                provider_scopes: Vec::new(),
+            },
+            connection_requirement:
+                ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement {
+                    channel: extension_id.as_str().to_string(),
+                    display_name: "Device Link Fixture".to_string(),
+                    strategy: RebornChannelConnectStrategy::DeviceLink,
+                    instructions: "Link your account.".to_string(),
+                    input_placeholder: String::new(),
+                    submit_label: "Link".to_string(),
+                    error_message: "Linking failed.".to_string(),
+                },
+            connection_notices:
+                ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy::generic(
+                    "Device Link Fixture",
+                ),
+            activation_success_message: "Link your account to continue.".to_string(),
+            pairing_deep_link_template: None,
+            inbound_code_prefixes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn activation_exempts_only_the_device_link_channels_own_credential() {
+        let setup = device_link_setup_descriptor("fixture", "fixture-vendor");
+        let channel_requirement = setup.auth_requirement.clone();
+        assert!(is_device_link_channel_requirement(
+            &setup,
+            &channel_requirement
+        ));
+
+        let unrelated_provider = RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("other-vendor").expect("provider id"),
+            ..channel_requirement.clone()
+        };
+        assert!(!is_device_link_channel_requirement(
+            &setup,
+            &unrelated_provider
+        ));
+
+        let unrelated_requester = RuntimeCredentialAuthRequirement {
+            requester_extension: ExtensionId::new("other-extension").expect("extension id"),
+            ..channel_requirement.clone()
+        };
+        assert!(!is_device_link_channel_requirement(
+            &setup,
+            &unrelated_requester
+        ));
+
+        let unrelated_setup = RuntimeCredentialAuthRequirement {
+            setup: RuntimeCredentialAccountSetup::ManualToken,
+            ..channel_requirement
+        };
+        assert!(!is_device_link_channel_requirement(
+            &setup,
+            &unrelated_setup
+        ));
+    }
 
     #[derive(Clone, Default)]
     struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

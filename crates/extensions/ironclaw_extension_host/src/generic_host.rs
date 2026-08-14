@@ -48,8 +48,8 @@ use ironclaw_resources::ResourceGovernor;
 use crate::{
     BindError, ChannelConfigError, ChannelConfigService, DrainController, EgressFactory,
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    HookError, InstallationRecord, LoadContext, LoadedExtension, NativeExtensionFactory,
-    RehydratedInstallationRecordStore, SnapshotToolResolver,
+    HookError, InstallationRecord, LinkedSessionStore, LoadContext, LoadedExtension,
+    NativeExtensionFactory, RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 
 /// The composed generic host plus the resolver handle composition injects
@@ -70,6 +70,22 @@ pub struct GenericExtensionHostParams {
     pub governor: Arc<dyn ResourceGovernor>,
     pub assembly: ExtensionHostAssemblyConfig,
     pub channel_egress_transport: Option<Arc<dyn crate::egress::ChannelEgressTransport>>,
+    /// Linked-account custody. A deployment that wires none passes
+    /// [`LinkedSessionStore::unavailable`] — the fail-closed store, chosen at
+    /// the composition boundary rather than defaulted here, so this type
+    /// cannot claim custody is optional when production always supplies it.
+    pub linked_sessions: Arc<LinkedSessionStore>,
+    /// The per-extension linked-account resolver factory; the unwired shape
+    /// is the explicit `UnavailableLinkedAccountResolution`.
+    pub linked_accounts: Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>,
+    /// Admin-configuration reads for load-time factory construction.
+    ///
+    /// Required, like its two custody siblings: production always supplies it,
+    /// so an `Option` here described a deployment that does not exist and hid
+    /// the fail-closed choice inside this crate. A deployment without admin
+    /// configuration passes `None` at the composition boundary instead, where
+    /// the choice is visible.
+    pub admin_secrets: Option<Arc<crate::ChannelConfigService>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,6 +197,9 @@ pub async fn build_generic_extension_host(
         governor,
         assembly,
         channel_egress_transport,
+        linked_sessions,
+        linked_accounts,
+        admin_secrets,
     } = params;
     let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
         .into_iter()
@@ -212,6 +231,9 @@ pub async fn build_generic_extension_host(
             reserved_capability_ids: assembly.reserved_capability_ids,
             reserved_ingress_routes: assembly.reserved_ingress_routes,
             hook_deadline: assembly.hook_deadline,
+            linked_sessions,
+            linked_accounts,
+            admin_secrets,
         })
         .await,
     );
@@ -349,7 +371,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
             &ctx.resolved.runtime
             && let Some(factory) = self.factories.get(service)
         {
-            let entrypoint = factory.load(ctx)?;
+            let entrypoint = factory.load(ctx).await?;
             return Ok(LoadedExtension::new(Box::new(SettlingEntrypoint {
                 inner: entrypoint,
                 governor: Arc::clone(&self.governor),
@@ -582,6 +604,11 @@ impl ExtensionEntrypoint for LaneEntrypoint {
         Ok(ExtensionBindings {
             tools: self.adapter.clone(),
             channel: self.channel.clone(),
+            // A runtime lane cannot carry a device-link handshake: the login is
+            // bound to a live connection the package owns across calls, which
+            // is exactly what a per-invocation lane does not have. A
+            // device-link extension binds through a native entrypoint.
+            device_link: None,
         })
     }
 }
@@ -605,6 +632,10 @@ impl ExtensionEntrypoint for SettlingEntrypoint {
                 }) as Arc<dyn ToolAdapter>
             }),
             channel: bindings.channel,
+            // Passed through undecorated: the settle legs this wrapper adds are
+            // resource reservations on a capability dispatch, and a device-link
+            // call is neither.
+            device_link: bindings.device_link,
         })
     }
 }
@@ -831,12 +862,13 @@ input_schema_ref = "schemas/echo.input.json"
     /// first_party loader branch, no runtime lane required.
     struct FixtureNativeFactory;
 
+    #[async_trait]
     impl NativeExtensionFactory for FixtureNativeFactory {
         fn service(&self) -> &str {
             FIXTURE_SERVICE
         }
 
-        fn load(
+        async fn load(
             &self,
             _ctx: &LoadContext,
         ) -> Result<Box<dyn crate::ExtensionEntrypoint>, BindError> {
@@ -844,6 +876,7 @@ input_schema_ref = "schemas/echo.input.json"
                 bindings: ExtensionBindings {
                     tools: Some(Arc::new(FakeToolAdapter)),
                     channel: ChannelSurfaces::default(),
+                    device_link: None,
                 },
             }))
         }
@@ -930,6 +963,7 @@ input_schema_ref = "schemas/echo.input.json"
             extension_id: id.to_string(),
             installation_id: id.to_string(),
             resolved: Arc::new(record.resolved().clone()),
+            admin_secrets: Arc::new(crate::loaders::UnavailableLoadTimeAdminSecrets),
         }
     }
 
@@ -1056,6 +1090,11 @@ input_schema_ref = "schemas/echo.input.json"
                 Duration::from_secs(30),
             ),
             channel_egress_transport: None,
+            linked_sessions: LinkedSessionStore::unavailable(),
+            linked_accounts: Arc::new(
+                crate::linked_account_resolution::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await;
 

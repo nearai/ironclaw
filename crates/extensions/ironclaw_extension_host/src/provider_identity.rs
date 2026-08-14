@@ -17,10 +17,7 @@ use std::{
 
 #[cfg(test)]
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-use ironclaw_host_api::{
-    ids::UserId,
-    user_identity::{RebornUserIdentityLookup, installation_scoped_provider_user_id},
-};
+use ironclaw_host_api::{ids::UserId, user_identity::RebornUserIdentityLookup};
 use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
@@ -44,6 +41,7 @@ pub struct ProviderIdentityActorResolver {
     /// `None` accepts every actor kind: binding keys are already
     /// installation-scoped, so an unbound kind simply resolves to nothing.
     actor_kind: Option<String>,
+    identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
     lookup: Arc<dyn RebornUserIdentityLookup>,
     resolved_user_cache: Arc<Mutex<HashMap<String, CachedProviderIdentity>>>,
     cache_ttl: Duration,
@@ -60,6 +58,7 @@ impl ProviderIdentityActorResolver {
             provider: provider.into(),
             adapter_id: adapter_id.into(),
             actor_kind: Some(actor_kind.into()),
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
             lookup,
             resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROVIDER_IDENTITY_CACHE_TTL,
@@ -79,10 +78,19 @@ impl ProviderIdentityActorResolver {
             provider: provider.into(),
             adapter_id: adapter_id.into(),
             actor_kind: None,
+            identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
             lookup,
             resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROVIDER_IDENTITY_CACHE_TTL,
         }
+    }
+
+    pub fn with_identity_keyspace(
+        mut self,
+        identity_keyspace: crate::channel_identity::ChannelIdentityKeyspace,
+    ) -> Self {
+        self.identity_keyspace = identity_keyspace;
+        self
     }
 
     fn cached_user(
@@ -136,10 +144,10 @@ impl ProviderIdentityActorResolver {
         {
             return None;
         }
-        Some(installation_scoped_provider_user_id(
-            &request.installation_id,
-            request.external_actor_ref.id(),
-        ))
+        Some(
+            self.identity_keyspace
+                .provider_user_id(&request.installation_id, request.external_actor_ref.id()),
+        )
     }
 
     async fn lookup_user(
@@ -168,6 +176,7 @@ impl std::fmt::Debug for ProviderIdentityActorResolver {
             .field("provider", &self.provider)
             .field("adapter_id", &self.adapter_id)
             .field("actor_kind", &self.actor_kind)
+            .field("identity_keyspace", &self.identity_keyspace)
             .finish_non_exhaustive()
     }
 }
@@ -185,10 +194,11 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
             return Ok(Some(ResolvedProductActorUser::new(user_id)));
         }
         let resolved = self.lookup_user(&provider_user_id).await?;
-        if let Some(user_id) = resolved.as_ref() {
+        if let Some(user_id) = resolved {
             self.cache_user(provider_user_id, user_id.clone())?;
+            return Ok(Some(ResolvedProductActorUser::new(user_id)));
         }
-        Ok(resolved.map(ResolvedProductActorUser::new))
+        Ok(None)
     }
 
     async fn resolved_product_actor_user_is_current(
@@ -212,6 +222,7 @@ mod tests {
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 
     use super::*;
+    use ironclaw_host_api::user_identity::installation_scoped_provider_user_id;
 
     fn resolver(lookup: Arc<dyn RebornUserIdentityLookup>) -> ProviderIdentityActorResolver {
         ProviderIdentityActorResolver::new("slack", "slack_v2", "slack_user", lookup)
@@ -238,6 +249,50 @@ mod tests {
         assert_eq!(
             lookup.calls(),
             vec![("slack".to_string(), "install-alpha:U123".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn device_link_resolver_ignores_a_retired_pairing_key() {
+        let installation_id = installation("install-alpha");
+        // Seeded exactly as the retired proof-code ceremony left it: an
+        // unversioned binding, nothing under `device-link-v1`.
+        let lookup = Arc::new(RecordingLookup::new([(
+            installation_scoped_provider_user_id(&installation_id, "U123"),
+            user("user:alice"),
+        )]));
+        let resolver = ProviderIdentityActorResolver::for_any_actor_kind(
+            "telegram",
+            "telegram",
+            lookup.clone(),
+        )
+        .with_identity_keyspace(
+            crate::channel_identity::ChannelIdentityKeyspace::for_strategy(Some(
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink,
+            )),
+        );
+
+        let resolved = resolver
+            .resolve_product_actor_user(request(
+                "telegram",
+                installation_id,
+                "telegram_user",
+                "U123",
+            ))
+            .await
+            .expect("resolution succeeds");
+
+        assert_eq!(
+            resolved, None,
+            "a retired proof-code binding must not admit an actor on a device-link channel"
+        );
+        assert_eq!(
+            lookup.calls(),
+            vec![(
+                "telegram".to_string(),
+                "install-alpha:device-link-v1:U123".to_string()
+            )],
+            "a device-link channel consults only the device-link namespace"
         );
     }
 

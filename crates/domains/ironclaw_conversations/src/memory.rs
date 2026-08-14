@@ -180,6 +180,21 @@ impl InMemoryConversationServices {
             {
                 return Ok(());
             }
+            // A different canonical owner is a new authority grant. Direct
+            // routes created for the previous user must not survive it: their
+            // canonical thread is still owned by that user, so reusing the
+            // binding would either deny the new owner forever or expose the
+            // old owner's thread. An epoch-only refresh for the SAME user is
+            // a relink of the same identity and deliberately preserves their
+            // conversation continuity. Shared routes remain conversation-
+            // scoped and are preserved in both cases.
+            if state
+                .pairings
+                .get(&actor_key)
+                .is_some_and(|current_user_id| current_user_id != &user_id)
+            {
+                state.revoke_direct_bindings_for_actor(&actor_key);
+            }
             state.pairings.insert(actor_key.clone(), user_id);
             match binding_epoch {
                 Some(binding_epoch) => {

@@ -19,18 +19,18 @@ use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, AssistantReply, CancellationPolicy, CapabilityCallCandidate,
     CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceProfileId,
     CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-    ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
-    LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
-    LoopContextBundle, LoopContextRequest, LoopDriverId, LoopFailureKind, LoopInputAck,
-    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
-    LoopModelRequest, LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef,
-    LoopPromptBundleRequest, LoopRequest, LoopRequestBatch, LoopRunContext, ModelProfileId,
-    ModelStreamChunk, ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
-    RedactedRunProfileProvenance, RegisterProviderToolCallRequest, ResolvedRunProfile,
-    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-    RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
+    LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
+    LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest, LoopContextBundle,
+    LoopContextRequest, LoopDriverId, LoopFailureKind, LoopInputAck, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+    LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopRequest,
+    LoopRequestBatch, LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
+    PromptMode, ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance,
+    RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
+    RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+    StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 
 use crate::{
@@ -38,11 +38,11 @@ use crate::{
     family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
-        BoundedParallelBatchPolicyStrategy, CapabilityErrorSummary, CapabilityFilter,
-        CapabilityStrategy, ContextStrategy, DefaultBudgetStrategy, DefaultCompactionStrategy,
-        GateHandlingStrategy, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary,
-        RecoveryOutcome, RecoveryStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
-        RetryAlteration, RetryScope, StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
+        CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy, ContextStrategy,
+        DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome,
+        GateSummary, InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
+        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
+        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
 
@@ -106,7 +106,6 @@ pub(super) struct MockHost {
     fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
     prompt_bundle_failure: Option<AgentLoopHostError>,
-    default_concurrency_hint: ConcurrencyHint,
     requires_ordered_batch_invocation: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
@@ -157,7 +156,6 @@ impl MockHost {
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
             fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
-            default_concurrency_hint: ConcurrencyHint::SafeForParallel,
             requires_ordered_batch_invocation: false,
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
@@ -211,10 +209,11 @@ impl MockHost {
     }
 
     pub(super) fn with_batch_outcomes(
-        self,
+        mut self,
         outcomes: Vec<ironclaw_host_api::resolution::ResolutionBatch>,
     ) -> Self {
         *self.batch_outcomes.lock().expect("lock") = outcomes.into();
+        self.requires_ordered_batch_invocation = true;
         self
     }
 
@@ -277,14 +276,6 @@ impl MockHost {
         descriptors: Vec<CapabilityDescriptorView>,
     ) -> Self {
         self.extra_capability_descriptors = descriptors;
-        self
-    }
-
-    pub(super) fn with_default_concurrency_hint(
-        mut self,
-        concurrency_hint: ConcurrencyHint,
-    ) -> Self {
-        self.default_concurrency_hint = concurrency_hint;
         self
     }
 
@@ -493,7 +484,6 @@ impl MockHost {
             safe_name: "demo".to_string(),
             safe_description: "demo capability".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: self.default_concurrency_hint,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }];
         descriptors.extend(self.extra_capability_descriptors.clone());
@@ -863,7 +853,7 @@ impl ironclaw_loop_contracts::LoopModelPort for MockHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockHost {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         self.requires_ordered_batch_invocation
     }
 
@@ -1404,8 +1394,7 @@ pub(super) fn message_ref(value: &str) -> LoopMessageRef {
 }
 
 pub(super) fn family_with_parallel_batch_execution() -> LoopFamily {
-    let planner =
-        DefaultPlanner::compose_default().with_batch(Arc::new(BoundedParallelBatchPolicyStrategy));
+    let planner = DefaultPlanner::compose_default();
     let id = LoopFamilyId::new("executor-parallel-batch-test").expect("valid test family id");
     let version =
         ComponentIdentity::from_static("executor-parallel-batch-test", ComponentDigest([11; 32]));

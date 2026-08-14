@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
 use ironclaw_host_api::ids::{
     AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
 };
@@ -53,6 +54,18 @@ pub struct CredentialAccount {
     pub scopes: Vec<ProviderScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_identity: Option<OAuthProviderIdentity>,
+    /// How many times a linked-device session has been established against
+    /// this account. `0` for every account that is not a linked device.
+    ///
+    /// **Part of the identity of a live session, not decoration.** A user id
+    /// never changes across unlink/relink, so anything caching a session
+    /// (a pooled vendor client, an opened custody handle) has to key on this
+    /// too — bumping it is what invalidates the old credential's readers.
+    ///
+    /// `#[serde(default)]` because this is a persisted record: rows written
+    /// before linked devices existed carry no such key and must rehydrate.
+    #[serde(default)]
+    pub link_revision: u64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -79,6 +92,7 @@ impl fmt::Debug for CredentialAccount {
             )
             .field("scopes", &self.scopes)
             .field("provider_identity", &self.provider_identity)
+            .field("link_revision", &self.link_revision)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -112,6 +126,36 @@ impl CredentialAccount {
                 .is_some_and(|requester| self.granted_extensions.contains(requester)),
             CredentialOwnership::System => false,
         }
+    }
+
+    /// Whether this account carries a linked-device session.
+    ///
+    /// `link_revision` is `0` for every account that has never been linked, and
+    /// [`CredentialAccountService::bump_link_revision`] is the only writer, so a
+    /// non-zero revision is the durable record of "a live vendor device
+    /// authorization hangs off this credential".
+    pub fn is_linked_device(&self) -> bool {
+        self.link_revision > 0
+    }
+
+    /// Whether this account carries the ownership a linked device requires:
+    /// [`CredentialOwnership::ExtensionOwned`], a named owner extension, and no
+    /// grants.
+    ///
+    /// **Not a style preference — the reusable default is a reachability bug
+    /// here.** [`Self::is_authorized_for_requester`] answers `true` for *any*
+    /// requester on [`CredentialOwnership::UserReusable`], so a linked device
+    /// left at that default would hand every installed extension a working
+    /// handle onto the user's personal vendor session; and ownership-aware
+    /// cleanup deliberately does not delete reusable credentials, so the same
+    /// account (and the live device behind it) would survive uninstall. Both
+    /// consequences follow from the ownership fields alone, which is why the
+    /// pin is checked at the record rather than trusted at each mint site
+    /// (PROPOSAL §4.5).
+    pub fn linked_device_ownership_is_pinned(&self) -> bool {
+        self.ownership == CredentialOwnership::ExtensionOwned
+            && self.owner_extension.is_some()
+            && self.granted_extensions.is_empty()
     }
 }
 
@@ -474,6 +518,46 @@ pub struct NewCredentialAccount {
     pub scopes: Vec<ProviderScope>,
 }
 
+impl NewCredentialAccount {
+    /// The one sanctioned shape for the credential account a device link mints.
+    ///
+    /// **Every ownership field is pinned here rather than chosen at the call
+    /// site**, because the fields a mint site would otherwise fill in by hand
+    /// are exactly the ones whose defaults are dangerous: reusable ownership
+    /// makes the account reachable by every installed extension and survives
+    /// uninstall along with the live vendor device
+    /// ([`CredentialAccount::linked_device_ownership_is_pinned`] states the
+    /// mechanism). So `ownership` is [`CredentialOwnership::ExtensionOwned`],
+    /// `owner_extension` is the extension that ran the link, and
+    /// `granted_extensions` is empty — sharing a linked device is not a thing
+    /// this constructor can express.
+    ///
+    /// `scopes` is empty and `refresh_secret` is `None` by construction too: a
+    /// linked device holds the account's own authority, so there is no scope to
+    /// intersect and no refresh token to exchange. The session blob rotates
+    /// through custody compare-and-swap, not through a refresh.
+    pub fn for_linked_device(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        label: CredentialAccountLabel,
+        owner_extension: ExtensionId,
+        access_secret: SecretHandle,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            label,
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(owner_extension),
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountUpdate {
     pub account_id: CredentialAccountId,
@@ -484,6 +568,59 @@ pub struct CredentialAccountUpdate {
 pub enum CredentialAccountMutation {
     Create(NewCredentialAccount),
     Update(CredentialAccountUpdate),
+}
+
+/// Addresses the opaque session material of exactly one linked account, at
+/// exactly one link revision.
+///
+/// The revision is part of the address, not a hint: a request presenting a
+/// stale one is refused ([`AuthProductError::LinkRevisionStale`]) rather than
+/// served, so a caller holding a handle from before an unlink cannot read or
+/// clobber the credential that replaced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaqueMaterialRequest {
+    pub scope: AuthProductScope,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+    pub link_revision: u64,
+}
+
+/// A loaded blob and the token to present on the next write.
+///
+/// Not `PartialEq`, not `Clone`-compared, and never `Debug`-printed in full:
+/// [`SessionBytes`] redacts to a length. The bytes are a full account
+/// credential in a vendor-private format that **this crate deliberately
+/// cannot read** — see [`CredentialAccountService::store_opaque_material`].
+#[derive(Debug)]
+pub struct OpaqueMaterialSnapshot {
+    pub material: SessionBytes,
+    pub version: LinkedSessionVersion,
+}
+
+/// A compare-and-swap write of opaque session material.
+#[derive(Debug)]
+pub struct OpaqueMaterialWrite {
+    pub target: OpaqueMaterialRequest,
+    /// The version the caller loaded. [`LinkedSessionVersion::absent`] is the
+    /// only value a genuine first write may present.
+    pub expected: LinkedSessionVersion,
+    pub material: SessionBytes,
+}
+
+/// What a compare-and-swap write did.
+#[derive(Debug)]
+pub enum OpaqueMaterialWriteOutcome {
+    /// The write applied; `version` is the token for the next one.
+    Stored { version: LinkedSessionVersion },
+    /// The write lost: someone else stored newer material.
+    ///
+    /// **This is the whole point of the method.** `SecretStorePort::put` is
+    /// last-writer-wins, and a rotating vendor auth key clobbered by a
+    /// concurrent write leaves a session the vendor rejects — a silently dead
+    /// link. Returning the current version lets the owner of the format
+    /// reload and merge; retrying the write unconditionally is exactly the
+    /// bug this exists to prevent.
+    Conflict { current: LinkedSessionVersion },
 }
 
 #[async_trait]
@@ -529,6 +666,230 @@ pub trait CredentialAccountService: Send + Sync {
         &self,
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError>;
+
+    /// Load the opaque linked-device session material bound to an account.
+    ///
+    /// `Ok(None)` means "nothing stored yet"; a stale `link_revision` is an
+    /// error, not an absence, because the two demand different recoveries.
+    ///
+    /// Defaulted and fail-closed: a credential service with no linked-device
+    /// custody keeps compiling and refuses the call by name.
+    async fn load_opaque_material(
+        &self,
+        _request: OpaqueMaterialRequest,
+    ) -> Result<Option<OpaqueMaterialSnapshot>, AuthProductError> {
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "load_opaque_material",
+        })
+    }
+
+    /// Compare-and-swap the opaque linked-device session material.
+    ///
+    /// **This crate owns conflict *detection* and nothing else.** The blob is
+    /// opaque bytes here by design: merging two versions of a vendor session
+    /// (union the peer cache, take the newest cursor, never replace a live
+    /// auth key) requires reading a vendor-private structure, and the crate
+    /// that may read it is the extension package — not this one, which may not
+    /// name a vendor at all. So a lost CAS returns
+    /// [`OpaqueMaterialWriteOutcome::Conflict`] with the current version and
+    /// stops; the semantic merge, and its tests, live package-side.
+    ///
+    /// Implementations must not last-writer-wins, and must not inspect,
+    /// parse, log, or embed `material` in an error.
+    async fn store_opaque_material(
+        &self,
+        _write: OpaqueMaterialWrite,
+    ) -> Result<OpaqueMaterialWriteOutcome, AuthProductError> {
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "store_opaque_material",
+        })
+    }
+
+    /// Advance an account's `link_revision`, returning the updated record.
+    ///
+    /// Called once per (re)link, after custody is durable. The bump is what
+    /// invalidates every handle and cached client bound to the previous
+    /// revision, so it must be a single durable write, never a read-then-set
+    /// from a caller-supplied value.
+    ///
+    /// **This is where the ownership pin is enforced.** The bump is the
+    /// operation that makes an account a linked device, so an implementation
+    /// must refuse it on an account that is not
+    /// [`CredentialAccount::linked_device_ownership_is_pinned`] — otherwise a
+    /// reusable account picks up a live vendor device authorization that every
+    /// installed extension may use and that uninstall will not delete
+    /// (PROPOSAL §4.5). Checking here rather than only at the mint site is
+    /// deliberate: the mint site is one caller, and this is the invariant's
+    /// only durable writer.
+    async fn bump_link_revision(
+        &self,
+        _scope: &AuthProductScope,
+        _account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "bump_link_revision",
+        })
+    }
+
+    /// Complete one device link: mint (or reuse) the linked-device credential
+    /// account, advance its `link_revision`, and store the session material —
+    /// in that order, so a completion is never reported before custody is
+    /// durable (PROPOSAL §4.3: store → mint → report; the caller reports).
+    ///
+    /// The one place the completion policy lives, deliberately a provided
+    /// method built from the trait's own operations so every implementation
+    /// behaves identically:
+    ///
+    /// - **Reuse before create.** A non-revoked linked-device account for the
+    ///   same `(scope, provider, owner_extension)` is re-linked rather than
+    ///   duplicated — its revision bumps, which is what evicts every live
+    ///   handle bound to the old one. A **revoked** account is never reused:
+    ///   its status machine is terminal, so a fresh account is minted.
+    /// - **Ownership is pinned at the constructor** —
+    ///   [`NewCredentialAccount::for_linked_device`] — and enforced again by
+    ///   [`CredentialAccountService::bump_link_revision`].
+    /// - **The blob write is load-then-CAS, never absent-only.** A crashed
+    ///   prior link may have left an orphan blob; relinking overwrites it.
+    ///   When the orphan cannot even be loaded, the write still learns the
+    ///   current version from the conflict outcome and retries exactly once —
+    ///   so a corrupt orphan cannot brick relinking, and a genuine concurrent
+    ///   writer still wins.
+    async fn complete_linked_device_link(
+        &self,
+        request: LinkedDeviceLinkCompletion,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let reusable = self
+            .list_accounts(CredentialAccountListRequest {
+                scope: request.scope.clone(),
+                provider: request.provider.clone(),
+                requester_extension: Some(request.owner_extension.clone()),
+                cursor: None,
+                limit: CredentialAccountListRequest::MAX_LIMIT,
+            })
+            .await?
+            .accounts
+            .into_iter()
+            .find(|account| {
+                account.ownership == CredentialOwnership::ExtensionOwned
+                    && account.owner_extension.as_ref() == Some(&request.owner_extension)
+                    && account.granted_extensions.is_empty()
+                    && account.status != CredentialAccountStatus::Revoked
+            });
+        let account = match reusable {
+            Some(projection) => self
+                .get_account(CredentialAccountLookupRequest {
+                    scope: request.scope.clone(),
+                    account_id: projection.id,
+                    requester_extension: Some(request.owner_extension.clone()),
+                })
+                .await?
+                .ok_or(AuthProductError::CredentialMissing)?,
+            None => {
+                self.create_account(NewCredentialAccount::for_linked_device(
+                    request.scope.clone(),
+                    request.provider.clone(),
+                    request.label.clone(),
+                    request.owner_extension.clone(),
+                    linked_session_secret_handle()?,
+                ))
+                .await?
+            }
+        };
+        let account = self.bump_link_revision(&request.scope, account.id).await?;
+        let account = if account.status == CredentialAccountStatus::Configured {
+            account
+        } else {
+            self.update_status(
+                &request.scope,
+                account.id,
+                CredentialAccountStatus::Configured,
+            )
+            .await?
+        };
+
+        let target = OpaqueMaterialRequest {
+            scope: request.scope.clone(),
+            account_id: account.id,
+            requester_extension: Some(request.owner_extension.clone()),
+            link_revision: account.link_revision,
+        };
+        // Load-then-CAS: learn the stored version (an orphan blob from a
+        // crashed link is legal here), then overwrite it.
+        let expected = match self.load_opaque_material(target.clone()).await {
+            Ok(Some(snapshot)) => snapshot.version,
+            Ok(None) => LinkedSessionVersion::absent(),
+            // silent-ok: best-effort version probe before the relink write.
+            // A failed load gets the same answer as a missing blob because
+            // the compare-and-swap below is the authority either way: if a
+            // blob exists after all, this `Absent` expectation loses with the
+            // current version and the conflict arm retries against it — so a
+            // transient read error can cost one extra round-trip, never a
+            // clobbered or corrupted custody record.
+            Err(_) => LinkedSessionVersion::absent(),
+        };
+        let material = SessionBytes::new(request.material.expose().to_vec())
+            .map_err(|_| AuthProductError::invalid_request("session material violates bounds"))?;
+        let outcome = self
+            .store_opaque_material(OpaqueMaterialWrite {
+                target: target.clone(),
+                expected,
+                material,
+            })
+            .await?;
+        match outcome {
+            OpaqueMaterialWriteOutcome::Stored { .. } => Ok(account),
+            OpaqueMaterialWriteOutcome::Conflict { current } => {
+                // One retry against the version the conflict reported — the
+                // corrupt-orphan case. A second conflict is a genuine
+                // concurrent writer and the caller must not blind-write over
+                // it.
+                let material =
+                    SessionBytes::new(request.material.expose().to_vec()).map_err(|_| {
+                        AuthProductError::invalid_request("session material violates bounds")
+                    })?;
+                match self
+                    .store_opaque_material(OpaqueMaterialWrite {
+                        target,
+                        expected: current,
+                        material,
+                    })
+                    .await?
+                {
+                    OpaqueMaterialWriteOutcome::Stored { .. } => Ok(account),
+                    OpaqueMaterialWriteOutcome::Conflict { .. } => {
+                        Err(AuthProductError::BackendConflict)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Everything a completed device link resolves to before the account exists.
+///
+/// `material` is the session credential the vendor handshake produced —
+/// opaque bytes this crate stores and never reads.
+#[derive(Debug)]
+pub struct LinkedDeviceLinkCompletion {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub owner_extension: ExtensionId,
+    pub label: CredentialAccountLabel,
+    pub material: SessionBytes,
+}
+
+/// Mint the secret handle one linked-device account's session blob lives
+/// under. Fresh per account — the association travels on the account record
+/// (`access_secret`), which is also what cleanup purges by, so the name only
+/// has to be unique and shaped like a handle.
+fn linked_session_secret_handle() -> Result<SecretHandle, AuthProductError> {
+    SecretHandle::new(format!(
+        "product-auth-linked-session-{}",
+        uuid::Uuid::new_v4()
+    ))
+    .map_err(|error| {
+        AuthProductError::invalid_request(format!("linked-session handle invalid: {error}"))
+    })
 }
 
 /// Stable credential-account owner fields used by read models that need to
@@ -1003,6 +1364,38 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
         self.release_refresh_lock(initial_account.id);
         result
     }
+
+    // Linked-device custody is not a provider conversation: there is no token
+    // to exchange and no refresh to serialize, so this decorator adds nothing
+    // and must not silently swallow the capability of the service it wraps.
+    async fn load_opaque_material(
+        &self,
+        request: OpaqueMaterialRequest,
+    ) -> Result<Option<OpaqueMaterialSnapshot>, AuthProductError> {
+        self.accounts.load_opaque_material(request).await
+    }
+
+    async fn store_opaque_material(
+        &self,
+        write: OpaqueMaterialWrite,
+    ) -> Result<OpaqueMaterialWriteOutcome, AuthProductError> {
+        self.accounts.store_opaque_material(write).await
+    }
+
+    async fn bump_link_revision(
+        &self,
+        scope: &AuthProductScope,
+        account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.accounts.bump_link_revision(scope, account_id).await
+    }
+
+    async fn complete_linked_device_link(
+        &self,
+        request: LinkedDeviceLinkCompletion,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.accounts.complete_linked_device_link(request).await
+    }
 }
 
 fn account_is_authorized_for_requester(
@@ -1108,14 +1501,144 @@ mod tests {
             refresh_secret: None,
             scopes: vec![ProviderScope::new("read").unwrap()],
             provider_identity: None,
+            link_revision: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
 
+    /// `link_revision` is additive on a **persisted** record: a row written
+    /// before linked devices existed carries no such key and must rehydrate to
+    /// `0` rather than failing the store open.
+    #[test]
+    fn an_account_row_written_without_link_revision_rehydrates_at_zero() {
+        let account = make_account(AuthProductScope::new(
+            owner_resource(InvocationId::new()),
+            AuthSurface::Web,
+        ));
+        let mut wire = serde_json::to_value(&account).expect("serialize");
+        let object = wire.as_object_mut().expect("account is a JSON object");
+        assert!(
+            object.remove("link_revision").is_some(),
+            "the field must be written; only its ABSENCE from legacy rows is defaulted"
+        );
+
+        let decoded: CredentialAccount =
+            serde_json::from_value(wire).expect("legacy row rehydrates");
+        assert_eq!(decoded.link_revision, 0);
+    }
+
     /// Build a base ResourceScope for a known owner with a given invocation_id.
     fn owner_resource(invocation_id: InvocationId) -> ResourceScope {
         ResourceScope::local_default(UserId::new("alice").unwrap(), invocation_id).unwrap()
+    }
+
+    fn device_link_mint() -> NewCredentialAccount {
+        NewCredentialAccount::for_linked_device(
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web),
+            AuthProviderId::new("vendor-a").unwrap(),
+            CredentialAccountLabel::new("vendor-a-linked").unwrap(),
+            ExtensionId::new("ext-a").unwrap(),
+            ironclaw_host_api::ids::SecretHandle::new("vendor_a_session").unwrap(),
+        )
+    }
+
+    /// PROPOSAL §4.5: the mint pins ownership rather than inheriting the
+    /// reusable default.
+    #[test]
+    fn a_device_link_mint_is_extension_owned_with_no_grants() {
+        let mint = device_link_mint();
+
+        assert_eq!(mint.ownership, CredentialOwnership::ExtensionOwned);
+        assert_eq!(
+            mint.owner_extension,
+            Some(ExtensionId::new("ext-a").unwrap()),
+            "the linking extension owns the account"
+        );
+        assert!(
+            mint.granted_extensions.is_empty(),
+            "a linked device is never shared with another extension"
+        );
+        // A linked device holds the account's own authority: nothing to refresh
+        // and no scope to intersect.
+        assert!(mint.refresh_secret.is_none());
+        assert!(mint.scopes.is_empty());
+        assert_eq!(mint.status, CredentialAccountStatus::Configured);
+    }
+
+    /// The hazard the pin closes: `UserReusable` answers `true` for ANY
+    /// requester, so an unpinned linked device would be reachable by every
+    /// installed extension.
+    #[test]
+    fn a_different_extension_is_not_authorized_for_a_device_link_account() {
+        let mint = device_link_mint();
+        let account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: mint.scope.clone(),
+            provider: mint.provider.clone(),
+            label: mint.label.clone(),
+            status: mint.status,
+            ownership: mint.ownership,
+            owner_extension: mint.owner_extension.clone(),
+            granted_extensions: mint.granted_extensions.clone(),
+            access_secret: mint.access_secret.clone(),
+            refresh_secret: None,
+            scopes: Vec::new(),
+            provider_identity: None,
+            link_revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(account.is_authorized_for_requester(Some(&ExtensionId::new("ext-a").unwrap())));
+        assert!(
+            !account.is_authorized_for_requester(Some(&ExtensionId::new("ext-b").unwrap())),
+            "another installed extension must not reach the linked account"
+        );
+        assert!(
+            !account.is_authorized_for_requester(None),
+            "an unattributed requester must not reach the linked account either"
+        );
+        assert!(account.is_linked_device());
+        assert!(account.linked_device_ownership_is_pinned());
+    }
+
+    /// The three shapes the pin refuses, each for its own reason.
+    #[test]
+    fn the_linked_device_ownership_pin_refuses_reusable_ownerless_and_granted_accounts() {
+        let mut reusable = make_account(AuthProductScope::new(
+            owner_resource(InvocationId::new()),
+            AuthSurface::Web,
+        ));
+        reusable.ownership = CredentialOwnership::UserReusable;
+        assert!(!reusable.linked_device_ownership_is_pinned());
+
+        let mut ownerless = reusable.clone();
+        ownerless.ownership = CredentialOwnership::ExtensionOwned;
+        ownerless.owner_extension = None;
+        assert!(!ownerless.linked_device_ownership_is_pinned());
+
+        let mut granted = ownerless.clone();
+        granted.owner_extension = Some(ExtensionId::new("ext-a").unwrap());
+        granted.granted_extensions = vec![ExtensionId::new("ext-b").unwrap()];
+        assert!(!granted.linked_device_ownership_is_pinned());
+
+        granted.granted_extensions.clear();
+        assert!(granted.linked_device_ownership_is_pinned());
+    }
+
+    /// `link_revision == 0` is "never linked"; only a bump makes an account a
+    /// linked device.
+    #[test]
+    fn only_a_bumped_link_revision_marks_an_account_as_a_linked_device() {
+        let mut account = make_account(AuthProductScope::new(
+            owner_resource(InvocationId::new()),
+            AuthSurface::Web,
+        ));
+
+        assert!(!account.is_linked_device());
+        account.link_revision = 1;
+        assert!(account.is_linked_device());
     }
 
     // Case 1: all axes match, including surface and session. invocation_id differs

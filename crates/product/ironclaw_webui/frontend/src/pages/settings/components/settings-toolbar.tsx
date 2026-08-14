@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SearchField } from "../../../design-system/search-field";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";
@@ -123,31 +124,15 @@ export function SettingsToolbar({
             </Button>
           )}
 
-          <label className="relative min-w-0 flex-1">
-            <span className="sr-only">{t("settings.searchPlaceholder")}</span>
-            <Icon
-              name="search"
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--v2-text-faint)]"
-            />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(event) => onSearchChange(event.currentTarget.value)}
-              placeholder={t("settings.searchPlaceholder")}
-              className="h-9 w-full rounded-md border border-white/12 bg-white/[0.04] pl-9 pr-9 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
-            />
-            {searchQuery &&
-            (
-              <button
-                type="button"
-                onClick={onSearchClear}
-                aria-label={t("settings.clearSearch")}
-                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)]"
-              >
-                <Icon name="close" className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </label>
+          <SearchField
+            value={searchQuery}
+            onChange={onSearchChange}
+            onClear={onSearchClear}
+            placeholder={t("settings.searchPlaceholder")}
+            aria-label={t("settings.searchPlaceholder")}
+            clearLabel={t("settings.clearSearch")}
+            className="flex-1"
+          />
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2">

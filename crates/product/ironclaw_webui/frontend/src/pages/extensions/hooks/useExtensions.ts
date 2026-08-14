@@ -122,6 +122,11 @@ export function useExtensions() {
     // leaving both data and error empty and reproducing the misleading state.
     networkMode: "always",
     refetchOnMount: "always",
+    // Lifecycle and account state can change while the server is restarting or
+    // while this tab is in the background. The app-wide default disables focus
+    // refresh, which otherwise leaves a revoked/connected card stale until a
+    // hard reload even after the backend is healthy again.
+    refetchOnWindowFocus: true,
   });
 
   const registryQuery = useQuery({
@@ -129,6 +134,7 @@ export function useExtensions() {
     queryFn: fetchExtensionRegistry,
     networkMode: "always",
     refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const refetch = React.useCallback(
