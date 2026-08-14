@@ -45,6 +45,10 @@ fn execution_contract(goal: impl Into<String>) -> Value {
 #[test]
 fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_target() {
     assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("ask the user before calling this tool"),
+        "trigger_create must clarify ambiguous no-result delivery instead of guessing: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
         "trigger_create description must say the goal is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
     );

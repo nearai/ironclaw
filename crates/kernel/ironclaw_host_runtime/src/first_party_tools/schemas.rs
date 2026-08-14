@@ -977,7 +977,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "result_delivery": {
                                     "type": "string",
                                     "enum": ["deliver", "suppress_when_nothing_to_report"],
-                                    "description": "Defaults to deliver. Choose suppress_when_nothing_to_report only when a no-result run should produce no ordinary result delivery; the trusted settlement boundary recognizes only the exact normalized [SILENT] response."
+                                    "description": "Defaults to deliver. Choose suppress_when_nothing_to_report only when the user wants no ordinary delivery for a no-result run. If the user's intent is unclear, ask the user before calling trigger_create rather than guess. The trusted settlement boundary recognizes only the exact normalized [SILENT] response."
                                 }
                             },
                             "additionalProperties": false
@@ -1227,6 +1227,13 @@ mod tests {
         assert_eq!(
             schema["required"],
             serde_json::json!(["name", "execution_contract", "schedule"])
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+                ["result_delivery"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("ask the user before calling")),
+            "ambiguous no-result delivery must be clarified before trigger creation"
         );
     }
 
