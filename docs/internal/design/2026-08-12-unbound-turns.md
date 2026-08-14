@@ -406,9 +406,10 @@ underneath: a conversation's context is a *reference* the host keeps
 materializing (steering, compaction, rebuild-on-resume — I1, I2); a
 unbound turn's content is supplied once and nothing mutates it. Beneath
 both accept doors there is one kind of thing — a thread — and one runtime.
-(Continuation-style unbound callers need nothing new: accept more content
-onto the same unbound thread and submit again — structurally identical to
-a conversation's next turn, minus the binding.)
+(Continuation-style unbound callers accept a NEW prepared context — a
+fresh idempotency key mints a fresh thread carrying the full updated
+context; in-place appending to an existing unbound thread is a follow-up,
+not shipped behavior)
 
 **Why can't conversations just materialize a snapshot too?** The obvious
 simpler design — the conversation workflow assembles `system_prompt` +

@@ -146,7 +146,7 @@ mod tests {
                     crate::state::ReplyAdmissionRejectionReason::StructuredOutputRequired
                 );
                 assert!(
-                    reply_admission_control_text(&rejection).contains("unbound_result"),
+                    reply_admission_control_text(&rejection).contains("builtin__structured_result"),
                     "the repair hint must direct the model to the result tool"
                 );
             }
