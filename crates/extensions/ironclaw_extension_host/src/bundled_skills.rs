@@ -301,8 +301,8 @@ pub async fn ensure_bundled_reborn_skills_installed_in(
 
 pub fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, RebornBuildError> {
     // Which bundled skills ship a `scripts/` directory, read from the embedded bundles rather than
-    // assumed. `portfolio` ships four Python scripts today, and reporting `has_scripts: false` for it
-    // would tell the Skills page it is a prose-only skill.
+    // assumed. Reporting `has_scripts: false` for any such bundle would tell the Skills page it is
+    // prose-only.
     let skills_with_scripts = embedded_reborn_skill_bundles()?
         .into_iter()
         .filter(|bundle| {
@@ -673,6 +673,54 @@ fn invalid_config(reason: impl std::fmt::Display) -> RebornBuildError {
 mod tests {
     use super::*;
 
+    const ARCHIVED_RUNTIME_SKILLS: &[&str] = &[
+        "ceo-setup",
+        "code-review",
+        "commitment-setup",
+        "content-creator-setup",
+        "developer-setup",
+        "github",
+        "github-workflow",
+        "linear",
+        "llm-council",
+        "local-test",
+        "new-project",
+        "parallel-pr-review",
+        "plan-mode",
+        "portfolio",
+        "project-setup",
+        "trader-setup",
+        "web-ui-test",
+    ];
+
+    #[test]
+    fn archived_runtime_skills_are_preserved_but_not_bundled() {
+        let bundled_names = embedded_reborn_skill_bundles()
+            .expect("parse embedded skills")
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect::<HashSet<_>>();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|path| path.join("Cargo.lock").is_file() && path.join("skills").is_dir())
+            .expect("repository root");
+
+        for name in ARCHIVED_RUNTIME_SKILLS {
+            assert!(
+                !bundled_names.contains(*name),
+                "archived runtime skill {name} must not be model-triggerable"
+            );
+            assert!(
+                repo_root
+                    .join("docs/internal/archived-skills")
+                    .join(name)
+                    .join("SKILL.md")
+                    .is_file(),
+                "archived runtime skill {name} must remain available for parity restoration"
+            );
+        }
+    }
+
     #[test]
     fn legacy_skill_backfill_errors_include_operation_and_path() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -809,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundled_reborn_skills_include_current_repo_bundles_and_assets() {
+    async fn bundled_reborn_skills_include_current_repo_bundles() {
         let dir = tempfile::tempdir().expect("tempdir");
         let standalone_root = dir.path().join("standalone");
 
@@ -819,12 +867,12 @@ mod tests {
 
         assert!(
             standalone_root
-                .join("system/skills/code-review/SKILL.md")
+                .join("system/skills/coding/SKILL.md")
                 .is_file()
         );
         assert!(
             standalone_root
-                .join("system/skills/portfolio/scripts/backtest_strategy.py")
+                .join("system/skills/routine-advisor/SKILL.md")
                 .is_file()
         );
     }
@@ -833,7 +881,7 @@ mod tests {
     async fn bundled_reborn_skills_do_not_overwrite_unmanaged_system_skills() {
         let dir = tempfile::tempdir().expect("tempdir");
         let standalone_root = dir.path().join("standalone");
-        let skill_dir = standalone_root.join("system/skills/code-review");
+        let skill_dir = standalone_root.join("system/skills/coding");
         fs::create_dir_all(&skill_dir).expect("mkdir");
         fs::write(skill_dir.join("SKILL.md"), "operator-owned").expect("write");
 
@@ -851,7 +899,7 @@ mod tests {
     async fn bundled_reborn_skills_skip_unchanged_managed_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let standalone_root = dir.path().join("standalone");
-        let skill_md = standalone_root.join("system/skills/code-review/SKILL.md");
+        let skill_md = standalone_root.join("system/skills/coding/SKILL.md");
 
         ensure_bundled_reborn_skills_installed(&standalone_root)
             .await
@@ -878,7 +926,7 @@ mod tests {
     async fn bundled_reborn_skills_replace_changed_managed_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let standalone_root = dir.path().join("standalone");
-        let skill_dir = standalone_root.join("system/skills/code-review");
+        let skill_dir = standalone_root.join("system/skills/coding");
         let skill_md = skill_dir.join("SKILL.md");
 
         ensure_bundled_reborn_skills_installed(&standalone_root)
