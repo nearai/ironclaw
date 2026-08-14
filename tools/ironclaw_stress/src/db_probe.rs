@@ -68,6 +68,10 @@ pub(crate) struct DbProbeSnapshot {
     pub(crate) libsql_wal_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) libsql_shm_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) libsql_table_writes: Vec<LibSqlTableWrites>,
+    #[serde(default)]
+    pub(crate) libsql_table_writes_total: LibSqlWriteCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) postgres_database_size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +92,29 @@ pub(crate) struct DbProbeSnapshot {
     pub(crate) postgres_statement_calls_total: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LibSqlWriteCounts {
+    pub(crate) inserts: u64,
+    pub(crate) updates: u64,
+    pub(crate) deletes: u64,
+}
+
+impl LibSqlWriteCounts {
+    pub(crate) fn total(&self) -> u64 {
+        self.inserts
+            .saturating_add(self.updates)
+            .saturating_add(self.deletes)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LibSqlTableWrites {
+    pub(crate) table: String,
+    pub(crate) inserts: u64,
+    pub(crate) updates: u64,
+    pub(crate) deletes: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +162,10 @@ pub(crate) struct DbProbeDelta {
     pub(crate) libsql_wal_bytes: Option<i128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) libsql_shm_bytes: Option<i128>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) libsql_table_writes: Vec<LibSqlTableWriteDelta>,
+    #[serde(default)]
+    pub(crate) libsql_table_writes_total: LibSqlWriteDelta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) postgres_database_size_bytes: Option<i128>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,6 +178,27 @@ pub(crate) struct DbProbeDelta {
     pub(crate) postgres_statement_calls_by_table: Vec<PostgresTableStatementCallDelta>,
     #[serde(default)]
     pub(crate) postgres_statement_calls_total: i128,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LibSqlWriteDelta {
+    pub(crate) inserts: i128,
+    pub(crate) updates: i128,
+    pub(crate) deletes: i128,
+}
+
+impl LibSqlWriteDelta {
+    pub(crate) fn total(&self) -> i128 {
+        self.inserts + self.updates + self.deletes
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LibSqlTableWriteDelta {
+    pub(crate) table: String,
+    pub(crate) inserts: i128,
+    pub(crate) updates: i128,
+    pub(crate) deletes: i128,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,29 +244,68 @@ pub(crate) async fn capture(args: &Args) -> DbProbeSnapshot {
 }
 
 pub(crate) async fn begin_measurement(args: &Args) -> Result<DbProbeSnapshot, String> {
-    let url = crate::resolve_postgres_url(args)?;
-    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-        .await
-        .map_err(|error| sanitize_postgres_error(&url, error))?;
-    let connection_handle = tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("[ironclaw-stress] postgres probe connection error: {error}");
+    match args.backend {
+        Backend::Libsql => {
+            let path = args
+                .libsql_path
+                .clone()
+                .unwrap_or_else(crate::default_libsql_path);
+            install_libsql_write_counters(&path, args.db_write_reset_stats)
+                .await
+                .map_err(|error| format!("libsql measurement setup failed: {error}"))?;
+            capture_measurement(args).await
         }
-    });
-    ensure_pg_stat_statements(&client, &url).await?;
-    if args.db_write_reset_stats {
-        reset_measurement_stats(&client, &url).await?;
+        Backend::Postgres => {
+            let url = crate::resolve_postgres_url(args)?;
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .map_err(|error| sanitize_postgres_error(&url, error))?;
+            let connection_handle = tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    eprintln!("[ironclaw-stress] postgres probe connection error: {error}");
+                }
+            });
+            ensure_pg_stat_statements(&client, &url).await?;
+            if args.db_write_reset_stats {
+                reset_measurement_stats(&client, &url).await?;
+            }
+            drop(client);
+            let _ = connection_handle.await;
+            capture_measurement(args).await
+        }
     }
-    drop(client);
-    let _ = connection_handle.await;
-    capture_measurement(args).await
 }
 
 pub(crate) async fn capture_measurement(args: &Args) -> Result<DbProbeSnapshot, String> {
-    let url = crate::resolve_postgres_url(args)?;
-    try_capture_postgres(&url, true)
+    match args.backend {
+        Backend::Libsql => {
+            let path = args
+                .libsql_path
+                .clone()
+                .unwrap_or_else(crate::default_libsql_path);
+            try_capture_libsql(path)
+                .await
+                .map_err(|error| format!("libsql probe failed: {error}"))
+        }
+        Backend::Postgres => {
+            let url = crate::resolve_postgres_url(args)?;
+            try_capture_postgres(&url, true)
+                .await
+                .map_err(|error| sanitize_postgres_error(&url, error))
+        }
+    }
+}
+pub(crate) async fn finish_measurement(args: &Args) -> Result<(), String> {
+    if !matches!(args.backend, Backend::Libsql) {
+        return Ok(());
+    }
+    let path = args
+        .libsql_path
+        .clone()
+        .unwrap_or_else(crate::default_libsql_path);
+    remove_libsql_write_counters(&path)
         .await
-        .map_err(|error| sanitize_postgres_error(&url, error))
+        .map_err(|error| format!("libsql measurement cleanup failed: {error}"))
 }
 
 pub(crate) fn summarize(before: DbProbeSnapshot, after: DbProbeSnapshot) -> DbProbeSummary {
@@ -268,13 +359,142 @@ async fn capture_libsql(args: &Args) -> DbProbeSnapshot {
     }
 }
 
-async fn try_capture_libsql(path: PathBuf) -> Result<DbProbeSnapshot, std::io::Error> {
+pub(crate) async fn try_capture_libsql(
+    path: PathBuf,
+) -> Result<DbProbeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let file_bytes = file_size(&path).await?;
+    let wal_bytes = file_size(&sidecar_path(&path, "-wal")).await?;
+    let shm_bytes = file_size(&sidecar_path(&path, "-shm")).await?;
+    let db = libsql::Builder::new_local(&path).build().await?;
+    let connection = db.connect()?;
+    let mut counter_table = connection
+        .query(
+            "SELECT 1 FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'ironclaw_stress_write_counters'",
+            (),
+        )
+        .await?;
+    if counter_table.next().await?.is_none() {
+        return Ok(DbProbeSnapshot {
+            libsql_file_bytes: Some(file_bytes),
+            libsql_wal_bytes: Some(wal_bytes),
+            libsql_shm_bytes: Some(shm_bytes),
+            ..DbProbeSnapshot::default()
+        });
+    }
+    let mut rows = connection
+        .query(
+            "SELECT table_name, operation, row_count \
+             FROM ironclaw_stress_write_counters \
+             ORDER BY table_name, operation",
+            (),
+        )
+        .await?;
+    let mut table_writes = MEASUREMENT_TABLES
+        .iter()
+        .map(|table| {
+            (
+                (*table).to_string(),
+                LibSqlTableWrites {
+                    table: (*table).to_string(),
+                    ..LibSqlTableWrites::default()
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    while let Some(row) = rows.next().await? {
+        let table: String = row.get(0)?;
+        let operation: String = row.get(1)?;
+        let count: i64 = row.get(2)?;
+        let count = i64_to_u64(count).unwrap_or(0);
+        let Some(table_writes) = table_writes.get_mut(&table) else {
+            continue;
+        };
+        match operation.as_str() {
+            "insert" => table_writes.inserts = count,
+            "update" => table_writes.updates = count,
+            "delete" => table_writes.deletes = count,
+            _ => {}
+        }
+    }
     Ok(DbProbeSnapshot {
-        libsql_file_bytes: Some(file_size(&path).await?),
-        libsql_wal_bytes: Some(file_size(&sidecar_path(&path, "-wal")).await?),
-        libsql_shm_bytes: Some(file_size(&sidecar_path(&path, "-shm")).await?),
+        libsql_file_bytes: Some(file_bytes),
+        libsql_wal_bytes: Some(wal_bytes),
+        libsql_shm_bytes: Some(shm_bytes),
+        libsql_table_writes: table_writes.into_values().collect(),
         ..DbProbeSnapshot::default()
     })
+}
+
+pub(crate) async fn install_libsql_write_counters(
+    path: &std::path::Path,
+    reset: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let db = libsql::Builder::new_local(path).build().await?;
+    let connection = db.connect()?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS ironclaw_stress_write_counters (\
+                table_name TEXT NOT NULL,\
+                operation TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete')),\
+                row_count INTEGER NOT NULL DEFAULT 0,\
+                PRIMARY KEY (table_name, operation)\
+             );",
+        )
+        .await?;
+    if reset {
+        connection
+            .execute("DELETE FROM ironclaw_stress_write_counters", ())
+            .await?;
+    }
+    for table in MEASUREMENT_TABLES {
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [*table],
+            )
+            .await?;
+        if rows.next().await?.is_none() {
+            continue;
+        }
+        for (suffix, timing, operation) in [
+            ("ai", "AFTER INSERT", "insert"),
+            ("au", "AFTER UPDATE", "update"),
+            ("ad", "AFTER DELETE", "delete"),
+        ] {
+            let sql = format!(
+                "CREATE TRIGGER IF NOT EXISTS ironclaw_stress_{table}_{suffix} \
+                 {timing} ON {table} BEGIN \
+                   INSERT INTO ironclaw_stress_write_counters(table_name, operation, row_count) \
+                   VALUES ('{table}', '{operation}', 1) \
+                   ON CONFLICT(table_name, operation) DO UPDATE \
+                   SET row_count = row_count + 1; \
+                 END;"
+            );
+            connection.execute_batch(&sql).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn remove_libsql_write_counters(
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let db = libsql::Builder::new_local(path).build().await?;
+    let connection = db.connect()?;
+    for table in MEASUREMENT_TABLES {
+        for suffix in ["ai", "au", "ad"] {
+            connection
+                .execute_batch(&format!(
+                    "DROP TRIGGER IF EXISTS ironclaw_stress_{table}_{suffix};"
+                ))
+                .await?;
+        }
+    }
+    connection
+        .execute_batch("DROP TABLE IF EXISTS ironclaw_stress_write_counters;")
+        .await?;
+    Ok(())
 }
 
 fn sidecar_path(path: &std::path::Path, suffix: &str) -> PathBuf {
@@ -560,6 +780,18 @@ fn statement_operation(query: &str) -> String {
 
 fn normalize_snapshot(mut snapshot: DbProbeSnapshot) -> DbProbeSnapshot {
     snapshot
+        .libsql_table_writes
+        .sort_by(|left, right| left.table.cmp(&right.table));
+    snapshot.libsql_table_writes_total = snapshot.libsql_table_writes.iter().fold(
+        LibSqlWriteCounts::default(),
+        |mut total, table| {
+            total.inserts = total.inserts.saturating_add(table.inserts);
+            total.updates = total.updates.saturating_add(table.updates);
+            total.deletes = total.deletes.saturating_add(table.deletes);
+            total
+        },
+    );
+    snapshot
         .postgres_table_writes
         .sort_by(|left, right| left.table.cmp(&right.table));
     snapshot.postgres_table_writes_total = snapshot.postgres_table_writes.iter().fold(
@@ -594,6 +826,16 @@ fn normalize_snapshot(mut snapshot: DbProbeSnapshot) -> DbProbeSnapshot {
 }
 
 fn snapshot_delta(before: &DbProbeSnapshot, after: &DbProbeSnapshot) -> DbProbeDelta {
+    let libsql_table_writes = libsql_table_write_delta(before, after);
+    let libsql_table_writes_total =
+        libsql_table_writes
+            .iter()
+            .fold(LibSqlWriteDelta::default(), |mut total, table| {
+                total.inserts += table.inserts;
+                total.updates += table.updates;
+                total.deletes += table.deletes;
+                total
+            });
     let postgres_table_writes = table_write_delta(before, after);
     let postgres_table_writes_total =
         postgres_table_writes
@@ -624,6 +866,8 @@ fn snapshot_delta(before: &DbProbeSnapshot, after: &DbProbeSnapshot) -> DbProbeD
         libsql_file_bytes: delta(before.libsql_file_bytes, after.libsql_file_bytes),
         libsql_wal_bytes: delta(before.libsql_wal_bytes, after.libsql_wal_bytes),
         libsql_shm_bytes: delta(before.libsql_shm_bytes, after.libsql_shm_bytes),
+        libsql_table_writes,
+        libsql_table_writes_total,
         postgres_database_size_bytes: delta(
             before.postgres_database_size_bytes,
             after.postgres_database_size_bytes,
@@ -634,6 +878,48 @@ fn snapshot_delta(before: &DbProbeSnapshot, after: &DbProbeSnapshot) -> DbProbeD
         postgres_statement_calls_by_table,
         postgres_statement_calls_total,
     }
+}
+
+fn libsql_table_write_delta(
+    before: &DbProbeSnapshot,
+    after: &DbProbeSnapshot,
+) -> Vec<LibSqlTableWriteDelta> {
+    let before = before
+        .libsql_table_writes
+        .iter()
+        .map(|table| (table.table.as_str(), table))
+        .collect::<BTreeMap<_, _>>();
+    let after = after
+        .libsql_table_writes
+        .iter()
+        .map(|table| (table.table.as_str(), table))
+        .collect::<BTreeMap<_, _>>();
+    before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|table| {
+            let before = before.get(table).copied();
+            let after = after.get(table).copied();
+            LibSqlTableWriteDelta {
+                table: table.to_string(),
+                inserts: counter_delta(
+                    before.map_or(0, |value| value.inserts),
+                    after.map_or(0, |value| value.inserts),
+                ),
+                updates: counter_delta(
+                    before.map_or(0, |value| value.updates),
+                    after.map_or(0, |value| value.updates),
+                ),
+                deletes: counter_delta(
+                    before.map_or(0, |value| value.deletes),
+                    after.map_or(0, |value| value.deletes),
+                ),
+            }
+        })
+        .collect()
 }
 
 fn table_write_delta(

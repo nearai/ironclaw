@@ -528,12 +528,110 @@ fn push_db_probe_table(output: &mut String, db_probe: &DbProbeSummary) {
             measurement.stats_scope.as_str().to_string(),
         );
         push_metric(output, "stats_reset", measurement.reset_stats.to_string());
-        push_postgres_table_write_table(output, db_probe);
-        push_postgres_statement_table(output, db_probe);
-        if let Some(idle_delta) = &db_probe.idle_delta {
-            push_postgres_idle_tables(output, idle_delta);
-            push_postgres_idle_statements(output, idle_delta);
+        if !db_probe.delta.libsql_table_writes.is_empty() {
+            push_libsql_table_write_table(output, db_probe);
         }
+        if !db_probe.delta.postgres_table_writes.is_empty() {
+            push_postgres_table_write_table(output, db_probe);
+        }
+        if !db_probe.delta.postgres_statement_calls.is_empty() {
+            push_postgres_statement_table(output, db_probe);
+        }
+        if let Some(idle_delta) = &db_probe.idle_delta {
+            if !idle_delta.postgres_table_writes.is_empty() {
+                push_postgres_idle_tables(output, idle_delta);
+            }
+            if !idle_delta.libsql_table_writes.is_empty() {
+                push_libsql_idle_tables(output, idle_delta);
+            }
+            if !idle_delta.postgres_statement_calls.is_empty() {
+                push_postgres_idle_statements(output, idle_delta);
+            }
+        }
+    }
+}
+
+fn push_libsql_table_write_table(output: &mut String, db_probe: &DbProbeSummary) {
+    let _ = writeln!(output, "\nlibSQL instrumented table writes");
+    let _ = writeln!(
+        output,
+        "{:<40} {:>10} {:>10} {:>10}",
+        "counter", "before", "after", "delta"
+    );
+    let _ = writeln!(output, "{:-<40} {:->10} {:->10} {:->10}", "", "", "", "");
+    for delta in &db_probe.delta.libsql_table_writes {
+        let before = db_probe
+            .before
+            .libsql_table_writes
+            .iter()
+            .find(|table| table.table == delta.table);
+        let after = db_probe
+            .after
+            .libsql_table_writes
+            .iter()
+            .find(|table| table.table == delta.table);
+        for (name, before, after, change) in [
+            (
+                "insert",
+                before.map(|table| table.inserts),
+                after.map(|table| table.inserts),
+                delta.inserts,
+            ),
+            (
+                "update",
+                before.map(|table| table.updates),
+                after.map(|table| table.updates),
+                delta.updates,
+            ),
+            (
+                "delete",
+                before.map(|table| table.deletes),
+                after.map(|table| table.deletes),
+                delta.deletes,
+            ),
+        ] {
+            let _ = writeln!(
+                output,
+                "{:<40} {:>10} {:>10} {:>+10}",
+                truncate(&format!("{}.{}", delta.table, name), 40),
+                format_optional(before),
+                format_optional(after),
+                change,
+            );
+        }
+    }
+    let total = &db_probe.delta.libsql_table_writes_total;
+    let _ = writeln!(
+        output,
+        "{:<40} {:>10} {:>10} {:>+10}",
+        "TOTAL.rows",
+        db_probe.before.libsql_table_writes_total.total(),
+        db_probe.after.libsql_table_writes_total.total(),
+        total.total(),
+    );
+    let _ = writeln!(
+        output,
+        "Note: counter-trigger writes are excluded above but included in DB/WAL byte growth."
+    );
+}
+
+fn push_libsql_idle_tables(output: &mut String, idle: &crate::db_probe::DbProbeDelta) {
+    let _ = writeln!(output, "\nlibSQL idle instrumented table writes");
+    let _ = writeln!(
+        output,
+        "{:<40} {:>10} {:>10} {:>10} {:>10}",
+        "table", "inserts", "updates", "deletes", "total"
+    );
+    for table in &idle.libsql_table_writes {
+        let _ = writeln!(
+            output,
+            "{:<40} {:>+10} {:>+10} {:>+10} {:>+10}",
+            truncate(&table.table, 40),
+            table.inserts,
+            table.updates,
+            table.deletes,
+            table.inserts + table.updates + table.deletes,
+        );
     }
 }
 
