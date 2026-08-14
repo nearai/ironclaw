@@ -21,8 +21,7 @@ use ironclaw_host_api::failure::categories::{
 };
 use ironclaw_loop_contracts::{
     AssistantReply, FinalizeAssistantMessage, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopRunInfoPort as _,
-    sanitize_model_visible_text,
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, sanitize_model_visible_text,
 };
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{MessageKind, SessionThreadService, ThreadMessageId, ThreadScope};
@@ -229,10 +228,10 @@ impl HarnessTurnRunExecutor {
                     }) = notification.update
                     {
                         let cumulative_text = match output_for_updates.lock() {
-                            Ok(mut output) if output.push(&text.text) => {
-                                Some(sanitize_model_visible_text(output.render()))
-                            }
-                            Ok(_) | Err(_) => None,
+                            Ok(mut output) => output
+                                .push(&text.text)
+                                .then(|| sanitize_model_visible_text(output.render())),
+                            Err(_) => None,
                         };
                         if let Some(cumulative_text) = cumulative_text
                             && let Err(error) = milestones_for_updates

@@ -39,7 +39,7 @@ impl ProfileRoutingTurnRunExecutor {
                 .is_some()
             {
                 return Err(format!(
-                    "turn executor route for profile `{profile_id}` is duplicated"
+                    "turn executor route for profile `{raw_profile_id}` is duplicated"
                 ));
             }
             route_count = route_count.saturating_add(1);
