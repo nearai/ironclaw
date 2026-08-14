@@ -108,7 +108,15 @@ audit against this draft recorded these further landed-vs-drafted deltas:
   `max_wall_clock_seconds`, mapping onto `ResourceBudgetPolicy` and
   enforced by the loop executor's budget stage as hard stops
   (`model_call_limit` / `capability_invocation_limit` / `wall_clock_limit`
-  failure categories). A per-run USD accountant and a max-output-tokens
+  failure categories). Enforcement is charge-at-dispatch through one
+  typed chokepoint: a `BudgetLedger` on the loop state owns the per-run
+  counters (private fields; `try_charge_model_call` /
+  `try_charge_invocations` verdicts), so no model or capability dispatch
+  — first attempt, recovery retry, or batch member — can bypass
+  accounting. Exhausted verdicts map onto existing exits only: a model
+  retry converts to the outer-loop re-entry and the budget stage's
+  hard stop fires; an over-budget capability batch tail receives paired
+  blocked results; an exhausted capability retry is not re-dispatched. A per-run USD accountant and a max-output-tokens
   knob were not built — no engine seam exists for either; OpenAI-compat's
   `max_tokens` family is accepted and deliberately unmapped.
 - **Gate posture (§4.6)**: the unbound surface is the deployment surface
