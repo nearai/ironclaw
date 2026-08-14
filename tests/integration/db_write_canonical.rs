@@ -23,12 +23,14 @@ const MINIMUM_HEARTBEATS: usize = 3;
 const FINAL_REPLY: &str = "canonical measurement complete";
 
 #[tokio::test]
-async fn canonical_agent_turn_db_writes_libsql() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn canonical_agent_turn_db_writes_libsql()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_canonical_agent_turn(StorageMode::LibSql, MeasuredStorageBackend::Libsql).await
 }
 
 #[tokio::test]
-async fn canonical_agent_turn_db_writes_postgres() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn canonical_agent_turn_db_writes_postgres()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_canonical_agent_turn(StorageMode::Postgres, MeasuredStorageBackend::Postgres).await
 }
 
@@ -46,25 +48,27 @@ async fn run_canonical_agent_turn(
         .collect::<Vec<_>>();
     script.push(RebornScriptedReply::text(FINAL_REPLY));
 
-    let harness = RebornIntegrationHarness::builder(format!(
-        "conv-db-write-canonical-{}",
-        backend.as_str()
-    ))
-    .storage(storage)
-    .with_builtin_http_tools()
-    .with_durable_milestone_event_store_for_test()
-    .with_runner_heartbeat_interval_for_test(HEARTBEAT_INTERVAL)
-    .with_model_call_delay_for_test(MODEL_CALL_DELAY)
-    .record_model_calls_for_test()
-    .script(script)
-    .build()
-    .await?;
+    let harness =
+        RebornIntegrationHarness::builder(format!("conv-db-write-canonical-{}", backend.as_str()))
+            .storage(storage)
+            .with_builtin_http_tools()
+            .with_durable_milestone_event_store_for_test()
+            .with_runner_heartbeat_interval_for_test(HEARTBEAT_INTERVAL)
+            .with_model_call_delay_for_test(MODEL_CALL_DELAY)
+            .record_model_calls_for_test()
+            .script(script)
+            .build()
+            .await?;
     let config = harness.db_probe_config(true)?;
 
     let (measurement, run_id) = measure_db_writes(
         &config,
         CanonicalDbWriteMeasurement::new(WORKLOAD, TOOL_CALLS),
-        || async { harness.submit_turn("run the canonical measured tool flow").await },
+        || async {
+            harness
+                .submit_turn("run the canonical measured tool flow")
+                .await
+        },
     )
     .await?;
 

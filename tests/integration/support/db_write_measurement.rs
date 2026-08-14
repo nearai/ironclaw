@@ -88,7 +88,12 @@ impl CanonicalDbWriteMeasurementReport {
                     .delta
                     .postgres_table_writes
                     .iter()
-                    .find(|row| row.table == table)
+                    .find(|row| {
+                        row.table
+                            .rsplit_once('.')
+                            .map_or(row.table.as_str(), |(_, relation)| relation)
+                            == table
+                    })
                     .map(|row| row.inserts + row.updates + row.deletes),
             }
             .unwrap_or_default();
@@ -171,10 +176,9 @@ where
         Err(primary) => {
             return match finish(config).await {
                 Ok(()) => Err(DbWriteMeasurementError::Workload(primary)),
-                Err(cleanup) => Err(DbWriteMeasurementError::WorkloadAndCleanup {
-                    primary,
-                    cleanup,
-                }),
+                Err(cleanup) => {
+                    Err(DbWriteMeasurementError::WorkloadAndCleanup { primary, cleanup })
+                }
             };
         }
     };
@@ -184,14 +188,15 @@ where
         Err(primary) => {
             return match finish(config).await {
                 Ok(()) => Err(DbWriteMeasurementError::Capture(primary)),
-                Err(cleanup) => Err(DbWriteMeasurementError::CaptureAndCleanup {
-                    primary,
-                    cleanup,
-                }),
+                Err(cleanup) => {
+                    Err(DbWriteMeasurementError::CaptureAndCleanup { primary, cleanup })
+                }
             };
         }
     };
-    finish(config).await.map_err(DbWriteMeasurementError::Cleanup)?;
+    finish(config)
+        .await
+        .map_err(DbWriteMeasurementError::Cleanup)?;
 
     let backend = match config.target() {
         DbProbeTarget::LibSql { .. } => MeasuredStorageBackend::Libsql,
@@ -248,7 +253,7 @@ impl RebornIntegrationHarness {
                 &self.turn_scope.to_resource_scope(),
                 Some(&self.binding.actor_user_id),
                 None,
-                4096,
+                1_023,
             )
             .await
             .map_err(|error| format!("read process journal: {error}"))?;
@@ -278,7 +283,7 @@ impl RebornIntegrationHarness {
         let stream = EventStreamKey::new(
             self.binding.tenant_id.clone(),
             self.binding.actor_user_id.clone(),
-            Some(self.binding.agent_id.clone()),
+            self.binding.agent_id.clone(),
         );
         let replay = event_log
             .read_after_cursor(&stream, &ReadScope::any(), None, 4096)
@@ -293,5 +298,4 @@ impl RebornIntegrationHarness {
         }
         Ok(())
     }
-
 }

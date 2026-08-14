@@ -132,11 +132,7 @@ async fn run_postgres(
     workload: FixedWorkload,
 ) -> Result<FixedWorkloadMeasurement, FixedWorkloadError> {
     let url = env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL").map_err(|source| {
-        FixedWorkloadError::setup(
-            "postgres",
-            "read IRONCLAW_FILESYSTEM_POSTGRES_URL",
-            source,
-        )
+        FixedWorkloadError::setup("postgres", "read IRONCLAW_FILESYSTEM_POSTGRES_URL", source)
     })?;
     run_fixed_workload(workload, WorkloadBackend::Postgres { url }).await
 }
@@ -285,9 +281,7 @@ enum FixedWorkloadError {
         primary: Box<DbProbeError>,
         cleanup: Box<DbProbeError>,
     },
-    #[error(
-        "{backend} workload {workload} produced no writes for required table {table}"
-    )]
+    #[error("{backend} workload {workload} produced no writes for required table {table}")]
     NonzeroBaseline {
         backend: &'static str,
         workload: &'static str,
@@ -318,10 +312,7 @@ struct WorkloadFailure {
 }
 
 impl WorkloadFailure {
-    fn source(
-        operation: &'static str,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
+    fn source(operation: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
         Self {
             operation,
             source: Box::new(source),
@@ -340,14 +331,9 @@ async fn run_fixed_workload(
     let backend_name = backend.name();
     match backend {
         WorkloadBackend::LibSql { path } => {
-            let database = Arc::new(
-                libsql::Builder::new_local(&path)
-                    .build()
-                    .await
-                    .map_err(|source| {
-                        FixedWorkloadError::setup("libsql", "open durable database", source)
-                    })?,
-            );
+            let database = Arc::new(libsql::Builder::new_local(&path).build().await.map_err(
+                |source| FixedWorkloadError::setup("libsql", "open durable database", source),
+            )?);
             let runtime = Arc::new(LibSqlRuntime::new(database).map_err(|source| {
                 FixedWorkloadError::setup("libsql", "build shared database runtime", source)
             })?);
@@ -371,8 +357,7 @@ async fn run_fixed_workload(
             let postgres_config = url.parse::<tokio_postgres::Config>().map_err(|source| {
                 FixedWorkloadError::setup("postgres", "parse database URL", source)
             })?;
-            let manager =
-                deadpool_postgres::Manager::new(postgres_config, tokio_postgres::NoTls);
+            let manager = deadpool_postgres::Manager::new(postgres_config, tokio_postgres::NoTls);
             let pool = deadpool_postgres::Pool::builder(manager)
                 .max_size(8)
                 .build()
@@ -392,6 +377,7 @@ async fn run_fixed_workload(
                 })?;
                 run_trigger_measurement(repository, root, config, backend_name).await
             } else {
+                drop(pool);
                 run_root_measurement(workload, root, config, backend_name).await
             }
         }
@@ -508,7 +494,7 @@ impl BackendName {
 
 async fn run_trigger_measurement<R, F>(
     repository: Arc<R>,
-    _root: Arc<F>,
+    root: Arc<F>,
     config: DbProbeConfig,
     backend: BackendName,
 ) -> Result<FixedWorkloadMeasurement, FixedWorkloadError>
@@ -516,9 +502,10 @@ where
     R: TriggerRepository + 'static,
     F: RootFilesystem + 'static,
 {
-    let fixture = seed_trigger(repository.as_ref()).await.map_err(|source| {
-        FixedWorkloadError::Workload { source }
-    })?;
+    let fixture = seed_trigger(repository.as_ref())
+        .await
+        .map_err(|source| FixedWorkloadError::Workload { source })?;
+    drop(root);
     measure_fixed(
         FixedWorkload::TriggerHistoryPruning,
         backend,
@@ -538,25 +525,20 @@ async fn seed_trigger(
     repository: &impl TriggerRepository,
 ) -> Result<TriggerFixture, WorkloadFailure> {
     let trigger_id = TriggerId::new();
-    let tenant_id = TenantId::new("tenant-db-write-trigger").map_err(|source| {
-        WorkloadFailure::source("build trigger tenant", source)
-    })?;
-    let creator_user_id = UserId::new("user-db-write-trigger").map_err(|source| {
-        WorkloadFailure::source("build trigger user", source)
-    })?;
-    let agent_id = AgentId::new("agent-db-write-trigger").map_err(|source| {
-        WorkloadFailure::source("build trigger agent", source)
-    })?;
-    let project_id = ProjectId::new("project-db-write-trigger").map_err(|source| {
-        WorkloadFailure::source("build trigger project", source)
-    })?;
+    let tenant_id = TenantId::new("tenant-db-write-trigger")
+        .map_err(|source| WorkloadFailure::source("build trigger tenant", source))?;
+    let creator_user_id = UserId::new("user-db-write-trigger")
+        .map_err(|source| WorkloadFailure::source("build trigger user", source))?;
+    let agent_id = AgentId::new("agent-db-write-trigger")
+        .map_err(|source| WorkloadFailure::source("build trigger agent", source))?;
+    let project_id = ProjectId::new("project-db-write-trigger")
+        .map_err(|source| WorkloadFailure::source("build trigger project", source))?;
     let first_fire_slot = Utc
         .with_ymd_and_hms(2026, 8, 14, 8, 0, 0)
         .single()
         .ok_or_else(|| WorkloadFailure::message("build trigger timestamp", "invalid timestamp"))?;
-    let schedule = TriggerSchedule::cron("0 8 * * *").map_err(|source| {
-        WorkloadFailure::source("build trigger schedule", source)
-    })?;
+    let schedule = TriggerSchedule::cron("0 8 * * *")
+        .map_err(|source| WorkloadFailure::source("build trigger schedule", source))?;
     repository
         .upsert_trigger(TriggerRecord {
             trigger_id,
@@ -568,6 +550,7 @@ async fn seed_trigger(
             source: TriggerSourceKind::Schedule,
             schedule,
             prompt: "measure trigger history writes".to_string(),
+            execution_spec: None,
             delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at: first_fire_slot,
@@ -785,15 +768,20 @@ where
                                 WorkloadFailure::source("build PKCE verifier", source)
                             })?,
                             pkce_verifier_hash: pkce_hash,
-                            scopes: vec![ProviderScope::new("test.readonly").map_err(|source| {
-                                WorkloadFailure::source("build OAuth provider scope", source)
-                            })?],
+                            scopes: vec![ProviderScope::new("test.readonly").map_err(
+                                |source| {
+                                    WorkloadFailure::source("build OAuth provider scope", source)
+                                },
+                            )?],
                         },
                     },
                 })
                 .await
                 .map_err(|source| {
-                    WorkloadFailure::source("claim and complete OAuth callback", source)
+                    WorkloadFailure::message(
+                        "claim and complete OAuth callback",
+                        format!("code={:?}, retryable={}", source.code, source.retryable),
+                    )
                 })?;
             let account_id = callback.credential_account_id.ok_or_else(|| {
                 WorkloadFailure::message(
@@ -877,8 +865,8 @@ where
     F: RootFilesystem + 'static,
 {
     let unique_label = format!("{label}-{}", Uuid::new_v4());
-    let scope = thread_scope(&unique_label)
-        .map_err(|source| FixedWorkloadError::Workload { source })?;
+    let scope =
+        thread_scope(&unique_label).map_err(|source| FixedWorkloadError::Workload { source })?;
     let target = format!(
         "/tenants/{}/users/{}/threads",
         scope.tenant_id.as_str(),
@@ -913,9 +901,7 @@ where
             metadata_json: None,
         })
         .await
-        .map_err(|source| {
-            FixedWorkloadError::setup("filesystem", "seed durable thread", source)
-        })?;
+        .map_err(|source| FixedWorkloadError::setup("filesystem", "seed durable thread", source))?;
 
     Ok(ThreadFixture {
         service,
@@ -965,9 +951,7 @@ where
     .await
 }
 
-async fn run_thread_activity_burst<F>(
-    fixture: ThreadFixture<F>,
-) -> Result<(), WorkloadFailure>
+async fn run_thread_activity_burst<F>(fixture: ThreadFixture<F>) -> Result<(), WorkloadFailure>
 where
     F: RootFilesystem + 'static,
 {
@@ -986,9 +970,7 @@ where
                 )),
             })
             .await
-            .map_err(|source| {
-                WorkloadFailure::source("append thread activity message", source)
-            })?;
+            .map_err(|source| WorkloadFailure::source("append thread activity message", source))?;
     }
 
     let history = fixture
@@ -1042,9 +1024,7 @@ where
     .await
 }
 
-async fn run_message_lookup_matrix<F>(
-    fixture: ThreadFixture<F>,
-) -> Result<(), WorkloadFailure>
+async fn run_message_lookup_matrix<F>(fixture: ThreadFixture<F>) -> Result<(), WorkloadFailure>
 where
     F: RootFilesystem + 'static,
 {
@@ -1104,7 +1084,7 @@ where
             turn_run_id: turn_run_id.clone(),
             result_ref: bare_result_ref.clone(),
             safe_summary: ToolResultSafeSummary::new("durable bare tool result").map_err(
-                |source| WorkloadFailure::source("build bare tool result summary", source),
+                |source| WorkloadFailure::message("build bare tool result summary", source),
             )?,
             provider_call: None,
             model_observation: None,
@@ -1119,7 +1099,7 @@ where
             turn_run_id: turn_run_id.clone(),
             result_ref: bare_result_ref,
             safe_summary: ToolResultSafeSummary::new("bare duplicate ignored").map_err(
-                |source| WorkloadFailure::source("build bare duplicate summary", source),
+                |source| WorkloadFailure::message("build bare duplicate summary", source),
             )?,
             provider_call: None,
             model_observation: None,
@@ -1133,7 +1113,6 @@ where
         ));
     }
 
-
     let result_ref = "result:db-write-message-lookup".to_string();
     let provider_call = provider_call_reference()?;
     let tool_result = fixture
@@ -1143,9 +1122,8 @@ where
             thread_id: fixture.thread_id.clone(),
             turn_run_id: turn_run_id.clone(),
             result_ref: result_ref.clone(),
-            safe_summary: ToolResultSafeSummary::new("durable tool result").map_err(|source| {
-                WorkloadFailure::source("build tool result summary", source)
-            })?,
+            safe_summary: ToolResultSafeSummary::new("durable tool result")
+                .map_err(|source| WorkloadFailure::message("build tool result summary", source))?,
             provider_call: Some(provider_call.clone()),
             model_observation: None,
         })
@@ -1159,7 +1137,7 @@ where
             turn_run_id: turn_run_id.clone(),
             result_ref: result_ref.clone(),
             safe_summary: ToolResultSafeSummary::new("duplicate ignored").map_err(|source| {
-                WorkloadFailure::source("build duplicate tool result summary", source)
+                WorkloadFailure::message("build duplicate tool result summary", source)
             })?,
             provider_call: Some(provider_call),
             model_observation: None,
@@ -1201,6 +1179,32 @@ where
             "capability preview lookup did not deduplicate",
         ));
     }
+    let expected_next_sequence = preview_message.sequence.checked_add(1).ok_or_else(|| {
+        WorkloadFailure::message("read capability preview lookup", "message sequence overflow")
+    })?;
+    let after_preview = fixture
+        .service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            actor_id: "db-write-workload".to_string(),
+            source_binding_id: Some("db-write-message-lookup".to_string()),
+            reply_target_binding_id: Some("db-write-message-lookup-reply".to_string()),
+            external_event_id: Some("message-lookup-after-preview".to_string()),
+            content: MessageContent::text("Message after capability preview"),
+        })
+        .await
+        .map_err(|source| WorkloadFailure::source("append message after preview", source))?;
+    if after_preview.sequence != expected_next_sequence {
+        return Err(WorkloadFailure::message(
+            "read capability preview lookup",
+            format!(
+                "capability preview lookup consumed a sequence: expected {}, got {}",
+                expected_next_sequence, after_preview.sequence
+            ),
+        ));
+    }
+
 
     let listed = fixture
         .service
@@ -1283,5 +1287,5 @@ fn capability_preview(
         updated_at: Utc::now(),
         activity_order: None,
     })
-    .map_err(|source| WorkloadFailure::source("build capability preview", source))
+    .map_err(|source| WorkloadFailure::message("build capability preview", source))
 }

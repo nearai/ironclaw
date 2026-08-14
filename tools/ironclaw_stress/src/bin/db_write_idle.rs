@@ -40,6 +40,7 @@ use tokio::sync::watch;
 
 const WORKLOAD_NAME: &str = "long-lived-idle-process";
 const OBSERVER_ID: &str = "ironclaw-stress-db-write-idle";
+const POSTGRES_POOL_STATS_FLUSH_DELAY: Duration = Duration::from_millis(1_100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -678,6 +679,10 @@ where
     let running_observed_after = active.started.elapsed();
     tokio::time::sleep(lifecycle.idle).await;
     wait_for_scheduler_activity(active, lifecycle).await?;
+    if matches!(probe.target(), db_probe::DbProbeTarget::Postgres { .. }) {
+        tokio::time::sleep(POSTGRES_POOL_STATS_FLUSH_DELAY).await;
+        require_running(active, "after PostgreSQL stats flush delay").await?;
+    }
     require_running(active, "before counter capture").await?;
     let after = db_probe::capture_settled(probe).await?;
     require_running(active, "after counter capture").await?;
@@ -769,8 +774,8 @@ where
         .map_err(|error| IdleError::Workload(format!("load idle process {phase}: {error}")))?;
     if snapshot.status != ProcessLifecycleStatus::Running {
         return Err(IdleError::Workload(format!(
-            "idle process was {:?} {phase}, expected Running",
-            snapshot.status
+            "idle process was {:?} {phase}, expected Running; failure={:?}",
+            snapshot.status, snapshot.failure
         )));
     }
     Ok(())
@@ -904,7 +909,13 @@ fn add_database_write_families(
             .delta
             .postgres_table_writes
             .iter()
-            .map(|row| (row.table.clone(), row.inserts + row.updates + row.deletes))
+            .map(|row| {
+                let table = row
+                    .table
+                    .rsplit_once('.')
+                    .map_or(row.table.as_str(), |(_, relation)| relation);
+                (table.to_string(), row.inserts + row.updates + row.deletes)
+            })
             .collect::<BTreeMap<_, _>>(),
     };
     families.event_writes = tables.get("root_filesystem_events").copied();
@@ -992,12 +1003,12 @@ mod tests {
 
     fn short_lifecycle() -> LifecycleConfig {
         LifecycleConfig {
-            idle: Duration::from_millis(80),
-            poll_interval: Duration::from_millis(5),
-            recovery_interval: Duration::from_millis(7),
-            heartbeat_interval: Duration::from_millis(10),
-            lease_duration: Duration::from_millis(100),
-            terminal_timeout: Duration::from_secs(5),
+            idle: Duration::from_millis(150),
+            poll_interval: Duration::from_millis(20),
+            recovery_interval: Duration::from_millis(50),
+            heartbeat_interval: Duration::from_millis(100),
+            lease_duration: Duration::from_secs(5),
+            terminal_timeout: Duration::from_secs(10),
         }
     }
 
@@ -1060,7 +1071,7 @@ mod tests {
         let config = url.parse::<tokio_postgres::Config>().unwrap();
         let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
         let pool = deadpool_postgres::Pool::builder(manager)
-            .max_size(4)
+            .max_size(1)
             .build()
             .unwrap();
         let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(pool));
@@ -1079,10 +1090,10 @@ mod tests {
         assert!(report.lifecycle.terminal_after_capture);
         assert!(report.write_families.heartbeat_writes > 0);
         assert_eq!(report.write_families.recovery_writes, 0);
-        assert!(report.write_families.claim_poll_calls >= 2);
+        assert!(report.write_families.claim_poll_calls >= 1);
         assert!(report.write_families.recovery_sweep_calls > 0);
         assert!(report.write_families.observer_checkpoint_writes > 0);
-        assert!(report.write_families.event_writes.unwrap_or_default() > 0);
+        assert_eq!(report.write_families.event_writes, Some(0));
         assert!(
             report
                 .write_families

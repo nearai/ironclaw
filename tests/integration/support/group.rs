@@ -61,9 +61,9 @@ use ironclaw_composition::RebornTrajectoryObserver;
 use ironclaw_composition::build_default_budget_accountant;
 use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_config::BudgetDefaults;
+use ironclaw_event_log::DurableEventLog;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
-use ironclaw_event_log::DurableEventLog;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy, ids::UserId, resource::ResourceScope,
@@ -90,12 +90,12 @@ use ironclaw_resources::{
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turn_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_turn_runner::milestone_events::{
+    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
+};
 use ironclaw_turn_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ParallelToolBatchMode,
     ProcessRuntimeSystem, build_default_planned_runtime,
-};
-use ironclaw_turn_runner::milestone_events::{
-    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
 use ironclaw_turn_runner::subagent::{
     await_edge::{

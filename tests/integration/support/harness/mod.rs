@@ -54,8 +54,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
-    LoopRequest, LoopRunContext,
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopRequest, LoopRunContext,
 };
 use ironclaw_loop_host::{
     CapabilityResolveError, CapabilitySurfaceProfileResolver, LoopCapabilityPortFactory,
